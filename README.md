@@ -1,35 +1,37 @@
 # OpenMinis
 
-**OpenMinis** is the official open-source repository for the app featured on [openminis.app](https://openminis.app).
+OpenMinis is the official open-source repository for the app introduced on [openminis.app](https://openminis.app).
 
-OpenMinis is a powerful AI Agent app for iOS that brings Claude, GPT, Gemini, and more directly to your fingertips — with a built-in Linux shell, browser automation, skills system, and deep Apple framework integrations.
+OpenMinis is an AI Agent app for iOS that brings leading models such as Claude, GPT, and Gemini into a native mobile experience — enhanced with a built-in Linux shell, browser automation, extensible skills, persistent memory, and deep Apple platform integrations.
 
 ---
 
-## 🚀 Download
+## Download
 
 | Channel | Link |
 |---|---|
-| 📱 App Store | [Download on the App Store](https://apps.apple.com/app/id6738544579) |
-| 🧪 TestFlight (Beta) | [Join the TestFlight Beta](https://testflight.apple.com/join/MJIFjBBq) |
+| App Store | [Download on the App Store](https://apps.apple.com/app/id6738544579) |
+| TestFlight | [Join the TestFlight Beta](https://testflight.apple.com/join/MJIFjBBq) |
 
 ---
 
-## 🔓 Open Source
+## About This Repository
 
-The full source code is currently being cleaned up and optimized. We plan to open it up to the community in the **near future**.
+This repository serves as the main open-source home for OpenMinis.
 
-Stay tuned — we're working hard to make this a great open-source project for everyone. ⭐ Star this repo to get notified when we launch!
+At the moment, the public source code is still being organized, cleaned up, and optimized for release. We expect to open more of the project in the near future.
 
----
-
-## 🌐 Website
-
-[https://openminis.app](https://openminis.app)
+If you're interested in OpenMinis, please star this repository and follow future updates.
 
 ---
 
-## 📬 Community & Feedback
+## Website
+
+- Official website: [openminis.app](https://openminis.app)
+
+---
+
+## Community
 
 - Telegram Group: [Join our Telegram Group](https://t.me/+2NzhOJuzRyI1YmM1)
-- GitHub Issues: Feel free to open an issue for feature requests or bug reports.
+- GitHub Issues: Please use Issues for bug reports, feature requests, and discussions.
