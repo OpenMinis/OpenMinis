@@ -31,5 +31,5 @@ Stay tuned — we're working hard to make this a great open-source project for e
 
 ## 📬 Community & Feedback
 
-- Telegram Group: [t.me/OpenMinis](https://t.me/OpenMinis)
+- Telegram Group: [Join our Telegram Group](https://t.me/+2NzhOJuzRyI1YmM1)
 - GitHub Issues: Feel free to open an issue for feature requests or bug reports.
