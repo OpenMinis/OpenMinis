@@ -2,7 +2,7 @@
 
 OpenMinis is the official open-source repository for the app introduced on [openminis.app](https://openminis.app).
 
-OpenMinis is an AI Agent app for iOS that brings leading models such as Claude, GPT, and Gemini into a native mobile experience — enhanced with a built-in Linux shell, browser automation, extensible skills, persistent memory, and deep Apple platform integrations.
+OpenMinis is an AI Agent app that brings leading models such as Claude, GPT, and Gemini into a native experience across platforms — enhanced with a built-in Linux shell, browser automation, extensible skills, persistent memory, and deep system integrations.
 
 ---
 
