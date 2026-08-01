@@ -139,6 +139,31 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
 `Minis` (app), `MinisShare` (share extension), `AgentWidgetExtension`,
 `MinisFileProvider`, plus `MinisTests` / `MinisUITests`.
 
+### Building the IPA with GitHub Actions
+
+An iOS build requires macOS with Xcode, so the supported way to produce an
+`.ipa` from a Windows/Linux machine is the **Build iOS IPA** workflow
+(`.github/workflows/build-ios-ipa.yml`). It checks out the submodules, installs
+the native toolchain (meson/ninja/LLVM), builds LAME → FFmpeg → iSH → the
+Alpine rootfs, then archives and exports the app.
+
+Trigger it manually:
+
+```sh
+gh workflow run "Build iOS IPA" --ref main
+gh run watch
+gh run download <run-id> -n ios-ipa   # → the .ipa
+```
+
+An **installable** IPA requires an Apple developer account and signing assets. **Without them the workflow still produces an unsigned IPA** (packaged from the `CODE_SIGNING_ALLOWED=NO` archive). The unsigned `.ipa` can't be installed on a stock, non-jailbroken device — iOS requires a valid signature — but it's useful for verifying the build, and it can be re-signed locally (e.g. with `codesign` + a development certificate) or sideloaded via tools that re-sign. Set these repository secrets to get a properly signed IPA:
+
+| Secret | Value |
+|---|---|
+| `IOS_P12_BASE64` | Distribution/development `.p12` certificate, base64-encoded |
+| `IOS_P12_PASSWORD` | Password for the `.p12` |
+| `IOS_MOBILEPROVISION_BASE64` | Provisioning profile covering all bundle IDs (`com.openminis.app` and the extension/team suffixes), base64-encoded |
+| `IOS_KEYCHAIN_PASSWORD` | Optional; keychain password used on the runner |
+
 ---
 
 ## Android
