@@ -101,6 +101,22 @@ check_prerequisites() {
         log_warning "Install with: brew install llvm"
     else
         log_info "Found LLVM Clang: $LLVM_CLANG"
+        # Ensure the Homebrew LLVM bin dir is on $PATH so clang can resolve
+        # '-fuse-ld=lld' for the ELF (Linux guest) VDSO cross-link.
+        # On Apple Silicon Homebrew installs lld/ld.lld alongside clang; without
+        # this, the VDSO meson probe fails with:
+        #   clang: error: invalid linker name in argument '-fuse-ld=lld'
+        LLVM_BIN="$(dirname "$LLVM_CLANG")"
+        case ":$PATH:" in
+            *":$LLVM_BIN:"*) : ;;
+            *) export PATH="$LLVM_BIN:$PATH" ;;
+        esac
+        # Belt-and-suspenders: put llvm's lld symlink into clang's resource bin so
+        # the linker search finds 'ld.lld' regardless of PATH.
+        if [ -x "$LLVM_BIN/lld" ] && [ ! -e "$LLVM_BIN/ld.lld" ]; then
+            ln -s lld "$LLVM_BIN/ld.lld" 2>/dev/null || true
+        fi
+        log_info "VDSO linker search configured via: $LLVM_BIN"
     fi
 
     log_success "Prerequisites check passed"
