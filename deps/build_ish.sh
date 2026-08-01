@@ -267,9 +267,9 @@ build_ish() {
     log_info "Building with ninja..."
     ninja -C "$BUILD_DIR" libish.a libish_emu.a libfakefs.a
 
-    # Also build VDSO (arm64 guest VDSO is at vdso/arm64/libvdso.so.elf)
+    # Also build VDSO (guest VDSO lands at vdso/libvdso.so.elf)
     log_info "Building VDSO..."
-    ninja -C "$BUILD_DIR" vdso/arm64/libvdso.so.elf || log_warning "VDSO build failed (may need LLVM)"
+    ninja -C "$BUILD_DIR" vdso/libvdso.so.elf || log_warning "VDSO build failed (may need LLVM)"
 
     cd "$SCRIPT_DIR"
     log_success "iSH libraries built successfully"
@@ -301,12 +301,12 @@ copy_outputs() {
     cp "$BUILD_DIR/libish_emu.a" "$OUTPUT_LIBS/"
     cp "$BUILD_DIR/libfakefs.a" "$OUTPUT_LIBS/"
 
-    # Copy VDSO if built (arm64 guest VDSO path)
-    if [ -f "$BUILD_DIR/vdso/arm64/libvdso.so.elf" ]; then
-        cp "$BUILD_DIR/vdso/arm64/libvdso.so.elf" "$OUTPUT_RESOURCES/"
-        log_success "VDSO copied"
-    elif [ -f "$BUILD_DIR/vdso/libvdso.so.elf" ]; then
+    # Copy VDSO if built (guest VDSO lands at vdso/libvdso.so.elf)
+    if [ -f "$BUILD_DIR/vdso/libvdso.so.elf" ]; then
         cp "$BUILD_DIR/vdso/libvdso.so.elf" "$OUTPUT_RESOURCES/"
+        log_success "VDSO copied"
+    elif [ -f "$BUILD_DIR/vdso/arm64/libvdso.so.elf" ]; then
+        cp "$BUILD_DIR/vdso/arm64/libvdso.so.elf" "$OUTPUT_RESOURCES/"
         log_success "VDSO copied"
     fi
 
@@ -336,8 +336,10 @@ copy_outputs() {
     # Platform headers
     cp "$ISH_DIR"/platform/*.h "$OUTPUT_INCLUDE/ish/platform/"
 
-    # Asbestos headers
-    cp "$ISH_DIR"/asbestos/*.h "$OUTPUT_INCLUDE/ish/asbestos/"
+    # Asbestos headers (only present when the asbestos engine is enabled)
+    if [ -d "$ISH_DIR/asbestos" ]; then
+        cp "$ISH_DIR"/asbestos/*.h "$OUTPUT_INCLUDE/ish/asbestos/"
+    fi
     # ARM64 guest gadgets
     mkdir -p "$OUTPUT_INCLUDE/ish/asbestos/guest-arm64/gadgets-aarch64"
     cp "$ISH_DIR"/asbestos/guest-arm64/gadgets-aarch64/*.h "$OUTPUT_INCLUDE/ish/asbestos/guest-arm64/gadgets-aarch64/" 2>/dev/null || true
