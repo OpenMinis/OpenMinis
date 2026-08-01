@@ -323,6 +323,10 @@ copy_outputs() {
 
     # Kernel headers
     cp "$ISH_DIR"/kernel/*.h "$OUTPUT_INCLUDE/ish/kernel/"
+    if [ -d "$ISH_DIR/kernel/abi" ]; then
+        mkdir -p "$OUTPUT_INCLUDE/ish/kernel/abi"
+        cp "$ISH_DIR"/kernel/abi/*.h "$OUTPUT_INCLUDE/ish/kernel/abi/"
+    fi
 
     # FS headers
     cp "$ISH_DIR"/fs/*.h "$OUTPUT_INCLUDE/ish/fs/"
