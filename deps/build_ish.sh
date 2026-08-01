@@ -2,13 +2,13 @@
 set -e
 
 # ============================================================================
-# iSH-ARM64 Build Script for iOS Static Library
+# iSH-AOK Build Script for iOS Static Library
 # ============================================================================
 # This script builds libish, libish_emu, and libfakefs as static libraries
-# for iOS (arm64) integration, using the ish-arm64 fork which emulates an
+# for iOS (arm64) integration, using the ish-AOK fork which emulates an
 # ARM64 Linux guest on iOS.
 #
-# Repository: https://github.com/OpenMinis/ish-arm64 (branch: feature-arm64)
+# Repository: https://github.com/emkey1/ish-AOK (default branch)
 #
 # Prerequisites:
 #   - Xcode with iOS SDK
@@ -332,7 +332,7 @@ create_umbrella_header() {
  * iSH-ARM64 - Linux shell for iOS (ARM64 guest emulation)
  * Umbrella header for static library integration
  *
- * https://github.com/OpenMinis/ish-arm64
+ * https://github.com/emkey1/ish-AOK
  */
 
 #ifndef ISH_H

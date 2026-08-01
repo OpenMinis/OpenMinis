@@ -1,8 +1,8 @@
-# iSH-ARM64 iOS 集成指南
+# iSH-AOK iOS 集成指南
 
-本文档说明如何将 iSH-ARM64 静态库集成到 iOS 项目中，实现在 iOS 设备上运行 Linux aarch64 (ARM64) 环境。
+本文档说明如何将 iSH-AOK 静态库集成到 iOS 项目中，实现在 iOS 设备上运行 Linux aarch64 (ARM64) 环境。
 
-> **仓库**: [OpenMinis/ish-arm64](https://github.com/OpenMinis/ish-arm64) (分支: `feature-arm64`)
+> **仓库**: [emkey1/ish-AOK](https://github.com/emkey1/ish-AOK) (默认分支)
 
 ## 目录
 
@@ -520,7 +520,7 @@ class TerminalViewController: UIViewController {
 
 ## 参考资料
 
-- [iSH-ARM64 仓库](https://github.com/OpenMinis/ish-arm64) (feature-arm64 分支)
+- [iSH-AOK 仓库](https://github.com/emkey1/ish-AOK) (默认分支)
 - [iSH 原始仓库](https://github.com/ish-app/ish)
 - [iSH Wiki](https://github.com/ish-app/ish/wiki)
 - [Alpine Linux](https://alpinelinux.org/) (使用 aarch64 版本)
