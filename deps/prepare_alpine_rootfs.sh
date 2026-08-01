@@ -2,12 +2,12 @@
 set -e
 
 # ============================================================================
-# Alpine Linux aarch64 Rootfs Preparation Script for iSH-ARM64
+# Alpine Linux aarch64 Rootfs Preparation Script for iSH-AOK
 # ============================================================================
 # This script downloads Alpine Linux minirootfs (aarch64) and converts it to
 # iSH's fakefs format for use as a sandboxed ARM64 Linux environment.
 #
-# Repository: https://github.com/OpenMinis/ish-arm64 (branch: feature-arm64)
+# Repository: https://github.com/emkey1/ish-AOK (default branch)
 #
 # Prerequisites:
 #   - Python 3 with meson (pip3 install meson)

@@ -27,7 +27,7 @@ git submodule update --init --recursive
 
 | Submodule | Repository | Used by |
 |---|---|---|
-| `deps/ish` | [OpenMinis/ish-arm64](https://github.com/OpenMinis/ish-arm64) | iOS sandbox kernel |
+| `deps/ish` | [emkey1/ish-AOK](https://github.com/emkey1/ish-AOK) | iOS sandbox kernel |
 | `deps/proot` | [OpenMinis/proot](https://github.com/OpenMinis/proot) | Android sandbox |
 
 ### Build-time customization

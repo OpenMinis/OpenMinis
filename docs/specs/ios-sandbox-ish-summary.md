@@ -2,7 +2,7 @@
 
 ## Overview
 
-MinisApp uses a customized fork of [iSH](https://github.com/OpenMinis/ish-arm64) (OpenMinis/ish-arm64) to provide a full Linux sandbox execution environment on iOS. The iSH kernel runs an Alpine Linux (aarch64) guest inside the app process, giving the AI agent a real shell with networking, filesystem, and process management — while native offloads bridge guest commands to iOS frameworks for hardware and system access.
+MinisApp uses a customized fork of [iSH](https://github.com/emkey1/ish-AOK) (emkey1/ish-AOK) to provide a full Linux sandbox execution environment on iOS. The iSH kernel runs an Alpine Linux (aarch64) guest inside the app process, giving the AI agent a real shell with networking, filesystem, and process management — while native offloads bridge guest commands to iOS frameworks for hardware and system access.
 
 ---
 
@@ -15,7 +15,7 @@ MinisApp uses a customized fork of [iSH](https://github.com/OpenMinis/ish-arm64)
 | Guest Architecture | ARM64 (aarch64) |
 | Engine | Asbestos (threaded-code JIT interpreter) |
 | Guest OS | Alpine Linux aarch64 |
-| Upstream Fork | `OpenMinis/ish-arm64`, branch `feature-arm64` |
+| Upstream Fork | `emkey1/ish-AOK`, default branch |
 | Build System | Meson (cross-compile for iOS arm64) |
 | iOS Deployment Target | 14.0+ |
 
