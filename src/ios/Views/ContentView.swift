@@ -1672,6 +1672,11 @@ struct ContentView: View {
             if !isSelecting {
                 Menu {
                     Button {
+                        deepLink.pendingSettingsTarget = .scheduledTasks
+                    } label: {
+                        Label("Scheduled Tasks", systemImage: "clock.badge.checkmark")
+                    }
+                    Button {
                         showTerminal = true
                     } label: {
                         Label("Shell Terminal", systemImage: "terminal")
@@ -4783,6 +4788,7 @@ private enum SettingsDestination: Hashable {
     case logs
     case appearance
     case background
+    case scheduledTasks
     case about
     case permissions
     case environments
@@ -4847,6 +4853,19 @@ private struct SettingsSheet: View {
                 }
 
                 Section("Agent Runtime") {
+                    NavigationLink {
+                        ScheduledTasksSettingsView()
+                    } label: {
+                        Label {
+                            Text("Scheduled Tasks")
+                        } icon: {
+                            Image(systemName: "clock.badge.checkmark")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white)
+                                .frame(width: 21, height: 21)
+                                .background(.orange, in: Circle())
+                        }
+                    }
                     NavigationLink {
                         SkillsManagementView()
                     } label: {
@@ -5116,6 +5135,8 @@ private struct SettingsSheet: View {
                     AppearanceSettingsView()
                 case .background:
                     EnhancedBackgroundSettingsView()
+                case .scheduledTasks:
+                    ScheduledTasksSettingsView()
                 case .about:
                     AboutView()
                 case .environments:
@@ -5212,6 +5233,8 @@ private struct SettingsSheet: View {
             navPath.append(SettingsDestination.appearance)
         case .background:
             navPath.append(SettingsDestination.background)
+        case .scheduledTasks:
+            navPath.append(SettingsDestination.scheduledTasks)
         case .about:
             navPath.append(SettingsDestination.about)
         case .permissions:
@@ -5410,4 +5433,3 @@ private struct ForceSyncToastBanner: View {
         .frame(maxWidth: 480)
     }
 }
-

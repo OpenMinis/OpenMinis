@@ -17,6 +17,12 @@ struct SendPromptResult: AppEntity {
     @Property(title: "Status")
     var status: String
 
+    /// Stable boolean for Shortcuts conditions. `status` remains for backward
+    /// compatibility and display, but automations should not compare localized
+    /// or user-facing status text.
+    @Property(title: "Is Running")
+    var isRunning: Bool
+
     @Property(title: "Is New Session")
     var isNewSession: Bool
 
@@ -33,11 +39,20 @@ struct SendPromptResult: AppEntity {
         )
     }
 
-    init(sessionId: String, modelName: String, status: String, isNewSession: Bool, prompt: String = "", responseText: String = "") {
+    init(
+        sessionId: String,
+        modelName: String,
+        status: String,
+        isRunning: Bool? = nil,
+        isNewSession: Bool,
+        prompt: String = "",
+        responseText: String = ""
+    ) {
         self.id = sessionId
         self.sessionId = sessionId
         self.modelName = modelName
         self.status = status
+        self.isRunning = isRunning ?? (status == "Running" || status == "Retrying")
         self.isNewSession = isNewSession
         self.prompt = prompt
         self.responseText = responseText

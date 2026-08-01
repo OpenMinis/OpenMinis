@@ -34,6 +34,9 @@ enum ShortcutRunTracker {
     private static let pendingRecordsKey = "shortcutDiag.pendingRuns.v1"
     private static let notifiedRunsKey = "shortcutDiag.notifiedRuns.v1"
     private static let staleAge: TimeInterval = 24 * 60 * 60  // 24h
+    /// A foreground transition can race with session creation / vm.send(). A
+    /// brand-new marker is not evidence of an interrupted automation yet.
+    private static let minimumOrphanAge: TimeInterval = 30
     private static let notificationCategoryId = "SHORTCUT_KEEPALIVE_GUIDANCE"
 
     // MARK: - PerformEntry snapshot (concern #1)
@@ -122,9 +125,32 @@ enum ShortcutRunTracker {
         return record.id
     }
 
+    /// Replace the temporary `intent-eager:<UUID>` session used while a new
+    /// chat is being created with its durable ChatStore id. Without this, an
+    /// interruption notification deep-links to a session that never existed.
+    @MainActor
+    static func rebindSession(recordId: String, toSessionId sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        var records = loadRecords()
+        guard let old = records[recordId], old.sessionId != sessionId else { return }
+        records[recordId] = PendingRecord(
+            id: old.id,
+            intent: old.intent,
+            sessionId: sessionId,
+            startedAt: old.startedAt,
+            enhancedBackgroundEnabled: old.enhancedBackgroundEnabled,
+            backgroundSpeakEnabled: old.backgroundSpeakEnabled,
+            eagerKeepAliveArmed: old.eagerKeepAliveArmed,
+            eagerKeepAliveSkippedReason: old.eagerKeepAliveSkippedReason
+        )
+        saveRecords(records)
+        logger.info("[ShortcutDiag] pending REBOUND id=\(recordId.prefix(8)) session=\(sessionId.prefix(8))")
+    }
+
     /// Clear a pending record. Called from the completion-observer path once
     /// the agent loop's `isProcessing` returns to false (the same signal the
     /// existing "Follow-up Done" notification uses).
+    @MainActor
     static func markCompleted(recordId: String, reason: String) {
         var records = loadRecords()
         guard let removed = records.removeValue(forKey: recordId) else { return }
@@ -135,12 +161,11 @@ enum ShortcutRunTracker {
 
     // MARK: - Foreground scan (concern #3 payoff)
 
-    /// Called from MinisApp's scenePhase → .active handler. Any pending record
-    /// still present is by definition orphaned: the Intent handed off to the
-    /// agent loop and neither the loop's completion path nor a previous
-    /// foreground scan reached `markCompleted`. Records older than
-    /// `staleAge` are dropped silently; newer records where the user hadn't
-    /// enabled keep-alive get a one-shot guidance notification.
+    /// Called from MinisApp's scenePhase → .active handler. A pending record is
+    /// only orphaned after a short grace period and when its real session is no
+    /// longer active. This avoids warning when the user opens Minis while the
+    /// automation is still running. Records older than `staleAge` are dropped
+    /// silently; newer interrupted records receive one guidance notification.
     @MainActor
     static func checkPendingOnForeground() {
         var records = loadRecords()
@@ -148,12 +173,19 @@ enum ShortcutRunTracker {
         var notified = loadNotifiedIds()
         let now = Date()
 
-        // Split into "still fresh, needs attention" vs "too stale, drop".
+        // Split into "interrupted, needs attention" vs "too stale, drop".
+        // Young records and records backed by a currently-active session stay
+        // pending for their normal completion observer to clear.
         var stale: [PendingRecord] = []
         var orphaned: [PendingRecord] = []
         for record in records.values {
-            if now.timeIntervalSince(record.startedAt) > staleAge {
+            let age = now.timeIntervalSince(record.startedAt)
+            if age > staleAge {
                 stale.append(record)
+            } else if age < minimumOrphanAge {
+                logger.info("[ShortcutDiag] pending DEFERRED-YOUNG id=\(record.id.prefix(8)) age=\(String(format: "%.0f", age))s")
+            } else if SessionActivityTracker.shared.isActive(record.sessionId) {
+                logger.info("[ShortcutDiag] pending STILL-RUNNING id=\(record.id.prefix(8)) session=\(record.sessionId.prefix(8)) age=\(String(format: "%.0f", age))s")
             } else {
                 orphaned.append(record)
             }
@@ -252,10 +284,15 @@ enum ShortcutRunTracker {
         content.body = body
         content.sound = .default
         content.categoryIdentifier = notificationCategoryId
-        content.userInfo = [
-            "sessionId": record.sessionId,
-            "shortcutDiagCategory": category.rawValue,
+        var userInfo: [AnyHashable: Any] = [
+            "shortcutDiagCategory": category.rawValue
         ]
+        // A process can be suspended before ChatStore creates the real session.
+        // In that case open Minis normally instead of routing to a placeholder.
+        if !record.sessionId.hasPrefix("intent-eager:") && record.sessionId != "unknown" {
+            userInfo["sessionId"] = record.sessionId
+        }
+        content.userInfo = userInfo
         let request = UNNotificationRequest(
             identifier: "shortcutDiag-orphan-\(record.id)",
             content: content,

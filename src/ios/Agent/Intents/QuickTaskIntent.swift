@@ -69,6 +69,14 @@ struct QuickTaskIntent: AppIntent {
     @Parameter(title: "Wait for Result", description: "When enabled, waits for the AI to finish and returns the full response for use in subsequent actions.", default: false)
     var waitForResult: Bool
 
+    static var parameterSummary: some ParameterSummary {
+        Summary("Run \(\.$task)") {
+            \.$model
+            \.$files
+            \.$waitForResult
+        }
+    }
+
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<SendPromptResult> & ProvidesDialog {
         BackgroundKeepAliveManager.shared.setup()
@@ -120,6 +128,7 @@ struct QuickTaskIntent: AppIntent {
         if let realSid = vm.sessionId {
             BackgroundKeepAliveManager.shared.armEagerlyForShortcut(
                 sessionId: realSid, caller: "QuickTaskIntent.swap")
+            ShortcutRunTracker.rebindSession(recordId: pendingId, toSessionId: realSid)
             SessionActivityTracker.shared.setInactive(placeholderSid,
                 source: "QuickTaskIntent.eager.placeholderSwap")
         }

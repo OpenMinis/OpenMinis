@@ -65,6 +65,10 @@ struct GetSessionStatusIntent: AppIntent {
     @Parameter(title: "Session ID")
     var sessionID: String
 
+    static var parameterSummary: some ParameterSummary {
+        Summary("Get status for \(\.$sessionID)")
+    }
+
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<SessionStatus> {
         let isRunning = SessionActivityTracker.shared.isActive(sessionID)

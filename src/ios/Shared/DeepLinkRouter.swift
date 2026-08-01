@@ -34,6 +34,7 @@ extension Notification.Name {
 ///   minis://settings/logs
 ///   minis://settings/appearance
 ///   minis://settings/background
+///   minis://settings/scheduled-tasks             (alias: scheduled_tasks, automations)
 ///   minis://settings/about
 ///   minis://settings/permissions
 ///   minis://settings/environments[?create_key=…&create_value=…&create_note=…]
@@ -170,6 +171,9 @@ enum DeepLinkRouter {
             coord.setFocus(rawQueryValue: components?.queryItems?
                 .first(where: { $0.name == "focus" })?.value)
             coord.pendingSettingsTarget = .background
+
+        case "scheduled-tasks", "scheduled_tasks", "automations":
+            coord.pendingSettingsTarget = .scheduledTasks
 
         case "about":
             coord.pendingSettingsTarget = .about

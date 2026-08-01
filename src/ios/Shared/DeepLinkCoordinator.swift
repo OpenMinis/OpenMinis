@@ -19,6 +19,7 @@ enum SettingsDeepLinkTarget: Equatable {
     case logs
     case appearance
     case background
+    case scheduledTasks
     case about
     case permissions
     case environments

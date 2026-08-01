@@ -27,6 +27,15 @@ struct SendPromptIntent: AppIntent {
     @Parameter(title: "Wait for Result", description: "When enabled, waits for the AI to finish and returns the full response. Use this to chain the result into subsequent Shortcuts actions.", default: false)
     var waitForResult: Bool
 
+    static var parameterSummary: some ParameterSummary {
+        Summary("Send \(\.$prompt)") {
+            \.$session
+            \.$model
+            \.$files
+            \.$waitForResult
+        }
+    }
+
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<SendPromptResult> & ProvidesDialog {
         // Ensure BackgroundKeepAliveManager is set up
@@ -106,6 +115,7 @@ struct SendPromptIntent: AppIntent {
             if let placeholder = placeholderSid, let realSid = vm.sessionId {
                 BackgroundKeepAliveManager.shared.armEagerlyForShortcut(
                     sessionId: realSid, caller: "SendPromptIntent.swap")
+                ShortcutRunTracker.rebindSession(recordId: pendingId, toSessionId: realSid)
                 SessionActivityTracker.shared.setInactive(placeholder,
                     source: "SendPromptIntent.eager.placeholderSwap")
             }

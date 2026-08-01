@@ -76972,6 +76972,600 @@
         }
       }
     },
+    "Scheduled Tasks" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Scheduled Tasks"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "定时任务"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "排程任務"
+          }
+        }
+      }
+    },
+    "Run Minis on a Schedule" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Run Minis on a Schedule"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "让 Minis 定时运行"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "讓 Minis 定時執行"
+          }
+        }
+      }
+    },
+    "Use a Shortcuts Personal Automation to start a Minis task at a specific time or on selected days." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use a Shortcuts Personal Automation to start a Minis task at a specific time or on selected days."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用“快捷指令”个人自动化，在指定时间或选定日期启动 Minis 任务。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用「捷徑」個人自動化，在指定時間或選定日期啟動 Minis 任務。"
+          }
+        }
+      }
+    },
+    "Create a Personal Automation" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Create a Personal Automation"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建个人自动化"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "建立個人自動化"
+          }
+        }
+      }
+    },
+    "Open Shortcuts, choose Automation, then create a new Personal Automation." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Shortcuts, choose Automation, then create a new Personal Automation."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开“快捷指令”，选择“自动化”，然后新建个人自动化。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟「捷徑」，選擇「自動化」，然後建立個人自動化。"
+          }
+        }
+      }
+    },
+    "Choose the Trigger" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose the Trigger"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择触发条件"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇觸發條件"
+          }
+        }
+      }
+    },
+    "Select Time of Day, then choose the time and daily, weekly, or monthly repeat rule." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Select Time of Day, then choose the time and daily, weekly, or monthly repeat rule."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择“特定时间”，然后设置时间和每天、每周或每月重复规则。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇「特定時間」，然後設定時間和每天、每週或每月重複規則。"
+          }
+        }
+      }
+    },
+    "Add a Minis Action" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add a Minis Action"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加 Minis 操作"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加入 Minis 動作"
+          }
+        }
+      }
+    },
+    "Search for Minis and add Send Prompt or Quick Task. Configure the prompt, session, and model." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Search for Minis and add Send Prompt or Quick Task. Configure the prompt, session, and model."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜索 Minis，添加“发送提示”或“快捷任务”，然后配置提示、会话和模型。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "搜尋 Minis，加入「傳送提示」或「快捷任務」，然後設定提示、會話和模型。"
+          }
+        }
+      }
+    },
+    "Run Automatically" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Run Automatically"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动运行"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自動執行"
+          }
+        }
+      }
+    },
+    "Choose Run Immediately so the automation does not wait for confirmation." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choose Run Immediately so the automation does not wait for confirmation."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择“立即运行”，这样自动化无需等待确认。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "選擇「立即執行」，讓自動化不必等待確認。"
+          }
+        }
+      }
+    },
+    "Set Up in Shortcuts" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Set Up in Shortcuts"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在快捷指令中设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在捷徑中設定"
+          }
+        }
+      }
+    },
+    "Apple keeps Personal Automations private to the Shortcuts app, so Minis cannot create, list, or edit their schedules. Their next run is managed by Shortcuts." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple keeps Personal Automations private to the Shortcuts app, so Minis cannot create, list, or edit their schedules. Their next run is managed by Shortcuts."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 仅允许“快捷指令”管理个人自动化，因此 Minis 无法创建、列出或编辑其计划。下次运行时间由“快捷指令”管理。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Apple 僅允許「捷徑」管理個人自動化，因此 Minis 無法建立、列出或編輯其排程。下次執行時間由「捷徑」管理。"
+          }
+        }
+      }
+    },
+    "This opens Minis actions in Shortcuts. Switch to the Automation tab there to add the time trigger." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This opens Minis actions in Shortcuts. Switch to the Automation tab there to add the time trigger."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这会在“快捷指令”中打开 Minis 操作。请切换到“自动化”标签页添加时间触发条件。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "這會在「捷徑」中開啟 Minis 動作。請切換到「自動化」分頁加入時間觸發條件。"
+          }
+        }
+      }
+    },
+    "Background Keep-Alive" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Background Keep-Alive"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "后台保活"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "背景保活"
+          }
+        }
+      }
+    },
+    "Set Up" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Set Up"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "去设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "設定"
+          }
+        }
+      }
+    },
+    "Notification Permission" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Notification Permission"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通知权限"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "通知權限"
+          }
+        }
+      }
+    },
+    "Enable Notifications" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable Notifications"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开启通知"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟通知"
+          }
+        }
+      }
+    },
+    "Open Notification Settings" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Notification Settings"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开通知设置"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "開啟通知設定"
+          }
+        }
+      }
+    },
+    "Reliability" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reliability"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可靠性"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可靠性"
+          }
+        }
+      }
+    },
+    "Shortcuts starts the task. Background Keep-Alive helps longer agent work finish after Minis leaves the foreground, and notifications report when it starts and completes." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shortcuts starts the task. Background Keep-Alive helps longer agent work finish after Minis leaves the foreground, and notifications report when it starts and completes."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“快捷指令”负责启动任务。“后台保活”可帮助较长的 Agent 任务在 Minis 离开前台后继续完成；通知会报告开始和完成状态。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "「捷徑」負責啟動任務。「背景保活」可幫助較長的 Agent 任務在 Minis 離開前景後繼續完成；通知會回報開始和完成狀態。"
+          }
+        }
+      }
+    },
+    "Independent Task" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Independent Task"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "独立任务"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "獨立任務"
+          }
+        }
+      }
+    },
+    "Leave Wait for Result off and use task notifications to follow progress." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Leave Wait for Result off and use task notifications to follow progress."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭“等待结果”，通过任务通知跟踪进度。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "關閉「等待結果」，透過任務通知追蹤進度。"
+          }
+        }
+      }
+    },
+    "Shortcut Chain" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shortcut Chain"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快捷指令链"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "捷徑串連"
+          }
+        }
+      }
+    },
+    "Turn Wait for Result on only when a later Shortcuts action needs the AI response." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Turn Wait for Result on only when a later Shortcuts action needs the AI response."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅当后续快捷指令操作需要 AI 回复时，才开启“等待结果”。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "僅在後續捷徑動作需要 AI 回覆時，才開啟「等待結果」。"
+          }
+        }
+      }
+    },
+    "Execution Mode" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Execution Mode"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "执行模式"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "執行模式"
+          }
+        }
+      }
+    },
+    "Ready" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ready"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已就绪"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已就緒"
+          }
+        }
+      }
+    },
     "设置闹钟" : {
       "localizations" : {
         "de" : {

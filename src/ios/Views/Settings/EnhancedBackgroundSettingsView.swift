@@ -1,5 +1,7 @@
 import AVFoundation
+import AppIntents
 import SwiftUI
+import UserNotifications
 
 struct EnhancedBackgroundSettingsView: View {
     @ObservedObject private var keepAlive = BackgroundKeepAliveManager.shared
@@ -281,6 +283,218 @@ struct EnhancedBackgroundSettingsView: View {
         case .denied, .restricted: return .red
         default: return .secondary
         }
+    }
+}
+
+// MARK: - Scheduled Tasks
+
+/// iOS deliberately does not let third-party apps create or inspect a user's
+/// Personal Automations. Minis therefore exposes the actual work as App
+/// Intents, while Shortcuts owns the clock/repeat trigger. This screen makes
+/// that system boundary explicit and keeps the setup path inside the app.
+struct ScheduledTasksSettingsView: View {
+    @ObservedObject private var keepAlive = BackgroundKeepAliveManager.shared
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var notificationStatus: UNAuthorizationStatus = .notDetermined
+
+    var body: some View {
+        List {
+            Section {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Run Minis on a Schedule")
+                            .font(.headline)
+                        Text("Use a Shortcuts Personal Automation to start a Minis task at a specific time or on selected days.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "clock.badge.checkmark")
+                        .font(.title2)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Section {
+                setupStep(
+                    1,
+                    title: "Create a Personal Automation",
+                    detail: "Open Shortcuts, choose Automation, then create a new Personal Automation."
+                )
+                setupStep(
+                    2,
+                    title: "Choose the Trigger",
+                    detail: "Select Time of Day, then choose the time and daily, weekly, or monthly repeat rule."
+                )
+                setupStep(
+                    3,
+                    title: "Add a Minis Action",
+                    detail: "Search for Minis and add Send Prompt or Quick Task. Configure the prompt, session, and model."
+                )
+                setupStep(
+                    4,
+                    title: "Run Automatically",
+                    detail: "Choose Run Immediately so the automation does not wait for confirmation."
+                )
+            } header: {
+                Text("Set Up in Shortcuts")
+            } footer: {
+                Text("Apple keeps Personal Automations private to the Shortcuts app, so Minis cannot create, list, or edit their schedules. Their next run is managed by Shortcuts.")
+            }
+
+            Section {
+                HStack {
+                    Spacer()
+                    ShortcutsLink()
+                        .shortcutsLinkStyle(.automaticOutline)
+                    Spacer()
+                }
+            } footer: {
+                Text("This opens Minis actions in Shortcuts. Switch to the Automation tab there to add the time trigger.")
+            }
+
+            Section {
+                NavigationLink {
+                    EnhancedBackgroundSettingsView()
+                } label: {
+                    readinessRow(
+                        title: "Background Keep-Alive",
+                        systemImage: "waveform.path.ecg",
+                        ready: keepAlive.enhancedBackgroundEffective
+                    )
+                }
+
+                Toggle("Task Notifications", isOn: $keepAlive.backgroundNotificationsEnabled)
+
+                HStack {
+                    Label("Notification Permission", systemImage: "bell.badge")
+                    Spacer()
+                    Text(notificationStatusText)
+                        .foregroundStyle(notificationStatusColor)
+                }
+
+                if notificationStatus == .notDetermined {
+                    Button("Enable Notifications") {
+                        requestNotificationPermission()
+                    }
+                } else if notificationStatus == .denied {
+                    Button("Open Notification Settings") {
+                        guard let url = URL(string: UIApplication.openNotificationSettingsURLString) else { return }
+                        openURL(url)
+                    }
+                }
+            } header: {
+                Text("Reliability")
+            } footer: {
+                Text("Shortcuts starts the task. Background Keep-Alive helps longer agent work finish after Minis leaves the foreground, and notifications report when it starts and completes.")
+            }
+
+            Section {
+                Label {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Independent Task")
+                        Text("Leave Wait for Result off and use task notifications to follow progress.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "bell")
+                }
+
+                Label {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Shortcut Chain")
+                        Text("Turn Wait for Result on only when a later Shortcuts action needs the AI response.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: "link")
+                }
+            } header: {
+                Text("Execution Mode")
+            }
+        }
+        .navigationTitle("Scheduled Tasks")
+        .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await refreshNotificationStatus()
+        }
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            Task { await refreshNotificationStatus() }
+        }
+    }
+
+    private func setupStep(
+        _ number: Int,
+        title: LocalizedStringKey,
+        detail: LocalizedStringKey
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("\(number)")
+                .font(.caption.bold())
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(.orange, in: Circle())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func readinessRow(title: LocalizedStringKey, systemImage: String, ready: Bool) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+            Spacer()
+            Text(ready ? LocalizedStringKey("Ready") : LocalizedStringKey("Set Up"))
+                .foregroundStyle(ready ? .green : .orange)
+        }
+    }
+
+    private var notificationStatusText: String {
+        if !keepAlive.backgroundNotificationsEnabled {
+            return String(localized: "Off", comment: "Scheduled task readiness status")
+        }
+        switch notificationStatus {
+        case .authorized, .provisional, .ephemeral:
+            return String(localized: "Ready", comment: "Scheduled task readiness status")
+        case .denied:
+            return String(localized: "Denied", comment: "Notification permission status")
+        case .notDetermined:
+            return String(localized: "Not Requested", comment: "Notification permission status")
+        @unknown default:
+            return String(localized: "Unknown", comment: "Notification permission status")
+        }
+    }
+
+    private var notificationStatusColor: Color {
+        guard keepAlive.backgroundNotificationsEnabled else { return .secondary }
+        switch notificationStatus {
+        case .authorized, .provisional, .ephemeral: return .green
+        case .denied: return .red
+        default: return .orange
+        }
+    }
+
+    private func requestNotificationPermission() {
+        Task {
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(
+                options: [.alert, .sound, .badge]
+            )
+            await refreshNotificationStatus()
+        }
+    }
+
+    private func refreshNotificationStatus() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notificationStatus = settings.authorizationStatus
     }
 }
 
