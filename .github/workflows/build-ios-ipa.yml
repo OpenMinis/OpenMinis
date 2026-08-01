@@ -80,12 +80,16 @@ jobs:
         run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
 
       - name: Install signing certificate
-        if: ${{ secrets.IOS_P12_BASE64 != '' && secrets.IOS_P12_PASSWORD != '' }}
+        if: github.event_name != 'pull_request'
         env:
           IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
           IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD || 'temp_keychain_password' }}
         run: |
+          if [ -z "$IOS_P12_BASE64" ] || [ -z "$IOS_P12_PASSWORD" ]; then
+            echo "Signing certificate secrets not available, skipping..."
+            exit 0
+          fi
           echo "$IOS_P12_BASE64" | base64 --decode > cert.p12
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
@@ -95,18 +99,27 @@ jobs:
           rm -f cert.p12
 
       - name: Install provisioning profile
-        if: ${{ secrets.IOS_MOBILEPROVISION_BASE64 != '' }}
+        if: github.event_name != 'pull_request'
         env:
           IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
         run: |
+          if [ -z "$IOS_MOBILEPROVISION_BASE64" ]; then
+            echo "Provisioning profile secret not available, skipping..."
+            exit 0
+          fi
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/OpenMinis.mobileprovision"
 
       - name: Derive development team ID from provisioning profile
         id: team
-        if: ${{ secrets.IOS_MOBILEPROVISION_BASE64 != '' }}
+        if: github.event_name != 'pull_request'
         run: |
-          TEAM_ID="$(security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/OpenMinis.mobileprovision" \
+          PROFILE_PATH="$HOME/Library/MobileDevice/Provisioning Profiles/OpenMinis.mobileprovision"
+          if [ ! -f "$PROFILE_PATH" ]; then
+            echo "team_id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TEAM_ID="$(security cms -D -i "$PROFILE_PATH" \
             | plutil -extract TeamIdentifier.0 raw -o - -)"
           echo "team_id=${TEAM_ID}" >> "$GITHUB_OUTPUT"
           echo "Derived team ID: ${TEAM_ID}"
