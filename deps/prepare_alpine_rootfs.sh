@@ -141,7 +141,7 @@ build_fakefsify() {
             -Dlog="" \
             -Dkernel=ish \
             -Dengine=jit \
-            -Dguest_arch=arm64
+            -Dguest_archs=arm64
     fi
 
     # Build only fakefsify
