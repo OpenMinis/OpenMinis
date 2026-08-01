@@ -206,7 +206,7 @@ build_ish() {
             -Dlog="" \
             -Dlog_handler=nslog \
             -Dkernel=ish \
-            -Dengine=asbestos \
+            -Dengine=jit \
             -Dguest_arch=arm64
     else
         log_info "Meson already configured, reconfiguring..."

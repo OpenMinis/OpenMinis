@@ -140,7 +140,7 @@ build_fakefsify() {
             --buildtype=release \
             -Dlog="" \
             -Dkernel=ish \
-            -Dengine=asbestos \
+            -Dengine=jit \
             -Dguest_arch=arm64
     fi
 
