@@ -24,37 +24,60 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-14
-    timeout-minutes: 60
+    runs-on: macos-15
+    timeout-minutes: 120
 
     env:
-      SCHEME: OpenMinis
+      SCHEME: Minis
       CONFIGURATION: Release
-      WORKSPACE: ""
-      PROJECT: OpenMinis.xcodeproj
-      ARCHIVE_PATH: ${{ github.workspace }}/build/OpenMinis.xcarchive
+      PROJECT: src/ios/Minis.xcodeproj
+      ARCHIVE_PATH: ${{ github.workspace }}/build/Minis.xcarchive
       EXPORT_PATH: ${{ github.workspace }}/build/export
-      EXPORT_OPTIONS_PLIST: ${{ github.workspace }}/ExportOptions.plist
+      EXPORT_OPTIONS_PLIST: ${{ github.workspace }}/build/ExportOptions.plist
 
     steps:
-      - name: Checkout
+      - name: Checkout with submodules
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
 
       - name: Select latest stable Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Show toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install native build dependencies
+        run: |
+          brew install ninja llvm libarchive pkg-config
+          python3 -m pip install meson || python3 -m pip install --user meson || pip3 install meson
+
+      - name: Prepare provider customization config
+        run: |
+          cp src/ios/Configs/ProviderCustomization.xcconfig.example \
+             src/ios/Configs/ProviderCustomization.xcconfig
+
+      # Native dependencies are built from source and are NOT committed.
+      # Order matters: FFmpeg links against LAME.
+      - name: Build LAME
+        run: ./deps/build_lame.sh
+
+      - name: Build FFmpeg frameworks
+        run: ./deps/build_ffmpeg.sh
+
+      - name: Build iSH libraries
+        run: ./deps/build_ish.sh
+
+      - name: Prepare Alpine rootfs
+        run: ./deps/prepare_alpine_rootfs.sh
 
       - name: Resolve Swift packages
-        run: |
-          if [ -n "$WORKSPACE" ]; then
-            xcodebuild -resolvePackageDependencies -workspace "$WORKSPACE" -scheme "$SCHEME"
-          else
-            xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
-          fi
+        run: xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
 
       - name: Install signing certificate
         if: ${{ secrets.IOS_P12_BASE64 != '' && secrets.IOS_P12_PASSWORD != '' }}
@@ -76,11 +99,21 @@ jobs:
         env:
           IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
         run: |
-          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
-          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > "$HOME/Library/MobileDevice/Provisioning Profiles/OpenMinis.mobileprovision"
+
+      - name: Derive development team ID from provisioning profile
+        id: team
+        if: ${{ secrets.IOS_MOBILEPROVISION_BASE64 != '' }}
+        run: |
+          TEAM_ID="$(security cms -D -i "$HOME/Library/MobileDevice/Provisioning Profiles/OpenMinis.mobileprovision" \
+            | plutil -extract TeamIdentifier.0 raw -o - -)"
+          echo "team_id=${TEAM_ID}" >> "$GITHUB_OUTPUT"
+          echo "Derived team ID: ${TEAM_ID}"
 
       - name: Create ExportOptions.plist
         run: |
+          mkdir -p "$(dirname "$EXPORT_OPTIONS_PLIST")"
           cat > "$EXPORT_OPTIONS_PLIST" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,7 +122,7 @@ jobs:
             <key>method</key>
             <string>ad-hoc</string>
             <key>signingStyle</key>
-            <string>manual</string>
+            <string>automatic</string>
             <key>stripSwiftSymbols</key>
             <true/>
             <key>compileBitcode</key>
@@ -102,27 +135,26 @@ jobs:
 
       - name: Archive app
         run: |
-          if [ -n "$WORKSPACE" ]; then
-            xcodebuild \
-              -workspace "$WORKSPACE" \
-              -scheme "$SCHEME" \
-              -configuration "$CONFIGURATION" \
-              -sdk iphoneos \
-              -archivePath "$ARCHIVE_PATH" \
-              clean archive
+          if [ -n "$TEAM_ID" ]; then
+            SIGNING_ARGS="CODE_SIGN_STYLE=Automatic DEVELOPMENT_TEAM=${TEAM_ID}"
           else
-            xcodebuild \
-              -project "$PROJECT" \
-              -scheme "$SCHEME" \
-              -configuration "$CONFIGURATION" \
-              -sdk iphoneos \
-              -archivePath "$ARCHIVE_PATH" \
-              clean archive
+            # No signing assets provided: build an unsigned archive and package
+            # it into an unsigned IPA later (not installable on stock devices).
+            SIGNING_ARGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO"
           fi
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration "$CONFIGURATION" \
+            -sdk iphoneos \
+            -archivePath "$ARCHIVE_PATH" \
+            clean archive $SIGNING_ARGS
+        env:
+          TEAM_ID: ${{ steps.team.outputs.team_id }}
 
-      - name: Export IPA (if signing assets are available)
+      - name: Export signed IPA
         id: export_ipa
-        continue-on-error: true
+        if: ${{ steps.team.outputs.team_id != '' }}
         run: |
           mkdir -p "$EXPORT_PATH"
           xcodebuild -exportArchive \
@@ -130,21 +162,25 @@ jobs:
             -exportPath "$EXPORT_PATH" \
             -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
 
+      - name: Package unsigned IPA
+        if: ${{ steps.team.outputs.team_id == '' }}
+        run: |
+          mkdir -p "$EXPORT_PATH/Payload"
+          cp -R "$ARCHIVE_PATH/Products/Applications/"*.app "$EXPORT_PATH/Payload/"
+          cd "$EXPORT_PATH"
+          zip -qry "OpenMinis-unsigned.ipa" Payload
+          ls -lh "OpenMinis-unsigned.ipa"
+
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: ios-xcarchive
           path: ${{ env.ARCHIVE_PATH }}
+          if-no-files-found: error
 
-      - name: Upload IPA (if generated)
-        if: ${{ steps.export_ipa.outcome == 'success' }}
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: ios-ipa
           path: ${{ env.EXPORT_PATH }}/*.ipa
-
-      - name: Fail when IPA was requested but export failed
-        if: ${{ steps.export_ipa.outcome != 'success' && (secrets.IOS_P12_BASE64 != '' || secrets.IOS_MOBILEPROVISION_BASE64 != '') }}
-        run: |
-          echo "IPA export failed despite signing assets being present."
-          exit 1
+          if-no-files-found: error
