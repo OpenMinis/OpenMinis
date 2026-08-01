@@ -15,6 +15,7 @@ set -e
 #   - Python 3 with meson (pip3 install meson)
 #   - Ninja (brew install ninja)
 #   - LLVM/Clang (brew install llvm) - required for VDSO compilation
+#   - LLD (brew install lld) - required by the VDSO probe (clang -fuse-ld=lld)
 #   - libarchive (brew install libarchive)
 #
 # Usage:
@@ -104,27 +105,52 @@ check_prerequisites() {
         # The iSH VDSO meson probe invokes:
         #   clang -target i386-linux -fuse-ld=lld ...
         # For an ELF (Linux) guest target, clang resolves '-fuse-ld=lld' by
-        # looking for a program named 'ld.lld' in its own RESOURCE directory:
+        # looking for a program named 'ld.lld' in its RESOURCE directory:
         #   <clang -print-resource-dir>/bin/
-        # Homebrew's llvm keg does NOT ship an 'ld.lld' there (only bin/lld and
-        # bin/ld64.lld), so clang errors with:
+        # Homebrew's `llvm` formula no longer bundles LLD at all (it moved to
+        # a separate `lld` formula), so the llvm keg ships neither 'lld' nor
+        # 'ld.lld'. clang then errors with:
         #   clang: error: invalid linker name in argument '-fuse-ld=lld'
-        # Fix: symlink the ELF-capable 'lld' driver as 'ld.lld' in the
-        # resource bin dir that clang actually scans for -fuse-ld programs.
+        # Fix: locate an LLD install (brew lld keg / PATH) and expose its
+        # ELF-capable driver as 'ld.lld' in the resource bin dir that clang
+        # scans, and put its directory on PATH as a fallback.
         LLVM_BIN="$(dirname "$LLVM_CLANG")"
-        if [ -x "$LLVM_BIN/lld" ]; then
+
+        # Find an LLD driver binary across common install locations.
+        LLD_DRIVER=""
+        for lld_candidate in \
+            "$LLVM_BIN/lld" \
+            "/opt/homebrew/opt/lld/bin/lld" \
+            "/usr/local/opt/lld/bin/lld" \
+            "/opt/local/bin/lld"; do
+            if [ -x "$lld_candidate" ]; then
+                LLD_DRIVER="$lld_candidate"
+                break
+            fi
+        done
+        if [ -z "$LLD_DRIVER" ]; then
+            LLD_DRIVER="$(command -v lld 2>/dev/null || true)"
+        fi
+
+        if [ -n "$LLD_DRIVER" ]; then
             LLVM_RESOURCE_BIN="$("$LLVM_CLANG" -print-resource-dir 2>/dev/null)/bin"
+            mkdir -p "$LLVM_RESOURCE_BIN" 2>/dev/null || true
             if [ -n "$LLVM_RESOURCE_BIN" ] && [ -d "$LLVM_RESOURCE_BIN" ]; then
-                ln -sf "$LLVM_BIN/lld" "$LLVM_RESOURCE_BIN/ld.lld" 2>/dev/null \
+                ln -sf "$LLD_DRIVER" "$LLVM_RESOURCE_BIN/ld.lld" 2>/dev/null \
                     || log_warning "Could not create ld.lld symlink for VDSO"
             fi
+            # Ensure the LLD bin dir is on PATH as a fallback (clang also
+            # searches PATH for -fuse-ld programs).
+            LLD_DIR="$(dirname "$LLD_DRIVER")"
+            case ":$PATH:" in
+                *":$LLD_DIR:"*) : ;;
+                *) export PATH="$LLD_DIR:$PATH" ;;
+            esac
+            log_info "VDSO linker configured: $LLD_DRIVER -> $LLVM_RESOURCE_BIN/ld.lld"
+        else
+            log_warning "LLD not found. The VDSO probe (clang -fuse-ld=lld) will fail."
+            log_warning "Install with: brew install lld"
         fi
-        # Also ensure the LLVM bin dir is on PATH as a fallback.
-        case ":$PATH:" in
-            *":$LLVM_BIN:"*) : ;;
-            *) export PATH="$LLVM_BIN:$PATH" ;;
-        esac
-        log_info "VDSO linker search configured via: $LLVM_BIN"
     fi
 
     log_success "Prerequisites check passed"

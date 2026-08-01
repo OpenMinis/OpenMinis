@@ -54,7 +54,7 @@ jobs:
 
       - name: Install native build dependencies
         run: |
-          brew install ninja llvm libarchive pkg-config meson
+          brew install ninja llvm lld libarchive pkg-config meson
 
       - name: Prepare provider customization config
         run: |
