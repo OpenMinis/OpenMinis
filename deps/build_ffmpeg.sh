@@ -114,23 +114,42 @@ check_prerequisites() {
 fetch_ffmpeg_source() {
     local version="6.1.2"
     local tarball="ffmpeg-${version}.tar.xz"
-    local url="https://ffmpeg.org/releases/${tarball}"
+    local url_primary="https://ffmpeg.org/releases/${tarball}"
+    local url_secondary="https://www.ffmpeg.org/releases/${tarball}"
+    local url_github="https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n${version}.tar.gz"
     local tmp
+    local archive_path=""
+    local extracted_dir=""
     tmp="$(mktemp -d)"
 
     log_info "FFmpeg source not present — downloading ${version}..."
-    if ! curl -fL# "$url" -o "$tmp/$tarball"; then
+    if curl -fL# --retry 3 --retry-all-errors "$url_primary" -o "$tmp/$tarball"; then
+        archive_path="$tmp/$tarball"
+    elif curl -fL# --retry 3 --retry-all-errors "$url_secondary" -o "$tmp/$tarball"; then
+        archive_path="$tmp/$tarball"
+    elif curl -fL# --retry 3 --retry-all-errors "$url_github" -o "$tmp/ffmpeg-${version}-github.tar.gz"; then
+        archive_path="$tmp/ffmpeg-${version}-github.tar.gz"
+    else
         rm -rf "$tmp"
-        log_error "Failed to download $url — check your network, or place the source at $FFMPEG_DIR manually."
+        log_error "Failed to download FFmpeg ${version} from all sources — check your network, or place the source at $FFMPEG_DIR manually."
     fi
 
     log_info "Extracting..."
-    if ! tar -xf "$tmp/$tarball" -C "$tmp"; then
+    if ! tar -xf "$archive_path" -C "$tmp"; then
         rm -rf "$tmp"
-        log_error "Failed to extract $tarball"
+        log_error "Failed to extract FFmpeg ${version} source archive"
     fi
 
-    mv "$tmp/ffmpeg-${version}" "$FFMPEG_DIR"
+    if [ -d "$tmp/ffmpeg-${version}" ]; then
+        extracted_dir="$tmp/ffmpeg-${version}"
+    elif [ -d "$tmp/FFmpeg-n${version}" ]; then
+        extracted_dir="$tmp/FFmpeg-n${version}"
+    else
+        rm -rf "$tmp"
+        log_error "Extracted FFmpeg source directory not found"
+    fi
+
+    mv "$extracted_dir" "$FFMPEG_DIR"
     rm -rf "$tmp"
     log_success "FFmpeg ${version} source ready at $FFMPEG_DIR"
 }
