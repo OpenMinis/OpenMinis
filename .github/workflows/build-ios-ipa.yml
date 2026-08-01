@@ -1,0 +1,150 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '**/*.swift'
+      - '**/*.m'
+      - '**/*.mm'
+      - '**/*.h'
+      - '**/*.xcodeproj/**'
+      - '**/*.xcworkspace/**'
+      - '.github/workflows/build-ios-ipa.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - '**/*.swift'
+      - '**/*.m'
+      - '**/*.mm'
+      - '**/*.h'
+      - '**/*.xcodeproj/**'
+      - '**/*.xcworkspace/**'
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    env:
+      SCHEME: OpenMinis
+      CONFIGURATION: Release
+      WORKSPACE: ""
+      PROJECT: OpenMinis.xcodeproj
+      ARCHIVE_PATH: ${{ github.workspace }}/build/OpenMinis.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+      EXPORT_OPTIONS_PLIST: ${{ github.workspace }}/ExportOptions.plist
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: |
+          if [ -n "$WORKSPACE" ]; then
+            xcodebuild -resolvePackageDependencies -workspace "$WORKSPACE" -scheme "$SCHEME"
+          else
+            xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME"
+          fi
+
+      - name: Install signing certificate
+        if: ${{ secrets.IOS_P12_BASE64 != '' && secrets.IOS_P12_PASSWORD != '' }}
+        env:
+          IOS_P12_BASE64: ${{ secrets.IOS_P12_BASE64 }}
+          IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD || 'temp_keychain_password' }}
+        run: |
+          echo "$IOS_P12_BASE64" | base64 --decode > cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import cert.p12 -k build.keychain -P "$IOS_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm -f cert.p12
+
+      - name: Install provisioning profile
+        if: ${{ secrets.IOS_MOBILEPROVISION_BASE64 != '' }}
+        env:
+          IOS_MOBILEPROVISION_BASE64: ${{ secrets.IOS_MOBILEPROVISION_BASE64 }}
+        run: |
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo "$IOS_MOBILEPROVISION_BASE64" | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/profile.mobileprovision
+
+      - name: Create ExportOptions.plist
+        run: |
+          cat > "$EXPORT_OPTIONS_PLIST" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>compileBitcode</key>
+            <false/>
+            <key>destination</key>
+            <string>export</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Archive app
+        run: |
+          if [ -n "$WORKSPACE" ]; then
+            xcodebuild \
+              -workspace "$WORKSPACE" \
+              -scheme "$SCHEME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -archivePath "$ARCHIVE_PATH" \
+              clean archive
+          else
+            xcodebuild \
+              -project "$PROJECT" \
+              -scheme "$SCHEME" \
+              -configuration "$CONFIGURATION" \
+              -sdk iphoneos \
+              -archivePath "$ARCHIVE_PATH" \
+              clean archive
+          fi
+
+      - name: Export IPA (if signing assets are available)
+        id: export_ipa
+        continue-on-error: true
+        run: |
+          mkdir -p "$EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$EXPORT_OPTIONS_PLIST"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcarchive
+          path: ${{ env.ARCHIVE_PATH }}
+
+      - name: Upload IPA (if generated)
+        if: ${{ steps.export_ipa.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-ipa
+          path: ${{ env.EXPORT_PATH }}/*.ipa
+
+      - name: Fail when IPA was requested but export failed
+        if: ${{ steps.export_ipa.outcome != 'success' && (secrets.IOS_P12_BASE64 != '' || secrets.IOS_MOBILEPROVISION_BASE64 != '') }}
+        run: |
+          echo "IPA export failed despite signing assets being present."
+          exit 1
