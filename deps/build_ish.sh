@@ -421,7 +421,7 @@ create_umbrella_header() {
 #include "kernel/task.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
-#include "kernel/memory.h"
+#include "kernel/mm.h"
 #include "kernel/signal.h"
 #include "kernel/errno.h"
 
