@@ -11,6 +11,7 @@ on:
       - '**/*.h'
       - '**/*.xcodeproj/**'
       - '**/*.xcworkspace/**'
+      - 'deps/**'
       - '.github/workflows/build-ios-ipa.yml'
   pull_request:
     branches: [ main, master ]
@@ -21,6 +22,7 @@ on:
       - '**/*.h'
       - '**/*.xcodeproj/**'
       - '**/*.xcworkspace/**'
+      - 'deps/**'
 
 jobs:
   build-ipa:
