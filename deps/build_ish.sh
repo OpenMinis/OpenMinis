@@ -364,10 +364,29 @@ copy_outputs() {
         cp "$ISH_DIR/deps/config.h" "$OUTPUT_INCLUDE/ish/deps/"
     fi
 
-    # Copy RootfsPatch bundle (rootfs overlay patches applied on boot)
+    # Copy RootfsPatch bundle (rootfs overlay patches applied on boot).
+    # ish-AOK does not ship one, but the Xcode project hard-references
+    # deps/resources/RootfsPatch.bundle, so create a minimal no-op bundle
+    # (empty manifest -> FsApplyOverlay does nothing) when absent.
+    mkdir -p "$OUTPUT_RESOURCES"
     if [ -d "$ISH_DIR/app/RootfsPatch.bundle" ]; then
         cp -r "$ISH_DIR/app/RootfsPatch.bundle" "$OUTPUT_RESOURCES/"
         log_success "RootfsPatch.bundle copied"
+    elif [ ! -e "$OUTPUT_RESOURCES/RootfsPatch.bundle" ]; then
+        mkdir -p "$OUTPUT_RESOURCES/RootfsPatch.bundle"
+        cat > "$OUTPUT_RESOURCES/RootfsPatch.bundle/manifest.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>version</key>
+	<integer>1</integer>
+	<key>files</key>
+	<array/>
+</dict>
+</plist>
+PLIST
+        log_success "RootfsPatch.bundle generated (empty manifest)"
     fi
 
     log_success "Output files copied"
