@@ -37,6 +37,9 @@
 		AA26CCBC2F31080100AECF2D /* ISHTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA26CCBD2F31080100AECF2D /* ISHTerminalView.swift */; };
 		AA26CCBC2F324FE400AECF2D /* FileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA26CCBB2F324FE400AECF2D /* FileBrowserView.swift */; };
 		AA26CCBE2F31080100AECF2D /* RootfsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA26CCBF2F31080100AECF2D /* RootfsManager.swift */; };
+		E5TAR0001 /* TarArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5TAR0002 /* TarArchive.swift */; };
+		E5TAR0003 /* RootfsArchiveDecompressor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5TAR0004 /* RootfsArchiveDecompressor.swift */; };
+		E5TAR0005 /* RootfsImportView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5TAR0006 /* RootfsImportView.swift */; };
 		AA26CCC12F31090000AECF2D /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA26CCC22F31090000AECF2D /* SystemConfiguration.framework */; };
 		AA26CCC32F31090100AECF2D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = AA26CCC42F31090100AECF2D /* libresolv.tbd */; };
 		AA71B0222F44BEB200A28A5E /* Launch Screen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA71B0212F44BEB200A28A5E /* Launch Screen.storyboard */; };
@@ -629,6 +632,9 @@
 		AA26CCBB2F324FE400AECF2D /* FileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserView.swift; sourceTree = "<group>"; };
 		AA26CCBD2F31080100AECF2D /* ISHTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ISHTerminalView.swift; sourceTree = "<group>"; };
 		AA26CCBF2F31080100AECF2D /* RootfsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootfsManager.swift; sourceTree = "<group>"; };
+		E5TAR0002 /* TarArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TarArchive.swift; sourceTree = "<group>"; };
+		E5TAR0004 /* RootfsArchiveDecompressor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootfsArchiveDecompressor.swift; sourceTree = "<group>"; };
+		E5TAR0006 /* RootfsImportView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootfsImportView.swift; sourceTree = "<group>"; };
 		AA26CCC02F31080100AECF2D /* ISHKernel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ISHKernel.h; sourceTree = "<group>"; };
 		AA26CCC22F31090000AECF2D /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		AA26CCC42F31090100AECF2D /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
@@ -1496,6 +1502,8 @@
 				E55000011 /* ISHShellExecutor.h */,
 				E55000012 /* ISHShellExecutor.m */,
 				AA26CCBF2F31080100AECF2D /* RootfsManager.swift */,
+				E5TAR0002 /* TarArchive.swift */,
+				E5TAR0004 /* RootfsArchiveDecompressor.swift */,
 				AA26CCB62F31067900AECF2D /* alpine-rootfs.zip */,
 				AA0838D32F3B941A00049557 /* RootfsPatch.bundle */,
 			);
@@ -2078,6 +2086,7 @@
 				AA26CCBD2F31080100AECF2D /* ISHTerminalView.swift */,
 				AA0838FE2F3B941A00049557 /* MirrorSpeedTestView.swift */,
 				AA0838BE2F3B941A00049557 /* RootfsManagementView.swift */,
+				E5TAR0006 /* RootfsImportView.swift */,
 				AA0838BF2F3B941A00049557 /* RootfsResetButton.swift */,
 			);
 			path = Rootfs;
@@ -2493,6 +2502,9 @@
 				AA0838C02F3B941A00049557 /* RootfsResetButton.swift in Sources */,
 				AA0838C32F3B941A00049557 /* RootfsManagementView.swift in Sources */,
 				AA0838FF2F3B941A00049557 /* MirrorSpeedTestView.swift in Sources */,
+				E5TAR0001 /* TarArchive.swift in Sources */,
+				E5TAR0003 /* RootfsArchiveDecompressor.swift in Sources */,
+				E5TAR0005 /* RootfsImportView.swift in Sources */,
 				AA0838CC2F3B941A00049557 /* StorageManagementView.swift in Sources */,
 				E5MNT0001 /* MountedFoldersManager.swift in Sources */,
 				E5MNT0002 /* MountedFolderCoordinator.swift in Sources */,

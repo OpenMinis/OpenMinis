@@ -32,37 +32,117 @@ class RootfsManager {
 
     private init() {}
 
-    var rootfsPath: URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documents.appendingPathComponent("alpine-rootfs")
+    // MARK: - Multi-rootfs profile model
+    //
+    // The rootfs is stored as a set of sibling "profiles" under Documents/.
+    // Each profile is a complete fakefs tree: a `data/` directory of real
+    // files plus a `meta.db` SQLite metadata database. The bundled Alpine
+    // profile is always named "alpine-rootfs" (created from the bundled
+    // .zip); additional profiles are created by importing tar.gz archives.
+    // Exactly one profile is "active" and is mounted by ISHKernel at boot.
+
+    /// Key in UserDefaults holding the currently active profile directory name.
+    private static let activeProfileKey = "rootfs.activeProfile"
+    private static let bundledProfileName = "alpine-rootfs"
+
+    /// Directory under Documents containing all rootfs profiles.
+    private var profilesRoot: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
+    /// The directory name of the active profile.
+    private var activeProfileName: String {
+        get {
+            if let stored = UserDefaults.standard.string(forKey: Self.activeProfileKey),
+               !stored.isEmpty,
+               FileManager.default.fileExists(atPath: profilesRoot.appendingPathComponent(stored).path) {
+                return stored
+            }
+            return Self.bundledProfileName
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Self.activeProfileKey) }
+    }
+
+    /// Root path of the active profile (e.g. Documents/alpine-rootfs).
+    var rootfsPath: URL {
+        return profilesRoot.appendingPathComponent(activeProfileName)
+    }
+
+    /// The fakefs real-files directory of the active profile.
     var dataPath: URL {
         return rootfsPath.appendingPathComponent("data")
+    }
+
+    /// Names of every installed rootfs profile.
+    var installedProfiles: [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: profilesRoot.path) else { return [] }
+        return names.compactMap { name in
+            let dir = profilesRoot.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+            // A profile is a directory that contains a valid meta.db + data/.
+            guard fm.fileExists(atPath: dir.appendingPathComponent("meta.db").path),
+                  fm.fileExists(atPath: dir.appendingPathComponent("data").path) else { return nil }
+            return name
+        }.sorted()
+    }
+
+    /// Currently active profile name.
+    var activeProfile: String { activeProfileName }
+
+    /// Switch which profile is active. If the kernel is already booted, the
+    /// change only takes effect on the next cold launch.
+    func setActiveProfile(_ name: String) -> Bool {
+        let profiles = installedProfiles
+        guard profiles.contains(name) else { return false }
+        activeProfileName = name
+        if ISHKernel.shared.isBooted {
+            logger.warning("Rootfs profile switch to '\(name)' requires app relaunch to take effect")
+            didResetWhileBooted = true
+        }
+        return true
     }
 
     /// Current rootfs architecture tag — change this when switching guest arch
     private let currentArch = "aarch64"
 
-    private var archTagPath: URL {
-        return rootfsPath.appendingPathComponent(".arch")
+    /// Path of the bundled Alpine profile (always alpine-rootfs). Installed
+    /// once from the bundled zip; import tar.gz creates sibling profiles.
+    private var bundledRootfsPath: URL {
+        return profilesRoot.appendingPathComponent(Self.bundledProfileName)
     }
 
+    private func archTagPath(for root: URL) -> URL {
+        return root.appendingPathComponent(".arch")
+    }
+
+    /// True if the active profile is installed and bootable.
     var isInstalled: Bool {
-        guard FileManager.default.fileExists(atPath: dataPath.path) else { return false }
-        // Check architecture matches
-        guard let tag = try? String(contentsOf: archTagPath, encoding: .utf8) else { return false }
+        return isRootfsInstalled(at: rootfsPath)
+    }
+
+    private func isRootfsInstalled(at root: URL) -> Bool {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: root.appendingPathComponent("data").path, isDirectory: &isDir),
+              isDir.boolValue else { return false }
+        guard fm.fileExists(atPath: root.appendingPathComponent("meta.db").path) else { return false }
+        guard let tag = try? String(contentsOf: archTagPath(for: root), encoding: .utf8) else { return false }
         return tag.trimmingCharacters(in: .whitespacesAndNewlines) == currentArch
     }
 
     func installIfNeeded() throws {
-        if FileManager.default.fileExists(atPath: rootfsPath.path) && !isInstalled {
+        let root = bundledRootfsPath
+        // If an imported profile is active, the bundled install path is
+        // independent of it; only install if the bundled Alpine is missing.
+        if FileManager.default.fileExists(atPath: root.path) && !isRootfsInstalled(at: root) {
             print("RootfsManager: Arch mismatch or missing tag, reinstalling \(currentArch) rootfs...")
-            try FileManager.default.removeItem(at: rootfsPath)
+            try FileManager.default.removeItem(at: root)
         }
 
-        guard !isInstalled else {
-            print("RootfsManager: Already installed (\(currentArch)) at \(rootfsPath.path)")
+        guard !isRootfsInstalled(at: root) else {
+            print("RootfsManager: Already installed (\(currentArch)) at \(root.path)")
             return
         }
 
@@ -78,16 +158,16 @@ class RootfsManager {
 
         // Create destination directory
         try FileManager.default.createDirectory(
-            at: rootfsPath,
+            at: root,
             withIntermediateDirectories: true,
             attributes: nil
         )
 
         // Unzip using custom ZIP reader
-        try unzipFile(at: zipURL, to: rootfsPath)
+        try unzipFile(at: zipURL, to: root)
 
         // Write architecture tag so we detect mismatches on future launches
-        try currentArch.write(to: archTagPath, atomically: true, encoding: .utf8)
+        try currentArch.write(to: archTagPath(for: root), atomically: true, encoding: .utf8)
 
         // Pre-create /var/minis/ shared directory structure
         let minisSubdirs = ["var/minis/attachments", "var/minis/offloads", "var/minis/workspace", "var/minis/skills", "var/minis/shared"]
@@ -100,6 +180,247 @@ class RootfsManager {
         UserDefaults.standard.set(true, forKey: "rootfs.freshInstall")
 
         print("RootfsManager: Installation complete (\(currentArch)) at \(rootfsPath.path)")
+    }
+
+    // MARK: - tar.gz mini-rootfs import
+
+    /// Human-readable errors surfaced by the import flow.
+    enum ImportError: LocalizedError {
+        case invalidArchive(String)
+        case noBootableRootfs
+        case io(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidArchive(let m): return "Could not read archive: \(m)"
+            case .noBootableRootfs: return "The archive does not appear to be a bootable Linux rootfs (missing /bin/sh or /etc)."
+            case .io(let m): return m
+            }
+        }
+    }
+
+    /// Decompress + extract a user-supplied mini-rootfs tarball and register
+    /// it as a new rootfs profile.
+    /// - Parameters:
+    ///   - sourceURL: The .tar.gz / .tgz / .tar file the user picked.
+    ///   - displayName: A human label for the new profile.
+    ///   - activate: If true, make the imported rootfs the active profile.
+    /// - Returns: The new profile name on success.
+    @discardableResult
+    func importFromTarGz(sourceURL: URL, displayName: String, activate: Bool = false) throws -> String {
+        let fm = FileManager.default
+
+        let baseName = sanitizedProfileName(displayName)
+        var profileName = baseName
+        var n = 2
+        while fm.fileExists(atPath: profilesRoot.appendingPathComponent(profileName).path) {
+            profileName = "\(baseName)-\(n)"
+            n += 1
+        }
+
+        let profileRoot = profilesRoot.appendingPathComponent(profileName)
+        let dataDir = profileRoot.appendingPathComponent("data")
+
+        let decompressed = try RootfsArchiveDecompressor.decompress(url: sourceURL)
+        let tarData = decompressed.data
+
+        do {
+            try fm.createDirectory(at: dataDir, withIntermediateDirectories: true, attributes: nil)
+            try initializeFakefsDatabase(at: profileRoot)
+            try extractTarIntoDataDir(tarData: tarData, dataDir: dataDir, databaseRoot: profileRoot)
+        } catch {
+            try? fm.removeItem(at: profileRoot)
+            throw error
+        }
+
+        try currentArch.write(to: archTagPath(for: profileRoot), atomically: true, encoding: .utf8)
+
+        guard isRootfsInstalled(at: profileRoot) else {
+            try? fm.removeItem(at: profileRoot)
+            throw ImportError.noBootableRootfs
+        }
+
+        finalizeImportedRootfs(at: dataDir)
+        print("RootfsManager: Imported rootfs profile '\(profileName)' from \(sourceURL.lastPathComponent)")
+
+        if activate {
+            _ = setActiveProfile(profileName)
+        }
+        return profileName
+    }
+
+    /// Create a fresh fakefs SQLite database (schema) for a profile root.
+    private func initializeFakefsDatabase(at profileRoot: URL) throws {
+        let dbPath = profileRoot.appendingPathComponent("meta.db").path
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE, nil) == SQLITE_OK,
+              let db else {
+            throw ImportError.io("Could not create fakefs database.")
+        }
+        defer { sqlite3_close(db) }
+
+        // The fakefs meta.db schema is authoritative — it must match the one
+        // the iSH kernel's fake_db_init expects. Reproduce it exactly
+        // (see tools/fakefs.c `schema` in the pinned deps/ish submodule).
+        let schema = [
+            "create table meta (id integer unique default 0, db_inode integer);",
+            "insert into meta (db_inode) values (0);",
+            "create table stats (inode integer primary key, stat blob);",
+            "create table paths (path blob primary key, inode integer references stats(inode));",
+            "create index inode_to_path on paths (inode, path);",
+            "pragma user_version=3;"
+        ]
+        for stmt in schema {
+            if sqlite3_exec(db, stmt, nil, nil, nil) != SQLITE_OK {
+                throw ImportError.io("Failed to initialize fakefs schema.")
+            }
+        }
+    }
+
+    /// Stream-extract the tar bytes into `dataDir`, registering every node in
+    /// the profile's `meta.db`. Preserves modes and symlinks.
+    private func extractTarIntoDataDir(tarData: Data, dataDir: URL, databaseRoot: URL) throws {
+        let fm = FileManager.default
+        let stream = try TarStream(data: tarData)
+        var seenDirs = Set<String>()
+
+        func ensureDir(_ rel: String) throws {
+            guard !rel.isEmpty, rel != "/" else { return }
+            var current = (rel as NSString).deletingLastPathComponent
+            while !current.isEmpty && current != "/" && !seenDirs.contains(current) {
+                try registerMeta(at: current, isDirectory: true, for: databaseRoot)
+                seenDirs.insert(current)
+                current = (current as NSString).deletingLastPathComponent
+            }
+            if !seenDirs.contains(rel) {
+                try registerMeta(at: rel, isDirectory: true, for: databaseRoot)
+                seenDirs.insert(rel)
+            }
+        }
+
+        while let entry = stream.nextEntry() {
+            let rel = entry.normalizedPath
+            guard !rel.isEmpty else { continue }
+
+            if entry.type == .directory {
+                try ensureDir(rel)
+                try fm.createDirectory(at: dataDir.appendingPathComponent(rel), withIntermediateDirectories: true)
+                continue
+            }
+            if entry.type == .symlink {
+                try ensureDir(rel)
+                let host = dataDir.appendingPathComponent(rel)
+                let parent = host.deletingLastPathComponent()
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+                _ = try? fm.removeItem(at: host)
+                try fm.createSymbolicLink(at: host, withDestinationURL: URL(fileURLWithPath: entry.linkTarget))
+                try registerMeta(at: rel, isDirectory: false,
+                                 explicitMode: UInt32(0o120000) | UInt32(entry.mode & 0o7777),
+                                 for: databaseRoot)
+                continue
+            }
+            if entry.type == .hardlink {
+                try ensureDir(rel)
+                let host = dataDir.appendingPathComponent(rel)
+                let parent = host.deletingLastPathComponent()
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+                let reference = dataDir.appendingPathComponent(entry.linkTarget)
+                if fm.fileExists(atPath: reference.path) {
+                    _ = try? fm.removeItem(at: host)
+                    _ = try? fm.copyItem(at: reference, to: host)
+                } else {
+                    try Data().write(to: host)
+                }
+                try registerMeta(at: rel, isDirectory: false,
+                                 explicitMode: UInt32(0o100000) | UInt32(entry.mode & 0o7777),
+                                 for: databaseRoot)
+                continue
+            }
+            if entry.type == .regular {
+                try ensureDir(rel)
+                let host = dataDir.appendingPathComponent(rel)
+                let parent = host.deletingLastPathComponent()
+                try fm.createDirectory(at: parent, withIntermediateDirectories: true)
+                try entry.payload.write(to: host)
+                let perms = entry.mode & 0o777
+                let iosMode = perms > 0 ? perms : 0o644
+                try? fm.setAttributes([.posixPermissions: iosMode], ofItemAtPath: host.path)
+                try registerMeta(at: rel, isDirectory: false,
+                                 explicitMode: UInt32(0o100000) | UInt32(entry.mode & 0o7777),
+                                 for: databaseRoot)
+                continue
+            }
+        }
+    }
+
+    /// Register one path's metadata in a profile's fakefs DB.
+    private func registerMeta(at linuxPath: String,
+                              isDirectory: Bool,
+                              explicitMode: UInt32? = nil,
+                              for profileRoot: URL) throws {
+        let mode: UInt32 = explicitMode ?? (isDirectory ? 0o040755 : 0o100644)
+        var statBytes = [UInt8](repeating: 0, count: 16)
+        let leMode = mode.littleEndian
+        withUnsafeBytes(of: leMode) { src in
+            for i in 0..<4 { statBytes[i] = src[i] }
+        }
+
+        let dbPath = profileRoot.appendingPathComponent("meta.db").path
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbPath, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db else {
+            throw ImportError.io("Could not open fakefs database for registration.")
+        }
+        defer { sqlite3_close(db) }
+
+        _ = sqlite3_exec(db, "BEGIN TRANSACTION;", nil, nil, nil)
+        var insStat: OpaquePointer?
+        if sqlite3_prepare_v2(db, "INSERT INTO stats (stat) VALUES (?)", -1, &insStat, nil) == SQLITE_OK,
+           let insStat {
+            sqlite3_bind_blob(insStat, 1, statBytes, Int32(statBytes.count), Self.SQLITE_TRANSIENT)
+            sqlite3_step(insStat)
+            let inode = sqlite3_last_insert_rowid(db)
+            sqlite3_finalize(insStat)
+
+            var insPath: OpaquePointer?
+            if sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO paths (path, inode) VALUES (?, ?)", -1, &insPath, nil) == SQLITE_OK,
+               let insPath {
+                bindPathBlob(insPath, index: 1, path: linuxPath)
+                sqlite3_bind_int64(insPath, 2, inode)
+                sqlite3_step(insPath)
+                sqlite3_finalize(insPath)
+            }
+        }
+        _ = sqlite3_exec(db, "COMMIT;", nil, nil, nil)
+    }
+
+    /// Post-import fixtures so the imported rootfs works with the Minis runtime.
+    private func finalizeImportedRootfs(at dataDir: URL) {
+        let fm = FileManager.default
+        for rel in ["var/minis/attachments", "var/minis/offloads", "var/minis/workspace",
+                    "var/minis/skills", "var/minis/shared"] {
+            try? fm.createDirectory(at: dataDir.appendingPathComponent(rel),
+                                    withIntermediateDirectories: true, attributes: nil)
+        }
+    }
+
+    /// Sanitize a user-supplied name into a safe profile directory name.
+    private func sanitizedProfileName(_ name: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let cleaned = name.unicodeScalars.map { allowed.contains($0) ? String($0) : "_" }.joined()
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        if trimmed.isEmpty { return "imported" }
+        return trimmed.hasPrefix("alpine-rootfs") ? "\(trimmed)-imported" : trimmed
+    }
+
+    /// Delete an installed profile (never the active or bundled one).
+    func deleteProfile(_ name: String) throws {
+        guard name != Self.bundledProfileName, name != activeProfileName else {
+            throw ImportError.io("Cannot delete the active or bundled profile.")
+        }
+        let dir = profilesRoot.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.removeItem(at: dir)
+        }
     }
 
     /// Reset (delete) the rootfs, forcing a fresh install on next launch

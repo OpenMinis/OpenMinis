@@ -17,6 +17,7 @@ struct ISHTerminalView: View {
     @StateObject private var viewModel = ISHTerminalViewModel()
     @State private var showFileBrowser = false
     @State private var showRootfsManagement = false
+    @State private var showRootfsImport = false
     @State private var ctrlActive = false
     @State private var keyboardActive = true
     /// Whether the software keyboard is currently visible (separate from first
@@ -29,7 +30,7 @@ struct ISHTerminalView: View {
     @State private var linkPreviewURL: URL?
     /// Track whether a sheet is presented so we can resign first responder
     /// and stop fighting with text fields inside the sheet.
-    private var isSheetPresented: Bool { showFileBrowser || showRootfsManagement }
+    private var isSheetPresented: Bool { showFileBrowser || showRootfsManagement || showRootfsImport }
 
     var body: some View {
         ZStack {
@@ -110,6 +111,16 @@ struct ISHTerminalView: View {
                     Image(systemName: "paintbrush")
                 }
             }
+            // Rootfs / import control: view & switch installed rootfs profiles
+            // or import a new tar.gz mini-rootfs.
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showRootfsImport = true
+                } label: {
+                    Image(systemName: "shippingbox")
+                }
+                .accessibilityLabel("Rootfs")
+            }
         }
         .onAppear {
             viewModel.startShell(sessionId: sessionId, initCommand: initCommand)
@@ -155,6 +166,11 @@ struct ISHTerminalView: View {
         .sheet(isPresented: $showRootfsManagement) {
             NavigationStack {
                 RootfsManagementView()
+            }
+        }
+        .sheet(isPresented: $showRootfsImport) {
+            NavigationStack {
+                RootfsImportView()
             }
         }
         // In-app WKWebView preview for URLs emitted by `minis-open` via
