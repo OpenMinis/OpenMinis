@@ -64,39 +64,40 @@ enum RootfsArchiveDecompressor {
         return DecompressedTarData(data: raw, wasCompressed: false)
     }
 
-    /// Decompress a gzip member using a streaming Compression decode. Streaming
-    /// is required because a rootfs can expand many times over; a single-shot
-    /// compression_decode_buffer would fail if the output buffer were too small.
+    /// Decompress a gzip member. Uses compression_decode_buffer (the same
+    /// primitive the app already uses for zip entries), growing the output
+    /// buffer until the whole member decodes. COMPRESSION_ZLIB decodes the
+    /// gzip wrapper transparently.
     private static func gunzip(_ data: Data) throws -> Data {
-        var output = Data()
-        let streamOp = COMPRESSION_STREAM_DECODE
-        let alg: compression_algorithm = COMPRESSION_ZLIB
-        let result = data.withUnsafeBytes { (srcRaw: UnsafeRawBufferPointer) -> Int in
-            guard let srcBase = srcRaw.baseAddress else { return -1 }
-            var stream = compression_stream(dst_ptr: nil,
-                                            dst_size: 0,
-                                            src_ptr: srcBase.assumingMemoryBound(to: UInt8.self),
-                                            src_size: data.count)
-            let initStatus = compression_stream_init(&stream, streamOp, alg)
-            guard initStatus != COMPRESSION_STATUS_ERROR else { return -1 }
-            defer { compression_stream_destroy(&stream) }
+        var capacity = max(data.count * 4, 1 << 20) // start generously
+        var output = Data(count: capacity)
+        var produced = -1
 
-            let window = 1 << 16
-            var buffer = [UInt8](repeating: 0, count: window)
-            var status: compression_status = COMPRESSION_STATUS_OK
-            while status == COMPRESSION_STATUS_OK {
-                let written = buffer.withUnsafeMutableBytes { (dstPtr: UnsafeMutableRawBufferPointer) -> Int in
-                    stream.dst_ptr = dstPtr.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                    stream.dst_size = window
-                    status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
-                    return window - Int(stream.dst_size)
+        // Grow the destination buffer until the gzip member fits. Rootfs
+        // archives can expand many times, so don't assume a fixed size.
+        for _ in 0..<24 {
+            let r = output.withUnsafeMutableBytes { dstPtr -> Int in
+                data.withUnsafeBytes { srcPtr -> Int in
+                    compression_decode_buffer(
+                        dstPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        capacity,
+                        srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                        data.count,
+                        nil,
+                        COMPRESSION_ZLIB)
                 }
-                if written > 0 { output.append(buffer, count: written) }
-                if status == COMPRESSION_STATUS_END { break }
             }
-            return output.count
+            if r > 0 {
+                produced = r
+                break
+            }
+            if capacity > (1 << 30) { break }
+            output = Data(count: capacity * 2)
+            capacity *= 2
         }
-        guard result > 0 else { throw RootfsArchiveError.inflateFailed }
+
+        guard produced > 0 else { throw RootfsArchiveError.inflateFailed }
+        output.count = produced
         return output
     }
 }
