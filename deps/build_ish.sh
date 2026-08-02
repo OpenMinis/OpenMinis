@@ -2,13 +2,13 @@
 set -e
 
 # ============================================================================
-# iSH-AOK Build Script for iOS Static Library
+# iSH-ARM64 Build Script for iOS Static Library
 # ============================================================================
 # This script builds libish, libish_emu, and libfakefs as static libraries
-# for iOS (arm64) integration, using the ish-AOK fork which emulates an
+# for iOS (arm64) integration, using the ish-arm64 fork which emulates an
 # ARM64 Linux guest on iOS.
 #
-# Repository: https://github.com/emkey1/ish-AOK (default branch)
+# Repository: https://github.com/OpenMinis/ish-arm64 (branch: feature-arm64)
 #
 # Prerequisites:
 #   - Xcode with iOS SDK
@@ -256,8 +256,8 @@ build_ish() {
             -Dlog="" \
             -Dlog_handler=nslog \
             -Dkernel=ish \
-            -Dengine=jit \
-            -Dguest_archs=arm64
+            -Dengine=asbestos \
+            -Dguest_arch=arm64
     else
         log_info "Meson already configured, reconfiguring..."
         meson configure "$BUILD_DIR" --buildtype="$MESON_BUILDTYPE"
@@ -267,9 +267,9 @@ build_ish() {
     log_info "Building with ninja..."
     ninja -C "$BUILD_DIR" libish.a libish_emu.a libfakefs.a
 
-    # Also build VDSO (guest VDSO lands at vdso/libvdso.so.elf)
+    # Also build VDSO (arm64 guest VDSO is at vdso/arm64/libvdso.so.elf)
     log_info "Building VDSO..."
-    ninja -C "$BUILD_DIR" vdso/libvdso.so.elf || log_warning "VDSO build failed (may need LLVM)"
+    ninja -C "$BUILD_DIR" vdso/arm64/libvdso.so.elf || log_warning "VDSO build failed (may need LLVM)"
 
     cd "$SCRIPT_DIR"
     log_success "iSH libraries built successfully"
@@ -301,12 +301,12 @@ copy_outputs() {
     cp "$BUILD_DIR/libish_emu.a" "$OUTPUT_LIBS/"
     cp "$BUILD_DIR/libfakefs.a" "$OUTPUT_LIBS/"
 
-    # Copy VDSO if built (guest VDSO lands at vdso/libvdso.so.elf)
-    if [ -f "$BUILD_DIR/vdso/libvdso.so.elf" ]; then
-        cp "$BUILD_DIR/vdso/libvdso.so.elf" "$OUTPUT_RESOURCES/"
-        log_success "VDSO copied"
-    elif [ -f "$BUILD_DIR/vdso/arm64/libvdso.so.elf" ]; then
+    # Copy VDSO if built (arm64 guest VDSO path)
+    if [ -f "$BUILD_DIR/vdso/arm64/libvdso.so.elf" ]; then
         cp "$BUILD_DIR/vdso/arm64/libvdso.so.elf" "$OUTPUT_RESOURCES/"
+        log_success "VDSO copied"
+    elif [ -f "$BUILD_DIR/vdso/libvdso.so.elf" ]; then
+        cp "$BUILD_DIR/vdso/libvdso.so.elf" "$OUTPUT_RESOURCES/"
         log_success "VDSO copied"
     fi
 
@@ -369,7 +369,7 @@ copy_outputs() {
     fi
 
     # Copy RootfsPatch bundle (rootfs overlay patches applied on boot).
-    # ish-AOK does not ship one, but the Xcode project hard-references
+    # Some iSH forks do not ship one, but the Xcode project hard-references
     # deps/resources/RootfsPatch.bundle, so create a minimal no-op bundle
     # (empty manifest -> FsApplyOverlay does nothing) when absent.
     mkdir -p "$OUTPUT_RESOURCES"
@@ -407,7 +407,7 @@ create_umbrella_header() {
  * iSH-ARM64 - Linux shell for iOS (ARM64 guest emulation)
  * Umbrella header for static library integration
  *
- * https://github.com/emkey1/ish-AOK
+ * https://github.com/OpenMinis/ish-arm64
  */
 
 #ifndef ISH_H
@@ -421,7 +421,7 @@ create_umbrella_header() {
 #include "kernel/task.h"
 #include "kernel/calls.h"
 #include "kernel/fs.h"
-#include "kernel/mm.h"
+#include "kernel/memory.h"
 #include "kernel/signal.h"
 #include "kernel/errno.h"
 

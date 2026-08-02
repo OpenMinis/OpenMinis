@@ -168,7 +168,7 @@ terms, is in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 **The sandbox** — the heart of the product:
 
 - **[iSH](https://github.com/ish-app/ish)** (GPLv3) — Linux usermode emulation on
-  iOS. We run [an ARM64 fork](https://github.com/emkey1/ish-AOK).
+  iOS. We run [an ARM64 fork](https://github.com/OpenMinis/ish-arm64).
 - **[PRoot](https://github.com/termux/proot)** (GPLv2) — user-space chroot for the
   Android sandbox, via [our fork](https://github.com/OpenMinis/proot);
   **[talloc](https://talloc.samba.org)** (LGPLv3+) underpins it.
@@ -197,7 +197,7 @@ Apple / Swift Server Workgroup packages (Apache-2.0).
 
 OpenMinis is licensed under the **[GNU General Public License v3.0](LICENSE)**.
 
-The app links GPL-licensed components — [iSH](https://github.com/emkey1/ish-AOK)
+The app links GPL-licensed components — [iSH](https://github.com/OpenMinis/ish-arm64)
 (GPLv3) and [PRoot](https://github.com/OpenMinis/proot) (GPLv2) — so the combined
 work is distributed under GPLv3. Bundled third-party licenses are listed in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
