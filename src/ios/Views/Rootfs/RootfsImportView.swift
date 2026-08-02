@@ -182,9 +182,9 @@ class RootfsImportViewModel: ObservableObject {
             do {
                 let staged = try RootfsImportViewModel.stageFile(from: url)
                 let base = url.deletingPathExtension().lastPathComponent
-                let name = RootfsManager.shared.importFromTarGz(sourceURL: staged,
-                                                                displayName: base,
-                                                                activate: false)
+                let name = try RootfsManager.shared.importFromTarGz(sourceURL: staged,
+                                                                    displayName: base,
+                                                                    activate: false)
                 try? FileManager.default.removeItem(at: staged)
                 await MainActor.run {
                     self.isImporting = false
@@ -202,7 +202,8 @@ class RootfsImportViewModel: ObservableObject {
 
     /// Copy the picked (possibly iCloud) file into our sandbox as a stable
     /// .tar file so the importer can read it after the security scope is gone.
-    private static func stageFile(from url: URL) throws -> URL {
+    /// Marked nonisolated so it can run from a background (non-main) task.
+    nonisolated private static func stageFile(from url: URL) throws -> URL {
         let fm = FileManager.default
         let dir = fm.temporaryDirectory.appendingPathComponent("rootfs-import", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)

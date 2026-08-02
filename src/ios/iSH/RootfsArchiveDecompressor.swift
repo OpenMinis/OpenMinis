@@ -64,42 +64,39 @@ enum RootfsArchiveDecompressor {
         return DecompressedTarData(data: raw, wasCompressed: false)
     }
 
-    /// Decompress a gzip member. Because the Compression framework's
-    /// COMPRESSION_ZLIB reads the gzip wrapper itself, we pass the whole
-    /// member. We drain it in a loop because compression_decode_buffer
-    /// performs a single-shot decode.
+    /// Decompress a gzip member using a streaming Compression decode. Streaming
+    /// is required because a rootfs can expand many times over; a single-shot
+    /// compression_decode_buffer would fail if the output buffer were too small.
     private static func gunzip(_ data: Data) throws -> Data {
         var output = Data()
-        var src = data
+        let streamOp = COMPRESSION_STREAM_DECODE
+        let alg: compression_algorithm = COMPRESSION_ZLIB
+        let result = data.withUnsafeBytes { (srcRaw: UnsafeRawBufferPointer) -> Int in
+            guard let srcBase = srcRaw.baseAddress else { return -1 }
+            var stream = compression_stream(dst_ptr: nil,
+                                            dst_size: 0,
+                                            src_ptr: srcBase.assumingMemoryBound(to: UInt8.self),
+                                            src_size: data.count)
+            let initStatus = compression_stream_init(&stream, streamOp, alg)
+            guard initStatus != COMPRESSION_STATUS_ERROR else { return -1 }
+            defer { compression_stream_destroy(&stream) }
 
-        // Iteratively decode until the stream is exhausted using an output
-        // buffer at least 4x input (typical rootfs expands several-fold).
-        var capacity = max(data.count * 4, 1 << 20)
-        // Cap very large increments to bound memory growth.
-        var guardCounter = 0
-
-        while !src.isEmpty, guardCounter < 4 {
-            var out = Data(count: capacity)
-            let produced = out.withUnsafeMutableBytes { dstPtr -> Int in
-                src.withUnsafeBytes { srcPtr -> Int in
-                    compression_decode_buffer(
-                        dstPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        capacity,
-                        srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        src.count,
-                        nil,
-                        COMPRESSION_ZLIB)
+            let window = 1 << 16
+            var buffer = [UInt8](repeating: 0, count: window)
+            var status: compression_status = COMPRESSION_STATUS_OK
+            while status == COMPRESSION_STATUS_OK {
+                let written = buffer.withUnsafeMutableBytes { (dstPtr: UnsafeMutableRawBufferPointer) -> Int in
+                    stream.dst_ptr = dstPtr.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                    stream.dst_size = window
+                    status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                    return window - Int(stream.dst_size)
                 }
+                if written > 0 { output.append(buffer, count: written) }
+                if status == COMPRESSION_STATUS_END { break }
             }
-            guard produced > 0 else { break }
-            out.count = produced
-            output.append(out)
-            // compression_decode_buffer consumed the whole source for zlib;
-            // stop after first successful decode (single gzip member).
-            break
+            return output.count
         }
-
-        guard !output.isEmpty else { throw RootfsArchiveError.inflateFailed }
+        guard result > 0 else { throw RootfsArchiveError.inflateFailed }
         return output
     }
 }

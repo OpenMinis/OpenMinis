@@ -78,21 +78,27 @@ final class TarStream {
                 continue
             }
 
-            // GNU long-name record: the following real header gains this path.
-            let ln = entry.normalizedPath
-            if entry.type == .regular && (ln == "@LongLink" || ln == "././@LongLink") {
+            // GNU long-name (L) / long-link (K) records: the payload holds the
+            // real name; the real header block follows immediately.
+            if isLongRecord(entry) {
                 let payloadLen = entry.size
-                // Peek payload without consuming it yet via maybeAdvance:
                 guard offset + payloadLen <= data.count else { return nil }
                 let longNameData = data.subdata(in: offset..<(offset + payloadLen))
                 offset += ((payloadLen + 511) / 512) * 512
-                let longName = String(data: longNameData, encoding: .utf8)?
+                let longText = String(data: longNameData, encoding: .utf8)?
                     .replacingOccurrences(of: "\0", with: "")
                 guard offset + 512 <= data.count else { return nil }
                 let realBlock = data.subdata(in: offset..<(offset + 512))
                 offset += 512
                 guard var real = parseHeader(realBlock) else { continue }
-                if let n = longName, !n.isEmpty { real.rawPath = n }
+                if let n = longText, !n.isEmpty {
+                    // L record patches the path; K record patches the target.
+                    if real.rawPath == "@/LongLink" {
+                        real.linkTarget = n
+                    } else {
+                        real.rawPath = n
+                    }
+                }
                 attachPayload(to: &real)
                 return real
             }
@@ -101,6 +107,12 @@ final class TarStream {
             return entry
         }
         return nil
+    }
+
+    /// True for GNU long-name ('L') / long-link ('K') meta records.
+    private func isLongRecord(_ entry: TarEntry) -> Bool {
+        let p = entry.rawPath
+        return p == "@LongLink" || p == "././@LongLink" || p == "@/LongLink"
     }
 
     private func readBlock() -> Data {
@@ -140,6 +152,9 @@ final class TarStream {
         case 0x35: type = .directory
         case 0x32: type = .symlink
         case 0x31: type = .hardlink
+        // GNU 'L' (0x4C) = long name record; 'K' (0x4B) = long link record.
+        // Represent them as .other so nextEntry can spot them by type.
+        case 0x4C, 0x4B: type = .other
         default: type = .other
         }
 
