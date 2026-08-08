@@ -28,6 +28,27 @@ final class BrowserUseManager: NSObject, ObservableObject {
     // MARK: - Internal
 
     private(set) var webView: WKWebView
+
+    // MARK: - Engine (Blink / SSR)
+
+    /// Active engine for this tab: `.webkit` (default, unchanged WKWebView
+    /// path), `.blink` (embedded Chromium Blink+V8) or `.ssr` (server-side
+    /// rendered content fetch). Decided at init from `BrowserEngineSettings`;
+    /// `.blink` silently downgrades to `.webkit` when the Blink framework
+    /// isn't bundled or fails to initialize.
+    let engineKind: BrowserEngineKind
+    private let engineCoordinator: BrowserEngineCoordinator?
+
+    /// The UIView to embed in the browser sheet: the Blink render surface,
+    /// the SSR placeholder, or this manager's WKWebView for `.webkit`.
+    var renderView: UIView {
+        engineCoordinator?.renderView ?? webView
+    }
+
+    /// True when agent automation must go through the engine coordinator
+    /// instead of the WKWebView (blink renders + evaluates JS there; ssr
+    /// fetches content headlessly).
+    var usesEnginePath: Bool { engineKind != .webkit }
     private var navigationContinuation: CheckedContinuation<Void, Error>?
     @Published private(set) var currentProfile: UserAgentProfile = .mobileSafari
 
@@ -82,12 +103,25 @@ final class BrowserUseManager: NSObject, ObservableObject {
         self.currentProfile = profile
         let vp = Self.resolveViewport(profile: profile, width: viewportWidth, height: viewportHeight)
         self.currentViewport = vp
+        let requested = BrowserEngineSettings.shared.effectiveKind
+        let coord = requested == .webkit
+            ? nil
+            : BrowserEngineCoordinator(
+                kind: requested,
+                frame: CGRect(x: 0, y: 0, width: vp.width, height: vp.height),
+                userAgent: Self.resolveUA(profile: profile, customString: customString),
+                desktop: profile == .desktopSafari,
+                viewportSize: vp)
+        // `coord?.kind` reflects a Blink→WebKit downgrade; keep engineKind in sync.
+        self.engineKind = coord?.kind ?? .webkit
+        self.engineCoordinator = coord
         self.webView = Self.makeWebView(profile: profile, customString: customString,
                                         viewportWidth: vp.width, viewportHeight: vp.height)
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
         registerPrintHandler(on: webView)
+        wireEngineStateSync()
     }
 
     /// Init with a pre-built configuration (used for window.open popups that share the opener's session).
@@ -96,6 +130,17 @@ final class BrowserUseManager: NSObject, ObservableObject {
         self.currentProfile = profile
         let vp = Self.resolveViewport(profile: profile, width: viewportWidth, height: viewportHeight)
         self.currentViewport = vp
+        let requested = BrowserEngineSettings.shared.effectiveKind
+        let coord = requested == .webkit
+            ? nil
+            : BrowserEngineCoordinator(
+                kind: requested,
+                frame: CGRect(x: 0, y: 0, width: vp.width, height: vp.height),
+                userAgent: Self.resolveUA(profile: profile, customString: customString),
+                desktop: profile == .desktopSafari,
+                viewportSize: vp)
+        self.engineKind = coord?.kind ?? .webkit
+        self.engineCoordinator = coord
         let wv = WKWebView(frame: CGRect(x: 0, y: 0, width: vp.width, height: vp.height), configuration: configuration)
         wv.customUserAgent = Self.resolveUA(profile: profile, customString: customString)
         wv.allowsBackForwardNavigationGestures = true
@@ -104,6 +149,40 @@ final class BrowserUseManager: NSObject, ObservableObject {
         webView.navigationDelegate = self
         webView.uiDelegate = self
         registerPrintHandler(on: webView)
+        wireEngineStateSync()
+    }
+
+    /// Keep the manager's @Published state in sync with Blink/SSR engine events.
+    private func wireEngineStateSync() {
+        engineCoordinator?.onURLChange = { [weak self] url in
+            self?.currentURL = url
+        }
+        engineCoordinator?.onTitleChange = { [weak self] title in
+            self?.pageTitle = title
+        }
+        engineCoordinator?.onLoadingChange = { [weak self] loading in
+            self?.isLoading = loading
+        }
+        engineCoordinator?.onBackForwardChange = { [weak self] back, forward in
+            self?.canGoBack = back
+            self?.canGoForward = forward
+        }
+        engineCoordinator?.onLoadFailed = { [weak self] url, message in
+            guard let self, let url else { return }
+            self.lastRequestedURL = URL(string: url)
+            self.loadError = WebLoadError(
+                error: NSError(domain: NSURLErrorDomain,
+                               code: NSURLErrorCannotConnectToHost,
+                               userInfo: [NSURLErrorFailingURLErrorKey: URL(string: url) as Any]),
+                failedURL: URL(string: url))
+            if let message {
+                logger.error("Engine load failed: \(message)")
+            }
+        }
+        engineCoordinator?.onWindowOpenBlocked = { [weak self] url in
+            logger.info("Blink blocked window.open: \(url ?? "?")")
+            _ = self // manager referenced only to keep closure semantics clear
+        }
     }
 
     private static func resolveViewport(profile: UserAgentProfile,
@@ -223,6 +302,10 @@ final class BrowserUseManager: NSObject, ObservableObject {
 
     /// Present the iOS system print dialog for the current page contents.
     private func presentPrintDialog() {
+        guard engineKind == .webkit else {
+            logger.info("打印仅支持 WebKit 引擎（当前 \(engineKind.displayName)）")
+            return
+        }
         let printController = UIPrintInteractionController.shared
         let printInfo = UIPrintInfo.printInfo()
         printInfo.outputType = .general
@@ -297,6 +380,10 @@ final class BrowserUseManager: NSObject, ObservableObject {
             return await setCookies(input.cookies)
         case .waitForDomStable:
             return try await waitForDomStable(timeout: input.timeout)
+        case .openInBrowser, .setEngine:
+            // Handled at the pool level (needs pool/URL context) — should never
+            // reach the per-tab manager.
+            return .error("\(input.action.rawValue) 由浏览器池处理，不应到达标签页管理器")
         }
 
         let actionMs = Int((CFAbsoluteTimeGetCurrent() - mgrStart) * 1000)
@@ -320,7 +407,7 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// The DOM summary IS sent to the model (appended to text); the snapshot is NOT
     /// (only imageFilePath is set, no base64Image).
     private func waitForDomSettleAndSnapshot(result: BrowserActionResult) async -> BrowserActionResult {
-        let prevURL = webView.url
+        let prevURL = usesEnginePath ? URL(string: currentURL) : webView.url
         let settleStart = CFAbsoluteTimeGetCurrent()
         // 1. Install MutationObserver and collect a DOM change summary
         let domSummary = await collectDomChangeSummary(timeout: 5.0)
@@ -328,11 +415,22 @@ final class BrowserUseManager: NSObject, ObservableObject {
         logger.info("[SettleTiming] dom_summary elapsed=\(domMs)ms")
 
         // 2. Take snapshot for UI preview (DOM is now stable, better screenshot)
+        let snapStart = CFAbsoluteTimeGetCurrent()
+        var snapshotPath: String? = nil
+        if usesEnginePath {
+            // Engine path: capture the Blink view / SSR placeholder directly.
+            let snapImage = (try? await engineCoordinator?.takeScreenshot()) ?? nil
+            if let image = snapImage, let jpegData = image.jpegData(compressionQuality: 0.7) {
+                lastScreenshot = image
+                let filename = "snapshot_\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+                let fileURL = Self.screenshotsDir.appendingPathComponent(filename)
+                try? jpegData.write(to: fileURL)
+                snapshotPath = fileURL.path
+            }
+        } else {
         //    Match the frame-resize approach in `screenshot()` so custom
         //    viewports render at their intended size even when the browser
         //    sheet is stretching the WKWebView to fill a different container.
-        let snapStart = CFAbsoluteTimeGetCurrent()
-        var snapshotPath: String? = nil
         let targetSize = CGSize(width: CGFloat(currentViewport.width),
                                 height: CGFloat(currentViewport.height))
         let savedFrame = webView.frame
@@ -365,6 +463,7 @@ final class BrowserUseManager: NSObject, ObservableObject {
             // (T-ios-browser-sheet-viewport-pollution)
             restoreViewportFrame()
         }
+        }
 
         let snapMs = Int((CFAbsoluteTimeGetCurrent() - snapStart) * 1000)
         logger.info("[SettleTiming] snapshot elapsed=\(snapMs)ms")
@@ -376,7 +475,7 @@ final class BrowserUseManager: NSObject, ObservableObject {
         }
 
         // 4. Detect URL change (ignore hash-only changes)
-        let newURL = webView.url
+        let newURL = usesEnginePath ? URL(string: currentURL) : webView.url
         if let prev = prevURL, let cur = newURL {
             let prevNoHash = prev.absoluteString.components(separatedBy: "#").first ?? prev.absoluteString
             let curNoHash = cur.absoluteString.components(separatedBy: "#").first ?? cur.absoluteString
@@ -569,6 +668,11 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// suspended — but it IS throttled, which stretches Task timers). A GCD timer
     /// on a background queue is wall-clock and keeps firing on time regardless.
     private func evaluateJavaScriptBounded(_ js: String, timeout: TimeInterval = 10) async throws -> Any? {
+        // Engine path (Blink/SSR): route through the engine coordinator.
+        if usesEnginePath {
+            guard let engineCoordinator else { return nil }
+            return try await engineCoordinator.evaluateJavaScript(js, timeout: timeout)
+        }
         // Bridge WKWebView's completion-handler API to a continuation, and race
         // it against a wall-clock GCD timer. The first to resume the continuation
         // wins; the loser's resume is dropped via the `done` flag (a continuation
@@ -682,6 +786,36 @@ final class BrowserUseManager: NSObject, ObservableObject {
             return .error("Cannot navigate to \(scheme):// URLs. Only http://, https://, and minis:// are supported.")
         }
 
+        // Engine path (Blink / SSR): the engine coordinator owns loading.
+        if usesEnginePath {
+            if scheme == "minis" {
+                return .error("minis:// 页面仅支持 WebKit 引擎，请在浏览器引擎设置中切换到 WebKit")
+            }
+            logger.info("[NavTiming] engine_load_start url=\(url.absoluteString.prefix(100)) engine=\(engineKind.rawValue)")
+            lastRequestedURL = url          // [T-ios-webview-error-ui]
+            loadError = nil
+            isLoading = true
+            do {
+                let meta = try await engineCoordinator?.navigate(to: url.absoluteString) ?? "加载完成"
+                isLoading = false
+                let info = engineCoordinator?.currentPageInfo()
+                currentURL = info?.url ?? url.absoluteString
+                pageTitle = info?.title ?? ""
+                logger.info("[NavTiming] engine_load_done url=\(url.absoluteString.prefix(100))")
+                return BrowserActionResult(text: meta, pageURL: info?.url ?? url.absoluteString)
+            } catch {
+                isLoading = false
+                loadError = WebLoadError(
+                    error: NSError(domain: NSURLErrorDomain,
+                                   code: NSURLErrorCannotConnectToHost,
+                                   userInfo: [NSURLErrorFailingURLErrorKey: url]),
+                    failedURL: url)
+                let msg = error.localizedDescription
+                logger.error("[NavTiming] engine_load_failed url=\(url.absoluteString.prefix(80)) err=\(msg)")
+                return .error("加载失败 (\(engineKind.displayName)): \(msg)")
+            }
+        }
+
         logger.info("[NavTiming] load_start url=\(url.absoluteString.prefix(100))")
 
         // Record the visit so this domain's cookie backup stays alive (keeps
@@ -745,6 +879,36 @@ final class BrowserUseManager: NSObject, ObservableObject {
     private static let fullPageMaxHeight: CGFloat = 32_768
 
     private func screenshot(fullPage: Bool = false) async throws -> BrowserActionResult {
+        // Engine path (Blink/SSR): snapshot via the engine coordinator.
+        if usesEnginePath {
+            guard let engineCoordinator else { return .error("引擎未初始化") }
+            let ssStart = CFAbsoluteTimeGetCurrent()
+            do {
+                let image = try await engineCoordinator.takeScreenshot()
+                guard let jpegData = image.jpegData(compressionQuality: 0.8) else {
+                    return .error("Failed to encode screenshot as JPEG")
+                }
+                let filename = "screenshot_\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+                let fileURL = Self.screenshotsDir.appendingPathComponent(filename)
+                try jpegData.write(to: fileURL)
+                lastScreenshot = image
+                let ms = Int((CFAbsoluteTimeGetCurrent() - ssStart) * 1000)
+                logger.info("[ScreenshotTiming] engine snapshot elapsed=\(ms)ms engine=\(engineKind.rawValue)")
+                let text: String
+                if engineKind == .ssr {
+                    text = "SSR 模式：无实时渲染截图（占位图）。页面内容请查看 navigate/get_text 结果。"
+                } else {
+                    text = "截图 \(Int(image.size.width))x\(Int(image.size.height))（\(jpegData.count) 字节，\(engineKind.badge) 引擎）"
+                }
+                return BrowserActionResult(
+                    text: text,
+                    base64Image: jpegData.base64EncodedString(),
+                    imageFilePath: fileURL.path
+                )
+            } catch {
+                return .error("截图失败 (\(engineKind.displayName)): \(error.localizedDescription)")
+            }
+        }
         let ssStart = CFAbsoluteTimeGetCurrent()
         logger.info("[ScreenshotTiming] enter fullPage=\(fullPage)")
         // If the webView's current bounds don't match the intended viewport
@@ -1054,12 +1218,23 @@ final class BrowserUseManager: NSObject, ObservableObject {
     // MARK: - Get Page Info
 
     private func getPageInfo() async throws -> BrowserActionResult {
+        if engineKind == .ssr {
+            let info = engineCoordinator?.currentPageInfo() ?? ("", "", false, false, false)
+            var lines: [String] = []
+            lines.append("URL: \(info.url.isEmpty ? "(未加载)" : info.url)")
+            lines.append("Title: \(info.title.isEmpty ? "(无标题)" : info.title)")
+            lines.append("Engine: SSR（服务器渲染，无 JS/DOM）")
+            return BrowserActionResult(text: lines.joined(separator: "\n"), pageURL: info.url.isEmpty ? nil : info.url)
+        }
         return try await evaluateAndReturn(BrowserUseJS.getPageInfo())
     }
 
     // MARK: - Get Cookies
 
     private func getCookies(keywords: [String]?, fuzzy: Bool) async -> BrowserActionResult {
+        if usesEnginePath {
+            return .error("cookies API 暂未接入 \(engineKind.displayName) 引擎；请切回 WebKit 引擎或直接在页面中登录")
+        }
         guard let pageURL = webView.url else {
             return .error("No page is currently loaded")
         }
@@ -1189,6 +1364,9 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// Symmetric with `getCookies`. Each entry needs `name` + `value`; `domain`
     /// defaults to the current page host, `path` to "/".
     private func setCookies(_ cookies: [[String: Any]]?) async -> BrowserActionResult {
+        if usesEnginePath {
+            return .error("cookies API 暂未接入 \(engineKind.displayName) 引擎；请切回 WebKit 引擎或直接在页面中登录")
+        }
         guard let pageURL = webView.url else {
             return .error("set_cookies: no page is loaded (navigate first)")
         }
@@ -1557,6 +1735,44 @@ final class BrowserUseManager: NSObject, ObservableObject {
 
         logger.info("Fetching resource: \(urlString)")
 
+        // Engine path (Blink/SSR): URLSession fetch (engine-independent).
+        if usesEnginePath {
+            guard let url = URL(string: urlString),
+                  let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme) else {
+                return .error("fetch 仅支持 http/https URL（\(engineKind.displayName) 引擎）")
+            }
+            guard let engineCoordinator else { return .error("引擎未初始化") }
+            do {
+                let (data, response) = try await engineCoordinator.fetchData(from: url)
+                let http = response as? HTTPURLResponse
+                let contentType = http?.value(forHTTPHeaderField: "Content-Type") ?? ""
+                let contentDisposition = http?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+                let status = http?.statusCode ?? 0
+                let filename: String
+                if let cdName = Self.parseContentDispositionFilename(contentDisposition) {
+                    filename = "\(Int(Date().timeIntervalSince1970))_\(cdName)"
+                } else if !url.lastPathComponent.isEmpty, url.lastPathComponent != "/" {
+                    filename = "\(Int(Date().timeIntervalSince1970))_\(url.lastPathComponent)"
+                } else {
+                    filename = "fetch_\(Int(Date().timeIntervalSince1970)).\(Self.extensionForMimeType(contentType))"
+                }
+                var lines: [String] = []
+                lines.append("Fetched \(url.absoluteString)")
+                lines.append("  Status: \(status)")
+                lines.append("  Content-Type: \(contentType)")
+                lines.append("  Size: \(Self.formatBytes(data.count))")
+                lines.append("  Filename: \(filename)")
+                return BrowserActionResult(
+                    text: lines.joined(separator: "\n"),
+                    fetchedFileData: data,
+                    fetchedFileName: filename
+                )
+            } catch {
+                return .error("Fetch failed: \(error.localizedDescription)")
+            }
+        }
+
         let js = """
         (async function() {
             try {
@@ -1699,6 +1915,13 @@ final class BrowserUseManager: NSObject, ObservableObject {
     func setUserAgent(profile: UserAgentProfile?, customString: String? = nil) -> BrowserActionResult {
         let newProfile = profile ?? .mobileSafari
 
+        if usesEnginePath {
+            currentProfile = newProfile
+            let ua = Self.resolveUA(profile: newProfile, customString: customString)
+            engineCoordinator?.setUserAgent(ua)
+            return BrowserActionResult(text: "Switched to \(newProfile.rawValue) (\(currentViewport.width)x\(currentViewport.height)) [\(engineKind.badge)]")
+        }
+
         currentProfile = newProfile
         // Preserve the current viewport across UA switches so a user-set
         // custom viewport survives an agent-driven UA flip.
@@ -1726,6 +1949,12 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// global or session custom viewport changes.
     func setViewport(width: Int, height: Int,
                      profile: UserAgentProfile, customUA: String?) {
+        if usesEnginePath {
+            currentProfile = profile
+            currentViewport = (width, height)
+            engineCoordinator?.applyViewport(desktop: profile == .desktopSafari, width: width)
+            return
+        }
         currentProfile = profile
         currentViewport = (width, height)
 
@@ -1758,6 +1987,7 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// (T-ios-browser-sheet-viewport-pollution)
     @MainActor
     func restoreViewportFrame() {
+        guard engineKind == .webkit else { return }  // Blink/SSR 有自己的视口管理
         // [T-ios-webview-phantom-keyboard] This runs when the browser sheet
         // closes / before a screenshot — i.e. the webView is going back
         // offscreen. Release any focused input's remote keyboard here too, so a
@@ -1804,25 +2034,40 @@ final class BrowserUseManager: NSObject, ObservableObject {
     // MARK: - User Navigation
 
     func goBack() {
+        if usesEnginePath { engineCoordinator?.goBack(); return }
         guard webView.canGoBack else { return }
         webView.goBack()
     }
 
     func goForward() {
+        if usesEnginePath { engineCoordinator?.goForward(); return }
         guard webView.canGoForward else { return }
         webView.goForward()
     }
 
     func reload() {
+        if usesEnginePath { engineCoordinator?.reload(); return }
         webView.reload()
     }
 
     func stopLoading() {
+        if usesEnginePath { engineCoordinator?.stopLoading(); return }
         webView.stopLoading()
         isLoading = false
     }
 
     func loadURL(_ urlString: String) {
+        if usesEnginePath {
+            var normalized = urlString
+            if !normalized.contains("://") {
+                normalized = "https://\(normalized)"
+            }
+            isLoading = true
+            Task { @MainActor in
+                _ = try? await engineCoordinator?.navigate(to: normalized)
+            }
+            return
+        }
         var normalized = urlString
         if !normalized.contains("://") {
             normalized = "https://\(normalized)"

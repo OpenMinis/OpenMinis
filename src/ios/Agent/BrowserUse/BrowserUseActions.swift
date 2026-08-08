@@ -25,6 +25,10 @@ enum BrowserAction: String, CaseIterable {
     case setCookies = "set_cookies"
     case scrollAndCollect = "scroll_and_collect"
     case waitForDomStable = "wait_for_dom_stable"
+    /// P2: open the current page (or `url`) in the system default browser.
+    case openInBrowser = "open_in_browser"
+    /// Switch the browser engine (webkit / blink / ssr) — applies to new tabs.
+    case setEngine = "set_engine"
 }
 
 // MARK: - Browser Action Input
@@ -62,6 +66,8 @@ struct BrowserActionInput {
     /// keys: name, value (required), and optional domain, path, secure,
     /// http_only, expires (Unix seconds).
     var cookies: [[String: Any]]? = nil
+    /// Engine to switch to (set_engine): "webkit" | "blink" | "ssr".
+    var engine: BrowserEngineKind? = nil
 
     enum ScrollDirection: String {
         case up, down
@@ -106,7 +112,8 @@ struct BrowserActionInput {
             viewportHeight: dict["viewport_height"] as? Int,
             viewportReset: dict["reset"] as? Bool,
             fullPage: dict["full_page"] as? Bool,
-            cookies: Self.parseCookies(dict["cookies"])
+            cookies: Self.parseCookies(dict["cookies"]),
+            engine: (dict["engine"] as? String).flatMap(BrowserEngineKind.init)
         )
     }
 

@@ -1,0 +1,218 @@
+name: Blink Engine Build (Chromium + OpenMinis IPA/TIPA)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chromium_build:
+        description: '仅构建 Chromium（跳过 OpenMinis 打包）'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - 'chromium-blink/**'
+      - '.github/workflows/blink-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-chromium:
+    name: Build Chromium Blink (content_shell_framework)
+    runs-on: macos-15
+    timeout-minutes: 355
+    env:
+      CHROMIUM_BUILDTOOLS_PATH: ${{ github.workspace }}/chromium/src/buildtools
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+
+    steps:
+      - name: Install ccache (incremental Chromium builds)
+        run: |
+          brew install ccache 2>/dev/null || brew upgrade ccache 2>/dev/null || true
+          ccache -M 8G
+          ccache -z
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('chromium-blink/**', '.github/workflows/blink-build.yml') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Free disk space
+        run: |
+          # --- Simulators: not needed for device builds ---
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Devices/* 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/iOS* 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/watchOS* 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/tvOS* 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/xrOS* 2>/dev/null || true
+          # --- Heavy SDKs / toolchains (NOT Xcode — image default is the usable one) ---
+          sudo rm -rf /usr/local/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost 2>/dev/null || true
+          sudo rm -rf ~/.gradle ~/.m2 ~/.npm ~/.cache/pip /Users/runner/Library/Android 2>/dev/null || true
+          sudo rm -rf ~/Library/Caches/Homebrew 2>/dev/null || true
+          brew cleanup --prune=all 2>/dev/null || true
+          echo "==> Free space after cleanup:"
+          df -h /
+
+      - name: Select Xcode (use image default — safest for Chromium 149)
+        run: |
+          echo "Active: $(xcode-select -p)"
+          xcodebuild -version
+
+      - uses: actions/checkout@v4
+
+      - name: Clone Blinker Fluid (patch set)
+        run: |
+          git clone --depth 1 https://github.com/Ssabal/blinker-fluid.git blinker-fluid
+          ls blinker-fluid
+
+      - name: Fetch + patch Chromium (shallow, ~30-50 min)
+        run: |
+          chmod +x chromium-blink/fetch_and_patch.sh
+          ./chromium-blink/fetch_and_patch.sh "$PWD" "$PWD/blinker-fluid" 2>&1 | tail -40
+          df -h /
+
+      - name: Check free disk (hard fail below 50GB — Chromium build + runner log spool)
+        run: |
+          FREE=$(df -k / | awk 'NR==2 {print $4}')
+          echo "free_kb=$FREE  free_gb=$((FREE/1024/1024))"
+          if [ "$FREE" -lt 50000000 ]; then
+            echo "::error::Only $((FREE/1024/1024)) GB free — Chromium static build needs ~50GB. Aborting to avoid a disk-full wedge."
+            exit 1
+          fi
+
+      - name: Build content_shell (1.5-3 h)
+        run: |
+          cd chromium/src
+          # Disk watchdog: abort cleanly instead of wedging the runner on a full
+          # disk (the previous run froze silently for 1h42m when the volume filled).
+          ( while true; do
+              FREE=$(df -k / | awk 'NR==2 {print $4}')
+              if [ "$FREE" -lt 3000000 ]; then
+                echo "::error::DISK FULL (free=$((FREE/1024/1024))MB) — aborting ninja"
+                pkill -9 -f 'ninja -C out/Release-iphoneos' 2>/dev/null || true
+                exit 1
+              fi
+              sleep 90
+            done ) &
+          WATCHDOG=$!
+          echo "Build start: $(date)"
+          autoninja -C out/Release-iphoneos content_shell
+          RC=$?
+          kill $WATCHDOG 2>/dev/null || true
+          echo "Build end: $(date) rc=$RC"
+          exit $RC
+
+      - name: Collect engine artifacts
+        run: |
+          OUT=chromium/src/out/Release-iphoneos
+          APP=$(find "$OUT" -name "content_shell.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "!! content_shell.app not found in $OUT"
+            find "$OUT" -maxdepth 3 -name "*.app" -type d
+            exit 1
+          fi
+          echo "found app: $APP"
+          mkdir -p /tmp/blink-artifacts
+          # The built app bundle contains the exact runtime layout (framework +
+          # icudtl.dat + paks + fonts + net/ + locales) — ship it whole.
+          cp -R "$APP" /tmp/blink-artifacts/content_shell.app
+          # Version stamp
+          echo "${{ github.sha }}" > /tmp/blink-artifacts/BLINK_BUILD.txt
+          echo "$(date -u +%Y%m%d-%H%M%S)" >> /tmp/blink-artifacts/BLINK_BUILD.txt
+          du -sh /tmp/blink-artifacts/content_shell.app
+
+      - name: Upload Chromium artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: blink-engine
+          path: /tmp/blink-artifacts
+          compression-level: 1
+          retention-days: 14
+
+  build-minis:
+    name: Build OpenMinis IPA/TIPA (TrollStore)
+    runs-on: macos-14
+    needs: build-chromium
+    if: ${{ !inputs.chromium_build }}
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_16.1.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_16.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_15.4.app 2>/dev/null \
+            || true
+          xcodebuild -version
+
+      - name: Download Chromium engine
+        uses: actions/download-artifact@v4
+        with:
+          name: blink-engine
+          path: blink-engine
+
+      - name: List schemes
+        run: xcodebuild -project src/ios/Minis.xcodeproj -list | head -30
+
+      - name: Build Minis (unsigned, TrollStore-compatible)
+        run: |
+          xcodebuild build \
+            -project src/ios/Minis.xcodeproj \
+            -scheme Minis \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            -destination 'generic/platform=iOS' 2>&1 | tail -25
+          APP=$(find build/DerivedData -name "Minis.app" -type d | head -1)
+          echo "APP=$APP"
+          [ -n "$APP" ] || { echo "!! Minis.app not found"; exit 1; }
+
+      - name: Embed Blink engine into app bundle
+        run: |
+          APP=$(find build/DerivedData -name "Minis.app" -type d | head -1)
+          chmod +x chromium-blink/embed_into_app.sh
+          ./chromium-blink/embed_into_app.sh "$APP" "blink-engine/content_shell.app"
+          echo "==> App size: $(du -sh "$APP" | cut -f1)"
+
+      - name: Package IPA + TIPA
+        run: |
+          APP=$(find build/DerivedData -name "Minis.app" -type d | head -1)
+          chmod +x scripts/package_tipa.sh
+          ./scripts/package_tipa.sh "$APP" "$PWD/dist"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMinis-Blink-IPA
+          path: dist/*.ipa
+          retention-days: 30
+
+      - name: Upload TIPA (TrollStore)
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMinis-Blink-TIPA
+          path: dist/*.tipa
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## OpenMinis Blink Build"
+            echo "- 引擎: Chromium Blink+V8 (use_blink=true, JITless, 单进程)"
+            echo "- iOS: 16.0+ (arm64), TrollStore 免签名"
+            echo "- 安装: 下载 TIPA → TrollStore 安装 → 浏览器工具栏引擎菜单选 Blink"
+            echo "- 降级: 引擎菜单 SSR / 系统浏览器打开 (P1/P2)"
+          } >> "$GITHUB_STEP_SUMMARY"

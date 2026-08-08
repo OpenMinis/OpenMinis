@@ -466,6 +466,54 @@ final class BrowserTabPool: ObservableObject {
         }
     }
 
+    /// P2: open a URL (or the current tab's URL) in the system default browser.
+    private func openInSystemBrowser(url urlString: String?) -> BrowserActionResult {
+        let target: String
+        if let urlString, !urlString.isEmpty {
+            target = urlString
+        } else if let manager = selectedManager, !manager.currentURL.isEmpty {
+            target = manager.currentURL
+        } else {
+            return .error("open_in_browser: 没有可打开的 URL（请先 navigate 或提供 url 参数）")
+        }
+        if let error = OpenInSystemBrowser.open(target) {
+            return .error(error)
+        }
+        return BrowserActionResult(text: "已在系统默认浏览器中打开 \(target)")
+    }
+
+    /// Switch the browser engine for new tabs. Existing tabs keep their engine
+    /// until closed; the current tab is re-created on the new engine at the
+    /// same URL so the change is immediately visible.
+    func switchEngine(to kind: BrowserEngineKind) -> BrowserActionResult {
+        guard BlinkEngineBridge.isFrameworkPresent() || kind != .blink else {
+            return .error("set_engine: Blink 引擎不可用（当前构建未嵌入 content_shell_framework；请安装 Blink/TrollStore 版本）")
+        }
+        BrowserEngineSettings.shared.kind = kind
+        let oldURL = selectedManager?.currentURL
+
+        // Re-create the selected tab on the new engine at the same URL.
+        if let tab = tabs.first(where: { $0.id == selectedTabId }), tab.manager.engineKind != kind {
+            let newManager = makeManager()
+            wireManager(newManager)
+            let replacement = Tab(id: tab.id, manager: newManager, inUse: true,
+                                  graceExpiryTask: tab.graceExpiryTask,
+                                  lastActivityDate: Date())
+            if let idx = tabs.firstIndex(where: { $0.id == tab.id }) {
+                tabs[idx] = replacement
+            }
+            if let oldURL, !oldURL.isEmpty {
+                newManager.loadURL(oldURL)
+            }
+            return BrowserActionResult(
+                text: "已切换到 \(kind.displayName) 引擎（新标签页生效；当前标签已在同一 URL 重建）",
+                pageURL: oldURL.isEmpty ? nil : oldURL
+            )
+        }
+
+        return BrowserActionResult(text: "已设置浏览器引擎为 \(kind.displayName)（新标签页生效）")
+    }
+
     /// Create a new tab using a pre-built WKWebViewConfiguration (for window.open / OAuth popups).
     /// Returns the new tab's WKWebView so the opener retains a window.opener reference.
     /// WebKit will automatically load the navigation into the returned WKWebView.
@@ -731,6 +779,13 @@ final class BrowserTabPool: ObservableObject {
             return closeTab(id: tabId)
         case .listTabs:
             return listTabs()
+        case .openInBrowser:
+            return openInSystemBrowser(url: input.url)
+        case .setEngine:
+            guard let kind = input.engine else {
+                return .error("set_engine: 需要 engine 参数（webkit / blink / ssr）")
+            }
+            return switchEngine(to: kind)
         default:
             break
         }

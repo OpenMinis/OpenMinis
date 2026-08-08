@@ -94,9 +94,10 @@ extension AIChatViewModel {
                     "viewport_height": AgentToolParam(type: .integer, description: "Viewport height in CSS pixels for set_viewport (e.g. 1080). Required together with viewport_width unless reset=true."),
                     "reset": AgentToolParam(type: .boolean, description: "For set_viewport: when true, clear the session-level viewport override and fall back to the global browser setting."),
                     "full_page": AgentToolParam(type: .boolean, description: "For screenshot: capture the entire scrollable page by temporarily resizing the WebView to document.documentElement.scrollHeight. Default false captures viewport only. Capped at 32768px tall; when capped, result text includes 'Truncated: true' and the original height."),
+                    "engine": AgentToolParam(type: .string, description: "Engine to switch to (set_engine): 'webkit' (system WebKit), 'blink' (embedded Chromium Blink, TrollStore build only), or 'ssr' (server-side rendered text fetch — use when a site renders blank/unresponsive). Applies to new tabs; the current tab is rebuilt at the same URL. open_in_browser opens the current page (or 'url') in the system default browser."),
                 ],
                 required: ["tool_title", "action"],
-                propertyOrdering: ["tool_title", "action", "tab_id", "url", "selector", "text", "coordinate_x", "coordinate_y", "direction", "amount", "scroll_count", "item_selector", "script", "user_agent", "max_depth", "keywords", "fuzzy", "cookies", "timeout", "viewport_width", "viewport_height", "reset", "full_page"]
+                propertyOrdering: ["tool_title", "action", "tab_id", "url", "selector", "text", "coordinate_x", "coordinate_y", "direction", "amount", "scroll_count", "item_selector", "script", "user_agent", "max_depth", "keywords", "fuzzy", "cookies", "timeout", "viewport_width", "viewport_height", "reset", "full_page", "engine"]
             ),
         ]
 
