@@ -1,0 +1,46 @@
+# Blink embed build args — Blinker Fluid configuration (Chromium 149 base
+# 31dce68b925c2b8efc93df832a86a7c0d03e3fa2) + is_component_build for the
+# single-dylib content_shell_framework that OpenMinis dlopens at runtime.
+
+target_os = "ios"
+target_cpu = "arm64"
+target_environment = "device"
+use_blink = true
+
+is_debug = false
+# NOTE: Chromium upstream asserts "Can't use component build on iOS"
+# (build/config/BUILDCONFIG.gn). Blinker Fluid does NOT set is_component_build —
+# ios_framework_bundle("content_shell_framework") still produces a dynamic
+# framework (263MB dylib) in a plain static build, which is exactly what the
+# OpenMinis dlopen bridge needs.
+symbol_level = 0
+treat_warnings_as_errors = false
+
+ios_enable_code_signing = false
+ios_deployment_target = "14.0"
+
+# iOS-15 port: V8 sandbox reserves ~1TB VA; iOS can't grant it. Disabling
+# drops the reservation to the 4GB pointer-compression cage.
+v8_enable_sandbox = false
+v8_enable_pointer_compression = true
+v8_enable_drumbrake = true
+
+# cppgc caged heap tries to reserve 2x4GB VA and aborts on 4GB-VA devices.
+cppgc_enable_caged_heap = false
+
+# Proprietary codecs (H.264/AAC) → VideoToolbox hardware decode.
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# DCHECKs abort on debug invariants in the single-process renderer — off for
+# a shipping build.
+dcheck_always_on = false
+
+# Keep output size/disk footprint small (runner has limited disk).
+enable_dsyms = false
+
+# JITless is forced at runtime via --js-flags=--jitless (BlinkBridgeInitialize),
+# keeping this build compatible with both modes.
+
+# Rust/C++ toolchain reuse to cut build time.
+use_remoteexec = false

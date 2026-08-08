@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E5B1000000000000000003E9 /* BrowserEngineKind.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003E8 /* BrowserEngineKind.swift */; };
+		E5B1000000000000000003EB /* BlinkEngineBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003EA /* BlinkEngineBridge.swift */; };
+		E5B1000000000000000003ED /* BlinkTabSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003EC /* BlinkTabSession.swift */; };
+		E5B1000000000000000003EF /* SSRManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003EE /* SSRManager.swift */; };
+		E5B1000000000000000003F1 /* BrowserEngineCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003F0 /* BrowserEngineCoordinator.swift */; };
+		E5B1000000000000000003F3 /* OpenInSystemBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B1000000000000000003F2 /* OpenInSystemBrowser.swift */; };
 		21FED4B7BB6F6D9476C9992E /* VoiceProvider+System.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88993FC8E3F0199C6638F664 /* VoiceProvider+System.swift */; };
 		241D530017827D7F0EB604DE /* VoiceProviderFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2941B643B8A2F048A2B154E /* VoiceProviderFactory.swift */; };
 		2A4FD49F872431D703328384 /* VoiceOutputPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424510790AF3FB2452D3CCE3 /* VoiceOutputPlayer.swift */; };
@@ -542,6 +548,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E5B1000000000000000003E8 /* BrowserEngineKind.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserEngineKind.swift; sourceTree = "<group>"; };
+		E5B1000000000000000003EA /* BlinkEngineBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlinkEngineBridge.swift; sourceTree = "<group>"; };
+		E5B1000000000000000003EC /* BlinkTabSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlinkTabSession.swift; sourceTree = "<group>"; };
+		E5B1000000000000000003EE /* SSRManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSRManager.swift; sourceTree = "<group>"; };
+		E5B1000000000000000003F0 /* BrowserEngineCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserEngineCoordinator.swift; sourceTree = "<group>"; };
+		E5B1000000000000000003F2 /* OpenInSystemBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenInSystemBrowser.swift; sourceTree = "<group>"; };
 		0ED149397BEA7E0408C92688 /* GroupVoiceModelsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupVoiceModelsView.swift; sourceTree = "<group>"; };
 		0F5379380323FA8C6477708C /* GroupSlotPicker.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupSlotPicker.swift; sourceTree = "<group>"; };
 		16FF3462D09402F14B610CD6 /* VoiceWaveformView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VoiceWaveformView.swift; sourceTree = "<group>"; };
@@ -1135,6 +1147,19 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		E5B10000000000000000000E /* Engine */ = {
+			isa = PBXGroup;
+			children = (
+				E5B1000000000000000003E8 /* BrowserEngineKind.swift */,
+				E5B1000000000000000003EA /* BlinkEngineBridge.swift */,
+				E5B1000000000000000003EC /* BlinkTabSession.swift */,
+				E5B1000000000000000003EE /* SSRManager.swift */,
+				E5B1000000000000000003F0 /* BrowserEngineCoordinator.swift */,
+				E5B1000000000000000003F2 /* OpenInSystemBrowser.swift */,
+			);
+			path = Engine;
+			sourceTree = "<group>";
+		};
 		42A3821DABA8773E8A5BA57E /* Voice */ = {
 			isa = PBXGroup;
 			children = (
@@ -1451,7 +1476,8 @@
 		E57000030 /* BrowserUse */ = {
 			isa = PBXGroup;
 			children = (
-				E57000011 /* BrowserUseActions.swift */,
+								E5B10000000000000000000E /* Engine */,
+E57000011 /* BrowserUseActions.swift */,
 				E57000012 /* BrowserUseJavaScript.swift */,
 				E57000013 /* BrowserUseManager.swift */,
 				E57000014 /* BrowserWebView.swift */,
@@ -2604,6 +2630,12 @@
 				E53000005 /* UsageStatsView.swift in Sources */,
 				E53000006 /* CacheKeepAliveManager.swift in Sources */,
 				E57000001 /* BrowserUseActions.swift in Sources */,
+		E5B1000000000000000003E9 /* BrowserEngineKind.swift in Sources */,
+		E5B1000000000000000003EB /* BlinkEngineBridge.swift in Sources */,
+		E5B1000000000000000003ED /* BlinkTabSession.swift in Sources */,
+		E5B1000000000000000003EF /* SSRManager.swift in Sources */,
+		E5B1000000000000000003F1 /* BrowserEngineCoordinator.swift in Sources */,
+		E5B1000000000000000003F3 /* OpenInSystemBrowser.swift in Sources */,
 				E57000002 /* BrowserUseJavaScript.swift in Sources */,
 				E57000003 /* BrowserUseManager.swift in Sources */,
 				E57000004 /* BrowserWebView.swift in Sources */,

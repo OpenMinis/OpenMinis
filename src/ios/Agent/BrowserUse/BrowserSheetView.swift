@@ -9,9 +9,28 @@ struct BrowserSheetView: View {
     @State private var addressText: String = ""
     @State private var showHistory = false
     @State private var isFullscreen = false
+    @State private var toastMessage: String = ""
     @FocusState private var addressFocused: Bool
 
     private var manager: BrowserUseManager? { pool.activeManager }
+
+    /// Engine shown in the toolbar badge (live from the active tab).
+    private var currentEngineKind: BrowserEngineKind {
+        manager?.engineKind ?? BrowserEngineSettings.shared.effectiveKind
+    }
+
+    /// Switch the pool's engine (persisted; current tab rebuilt at same URL).
+    private func switchEngine(to kind: BrowserEngineKind) {
+        if kind == .blink && !BlinkEngineBridge.isFrameworkPresent() {
+            toastMessage = "Blink 引擎不可用：当前构建未嵌入 content_shell_framework"
+            return
+        }
+        let result = pool.switchEngine(to: kind)
+        toastMessage = result.success ? "" : result.text
+        if let activeURL = manager?.currentURL, !activeURL.isEmpty {
+            addressText = activeURL
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -41,7 +60,7 @@ struct BrowserSheetView: View {
                             }
 
                         if manager?.isLoading ?? false {
-                            Button { manager?.webView.stopLoading() } label: {
+                            Button { manager?.stopLoading() } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(.secondary)
@@ -72,6 +91,24 @@ struct BrowserSheetView: View {
                     if isAgentBusy {
                         AgentBrowsingOverlay(onTakeover: onTakeover)
                             .transition(.opacity)
+                    }
+
+                    // Engine / action toast
+                    if !toastMessage.isEmpty {
+                        Text(toastMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.black.opacity(0.75)))
+                            .padding(.bottom, 24)
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
+                            .task(id: toastMessage) {
+                                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                                withAnimation { toastMessage = "" }
+                            }
                     }
 
                     // Fullscreen exit button
@@ -184,7 +221,47 @@ struct BrowserSheetView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
+                    HStack(spacing: 14) {
+                        // P2: open in system default browser
+                        Button {
+                            if let url = manager?.currentURL, !url.isEmpty {
+                                if let err = OpenInSystemBrowser.open(url) {
+                                    toastMessage = err
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "safari")
+                        }
+                        .disabled(isAgentBusy || (manager?.currentURL.isEmpty ?? true))
+
+                        // Engine switcher (WebKit / Blink / SSR)
+                        Menu {
+                            ForEach(BrowserEngineKind.allCases) { kind in
+                                Button {
+                                    switchEngine(to: kind)
+                                } label: {
+                                    if kind == currentEngineKind {
+                                        Label(kind.displayName, systemImage: "checkmark")
+                                    } else {
+                                        Text(kind.displayName)
+                                    }
+                                }
+                            }
+                            Divider()
+                            Text("引擎切换对新建标签页生效；当前标签会在同一 URL 重建")
+                                .font(.caption)
+                        } label: {
+                            Text(currentEngineKind.badge)
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .disabled(isAgentBusy)
+
+                        Button("Done") { dismiss() }
+                    }
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
