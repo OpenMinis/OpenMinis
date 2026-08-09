@@ -73,7 +73,7 @@ class VoiceProvider: VoiceInputCapable, VoiceOutputCapable {
 
     func defaultVoiceInputModel() -> String  { "whisper-1" }
     func defaultVoiceOutputModel() -> String { "tts-1" }
-    func defaultVoiceOutputVoice() -> String { "alloy" }
+    func defaultVoiceOutputVoice() -> String { "nova" }
 
     // MARK: - Request construction (override to customize format)
 

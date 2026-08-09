@@ -1766,7 +1766,7 @@ Passthrough mode (raw escape hatch; response is NOT parsed):
                                          // omit = chat path
        "method":  "POST",               // default POST
        "headers": {"X-Custom": "1"},    // same-name REPLACES defaults
-       "body":    {"input": "hi", "voice": "alloy"},
+       "body":    {"input": "hi", "voice": "nova"},
        "body_mode": "replace"           // replace = body IS the whole request
                                         // body; merge (default) = layered
                                         // over the converted OpenAI baseline,

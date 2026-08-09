@@ -113,7 +113,7 @@ open class VoiceProvider(
 
     open fun defaultVoiceInputModel(): String = "whisper-1"
     open fun defaultVoiceOutputModel(): String = "tts-1"
-    open fun defaultVoiceOutputVoice(): String = "alloy"
+    open fun defaultVoiceOutputVoice(): String = "nova"
 
     // -- Request construction (override to customize format) -----------------
 

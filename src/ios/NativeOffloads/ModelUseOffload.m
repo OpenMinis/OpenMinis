@@ -107,7 +107,7 @@ static NSString *const HELP_TEXT =
      "                                          // base host; omit = chat path\n"
      "       \"method\":  \"POST\",                // default POST\n"
      "       \"headers\": {\"X-Custom\": \"1\"},     // same-name REPLACES defaults\n"
-     "       \"body\":    {\"input\": \"hi\", \"voice\": \"alloy\"},\n"
+     "       \"body\":    {\"input\": \"hi\", \"voice\": \"nova\"},\n"
      "       \"body_mode\": \"replace\"            // replace = body IS the whole\n"
      "                                          // request body; merge (default)\n"
      "                                          // = layered over the converted\n"
