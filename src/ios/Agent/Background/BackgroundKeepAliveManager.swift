@@ -1332,6 +1332,32 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
         logger.info("[BKA][Stop] engine.stop() + end(.backgroundKeepAlive)")
     }
 
+    // MARK: - Terminal Keep-Alive
+
+    /// Stable synthetic session ID injected while the built-in terminal is open.
+    /// Using a fixed string (not a real UUID) means repeated open/close cycles
+    /// always use the same key, so the tracker never accumulates ghost entries.
+    private let terminalSessionId = "minis-terminal-keepalive"
+
+    /// Called when the user opens the built-in Shell Terminal.
+    /// Registers a synthetic session so BackgroundKeepAliveManager treats the
+    /// terminal as an "active" task — silent audio and location keep-alive both
+    /// engage when Enhanced Background is on, keeping the iSH process alive
+    /// after the user switches away.  No-op when Enhanced Background is off.
+    func registerTerminalSession() {
+        guard enhancedBackgroundEffective else { return }
+        SessionActivityTracker.shared.setActive(terminalSessionId, source: "terminal")
+        logger.info("[BKA] Terminal keep-alive REGISTERED")
+    }
+
+    /// Called when the built-in Shell Terminal is dismissed.
+    /// Removes the synthetic session so keep-alive can deactivate normally
+    /// once no real agent tasks are running either.
+    func unregisterTerminalSession() {
+        SessionActivityTracker.shared.setInactive(terminalSessionId, source: "terminal")
+        logger.info("[BKA] Terminal keep-alive UNREGISTERED")
+    }
+
     // MARK: - Live Activity Updates
 
     /// Shared method to push a Live Activity update. Called from:

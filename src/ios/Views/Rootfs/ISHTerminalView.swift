@@ -120,9 +120,17 @@ struct ISHTerminalView: View {
             // room for the sheet, and the user sees "terminal closes,
             // browser opens, loading forever". Cleared in .onDisappear.
             MinisOpenURLBroker.shared.terminalVisible = true
+            // Register terminal session so silent-audio + location keep-alive
+            // engage while the terminal is open (no-op when Enhanced Background
+            // is off). This keeps the iSH process alive after the user switches
+            // to another app, which is the primary use-case for the terminal.
+            BackgroundKeepAliveManager.shared.registerTerminalSession()
         }
         .onDisappear {
             MinisOpenURLBroker.shared.terminalVisible = false
+            // Release the synthetic keep-alive session so the background
+            // machinery can deactivate when no real agent tasks are running.
+            BackgroundKeepAliveManager.shared.unregisterTerminalSession()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { note in
             let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect) ?? .zero
