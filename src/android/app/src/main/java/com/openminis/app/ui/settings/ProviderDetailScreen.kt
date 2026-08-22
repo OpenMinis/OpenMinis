@@ -967,7 +967,9 @@ private fun ApiKeyCredentialBlock(
                 Text(stringResource(R.string.common_cancel))
             }
             Spacer(modifier = Modifier.width(8.dp))
-            MinisSmallButton(onClick = onSave, enabled = editValue.isNotBlank()) {
+            // [T-empty-key-compat-endpoints] Allow saving empty key for
+            // third-party keyless endpoints (ollama, OpenCode Zen free, etc.)
+            MinisSmallButton(onClick = onSave) {
                 Text(stringResource(R.string.provider_detail_save_key))
             }
         }
