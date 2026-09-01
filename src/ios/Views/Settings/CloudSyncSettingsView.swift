@@ -372,14 +372,14 @@ private struct DeviceSyncSection: View {
 
     private static func relativeTime(_ date: Date) -> String {
         let seconds = Int(Date().timeIntervalSince(date))
-        if seconds < 60 { return String(localized: "just now") }
+        if seconds < 60 { return AppLocalized("just now") }
         let minutes = seconds / 60
-        if minutes < 60 { return String(localized: "\(minutes) min ago") }
+        if minutes < 60 { return AppLocalized("\(minutes) min ago") }
         let hours = minutes / 60
-        if hours < 24 { return String(localized: "\(hours) hr ago") }
+        if hours < 24 { return AppLocalized("\(hours) hr ago") }
         let days = hours / 24
-        if days == 1 { return String(localized: "\(days) day ago") }
-        return String(localized: "\(days) days ago")
+        if days == 1 { return AppLocalized("\(days) day ago") }
+        return AppLocalized("\(days) days ago")
     }
 
     private var deviceIcon: String {
@@ -513,7 +513,7 @@ struct RemoteDeviceSessionsView: View {
             Button("OK") {}
         } message: {
             if let s = forkedSession {
-                Text("\"\(s.title ?? String(localized: "Untitled"))\" has been copied to your sessions. You can find it in the main session list.")
+                Text("\"\(s.title ?? AppLocalized("Untitled"))\" has been copied to your sessions. You can find it in the main session list.")
             }
         }
     }

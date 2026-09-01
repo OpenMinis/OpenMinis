@@ -219,7 +219,7 @@ enum MountedFolderCoordinator {
         throw NSError(
             domain: "MountedFolderCoordinator",
             code: -1,
-            userInfo: [NSLocalizedDescriptionKey: String(localized: "Timed out downloading file from iCloud.")]
+            userInfo: [NSLocalizedDescriptionKey: AppLocalized("Timed out downloading file from iCloud.")]
         )
     }
 
@@ -230,7 +230,7 @@ enum MountedFolderCoordinator {
         let url: URL
         var errorDescription: String? {
             String(
-                format: String(localized: "This location is inside a read-only mounted folder and cannot be modified: %@"),
+                format: AppLocalized("This location is inside a read-only mounted folder and cannot be modified: %@"),
                 url.lastPathComponent
             )
         }

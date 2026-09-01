@@ -44,7 +44,25 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             let count = (try? fm.contentsOfDirectory(atPath: dir.path).count) ?? -1
             rootSummaries.append("\(sub)=\(count)")
         }
-        FPSyncTraceLog.log("init domain=\(domain.identifier.rawValue) providerRoot=\(root.path) resolved=\(resolvedRoot) [\(rootSummaries.joined(separator: " "))]")
+        // [T-ios-fp-mac-bootcrash] Stamp every SUCCESSFUL launch with the app
+        // version and the executable's mtime. The pre-main SIGILL launches
+        // (TestFlight D8_ZguC2Ikr7Wl0fRI7Ubn, macOS 27 beta) can never log —
+        // dyld dies before our code runs — so the diagnosis has to come from
+        // the other side: the main app appends an "app-updated" line to this
+        // same trace file when the bundle changes, and each init line here
+        // carries the executable generation. If a .crash timestamp falls
+        // between an "app-updated" line and the next init with a NEW exec
+        // mtime, the bundle-replacement theory is confirmed from field data.
+        let bundle = Bundle.main
+        let ver = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        var execStamp = "?"
+        if let execURL = bundle.executableURL,
+           let mod = (try? fm.attributesOfItem(atPath: execURL.path))?[.modificationDate] as? Date {
+            execStamp = ISO8601DateFormatter().string(from: mod)
+        }
+        let onMac = ProcessInfo.processInfo.isiOSAppOnMac
+        FPSyncTraceLog.log("init domain=\(domain.identifier.rawValue) ver=\(ver)(\(build)) exec=\(execStamp) mac=\(onMac) providerRoot=\(root.path) resolved=\(resolvedRoot) [\(rootSummaries.joined(separator: " "))]")
 
         Self.recoverFakeTrashDirIfNeeded(root: root)
         Self.cleanupLegacyLogsDirIfNeeded(root: root)

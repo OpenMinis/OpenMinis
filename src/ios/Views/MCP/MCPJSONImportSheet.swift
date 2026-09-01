@@ -20,7 +20,7 @@ struct MCPJSONImportSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(String(localized: "Paste MCP JSON")) {
+                Section(AppLocalized("Paste MCP JSON")) {
                     TextEditor(text: $text)
                         .font(.system(.footnote, design: .monospaced))
                         .frame(minHeight: 220)
@@ -41,8 +41,8 @@ struct MCPJSONImportSheet: View {
                 }
 
                 if !parsed.isEmpty {
-                    Section(String(localized: "Preview")) {
-                        Text(String(format: String(localized: "Found %d server(s)"), parsed.count))
+                    Section(AppLocalized("Preview")) {
+                        Text(String(format: AppLocalized("Found %d server(s)"), parsed.count))
                             .font(.subheadline.weight(.semibold))
                         ForEach(parsed) { server in
                             HStack(spacing: 8) {
@@ -62,14 +62,14 @@ struct MCPJSONImportSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Cancel")) { dismiss() }
+                    Button(AppLocalized("Cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if parsed.isEmpty {
-                        Button(String(localized: "Parse")) { parse() }
+                        Button(AppLocalized("Parse")) { parse() }
                             .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     } else {
-                        Button(String(localized: "Import")) { commit() }
+                        Button(AppLocalized("Import")) { commit() }
                     }
                 }
             }

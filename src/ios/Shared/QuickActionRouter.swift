@@ -61,21 +61,21 @@ final class QuickActionRouter: ObservableObject {
         let items: [UIApplicationShortcutItem] = [
             UIApplicationShortcutItem(
                 type: ShortcutType.newChat,
-                localizedTitle: String(localized: "shortcut.newChat.title"),
+                localizedTitle: AppLocalized("shortcut.newChat.title"),
                 localizedSubtitle: nil,
                 icon: UIApplicationShortcutIcon(systemImageName: "bubble.left.and.bubble.right"),
                 userInfo: nil
             ),
             UIApplicationShortcutItem(
                 type: ShortcutType.voiceChat,
-                localizedTitle: String(localized: "shortcut.voiceChat.title"),
+                localizedTitle: AppLocalized("shortcut.voiceChat.title"),
                 localizedSubtitle: nil,
                 icon: UIApplicationShortcutIcon(systemImageName: "mic.fill"),
                 userInfo: nil
             ),
             UIApplicationShortcutItem(
                 type: ShortcutType.cameraChat,
-                localizedTitle: String(localized: "shortcut.cameraChat.title"),
+                localizedTitle: AppLocalized("shortcut.cameraChat.title"),
                 localizedSubtitle: nil,
                 icon: UIApplicationShortcutIcon(systemImageName: "camera.fill"),
                 userInfo: nil

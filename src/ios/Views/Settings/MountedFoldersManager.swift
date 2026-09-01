@@ -218,6 +218,16 @@ final class MountedFoldersManager {
         } catch {
             mountLog.error("save failed: \(error.localizedDescription)")
         }
+        // [T-ios-mention-index-stale-mounts] The mount set is one of the @-mention
+        // index's scan roots, and that index caches for 10 minutes keyed on
+        // sessionId. Without this, a folder mounted while an existing chat is open
+        // stays invisible to `@` in that chat until the TTL lapses, even though a
+        // newly-created chat finds it instantly.
+        //
+        // Hooked on `save()` because it is the single choke point both `add` and
+        // `remove(id:)` already funnel through — a future mutation path gets the
+        // invalidation for free instead of having to remember it.
+        FileMentionIndex.shared.invalidateCache(reason: "mounted folders changed")
     }
 
     // MARK: - CRUD
@@ -242,13 +252,13 @@ final class MountedFoldersManager {
 
         var errorDescription: String? {
             switch self {
-            case .invalidName: return String(localized: "Mount name is invalid.")
-            case .nameTaken: return String(localized: "A mount with this name already exists.")
-            case .scopeDenied: return String(localized: "Could not access the selected folder.")
+            case .invalidName: return AppLocalized("Mount name is invalid.")
+            case .nameTaken: return AppLocalized("A mount with this name already exists.")
+            case .scopeDenied: return AppLocalized("Could not access the selected folder.")
             case .bookmarkFailed(let msg): return msg
             case .limitReached(let max):
                 return String(
-                    format: String(localized: "Mount limit reached (%d). Remove an existing mount before adding a new one."),
+                    format: AppLocalized("Mount limit reached (%d). Remove an existing mount before adding a new one."),
                     max
                 )
             }

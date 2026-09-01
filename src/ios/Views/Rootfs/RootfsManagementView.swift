@@ -15,8 +15,15 @@ struct RootfsManagementView: View {
         List {
             Section("Status") {
                 HStack {
-                    Text("Installed")
+                    // The label used to be a hardcoded Text("Installed"), which
+                    // read as a claim rather than a field name: with no rootfs
+                    // present the row said "Installed ❌", contradicting both the
+                    // icon and the "Install Rootfs" action right below it. Use a
+                    // neutral field name and put the state in the value.
+                    Text("Status")
                     Spacer()
+                    Text(viewModel.isInstalled ? "Installed" : "Not Installed")
+                        .foregroundStyle(.secondary)
                     Image(systemName: viewModel.isInstalled ? "checkmark.circle.fill" : "xmark.circle.fill")
                         .foregroundColor(viewModel.isInstalled ? .green : .red)
                 }

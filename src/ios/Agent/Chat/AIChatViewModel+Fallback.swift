@@ -229,7 +229,7 @@ extension AIChatViewModel {
                     logger.error("🔀ROUTE entry=\(currentEntryId ?? "nil") always-strategy, immediate fallback for: \(error.localizedDescription)")
                     if let eid = currentEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                         let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: (error as? LLMError)?.fallbackReason ?? String(localized: "Error")))
+                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: (error as? LLMError)?.fallbackReason ?? AppLocalized("Error")))
                     }
 
                     let gid = activeGroupId
@@ -311,7 +311,7 @@ extension AIChatViewModel {
                     logger.error("🔀ROUTE auto-retry exhausted for entry=\(currentEntryId ?? "nil"), attempting group fallback")
                     if let eid = currentEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                         let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: String(localized: "Retries exhausted")))
+                        fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: AppLocalized("Retries exhausted")))
                     }
 
                     let gid = activeGroupId
@@ -422,7 +422,7 @@ extension AIChatViewModel {
             logger.error("🔀ROUTE-CONTENT entry=\(entryKey) returned empty response, advancing")
             if let eid = activeEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                 let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
-                fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: String(localized: "Empty response")))
+                fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: AppLocalized("Empty response")))
             }
 
             emptyResponseEntries.insert(entryKey)

@@ -115,7 +115,7 @@ struct ChatScreenshotPreviewSheet: View {
         // re-encode (expensive for a tall turn) then runs off-main and augments
         // the pasteboard entry when ready.
         UIPasteboard.general.image = image
-        flashToast(String(localized: "Copied"))
+        flashToast(AppLocalized("Copied"))
         DispatchQueue.global(qos: .userInitiated).async {
             guard let pngData = image.pngData() else { return }
             DispatchQueue.main.async {
@@ -128,9 +128,9 @@ struct ChatScreenshotPreviewSheet: View {
     private func saveImageToPhotos(_ image: UIImage) {
         ImageSaver.shared.save(image) { error in
             if let error {
-                flashToast(String(localized: "Save failed: \(error.localizedDescription)"))
+                flashToast(AppLocalized("Save failed: \(error.localizedDescription)"))
             } else {
-                flashToast(String(localized: "Saved to Photos"))
+                flashToast(AppLocalized("Saved to Photos"))
             }
         }
     }
@@ -145,7 +145,7 @@ struct ChatScreenshotPreviewSheet: View {
         // the sweep + encode + write on a background queue, then hop back to
         // main only to present the sheet. `flashToast` gives immediate feedback
         // so the tap doesn't feel dead while encoding runs.
-        flashToast(String(localized: "Preparing…"))
+        flashToast(AppLocalized("Preparing…"))
         DispatchQueue.global(qos: .userInitiated).async {
             // [T-mac-share-save-race] Sweep old share screenshots instead of
             // deleting in completionWithItemsHandler. On Mac (Designed for iPad)

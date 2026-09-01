@@ -173,6 +173,9 @@ struct ChatMessageRow: View {
     var onStop: (() -> Void)?
     var onRetry: (() -> Void)?
     var onEdit: (() -> Void)?
+    /// [T-ios-delete-from-message] Delete this user message and everything
+    /// after it. Only set for non-queued user bubbles when idle.
+    var onDeleteFrom: (() -> Void)?
     var onWithdraw: (() -> Void)?
     var autoRetryAttempt: Int = 0
     var autoRetryCountdown: Int = 0
@@ -194,6 +197,8 @@ struct ChatMessageRow: View {
     var toolSnapshots: [ToolSnapshotItem] = []
     @State private var showUsage = false
     @State private var showCompactSummary = false
+    /// [T-ios-delete-from-message] Confirmation gate for the suffix delete.
+    @State private var showDeleteFromConfirm = false
     /// Two-phase token usage reveal: space expands first, then content fades in.
     @State private var usageContentVisible = false
     /// Row frame in window coordinates — used to gate token-usage tap to bottom zone.
@@ -414,7 +419,7 @@ struct ChatMessageRow: View {
                     Button {
                         onCopyScreenshot()
                     } label: {
-                        Label(String(localized: "Copy Screenshot"), systemImage: "camera.viewfinder")
+                        Label(AppLocalized("Copy Screenshot"), systemImage: "camera.viewfinder")
                     }
                 }
                 if let onEdit {
@@ -431,8 +436,17 @@ struct ChatMessageRow: View {
                         Label("Retry", systemImage: "arrow.counterclockwise")
                     }
                 }
-                if let onCompact {
+                if onDeleteFrom != nil || onCompact != nil {
                     Divider()
+                }
+                if onDeleteFrom != nil {
+                    Button(role: .destructive) {
+                        showDeleteFromConfirm = true
+                    } label: {
+                        Label("Delete From Here", systemImage: "trash")
+                    }
+                }
+                if let onCompact {
                     Button(role: .destructive) {
                         onCompact()
                     } label: {
@@ -447,6 +461,17 @@ struct ChatMessageRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 4)
+        // [T-ios-delete-from-message] Suffix deletion is irreversible and takes
+        // the following replies with it, so it gets an explicit confirmation
+        // rather than firing straight off the menu.
+        .alert(AppLocalized("Delete Message?"), isPresented: $showDeleteFromConfirm) {
+            Button(AppLocalized("Cancel"), role: .cancel) {}
+            Button(AppLocalized("Delete"), role: .destructive) {
+                onDeleteFrom?()
+            }
+        } message: {
+            Text("This message and all messages after it will be deleted. This cannot be undone.")
+        }
     }
 
     // MARK: Assistant Row
@@ -583,7 +608,7 @@ struct ChatMessageRow: View {
                             Button {
                                 onReadAloud()
                             } label: {
-                                Label(String(localized: "Read from Start"), systemImage: "play.circle")
+                                Label(AppLocalized("Read from Start"), systemImage: "play.circle")
                             }
                             // Greyed out while streaming so it can't clash with the
                             // live streaming TTS of the same reply.
@@ -593,7 +618,7 @@ struct ChatMessageRow: View {
                             Button {
                                 onCopyScreenshot()
                             } label: {
-                                Label(String(localized: "Copy Screenshot"), systemImage: "camera.viewfinder")
+                                Label(AppLocalized("Copy Screenshot"), systemImage: "camera.viewfinder")
                             }
                         }
                         if let onCompact {
@@ -694,7 +719,7 @@ struct ChatMessageRow: View {
                 Button {
                     UIPasteboard.general.string = error
                 } label: {
-                    Label(String(localized: "Copy Error"), systemImage: "doc.on.doc")
+                    Label(AppLocalized("Copy Error"), systemImage: "doc.on.doc")
                 }
             }
 

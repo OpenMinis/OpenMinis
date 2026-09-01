@@ -94,7 +94,7 @@ struct SessionMCPsView: View {
                     }
                 } else if filteredServers.isEmpty {
                     Section {
-                        Text(String(localized: "No MCP servers match \"\(searchQuery)\"."))
+                        Text(AppLocalized("No MCP servers match \"\(searchQuery)\"."))
                             .foregroundStyle(.secondary)
                             .font(.subheadline)
                     }
@@ -125,7 +125,7 @@ struct SessionMCPsView: View {
             .navigationTitle("MCPs in Session")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchQuery, placement: .navigationBarDrawer(displayMode: .always),
-                        prompt: Text(String(localized: "Search MCP servers")))
+                        prompt: Text(AppLocalized("Search MCP servers")))
             .onAppear { store.load() }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {

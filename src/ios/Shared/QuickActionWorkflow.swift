@@ -57,7 +57,35 @@ final class QuickActionWorkflow: ObservableObject {
         case coverPresenting(ChatLaunchAction, targetSessionId: String)
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet { lastTransitionAt = Date() }
+    }
+
+    /// When `state` last changed. Lets takeover paths distinguish a LIVE
+    /// workflow (milliseconds–seconds old, still advancing) from STALE
+    /// residue — e.g. `waitingForChatMount` stranded because the user
+    /// backgrounded the app before the draft view ever mounted. Stale
+    /// residue must not keep steering navigation when a newer explicit
+    /// intent (an incoming share) arrives. [T-share-vs-shortcut-state]
+    private(set) var lastTransitionAt = Date()
+
+    /// Reset to idle ONLY when the workflow has been sitting in a non-idle
+    /// state for longer than `seconds`. A fresh, genuinely in-flight
+    /// workflow (cold quick-action launch racing a persisted share record)
+    /// is left alone — its own checkpoints/timeouts still own it. Returns
+    /// whether a reset happened.
+    @discardableResult
+    func resetIfStale(olderThan seconds: TimeInterval, reason: String) -> Bool {
+        if case .idle = state { return false }
+        let age = Date().timeIntervalSince(lastTransitionAt)
+        guard age > seconds else {
+            logger.info("resetIfStale skipped — state=\(stateLabel) age=\(String(format: "%.1f", age))s ≤ \(seconds)s (live workflow)")
+            return false
+        }
+        logger.warning("resetIfStale firing — state=\(stateLabel) age=\(String(format: "%.1f", age))s reason=\(reason)")
+        reset(reason: reason)
+        return true
+    }
 
     private var retryCount = 0
     private let maxRetries = 2

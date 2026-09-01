@@ -177,6 +177,24 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleShellExecute(params: params)
         case "debug.appInfo":
             return handleAppInfo(params: params)
+        case "debug.backup.export":
+            return try await DebugRPCBackup.export(params: params)
+        case "debug.backup.inspect":
+            return try await DebugRPCBackup.inspect(params: params)
+        case "debug.backup.cleanup":
+            return try await DebugRPCBackup.cleanup(params: params)
+        case "debug.backup.open":
+            return try await DebugRPCBackup.open(params: params)
+        case "debug.backup.destinations":
+            return try await DebugRPCBackup.destinations(params: params)
+        case "debug.backup.rescue":
+            return try await DebugRPCBackup.rescue(params: params)
+        case "debug.rclone.info":
+            return try await DebugRPCBackup.rcloneInfo(params: params)
+        case "debug.rclone.remote":
+            return try await DebugRPCBackup.rcloneRemote(params: params)
+        case "debug.backup.restore":
+            return try await DebugRPCBackup.restore(params: params)
         case "debug.auth.list":
             return ["tokens": DebugAuthenticator.shared.listTokens(),
                     "authRequired": DebugAuthenticator.shared.authRequired]
@@ -447,6 +465,10 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await DebugRPCChat.compactRevert(params: params)
         case "chat.simulateLongMessage":
             return try await DebugRPCChat.simulateLongMessage(params: params)
+        case "chat.debugRemoveMessages":
+            return try await DebugRPCChat.debugRemoveMessages(params: params)
+        case "chat.deleteFromMessage":
+            return try await DebugRPCChat.deleteFromMessage(params: params)
         #if DEBUG
         // MARK: Voice correction (design §10) — DEBUG-only, like the rest of this block.
         case "debug.voiceCorrection.confusionList":
@@ -467,6 +489,14 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await VoiceCorrectionDebugRPC.rebuildVocabulary(params: params)
         case "debug.voiceCorrection.metrics":
             return try await VoiceCorrectionDebugRPC.metrics(params: params)
+        case "debug.voiceCorrection.vocabularyStats":
+            return try await VoiceCorrectionDebugRPC.vocabularyStats(params: params)
+        case "debug.voiceCorrection.traceList":
+            return try await VoiceCorrectionDebugRPC.traceList(params: params)
+        case "debug.voiceCorrection.traceManualEdits":
+            return try await VoiceCorrectionDebugRPC.traceManualEdits(params: params)
+        case "debug.voiceCorrection.traceClear":
+            return try await VoiceCorrectionDebugRPC.traceClear(params: params)
         case "debug.voiceCorrection.injectConfusionRecord":
             return try await VoiceCorrectionDebugRPC.injectConfusionRecord(params: params)
         case "debug.voiceCorrection.recordManualEdit":
@@ -2090,6 +2120,12 @@ final class DebugJSONRPC: @unchecked Sendable {
                     let waitResult = ctx.sem.wait(timeout: .now() + timeout)
                     if waitResult == .timedOut {
                         ISHShellExecutor.killProcess(pid, withSignal: 9)
+                        // [T-ish-shell-timeout-leak] Same self-heal as the
+                        // agent path: don't leave teardown to an exit
+                        // notification that a zombie-reaped task never sends,
+                        // or this context and its reader threads leak for the
+                        // life of the process.
+                        ISHShellExecutor.finalizeTimedOutPid(pid)
                         continuation.resume(returning: (ctx.result, true))
                         return
                     }
@@ -2196,6 +2232,11 @@ final class DebugJSONRPC: @unchecked Sendable {
             "dataPath": dataPath.path,
             "rootfsPath": docs.appendingPathComponent("alpine-rootfs").path,
             "bundlePath": bundlePath,
+            // [T-ish-shell-timeout-leak] Reader-thread accounting. `liveReaders`
+            // should sit at 0 between commands; a value that only grows is the
+            // shell timeout leak recurring, and it ends with the app unable to
+            // run any command until the device restarts.
+            "shellLeakGuard": ISHShellExecutor.leakGuardStatus(),
             "buildDate": buildDate,
         ]
 

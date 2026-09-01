@@ -56,7 +56,13 @@ final class WebViewHolder: NSObject, ObservableObject {
 
         if localFile {
             let prefs = config.preferences
-            prefs.setValue(true, forKey: "allowFileAccessFromFileURLs")
+            // [T-ios-mac-uncaught-nsexception] Both keys are UNDOCUMENTED WKPreferences
+            // KVC keys. A raw setValue:forKey: throws NSUnknownKeyException the moment a
+            // WebKit release stops backing one — uncatchable from Swift, so it terminates
+            // the process. The sibling key below was already routed through the guard;
+            // this one was not, which is the whole hazard (same object, same risk, one
+            // line apart). Same treatment for both: keep the behaviour, survive removal.
+            SafeKVCSetTrue.apply(prefs, key: "allowFileAccessFromFileURLs")
             SafeKVCSetTrue.apply(prefs, key: "allowUniversalAccessFromFileURLs")
         }
 
@@ -276,34 +282,34 @@ struct WebPreviewMoreMenu: View {
                 Button {
                     holder.stopLoading()
                 } label: {
-                    Label(String(localized: "Stop"), systemImage: "xmark.circle")
+                    Label(AppLocalized("Stop"), systemImage: "xmark.circle")
                 }
             } else {
                 Button {
                     holder.reload()
                 } label: {
-                    Label(String(localized: "Reload"), systemImage: "arrow.clockwise")
+                    Label(AppLocalized("Reload"), systemImage: "arrow.clockwise")
                 }
             }
             if let onExpand {
                 Button {
                     onExpand()
                 } label: {
-                    Label(String(localized: "Fullscreen"), systemImage: "arrow.up.left.and.arrow.down.right")
+                    Label(AppLocalized("Fullscreen"), systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
             if let onCollapse {
                 Button {
                     onCollapse()
                 } label: {
-                    Label(String(localized: "Exit Fullscreen"), systemImage: "arrow.down.right.and.arrow.up.left")
+                    Label(AppLocalized("Exit Fullscreen"), systemImage: "arrow.down.right.and.arrow.up.left")
                 }
             }
             if let onAddToHomeScreen {
                 Button {
                     onAddToHomeScreen()
                 } label: {
-                    Label(String(localized: "Add to Home Screen"), systemImage: "rectangle.stack.badge.plus")
+                    Label(AppLocalized("Add to Home Screen"), systemImage: "rectangle.stack.badge.plus")
                 }
             }
             Button {
@@ -311,32 +317,32 @@ struct WebPreviewMoreMenu: View {
                 holder.setDesktopMode(desktopMode)
             } label: {
                 if desktopMode {
-                    Label(String(localized: "Request Mobile Site"), systemImage: "iphone")
+                    Label(AppLocalized("Request Mobile Site"), systemImage: "iphone")
                 } else {
-                    Label(String(localized: "Request Desktop Site"), systemImage: "desktopcomputer")
+                    Label(AppLocalized("Request Desktop Site"), systemImage: "desktopcomputer")
                 }
             }
             if allowOpenInSafari {
                 Button {
                     UIApplication.shared.open(url)
                 } label: {
-                    Label(String(localized: "Open in Safari"), systemImage: "safari")
+                    Label(AppLocalized("Open in Safari"), systemImage: "safari")
                 }
             }
             Button {
                 holder.printPage()
             } label: {
-                Label(String(localized: "Print"), systemImage: "printer")
+                Label(AppLocalized("Print"), systemImage: "printer")
             }
             Button {
                 showShareSheet = true
             } label: {
-                Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
             }
             Button {
                 UIPasteboard.general.string = url.absoluteString
             } label: {
-                Label(String(localized: "Copy Link"), systemImage: "doc.on.doc")
+                Label(AppLocalized("Copy Link"), systemImage: "doc.on.doc")
             }
         } label: {
             Image(systemName: "ellipsis.circle")
@@ -628,29 +634,29 @@ struct MinisSafariView: View {
                 Button {
                     exitFullscreen(returnToSheet: true)
                 } label: {
-                    Label(String(localized: "Exit Fullscreen"), systemImage: "arrow.down.right.and.arrow.up.left")
+                    Label(AppLocalized("Exit Fullscreen"), systemImage: "arrow.down.right.and.arrow.up.left")
                 }
             }
             Button {
                 reload()
             } label: {
-                Label(String(localized: "Reload"), systemImage: "arrow.clockwise")
+                Label(AppLocalized("Reload"), systemImage: "arrow.clockwise")
             }
             Button {
                 holder.printPage()
             } label: {
-                Label(String(localized: "Print"), systemImage: "printer")
+                Label(AppLocalized("Print"), systemImage: "printer")
             }
             Button {
                 showShareSheet = true
             } label: {
-                Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
             }
             Divider()
             Button(role: .destructive) {
                 exitFullscreen(returnToSheet: false)
             } label: {
-                Label(String(localized: "Close"), systemImage: "xmark")
+                Label(AppLocalized("Close"), systemImage: "xmark")
             }
         } label: {
             Image(systemName: "ellipsis")

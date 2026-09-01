@@ -221,8 +221,8 @@ struct EnhancedBackgroundSettingsView: View {
         // into a String, so localize here rather than relying on Text lookup.
         let quality: String
         switch voice.quality {
-        case .enhanced: quality = String(localized: "Enhanced", comment: "Speech voice quality")
-        case .premium: quality = String(localized: "Premium", comment: "Speech voice quality")
+        case .enhanced: quality = AppLocalized("Enhanced", comment: "Speech voice quality")
+        case .premium: quality = AppLocalized("Premium", comment: "Speech voice quality")
         default: quality = ""
         }
         let suffix = quality.isEmpty ? "" : " (\(quality))"
@@ -259,9 +259,9 @@ struct EnhancedBackgroundSettingsView: View {
     /// enabled keep-alive legs.
     private func extendedTierLabel(location: Bool, audio: Bool) -> String {
         switch (location, audio) {
-        case (true, true): return String(localized: "Extended (Location + Audio)", comment: "Keep-alive tier")
-        case (true, false): return String(localized: "Extended (Location)", comment: "Keep-alive tier")
-        default: return String(localized: "Extended (Audio)", comment: "Keep-alive tier")
+        case (true, true): return AppLocalized("Extended (Location + Audio)", comment: "Keep-alive tier")
+        case (true, false): return AppLocalized("Extended (Location)", comment: "Keep-alive tier")
+        default: return AppLocalized("Extended (Audio)", comment: "Keep-alive tier")
         }
     }
 
@@ -272,12 +272,12 @@ struct EnhancedBackgroundSettingsView: View {
     /// this row English in every language.
     private var locationStatusText: String {
         switch keepAlive.locationAuthStatus {
-        case .notDetermined: return String(localized: "Not Requested", comment: "Location permission status")
-        case .restricted: return String(localized: "Restricted", comment: "Location permission status")
-        case .denied: return String(localized: "Denied", comment: "Location permission status")
-        case .authorizedWhenInUse: return String(localized: "When In Use", comment: "Location permission status")
-        case .authorizedAlways: return String(localized: "Always", comment: "Location permission status")
-        @unknown default: return String(localized: "Unknown", comment: "Location permission status")
+        case .notDetermined: return AppLocalized("Not Requested", comment: "Location permission status")
+        case .restricted: return AppLocalized("Restricted", comment: "Location permission status")
+        case .denied: return AppLocalized("Denied", comment: "Location permission status")
+        case .authorizedWhenInUse: return AppLocalized("When In Use", comment: "Location permission status")
+        case .authorizedAlways: return AppLocalized("Always", comment: "Location permission status")
+        @unknown default: return AppLocalized("Unknown", comment: "Location permission status")
         }
     }
 

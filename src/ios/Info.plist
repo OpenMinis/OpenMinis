@@ -2,19 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleLocalizations</key>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>en</string>
-		<string>zh-Hans</string>
-		<string>zh-Hant</string>
-		<string>ja</string>
-		<string>ko</string>
-		<string>fr</string>
-		<string>de</string>
-		<string>ru</string>
+		<string>com.openminis.app.liveactivity-refresh</string>
 	</array>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -29,11 +20,214 @@
 				<string>public.json</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Minis Backup</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.openminis.app.minisbak</string>
+			</array>
+		</dict>
 	</array>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>AppIcon-Dark</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-Dark</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-LegacyDark</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-LegacyDark</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-LegacyLight</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-LegacyLight</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-Light</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-Light</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+		</dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon-Light</string>
+			</array>
+			<key>UIPrerenderedIcon</key>
+			<false/>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>AppIcon-Dark</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-Dark</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-LegacyDark</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-LegacyDark</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-LegacyLight</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-LegacyLight</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+			<key>AppIcon-Light</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>AlternateIcons/AppIcon-Light</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<false/>
+			</dict>
+		</dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon-Light</string>
+			</array>
+			<key>UIPrerenderedIcon</key>
+			<false/>
+		</dict>
+	</dict>
+	<key>CFBundleLocalizations</key>
 	<array>
-		<string>com.openminis.app.liveactivity-refresh</string>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>ja</string>
+		<string>ko</string>
+		<string>fr</string>
+		<string>de</string>
+		<string>ru</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Claude OAuth Callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.openminis.app</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Minis Share</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>minis</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>MCP OAuth Callback</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>minis-mcp</string>
+			</array>
+		</dict>
+	</array>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>NFCReaderUsageDescription</key>
+	<string>Minis uses NFC so the AI agent can read and write NFC tags on your behalf.</string>
+	<key>NSAlarmKitUsageDescription</key>
+	<string>Minis uses AlarmKit so the AI agent can set alarms and timers on your behalf.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSAppleMusicUsageDescription</key>
+	<string>Minis uses media library access so the AI agent can search your music library and control playback on your behalf.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Minis uses Bluetooth so the AI agent can scan for, connect to, and communicate with nearby BLE devices on your behalf.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Minis uses Bluetooth so the AI agent can scan for, connect to, and communicate with nearby BLE devices on your behalf.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Minis uses calendar access so the AI agent can query your schedule, check availability, and create events on your behalf.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Minis uses calendar access so the AI agent can query your schedule, check availability, and create events on your behalf.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Minis needs camera access to take photos for AI conversations.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Minis uses Face ID to protect locked chat sessions so only you can view their contents.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Minis uses HealthKit access so the AI agent can read your health data such as steps, heart rate, sleep, and workouts on your behalf.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Minis uses HealthKit write access so the AI agent can log health data such as steps, weight, and water intake on your behalf.</string>
+	<key>NSHomeKitUsageDescription</key>
+	<string>Minis uses HomeKit access so the AI agent can query and control your smart home accessories on your behalf.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Minis uses local network access for the debug server and to let the AI agent communicate with locally-hosted services.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Minis uses background location to keep agent tasks running when the app is in the background. Location data is only used to record session connection history.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Minis uses your location to record where agent sessions are started for your session history.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Minis needs microphone access for voice-to-text input in chat.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Minis needs permission to save videos and images to your photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Minis needs photo library access to attach images to AI conversations.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Minis uses reminders access so the AI agent can query and create reminders on your behalf.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Minis uses reminders access so the AI agent can query and create reminders on your behalf.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Minis uses speech recognition to convert your voice into text messages.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
@@ -41,48 +235,43 @@
 		<string>location</string>
 		<string>remote-notification</string>
 	</array>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
-	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
-	<true/>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Minis uses your location to record where agent sessions are started for your session history.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Minis uses background location to keep agent tasks running when the app is in the background. Location data is only used to record session connection history.</string>
-	<key>NSCalendarsUsageDescription</key>
-	<string>Minis uses calendar access so the AI agent can query your schedule, check availability, and create events on your behalf.</string>
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Minis uses calendar access so the AI agent can query your schedule, check availability, and create events on your behalf.</string>
-	<key>NSRemindersUsageDescription</key>
-	<string>Minis uses reminders access so the AI agent can query and create reminders on your behalf.</string>
-	<key>NSRemindersFullAccessUsageDescription</key>
-	<string>Minis uses reminders access so the AI agent can query and create reminders on your behalf.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>Minis needs camera access to take photos for AI conversations.</string>
-	<key>NSFaceIDUsageDescription</key>
-	<string>Minis uses Face ID to protect locked chat sessions so only you can view their contents.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Minis needs photo library access to attach images to AI conversations.</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Minis needs permission to save videos and images to your photo library.</string>
-	<key>NSHealthShareUsageDescription</key>
-	<string>Minis uses HealthKit access so the AI agent can read your health data such as steps, heart rate, sleep, and workouts on your behalf.</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>Minis uses HealthKit write access so the AI agent can log health data such as steps, weight, and water intake on your behalf.</string>
-	<key>NSAppleMusicUsageDescription</key>
-	<string>Minis uses media library access so the AI agent can search your music library and control playback on your behalf.</string>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Minis needs microphone access for voice-to-text input in chat.</string>
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Minis uses speech recognition to convert your voice into text messages.</string>
-	<key>NSHomeKitUsageDescription</key>
-	<string>Minis uses HomeKit access so the AI agent can query and control your smart home accessories on your behalf.</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Minis uses Bluetooth so the AI agent can scan for, connect to, and communicate with nearby BLE devices on your behalf.</string>
-	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Minis uses Bluetooth so the AI agent can scan for, connect to, and communicate with nearby BLE devices on your behalf.</string>
-	<key>NFCReaderUsageDescription</key>
-	<string>Minis uses NFC so the AI agent can read and write NFC tags on your behalf.</string>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.archive</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Minis Backup</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.openminis.app.minisbak</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>minisbak</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/x-minisbak</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>com.apple.developer.nfc.readersession.felica.systemcodes</key>
+	<array>
+		<string>0003</string>
+		<string>FE00</string>
+		<string>8008</string>
+		<string>88B4</string>
+		<string>12FC</string>
+		<string>8005</string>
+		<string>90B7</string>
+		<string>927A</string>
+		<string>86A7</string>
+	</array>
 	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
 	<array>
 		<string>D2760000850100</string>
@@ -178,157 +367,5 @@
 		<string>A0000008580201</string>
 		<string>00000000000000</string>
 	</array>
-	<key>com.apple.developer.nfc.readersession.felica.systemcodes</key>
-	<array>
-		<string>0003</string>
-		<string>FE00</string>
-		<string>8008</string>
-		<string>88B4</string>
-		<string>12FC</string>
-		<string>8005</string>
-		<string>90B7</string>
-		<string>927A</string>
-		<string>86A7</string>
-	</array>
-	<key>NSAlarmKitUsageDescription</key>
-	<string>Minis uses AlarmKit so the AI agent can set alarms and timers on your behalf.</string>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<key>CFBundleIcons</key>
-	<dict>
-		<key>CFBundlePrimaryIcon</key>
-		<dict>
-			<key>CFBundleIconFiles</key>
-			<array>
-				<string>AppIcon-Light</string>
-			</array>
-			<key>UIPrerenderedIcon</key>
-			<false/>
-		</dict>
-		<key>CFBundleAlternateIcons</key>
-		<dict>
-			<key>AppIcon-Light</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-Light</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-Dark</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-Dark</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-LegacyLight</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-LegacyLight</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-LegacyDark</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-LegacyDark</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-		</dict>
-	</dict>
-	<key>CFBundleIcons~ipad</key>
-	<dict>
-		<key>CFBundlePrimaryIcon</key>
-		<dict>
-			<key>CFBundleIconFiles</key>
-			<array>
-				<string>AppIcon-Light</string>
-			</array>
-			<key>UIPrerenderedIcon</key>
-			<false/>
-		</dict>
-		<key>CFBundleAlternateIcons</key>
-		<dict>
-			<key>AppIcon-Light</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-Light</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-Dark</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-Dark</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-LegacyLight</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-LegacyLight</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-			<key>AppIcon-LegacyDark</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>AlternateIcons/AppIcon-LegacyDark</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<false/>
-			</dict>
-		</dict>
-	</dict>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>Claude OAuth Callback</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>com.openminis.app</string>
-			</array>
-		</dict>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>Minis Share</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>minis</string>
-			</array>
-		</dict>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>MCP OAuth Callback</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>minis-mcp</string>
-			</array>
-		</dict>
-	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Minis uses local network access for the debug server and to let the AI agent communicate with locally-hosted services.</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-	</dict>
 </dict>
 </plist>

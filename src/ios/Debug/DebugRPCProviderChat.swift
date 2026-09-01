@@ -848,6 +848,79 @@ enum DebugRPCProvider {
 @MainActor
 enum DebugRPCChat {
 
+    /// [T-msgidx-oob-repro] `chat.debugRemoveMessages` — TEST HOOK.
+    ///
+    /// Removes `count` UI rows from the FRONT of the LIVE view model's
+    /// `messages` array (never the trailing assistant), simulating the
+    /// external mid-loop mutations the agent loop's msgIdx resync exists to
+    /// survive: an iCloud inbound rebuild, a compaction sweep, a user delete.
+    /// Exists to deterministically reproduce (and then regression-test) the
+    /// crash family where `messages[msgIdx]` is subscripted with a stale
+    /// index after a suspension — timing the call into a stalled provider
+    /// stream lands the mutation inside the exact windows that crash in the
+    /// field (1.11(15) .ips 2026-08-15 14:02, runAgentLoop reminder path).
+    /// Deliberately mutates ONLY the UI array (not agentHistory, not the DB)
+    /// — same shape as the sync-rebuild mutation.
+    static func debugRemoveMessages(params: [String: Any]) async throws -> [String: Any] {
+        guard let sid = params["sessionId"] as? String, !sid.isEmpty else {
+            throw DebugRPCErr(-32602, "Missing required param: sessionId")
+        }
+        let count = max(1, min((params["count"] as? Int) ?? 2, 10))
+        return await MainActor.run {
+            let (vm, _) = ViewModelCache.shared.getOrCreate(for: sid)
+            let before = vm.messages.count
+            var removed = 0
+            while removed < count, vm.messages.count > 1 {
+                vm.messages.remove(at: 0)
+                removed += 1
+            }
+            AppLogger(category: "DebugRPC").warning("[MsgIdxRepro] removed \(removed) leading UI rows (\(before) → \(vm.messages.count)) sid=\(sid.prefix(8))")
+            return ["before": before, "removed": removed, "after": vm.messages.count]
+        }
+    }
+
+    /// [T-ios-delete-from-message] `chat.deleteFromMessage` — TEST HOOK.
+    ///
+    /// Drives `AIChatViewModel.deleteFromMessage` on the live view model and
+    /// reports the before/after size of all THREE stores the suffix delete has
+    /// to keep in step (UI rows, model-facing agentHistory, persisted rows), so
+    /// a test can assert they stay consistent — in particular that the surviving
+    /// history never ends on a dangling tool_use.
+    ///
+    /// `index` selects the n-th USER bubble (0-based) instead of requiring a
+    /// message UUID, which is what a script actually has on hand.
+    static func deleteFromMessage(params: [String: Any]) async throws -> [String: Any] {
+        guard let sid = params["sessionId"] as? String, !sid.isEmpty else {
+            throw DebugRPCErr(-32602, "Missing required param: sessionId")
+        }
+        let userIndex = (params["index"] as? Int) ?? 0
+        // Make sure the view model has its UI loaded — a session that isn't
+        // open in the app has an empty `messages`/`agentHistory`, and the
+        // delete would be a silent no-op.
+        let (vm, _) = await MainActor.run { ViewModelCache.shared.getOrCreate(for: sid) }
+        await vm.loadSession()
+        return await MainActor.run {
+            let userIds = vm.messages.filter { $0.role == .user }.map(\.id)
+            guard userIndex >= 0, userIndex < userIds.count else {
+                return ["error": "index \(userIndex) out of range (userBubbles=\(userIds.count))"]
+            }
+            let beforeMsgs = vm.messages.count
+            let beforeHistory = vm.agentHistory.count
+            vm.deleteFromMessage(userIds[userIndex])
+            return [
+                "userBubblesBefore": userIds.count,
+                "messagesBefore": beforeMsgs,
+                "messagesAfter": vm.messages.count,
+                "historyBefore": beforeHistory,
+                "historyAfter": vm.agentHistory.count,
+                "trailingHistoryRole": vm.agentHistory.last.map { "\($0.role)" } ?? "none",
+                "trailingHasToolUse": vm.agentHistory.last.map { entry in
+                    entry.parts.contains { if case .toolUse = $0 { return true }; return false }
+                } ?? false,
+            ]
+        }
+    }
+
     static func modelsList(params: [String: Any]) throws -> [String: Any] {
         let includeHidden = (params["includeHidden"] as? Bool) ?? false
         let includeDisabled = (params["includeDisabled"] as? Bool) ?? false

@@ -1,6 +1,18 @@
 import Foundation
 import Combine
 
+/// [T-ios-badge-diag] Diagnostics for the badge/freshness path.
+///
+/// This subsystem cost two rounds to diagnose because it logged NOTHING: the
+/// first round's conclusion came from code reading alone and fixed only half
+/// the problem, and the real cause (reconcile stamping `Date()` on every
+/// launch/foreground) only surfaced after grepping a 57MB device log for a
+/// line that belonged to a different subsystem entirely. Every write to a
+/// badge timestamp is now traceable by `grep '\[BadgeStamp\]'`, so the next
+/// "why is this badge stale/fresh" question is answered from the log instead
+/// of from inference.
+private let logger = AppLogger(category: "SessionBadgeStore")
+
 /// A transient, prioritized status that can be shown as a small corner badge on
 /// a session's list-cell icon. Ordered, head-of-queue wins.
 ///
@@ -137,8 +149,11 @@ final class SessionBadgeStore: ObservableObject {
     /// Test injection: set a badge with a back-dated entry stamp so the
     /// freshness window is exercisable from the debug server.
     func debugSetBadge(_ state: SessionBadgeState, for sessionId: String, enteredAt: Date) {
-        pushFront(state, for: sessionId)
+        pushFront(state, for: sessionId, source: .debugInject)
         badgeTimestamps[sessionId, default: [:]][state] = enteredAt
+        logger.info(
+            "[BadgeStamp] debug-inject sid=\(sessionId.prefix(8)) state=\(state.rawValue) " +
+            "enteredAt=\(Self.stampDesc(enteredAt)) age=\(Self.ageDesc(enteredAt))")
         persist()
     }
     #endif
@@ -148,16 +163,86 @@ final class SessionBadgeStore: ObservableObject {
     /// Push `state` to the *front* of the session's queue (highest priority).
     /// No-op if the same state is already at the front, so repeated interruptions
     /// don't stack duplicates. Persists.
-    func pushFront(_ state: SessionBadgeState, for sessionId: String) {
+    ///
+    /// [T-ios-group-pause-badge-restamp] `restamp` distinguishes the two ways a
+    /// state gets pushed, which the caller knows and this store cannot infer:
+    ///
+    ///   • `true` (default) — a REAL new entry into the state (an actual
+    ///     interruption just happened). The freshness window keys off the last
+    ///     genuine entry, so this overwrites any existing stamp.
+    ///   • `false` — the state was merely RE-DETECTED for a session that was
+    ///     already in it (loading an old chat whose DB tail still looks
+    ///     interrupted, a background pre-warm, a cached VM re-deriving its
+    ///     flags). This is the same situation `reconcileInterruptedSessions`
+    ///     handles after a hard kill, and it takes the same line: keep the
+    ///     existing stamp, and only stamp now when none survives.
+    ///
+    /// Why it matters: the group-card badge only passes states entered within
+    /// the last 24h. When every push re-stamped unconditionally, simply opening
+    /// (or cold-start scanning) a chat interrupted days ago reset its stamp to
+    /// now, so a long-stale pause flagged its whole group forever — the more
+    /// often the user looked at it, the less able it was to expire.
+    func pushFront(
+        _ state: SessionBadgeState,
+        for sessionId: String,
+        restamp: Bool = true,
+        source: StampSource = .push
+    ) {
         var queue = badgeStates[sessionId] ?? []
         // Drop any existing copy so the state isn't duplicated, then prepend.
         queue.removeAll { $0 == state }
         queue.insert(state, at: 0)
         badgeStates[sessionId] = queue
-        // Every push re-stamps: the freshness window keys off the LAST time
-        // the session entered this state.
-        badgeTimestamps[sessionId, default: [:]][state] = Date()
+        let previous = badgeTimestamps[sessionId]?[state]
+        let wrote = restamp || previous == nil
+        if wrote {
+            let now = Date()
+            badgeTimestamps[sessionId, default: [:]][state] = now
+            // [T-ios-badge-diag] The line to grep when a stamp moved and nobody
+            // knows who moved it. `restamp` is the caller's declared intent;
+            // `age` is how old the stamp being overwritten was, which is what
+            // makes an unwanted refresh obvious at a glance (overwriting a
+            // 3-day-old stamp is almost always the bug, not the intent).
+            logger.info(
+                "[BadgeStamp] write sid=\(sessionId.prefix(8)) state=\(state.rawValue) " +
+                "source=\(source.rawValue) restamp=\(restamp) " +
+                "old=\(Self.stampDesc(previous)) new=\(Self.stampDesc(now)) " +
+                "overwroteAge=\(Self.ageDesc(previous))")
+        } else {
+            logger.info(
+                "[BadgeStamp] keep sid=\(sessionId.prefix(8)) state=\(state.rawValue) " +
+                "source=\(source.rawValue) restamp=false kept=\(Self.stampDesc(previous)) " +
+                "age=\(Self.ageDesc(previous))")
+        }
         persist()
+    }
+
+    /// [T-ios-badge-diag] Who asked for a stamp write. Carried into the log so a
+    /// stray refresh can be attributed to a call site without re-reading code.
+    enum StampSource: String {
+        /// A live interruption observed by the owning chat VM.
+        case push
+        /// The load/pre-warm path re-deriving an interruption that already happened.
+        case redetect
+        /// Launch/foreground reconcile restoring a marker from the DB tail.
+        case reconcile
+        /// The one-time repair of stamps polluted by earlier builds.
+        case repair
+        /// DEBUG injection from the debug RPC.
+        case debugInject
+    }
+
+    /// Compact, greppable timestamp rendering (`nil` stays visible as "none").
+    private static func stampDesc(_ date: Date?) -> String {
+        guard let date else { return "none" }
+        return String(format: "%.0f", date.timeIntervalSince1970)
+    }
+
+    /// How long ago a stamp was, in hours — the number that actually matters
+    /// against the 24h window.
+    private static func ageDesc(_ date: Date?) -> String {
+        guard let date else { return "n/a" }
+        return String(format: "%.1fh", -date.timeIntervalSinceNow / 3600)
     }
 
     /// Remove `state` from the session's queue (if present). The next state in
@@ -172,10 +257,18 @@ final class SessionBadgeStore: ObservableObject {
         } else {
             badgeStates[sessionId] = queue
         }
+        let dropped = badgeTimestamps[sessionId]?[state]
         badgeTimestamps[sessionId]?.removeValue(forKey: state)
         if badgeTimestamps[sessionId]?.isEmpty == true {
             badgeTimestamps.removeValue(forKey: sessionId)
         }
+        // [T-ios-badge-diag] Dropping the stamp is what lets a later re-add mint
+        // a brand-new one — the recurrence mechanism behind the original bug.
+        // Logged so a remove→re-add churn loop is visible as a pattern rather
+        // than having to be deduced.
+        logger.info(
+            "[BadgeStamp] drop sid=\(sessionId.prefix(8)) state=\(state.rawValue) " +
+            "droppedStamp=\(Self.stampDesc(dropped)) age=\(Self.ageDesc(dropped))")
         persist()
     }
 
@@ -188,8 +281,19 @@ final class SessionBadgeStore: ObservableObject {
     /// (resumed/completed before the kill) gets its stale badge cleared.
     ///
     /// Only touches `.paused`; other queued states are left intact.
-    func reconcileInterruptedSessions(_ interruptedIds: Set<String>) {
+    func reconcileInterruptedSessions(
+        _ interruptedIds: Set<String>,
+        entryDates: [String: Date] = [:],
+        trigger: String = "unspecified"
+    ) {
         var changed = false
+        // [T-ios-badge-diag] Per-run tallies. The single most useful signal here
+        // is `fallbackNow`: every one of those is a badge whose age is a guess,
+        // and a large count means the tail dates aren't arriving — the exact
+        // condition that made 288 stale pauses look current on the reporter's
+        // device. `firstStamp` vs `keptStamp` shows whether reconcile is
+        // restoring markers (expected) or re-minting them (not).
+        var firstStamp = 0, keptStamp = 0, fromTailDate = 0, fallbackNow = 0, cleared = 0
         // Add .paused for interrupted sessions that don't have it yet.
         for sid in interruptedIds where badgeStates[sid]?.contains(.paused) != true {
             var queue = badgeStates[sid] ?? []
@@ -197,10 +301,37 @@ final class SessionBadgeStore: ObservableObject {
             badgeStates[sid] = queue
             // Reconcile RESTORES a marker after a hard kill; it is not a new
             // entry into the state, so keep an existing stamp. Only stamp now
-            // when none survives (the original push never happened/persisted)
-            // — best available approximation of the entry time.
+            // when none survives (the original push never happened/persisted).
+            //
+            // [T-ios-group-pause-badge-reconcile-stamp] When none survives, use
+            // the DB tail's own timestamp — the moment the session was actually
+            // left hanging — NOT `Date()`. This is the path that kept the 24h
+            // window broken even after the pushFront fix: reconcile runs on
+            // every launch AND every foreground, and a device carrying hundreds
+            // of long-interrupted sessions (288 on the reporter's, per
+            // [ChatStore.interruptedSessionIds] in their log) had every one of
+            // them stamped "now" the first time the window shipped. It also
+            // recurs: `remove` drops the stamp, so any later re-add would mint
+            // a fresh one again. Falling back to `Date()` only when the tail
+            // date is genuinely unavailable keeps the old behavior for the
+            // case it was written for.
             if badgeTimestamps[sid]?[.paused] == nil {
-                badgeTimestamps[sid, default: [:]][.paused] = Date()
+                let tailDate = entryDates[sid]
+                let stamp = tailDate ?? Date()
+                badgeTimestamps[sid, default: [:]][.paused] = stamp
+                firstStamp += 1
+                if tailDate != nil { fromTailDate += 1 } else { fallbackNow += 1 }
+                // Per-session detail only for the fallback case: those are the
+                // ones whose age is unverified, so they're worth naming. The
+                // tail-dated majority is covered by the summary counts, keeping
+                // a 288-session reconcile from emitting 288 lines.
+                if tailDate == nil {
+                    logger.info(
+                        "[BadgeStamp] reconcile-fallback sid=\(sid.prefix(8)) — no tail date, " +
+                        "stamped now (age unverified)")
+                }
+            } else {
+                keptStamp += 1
             }
             changed = true
         }
@@ -211,8 +342,73 @@ final class SessionBadgeStore: ObservableObject {
             if q.isEmpty { badgeStates.removeValue(forKey: sid) } else { badgeStates[sid] = q }
             badgeTimestamps[sid]?.removeValue(forKey: .paused)
             changed = true
+            cleared += 1
         }
         if changed { persist() }
+        logger.info(
+            "[BadgeReconcile] trigger=\(trigger) interrupted=\(interruptedIds.count) " +
+            "tailDatesAvailable=\(entryDates.count) firstStamp=\(firstStamp) " +
+            "keptStamp=\(keptStamp) fromTailDate=\(fromTailDate) fallbackNow=\(fallbackNow) " +
+            "clearedNoLongerInterrupted=\(cleared) changed=\(changed)")
+    }
+
+    /// [T-ios-group-pause-badge-reconcile-stamp] Correct `.paused` stamps that
+    /// earlier builds wrote as "now" for sessions that had actually been
+    /// interrupted long before.
+    ///
+    /// Why a repair is needed at all: the stamp is persisted, so fixing the
+    /// writers only stops NEW pollution — every install that already ran a
+    /// build between the window shipping (2026-08-02) and this fix still holds
+    /// stamps saying a days-old pause happened moments ago, and the group card
+    /// reads those. The reporter's device had 288 interrupted sessions, so this
+    /// is the bulk of them.
+    ///
+    /// Strategy — trust the DB, never guess: a stamp is rewritten ONLY when the
+    /// session's interrupted tail is demonstrably older than the stamp claims.
+    /// The tail date is the real entry time, so "stamp newer than tail" can only
+    /// mean the stamp was minted by a re-detect/reconcile rather than by the
+    /// interruption itself. A tolerance absorbs the ordinary case where the push
+    /// legitimately lands a moment after the message is written.
+    ///
+    /// Deliberately NOT "wipe everything unknown": that would silence genuinely
+    /// fresh badges too (a real interruption 10 minutes ago), trading a
+    /// false-positive for a false-negative. Sessions absent from `entryDates`
+    /// (no longer interrupted) are left alone — reconcile's removal pass owns
+    /// those. Runs once per launch and is idempotent: after the first pass the
+    /// stamps already match the tails, so nothing changes on later passes.
+    func repairPollutedPausedStamps(entryDates: [String: Date]) {
+        /// A push racing its own message write can land slightly after it.
+        /// Anything beyond this gap is a re-stamp, not the original entry.
+        let tolerance: TimeInterval = 5 * 60
+        var repaired = 0
+        var examined = 0
+        var maxShiftHours: Double = 0
+        for (sid, tailDate) in entryDates {
+            guard let stamped = badgeTimestamps[sid]?[.paused] else { continue }
+            examined += 1
+            guard stamped > tailDate.addingTimeInterval(tolerance) else { continue }
+            let shiftHours = stamped.timeIntervalSince(tailDate) / 3600
+            maxShiftHours = max(maxShiftHours, shiftHours)
+            // [T-ios-badge-diag] Per-session detail: which stamp was wrong and
+            // by how much. `shift` is the size of the lie — a stamp claiming a
+            // pause was 0h old when the tail says 72h shows up as shift=72.0h.
+            logger.info(
+                "[BadgeRepair] fix sid=\(sid.prefix(8)) " +
+                "wasStamped=\(Self.stampDesc(stamped)) (age \(Self.ageDesc(stamped))) → " +
+                "tail=\(Self.stampDesc(tailDate)) (age \(Self.ageDesc(tailDate))) " +
+                "shift=\(String(format: "%.1f", shiftHours))h")
+            badgeTimestamps[sid, default: [:]][.paused] = tailDate
+            repaired += 1
+        }
+        if repaired > 0 { persist() }
+        // Always emit the summary, including the repaired=0 steady state: that
+        // zero IS the signal that the self-heal has converged. A count that
+        // stays high across launches means something is still re-polluting the
+        // stamps and this is only papering over it — the thing to notice early.
+        logger.info(
+            "[BadgeRepair] summary examined=\(examined) repaired=\(repaired) " +
+            "maxShift=\(String(format: "%.1f", maxShiftHours))h " +
+            "tailDatesAvailable=\(entryDates.count)")
     }
 
     /// Remove a session's entire queue (e.g. when the session is deleted).

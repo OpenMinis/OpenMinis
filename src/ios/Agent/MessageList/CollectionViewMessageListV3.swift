@@ -41,7 +41,10 @@ struct CollectionViewMessageListV3: UIViewControllerRepresentable {
     var inputFocused: Bool
     var onRetryMessage: ((UUID) -> Void)?
     var onRetryLast: (() -> Void)?
+    /// [T-ios-assistant-header-open-soul] Tap on the assistant identity row.
+    var onOpenSoulSettings: (() -> Void)?
     var onEdit: ((UUID) -> Void)?
+    var onDeleteFrom: ((UUID) -> Void)?
     var onWithdraw: ((UUID) -> Void)?
     var onResume: (() -> Void)?
     var onStop: (() -> Void)?
@@ -79,8 +82,10 @@ struct CollectionViewMessageListV3: UIViewControllerRepresentable {
         // the buttons stayed hidden at diff≈2700pt from the bottom).
         coord.rebindViewModelIfNeeded(vm)
         coord.onRetryMessage = onRetryMessage
+        coord.onOpenSoulSettings = onOpenSoulSettings
         coord.onRetryLast = onRetryLast
         coord.onEdit = onEdit
+        coord.onDeleteFrom = onDeleteFrom
         coord.onWithdraw = onWithdraw
         coord.onResume = onResume
         coord.onStop = onStop
@@ -199,29 +204,74 @@ struct CollectionViewMessageListV3: UIViewControllerRepresentable {
 // MARK: - V3 Bridged Cell Views (no GeometryReader)
 
 /// Header: "✦ Minis" label at the top of each assistant turn.
-/// Name comes from SOUL.md (user-editable in Soul Settings); the
-/// sparkles glyph is fixed — custom emoji is no longer supported,
-/// matching the Soul Settings UI.
+/// Name comes from SOUL.md (user-editable in Soul Settings).
+///
+/// [T-ios-assistant-header-open-soul] Tapping the row opens Soul Settings.
+/// The row shows the identity the user configured there, so it is the
+/// obvious place to reach for when changing it.
 private struct BridgedAssistantHeaderV3: View {
     @ObservedObject var message: ChatMessage
     var maxWidth: CGFloat = 0
     @State private var soulMeta: SoulMetadata = SoulStore.cachedMetadata
+    /// [T-ios-assistant-header-open-soul] Injected, NOT read from the
+    /// environment.
+    ///
+    /// `\.openMinisURL` is set on AIChatView, but each cell here is hosted in
+    /// its own `UIHostingConfiguration`, which starts a fresh SwiftUI hierarchy
+    /// rather than inheriting that one. Reading the environment inside a cell
+    /// therefore silently yields the key's default — an action that returns
+    /// `.systemAction` and does nothing. (Verified on device: the tap fired, no
+    /// navigation happened, and no deep-link log line appeared.) So the handler
+    /// is threaded down the same way every other cell callback already is.
+    var onOpenSoulSettings: (() -> Void)?
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color(red: 0.72, green: 0.69, blue: 0.59),
-                                 Color(red: 0.6, green: 0.6, blue: 0.55)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+            // [T-soul-custom-icon] Honours a user-chosen emoji or image;
+            // falls back to the gradient sparkle when unset, so headers for
+            // users who never customized are pixel-identical to before.
+            // 18pt keeps the measured 28pt row height below intact — the
+            // icon is square by construction (SoulIconImage.encode crops),
+            // so an image cannot make this row taller than a glyph does.
+            SoulIconView(
+                icon: soulMeta.icon,
+                size: 18,
+                sparkleGradient: LinearGradient(
+                    colors: [Color(red: 0.72, green: 0.69, blue: 0.59),
+                             Color(red: 0.6, green: 0.6, blue: 0.55)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
                 )
+            )
             Text(soulMeta.name.isEmpty ? "Minis" : soulMeta.name)
                 .font(.body.weight(.semibold))
                 .foregroundStyle(ChatColors.primaryText)
         }
+        // [T-ios-assistant-header-open-soul] Hit area and tap, applied to the
+        // icon+name HStack only — NOT to the full-width row below it.
+        //
+        // The `.frame(maxWidth: .infinity)` modifiers further down stretch this
+        // header across the whole message column; making that tappable would
+        // turn the empty space beside the name into a button and swallow taps
+        // meant for the transcript.
+        //
+        // `contentShape` makes the whole icon+name box (including the 6pt gap)
+        // hittable rather than only the glyph and text pixels.
+        //
+        // On the 44pt HIG target: the row is deliberately NOT grown to 44pt.
+        // The comment above records that this header measures 28pt and that
+        // the cell height is UIKit-self-sized, so enlarging the frame would
+        // shift every assistant message in the transcript — the task explicitly
+        // asks not to disturb layout. Instead the touch target is widened
+        // horizontally (the tappable box spans icon + gap + full name, well
+        // over 44pt across) and the 28pt height is left alone. That is the
+        // trade the surrounding code forces; growing it would need the height
+        // constant re-measured, which is out of scope here.
+        .contentShape(Rectangle())
+        .onTapGesture { onOpenSoulSettings?() }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(AppLocalized("Open Soul settings"))
+        .accessibilityHint(AppLocalized("Change the assistant's name, icon and personality"))
         .onReceive(NotificationCenter.default.publisher(for: .soulMdChanged)) { _ in
             soulMeta = SoulStore.cachedMetadata
         }
@@ -296,7 +346,7 @@ private struct BridgedAssistantBlockV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(String(localized: "Copy All"), systemImage: "doc.on.doc")
+                        Label(AppLocalized("Copy All"), systemImage: "doc.on.doc")
                     }
                     Button {
                         let text = message.blocks
@@ -304,13 +354,13 @@ private struct BridgedAssistantBlockV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(String(localized: "Copy Markdown"), systemImage: "text.quote")
+                        Label(AppLocalized("Copy Markdown"), systemImage: "text.quote")
                     }
                     if let onReadAloud = bridge.onReadAloud {
                         Button {
                             onReadAloud()
                         } label: {
-                            Label(String(localized: "Read from Start"), systemImage: "play.circle")
+                            Label(AppLocalized("Read from Start"), systemImage: "play.circle")
                         }
                         // Greyed out while streaming so it can't clash with the
                         // live streaming TTS of the same reply.
@@ -320,7 +370,7 @@ private struct BridgedAssistantBlockV3: View {
                         Button {
                             onCopyScreenshot()
                         } label: {
-                            Label(String(localized: "Copy Screenshot"), systemImage: "camera.viewfinder")
+                            Label(AppLocalized("Copy Screenshot"), systemImage: "camera.viewfinder")
                         }
                     }
                     if let onForceSync = bridge.onForceSync {
@@ -328,7 +378,7 @@ private struct BridgedAssistantBlockV3: View {
                         Button {
                             onForceSync()
                         } label: {
-                            Label(String(localized: "Force Sync"), systemImage: "arrow.triangle.2.circlepath.icloud")
+                            Label(AppLocalized("Force Sync"), systemImage: "arrow.triangle.2.circlepath.icloud")
                         }
                     }
                     if let onCompact = bridge.onCompact {
@@ -336,7 +386,7 @@ private struct BridgedAssistantBlockV3: View {
                         Button(role: .destructive) {
                             onCompact()
                         } label: {
-                            Label(String(localized: "Compact Above"), systemImage: "arrow.down.right.and.arrow.up.left")
+                            Label(AppLocalized("Compact Above"), systemImage: "arrow.down.right.and.arrow.up.left")
                         }
                     }
                 } preview: {
@@ -454,7 +504,7 @@ private struct BridgedAssistantFooterV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(String(localized: "Copy All"), systemImage: "doc.on.doc")
+                        Label(AppLocalized("Copy All"), systemImage: "doc.on.doc")
                     }
                     Button {
                         let text = message.blocks
@@ -462,13 +512,13 @@ private struct BridgedAssistantFooterV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(String(localized: "Copy Markdown"), systemImage: "text.quote")
+                        Label(AppLocalized("Copy Markdown"), systemImage: "text.quote")
                     }
                     if let onReadAloud = bridge.onReadAloud {
                         Button {
                             onReadAloud()
                         } label: {
-                            Label(String(localized: "Read from Start"), systemImage: "play.circle")
+                            Label(AppLocalized("Read from Start"), systemImage: "play.circle")
                         }
                         // Greyed out while streaming so it can't clash with the
                         // live streaming TTS of the same reply.
@@ -478,7 +528,7 @@ private struct BridgedAssistantFooterV3: View {
                         Button {
                             onCopyScreenshot()
                         } label: {
-                            Label(String(localized: "Copy Screenshot"), systemImage: "camera.viewfinder")
+                            Label(AppLocalized("Copy Screenshot"), systemImage: "camera.viewfinder")
                         }
                     }
                     if let onForceSync = bridge.onForceSync {
@@ -486,7 +536,7 @@ private struct BridgedAssistantFooterV3: View {
                         Button {
                             onForceSync()
                         } label: {
-                            Label(String(localized: "Force Sync"), systemImage: "arrow.triangle.2.circlepath.icloud")
+                            Label(AppLocalized("Force Sync"), systemImage: "arrow.triangle.2.circlepath.icloud")
                         }
                     }
                     if let onCompact = bridge.onCompact {
@@ -494,7 +544,7 @@ private struct BridgedAssistantFooterV3: View {
                         Button(role: .destructive) {
                             onCompact()
                         } label: {
-                            Label(String(localized: "Compact Above"), systemImage: "arrow.down.right.and.arrow.up.left")
+                            Label(AppLocalized("Compact Above"), systemImage: "arrow.down.right.and.arrow.up.left")
                         }
                     }
                 } preview: {
@@ -522,7 +572,7 @@ private struct BridgedAssistantFooterV3: View {
                 Button {
                     UIPasteboard.general.string = error
                 } label: {
-                    Label(String(localized: "Copy Error"), systemImage: "doc.on.doc")
+                    Label(AppLocalized("Copy Error"), systemImage: "doc.on.doc")
                 }
             }
             Spacer()
@@ -535,7 +585,7 @@ private struct BridgedAssistantFooterV3: View {
                 Button(action: onRetry) {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.clockwise").font(.caption.weight(.semibold))
-                        Text(String(localized: "Retry")).font(.caption.weight(.semibold))
+                        Text(AppLocalized("Retry")).font(.caption.weight(.semibold))
                     }
                     .foregroundStyle(ChatColors.primaryText)
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -551,14 +601,14 @@ private struct BridgedAssistantFooterV3: View {
         HStack(alignment: .center, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "pause.circle.fill").font(.caption).foregroundStyle(.orange)
-                Text(String(localized: "Interrupted — tap Resume to continue")).font(.caption).foregroundStyle(.secondary)
+                Text(AppLocalized("Interrupted — tap Resume to continue")).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             if let onResume = bridge.onResume {
                 Button(action: onResume) {
                     HStack(spacing: 4) {
                         Image(systemName: "play.fill").font(.caption.weight(.semibold))
-                        Text(String(localized: "Resume")).font(.caption.weight(.semibold))
+                        Text(AppLocalized("Resume")).font(.caption.weight(.semibold))
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 12).padding(.vertical, 6)
@@ -622,6 +672,7 @@ private struct BridgedWholeMessageV3: View {
             onStop: nil,
             onRetry: bridge.onRetry,
             onEdit: bridge.onEdit,
+            onDeleteFrom: bridge.onDeleteFrom,
             onWithdraw: bridge.onWithdraw,
             autoRetryAttempt: 0,
             autoRetryCountdown: 0,
@@ -661,8 +712,10 @@ extension CollectionViewMessageListV3 {
     final class Coordinator: NSObject, UICollectionViewDelegate, UIScrollViewDelegate, UICollectionViewDataSourcePrefetching {
         // Callbacks
         var onRetryMessage: ((UUID) -> Void)?
+        var onOpenSoulSettings: (() -> Void)?
         var onRetryLast: (() -> Void)?
         var onEdit: ((UUID) -> Void)?
+        var onDeleteFrom: ((UUID) -> Void)?
         var onWithdraw: ((UUID) -> Void)?
         var onResume: (() -> Void)?
         var onStop: (() -> Void)?
@@ -779,6 +832,90 @@ extension CollectionViewMessageListV3 {
         // preferredLayoutAttributesFitting so the cell never re-measures —
         // bottom of content gets clipped until the chat is re-entered.
         private var attachmentSizeChangedSub: AnyCancellable?
+        /// [T-ios-image-squish-probe §2] Same-runloop-tick coalescing for
+        /// `.minisAttachmentSizeChanged` bursts (a six-image message fires up
+        /// to 12: header probe + decode completion per image). The handler is
+        /// a full-list invalidate + reconfigure, so one pass per tick is the
+        /// budget.
+        private var attachmentSizeRefreshScheduled = false
+        private var pendingAttachmentSizeUrls: [String] = []
+
+        /// The actual `.minisAttachmentSizeChanged` work, run at most once per
+        /// runloop tick with every URL that arrived in that tick.
+        private func handleAttachmentSizeChanged(coalescedUrls: [String]) {
+            let alog = AppLogger(category: "AttachmentSize")
+            guard let cv = self.viewController?.collectionView,
+                  let layout = cv.collectionViewLayout as? MessageListLayout else {
+                alog.warning("[AttachmentSize] infra missing")
+                return
+            }
+            let visibleIPs = cv.indexPathsForVisibleItems.sorted()
+            var cleared = 0
+            for ip in visibleIPs {
+                if let cell = cv.cellForItem(at: ip) as? SelfSizingCell {
+                    let before = cell.frame.size.height
+                    cell.clearCachedHeight()
+                    layout.invalidateHeight(at: ip.item)
+                    cleared += 1
+                    alog.info("[AttachmentSize] clear idx=\(ip.item) frameH=\(String(format: "%.1f", before))")
+                }
+            }
+            // [T-attachment-cell-offscreen 2026-05-24]
+            // A markdown-inline video/image whose initial estimate
+            // was too small (e.g. text-only block estimator
+            // returning ~50pt) is pushed off-screen by the cold
+            // scroll-to-bottom — the visible-cells-only invalidate
+            // above then misses it, and the cell stays at the
+            // 200pt placeholder until an unrelated reconfigure
+            // runs many seconds later. Always invalidate the
+            // layout's height cache for ALL items so the next
+            // measurement pass picks up the new attachmentBounds.
+            let totalItems = self.dataSource?.snapshot().itemIdentifiers.count ?? 0
+            for idx in 0..<totalItems {
+                layout.invalidateHeight(at: idx)
+            }
+            if let snapshot = self.dataSource?.snapshot() {
+                // Reconfigure every item — cheap (no diff), forces
+                // every cell that gets re-displayed to re-measure.
+                // We still see a visible reflow only on cells in
+                // viewport; off-screen cells just get a corrected
+                // cached height for next display.
+                var snap = snapshot
+                snap.reconfigureItems(snapshot.itemIdentifiers)
+                self.dataSource?.apply(snap, animatingDifferences: false)
+            }
+            // [T-attachment-defer-invalidate 2026-05-24]
+            // Defer invalidateLayout to the next runloop. reconfigureItems
+            // schedules a SwiftUI hosting-config update on the next
+            // runloop tick; calling invalidateLayout synchronously
+            // makes UIKit re-query PLAF while the cell's
+            // UIHostingConfiguration still wraps the STALE
+            // attributedString (with the 200pt video placeholder),
+            // so systemLayoutSizeFitting returns the old 375pt
+            // height, caches it as lastComputedHeight, and locks
+            // the cell at the wrong size until something else
+            // triggers another reconfigure (10+ seconds later
+            // when the user navigates back). Letting the runloop
+            // turn first ensures the new attributedString is
+            // mounted in the hosting view before we re-measure.
+            DispatchQueue.main.async {
+                // Clear cell-side caches AGAIN after the
+                // reconfigure has propagated, then ask UIKit to
+                // re-measure.
+                for ip in cv.indexPathsForVisibleItems {
+                    (cv.cellForItem(at: ip) as? SelfSizingCell)?.clearCachedHeight()
+                }
+                layout.invalidateLayout()
+                // While we're still in the session-load clamp
+                // window, re-pin to bottom — the corrected
+                // heights shift the content offset and otherwise
+                // leave the user looking at the wrong region.
+                if self.clampAfterSessionLoad {
+                    self.scrollToLastItem()
+                }
+            }
+            alog.info("[AttachmentSize] coalesced=\(coalescedUrls.count) urls=\(coalescedUrls.map { $0.suffix(40) }.joined(separator: ",")) cleared=\(cleared)/\(visibleIPs.count) totalInvalidated=\(totalItems) clamp=\(self.clampAfterSessionLoad)")
+        }
 
         // === Foreground/Background Content Tracking ===
         /// Total character count of the last assistant message's blocks when the app entered background.
@@ -1072,7 +1209,8 @@ extension CollectionViewMessageListV3 {
                 let message = messages[msgIdx]
                 cell.backgroundColor = .clear
                 let config = UIHostingConfiguration {
-                    BridgedAssistantHeaderV3(message: message, maxWidth: width)
+                    BridgedAssistantHeaderV3(message: message, maxWidth: width,
+                                            onOpenSoulSettings: onOpenSoulSettings)
                         .transaction { $0.disablesAnimations = true }
                         .environmentObject(vm)
                 }.minSize(width: 0, height: 0).margins(.all, 0)
@@ -1365,6 +1503,7 @@ extension CollectionViewMessageListV3 {
             let retryMsg = onRetryMessage
             let retryLast = onRetryLast
             let edit = onEdit
+            let deleteFrom = onDeleteFrom
             let compact = onCompact
             let forceSync = onForceSync
             bridge.onForceSync = forceSync
@@ -1383,6 +1522,7 @@ extension CollectionViewMessageListV3 {
 
             if message.isCompactedHistory || message.role == .compactDivider || message.role == .systemInfo {
                 bridge.onRetry = nil; bridge.onEdit = nil; bridge.onCompact = nil
+                bridge.onDeleteFrom = nil
             } else if !vm.isProcessing && !vm.isCompacting {
                 if message.role == .user {
                     bridge.onRetry = { retryMsg?(message.id) }
@@ -1392,9 +1532,17 @@ extension CollectionViewMessageListV3 {
                     bridge.onRetry = nil
                 }
                 bridge.onEdit = message.role == .user ? { edit?(message.id) } : nil
+                // [T-ios-delete-from-message] Same gate as Edit/Retry: user
+                // bubbles only, never while streaming or compacting, never on
+                // already-compacted history (its agentHistory anchor is gone).
+                // A QUEUED bubble isn't in agentHistory/DB yet — Withdraw is
+                // its removal path, so this stays off for it.
+                bridge.onDeleteFrom = (message.role == .user && !message.isQueued)
+                    ? { deleteFrom?(message.id) } : nil
                 bridge.onCompact = { compact?(message.id) }
             } else {
                 bridge.onRetry = nil; bridge.onEdit = nil; bridge.onCompact = nil
+                bridge.onDeleteFrom = nil
             }
 
             // [T-ios-plaf-cache-footer-staleness] If the footer's rendered SHAPE
@@ -2254,80 +2402,26 @@ extension CollectionViewMessageListV3 {
                 attachmentSizeChangedSub = NotificationCenter.default.publisher(for: .minisAttachmentSizeChanged)
                     .receive(on: DispatchQueue.main)
                     .sink { [weak self] notification in
-                        let alog = AppLogger(category: "AttachmentSize")
+                        // [T-ios-image-squish-probe §2] Coalesce a same-tick
+                        // burst into ONE refresh pass. A six-image message now
+                        // fires up to 12 of these (header probe + decode
+                        // completion per image), and the handler below is a
+                        // full-list invalidate + reconfigureItems — running it
+                        // per notification is 12 back-to-back relayout storms.
+                        // Notifications already arrive on main; the pending
+                        // flag folds every arrival within the current runloop
+                        // tick into the single async pass scheduled below.
                         guard let self else { return }
-                        guard let cv = self.viewController?.collectionView,
-                              let layout = cv.collectionViewLayout as? MessageListLayout else {
-                            alog.warning("[AttachmentSize] infra missing")
-                            return
+                        self.pendingAttachmentSizeUrls.append((notification.object as? String) ?? "<nil>")
+                        guard !self.attachmentSizeRefreshScheduled else { return }
+                        self.attachmentSizeRefreshScheduled = true
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            self.attachmentSizeRefreshScheduled = false
+                            let urls = self.pendingAttachmentSizeUrls
+                            self.pendingAttachmentSizeUrls.removeAll()
+                            self.handleAttachmentSizeChanged(coalescedUrls: urls)
                         }
-                        let urlStr = (notification.object as? String) ?? "<nil>"
-                        let visibleIPs = cv.indexPathsForVisibleItems.sorted()
-                        var cleared = 0
-                        for ip in visibleIPs {
-                            if let cell = cv.cellForItem(at: ip) as? SelfSizingCell {
-                                let before = cell.frame.size.height
-                                cell.clearCachedHeight()
-                                layout.invalidateHeight(at: ip.item)
-                                cleared += 1
-                                alog.info("[AttachmentSize] clear idx=\(ip.item) frameH=\(String(format: "%.1f", before))")
-                            }
-                        }
-                        // [T-attachment-cell-offscreen 2026-05-24]
-                        // A markdown-inline video/image whose initial estimate
-                        // was too small (e.g. text-only block estimator
-                        // returning ~50pt) is pushed off-screen by the cold
-                        // scroll-to-bottom — the visible-cells-only invalidate
-                        // above then misses it, and the cell stays at the
-                        // 200pt placeholder until an unrelated reconfigure
-                        // runs many seconds later. Always invalidate the
-                        // layout's height cache for ALL items so the next
-                        // measurement pass picks up the new attachmentBounds.
-                        let totalItems = self.dataSource?.snapshot().itemIdentifiers.count ?? 0
-                        for idx in 0..<totalItems {
-                            layout.invalidateHeight(at: idx)
-                        }
-                        if let snapshot = self.dataSource?.snapshot() {
-                            // Reconfigure every item — cheap (no diff), forces
-                            // every cell that gets re-displayed to re-measure.
-                            // We still see a visible reflow only on cells in
-                            // viewport; off-screen cells just get a corrected
-                            // cached height for next display.
-                            var snap = snapshot
-                            snap.reconfigureItems(snapshot.itemIdentifiers)
-                            self.dataSource?.apply(snap, animatingDifferences: false)
-                        }
-                        // [T-attachment-defer-invalidate 2026-05-24]
-                        // Defer invalidateLayout to the next runloop. reconfigureItems
-                        // schedules a SwiftUI hosting-config update on the next
-                        // runloop tick; calling invalidateLayout synchronously
-                        // makes UIKit re-query PLAF while the cell's
-                        // UIHostingConfiguration still wraps the STALE
-                        // attributedString (with the 200pt video placeholder),
-                        // so systemLayoutSizeFitting returns the old 375pt
-                        // height, caches it as lastComputedHeight, and locks
-                        // the cell at the wrong size until something else
-                        // triggers another reconfigure (10+ seconds later
-                        // when the user navigates back). Letting the runloop
-                        // turn first ensures the new attributedString is
-                        // mounted in the hosting view before we re-measure.
-                        DispatchQueue.main.async {
-                            // Clear cell-side caches AGAIN after the
-                            // reconfigure has propagated, then ask UIKit to
-                            // re-measure.
-                            for ip in cv.indexPathsForVisibleItems {
-                                (cv.cellForItem(at: ip) as? SelfSizingCell)?.clearCachedHeight()
-                            }
-                            layout.invalidateLayout()
-                            // While we're still in the session-load clamp
-                            // window, re-pin to bottom — the corrected
-                            // heights shift the content offset and otherwise
-                            // leave the user looking at the wrong region.
-                            if self.clampAfterSessionLoad {
-                                self.scrollToLastItem()
-                            }
-                        }
-                        alog.info("[AttachmentSize] url=\(urlStr) cleared=\(cleared)/\(visibleIPs.count) totalInvalidated=\(totalItems) clamp=\(self.clampAfterSessionLoad)")
                     }
             }
 
@@ -2456,10 +2550,27 @@ extension CollectionViewMessageListV3 {
 
             // Build items
             var newItems: [MessageListItem] = []
+            // [T-ios-orphan-user-tail GH#262/#263] The Resume banner lives in
+            // the assistant FOOTER cell, and a user row never gets one — so a
+            // transcript ending on a user turn that never received a reply had
+            // canResume=true with nowhere to draw the button. Emit a footer
+            // after that trailing user row, reusing the cell that already knows
+            // how to size and render the banner rather than teaching the user
+            // bubble (whose contentKey and height estimate are content-only) to
+            // grow one. Scoped to the LAST message and to canResume, so an
+            // ordinary user turn mid-history is untouched.
+            let orphanTailUserId: UUID? = {
+                guard vm.canResume, !vm.isProcessing,
+                      let last = messages.last, last.role == .user else { return nil }
+                return last.id
+            }()
             for message in messages {
                 switch message.role {
                 case .user, .compactDivider, .systemInfo:
                     newItems.append(.wholeMessage(message.id))
+                    if message.id == orphanTailUserId {
+                        newItems.append(.assistantFooter(message.id))
+                    }
                 case .assistant:
                     newItems.append(.assistantHeader(message.id))
                     for block in message.blocks {
@@ -2986,6 +3097,35 @@ extension CollectionViewMessageListV3 {
             snapshotLayout?.suppressContentOffsetAdjustment = true
             isFlushing = true
             cellConfigCount = 0
+            // [T-ios-preapply-endediting] End editing BEFORE the structural
+            // apply, outside the batch-update transaction. Both TestFlight
+            // crash families need a live first responder inside the list at
+            // apply time: the AttributeGraph re-entry (synchronous
+            // super.resignFirstResponder mid-transaction, C4wXLBpem 1.13(4))
+            // and the _resignOrRebaseFirstResponderViewWithIndexPathMapping:
+            // assertion (deferred resign returning false, 1.13(15)). Resigning
+            // here removes the shared precondition for both. Cost: an active
+            // text selection is dismissed when a structural update lands (new
+            // block/message); reconfigure-only applies don't come through here
+            // and leave selection alone.
+            //
+            // Deliberately NOT excluded for callers that run inside a SwiftUI
+            // render pass (flushPending(updateUIVC-backstop), rebind). On
+            // those paths the whole `dataSource.apply` below ALREADY runs in
+            // the render pass — pre-8/17 code did the responder-chain walk
+            // INSIDE the resulting batch update there, which is the precise
+            // context of the C4wXLBpem stack. Moving the walk here keeps it in
+            // the same pass but outside the batch-update/hosted-cell update
+            // window, which is strictly earlier and strictly safer than what
+            // shipped before; excluding a caller instead would keep a live
+            // responder into the batch update — the exact window both crash
+            // families live in. Verified live on updateUIVC-backstop with an
+            // active selection (2026-08-22, iPhone 11/iOS 27).
+            if let cv = viewController?.collectionView as? NoAnimationCollectionView,
+               let responder = cv.trackedTextResponder, responder.isFirstResponder {
+                AppLogger(category: "Responder").info("[Responder] pre-apply endEditing (caller=\(caller))")
+                cv.endEditing(true)
+            }
             (viewController?.collectionView as? NoAnimationCollectionView)?.isApplyingSnapshot = true
             dataSource.apply(snapshot, animatingDifferences: false)
             (viewController?.collectionView as? NoAnimationCollectionView)?.isApplyingSnapshot = false
@@ -3295,31 +3435,73 @@ extension CollectionViewMessageListV3 {
                 context: nil
             )
             let textH = ceil(bounds.height)
-            // [T-ios-decel-inv-estimate-calibration] CJK bubble correction: all
-            // five first-measure samples in the debug.scrollMetrics trace showed
-            // CJK bubbles landing +6.3–7.0 taller than this boundingRect-based
-            // estimate (SwiftUI Text gives PingFang-fallback lines a taller
-            // box), independent of line count in the observed 1–4 line range.
-            // Latin-only bubbles were exact, so gate on CJK presence.
+            // [T-ios-decel-inv-estimate-calibration → superseded] There used to
+            // be a CJK-gated flat +7 here, calibrated from CJK samples that
+            // measured +6.3–7.0 taller than this estimate and attributed to
+            // "SwiftUI Text gives PingFang-fallback lines a taller box". The
+            // row-chrome measurement below shows that reading was wrong: those
+            // bubbles were short by the script-independent row constant, and
+            // gating the correction on CJK is precisely what left Latin bubbles
+            // 7pt short. Superseded by `rowChrome`, applied unconditionally.
             //
-            // [T-ios-user-attach-estimate-mismatch] The correction used to be
-            // ALSO gated to attachment-free bubbles, because "the one attachment
-            // bubble in the trace (att=1) measured exactly at the UNcorrected
-            // estimate". That single sample was misleading: it looked exact only
-            // because TWO errors cancelled — the attachment block was +6 too tall
-            // (the 70-vs-64 bug fixed just above) and the missing CJK correction
-            // was -7, netting -1. With the attachment block now exact, keeping
-            // the `attachCount == 0` gate would leave a CJK image bubble a clean
-            // -7 SHORT — and an under-estimate is the harmful direction: SwiftUI
-            // Text truncates during scroll and visibly expands at settle, which
-            // is the T-ios-user-msg-estimate-tail-jitter jank. So the gate is
-            // dropped and the correction now applies whenever CJK is present.
-            let cjk = text.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || (0x3000...0x30FF).contains($0.value) }
-            // bubble vertical padding (10*2) + attachment block + 1pt safety.
-            let total = textH + 20 + attachH + 1 + (cjk ? 7 : 0)
+            // [T-ios-user-bubble-row-chrome] The row wrapper costs a CONSTANT
+            // 7pt that this estimator never accounted for, so a Latin user
+            // bubble was seeded 7pt SHORT — the harmful direction (the cell
+            // lays out short, so SwiftUI Text truncates / the layout
+            // under-reserves, and the correction on re-measure is the blank
+            // strip around the message the user reported).
+            //
+            // Measured on device (iPhone 11), estimate vs the height the cell
+            // actually needs, via [BottomGapDiag][user-bubble-estimate] paired
+            // with [BottomGapDiag][seed-drift]:
+            //
+            //   Latin   18ch  1 line : est   42.0 → cell   49.0  (-7.0)
+            //   Latin  500ch 20 lines: est  439.0 → cell  445.5  (-6.5)
+            //   Latin 1135ch 49 lines: est 1065.0 → cell 1072.0  (-7.0)
+            //
+            // CONSTANT, not per-line. A throwaway probe isolated where it comes
+            // from: boundingRect == UILabel (engineDelta +0.0) and the isolated
+            // SwiftUI bubble == textH + 20 exactly (chromeMiss +0.0), while the
+            // REAL ChatMessageRow measured textH + 20 + 7 (rowVsEst +7.0). The
+            // text engine and the bubble padding were already correct; the miss
+            // is entirely the row structure around them.
+            //
+            // This also explains — and replaces — the old "CJK correction". That
+            // was a flat +7 gated on CJK presence, calibrated from a handful of
+            // CJK samples that landed +7 taller than the estimate. It was never
+            // about the script: those bubbles were short by the SAME row chrome
+            // every bubble is short by, and gating it on CJK is exactly why
+            // Latin bubbles kept the -7 and produced this report. Proven by
+            // adding the row constant while the CJK term was still in: a CJK
+            // bubble then over-reserved by precisely 7pt
+            // (est 870 → cell 863, `dir=RESERVED-TOO-MUCH`), i.e. the two terms
+            // were double-counting one 7pt. So the CJK special case is dropped
+            // and the correction becomes unconditional.
+            //
+            // Why the report says "long messages": the shortfall is the same 7pt
+            // at every length, but on a screen-filling bubble the re-measure
+            // relayouts a full-height row (visible blank strip), while on a 42pt
+            // bubble it is absorbed silently.
+            let rowChrome: CGFloat = 7
+            // bubble vertical padding (10*2) + row chrome + attachment block + 1pt safety.
+            let total = textH + 20 + rowChrome + attachH + 1
             cache[key] = total
+            #if DEBUG
+            // [BottomGapDiag][user-bubble-estimate] Cheap trace of what this
+            // estimator produced; pairs with [BottomGapDiag][seed-drift] at the
+            // PLAF site, which prints the height the cell ACTUALLY needs. The
+            // two together are what localised the constant 7pt row chrome, and
+            // they stay as the regression tripwire (a future +N drift shows up
+            // as a non-zero delta immediately).
+            AppLogger(category: "BottomGapDiag").info(
+                "[BottomGapDiag][user-bubble-estimate] chars=\(text.count) "
+                + "textH=\(String(format: "%.1f", textH)) attachH=\(String(format: "%.1f", attachH)) "
+                + "total=\(String(format: "%.1f", total)) "
+                + "w=\(String(format: "%.0f", usableTextWidth))")
+            #endif
             return total
         }
+
 
         // MARK: - Height Estimation
 

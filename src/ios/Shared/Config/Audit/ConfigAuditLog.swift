@@ -165,10 +165,10 @@ final class ConfigAuditLog: ObservableObject {
     /// [T-config-audit-wal-loss] Fold the WAL back into the main DB file.
     ///
     /// This database is deliberately separate from `minis.db` so the audit table
-    /// never lands in a sync-dirty query — but that also leaves it out of the
-    /// checkpointing that covers minis.db and skills.db. It runs in WAL mode with
-    /// nothing else ever checkpointing it, so a jetsam or crash can drop history
-    /// that was only in the `-wal` sidecar.
+    /// never lands in a sync-dirty query — but that also left it out of
+    /// `ICloudBackupManager.walCheckpoint`, which covers minis.db and skills.db.
+    /// It runs in WAL mode with nothing ever checkpointing it, so a jetsam or
+    /// crash can drop history that was only in the `-wal` sidecar.
     ///
     /// This is the defensive half of OpenMinis#98 defect 3. The report's "audit
     /// log was erased" could NOT be reproduced from code — no path in this tree

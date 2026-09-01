@@ -153,7 +153,7 @@ struct FileBrowserView: View {
         // [T-ios-copy-abs-path-copied-toast] Self-dismissing "Copied" capsule.
         .overlay(alignment: .bottom) {
             if copiedToast {
-                Label(String(localized: "Copied"), systemImage: "checkmark.circle.fill")
+                Label(AppLocalized("Copied"), systemImage: "checkmark.circle.fill")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
@@ -762,7 +762,7 @@ private struct FileBrowserRow: View {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     onCopiedPath()
                 } label: {
-                    Label(String(localized: "Copy Absolute Path"), systemImage: "document.on.clipboard")
+                    Label(AppLocalized("Copy Absolute Path"), systemImage: "document.on.clipboard")
                 }
                 Button { onCopy() } label: {
                     Label("Copy to…", systemImage: "doc.on.doc")

@@ -92,7 +92,15 @@ final class KaTeXRenderer: NSObject {
         let contentController = WKUserContentController()
         contentController.add(self, name: "mathRendered")
         config.userContentController = contentController
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        // [T-ios-mac-uncaught-nsexception] Undocumented WKPreferences KVC key —
+        // NSUnknownKeyException if a WebKit release drops it, and Swift cannot catch an
+        // ObjC exception, so it would take the process down. This site is the riskiest of
+        // the two: `warmUp()` dispatches it onto the main queue from MinisApp.init(), so
+        // it runs during startup on a plain runloop turn — exactly the shape of the two
+        // macOS 27 crashes (NSApplicationMain → -[NSApplication run], no frame of ours).
+        // If the key is gone, KaTeX simply loses local-file access (SwiftMath still
+        // renders); losing the app is not an acceptable alternative.
+        SafeKVCSetTrue.apply(config.preferences, key: "allowFileAccessFromFileURLs")
 
         // Large initial frame so KaTeX has room to lay out; we crop to content before snapshot.
         // WKWebView must be part of a visible view hierarchy for takeSnapshot to produce

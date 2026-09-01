@@ -246,10 +246,21 @@ class MCPPool:
     with a single retry; other errors propagate. When the pool empties it calls
     on_empty so the daemon can start its exit grace timer."""
 
-    def __init__(self, on_empty):
+    def __init__(self, on_empty, on_active=None):
         self._pool = {}
         self._lock = threading.Lock()
         self._on_empty = on_empty
+        # [T-mcp-daemon-idle-selfkill] GH#233. Notified whenever the pool holds
+        # a live session again, so the daemon can clear its exit-grace stamp.
+        # Without this the stamp was cleared ONLY by the 30s watchdog, so a
+        # session created between ticks stayed invisible to the grace timer.
+        self._on_active = on_active or (lambda: None)
+        # Fire on_empty only on a real non-empty -> empty TRANSITION. Previously
+        # gc() called it on every scan of an empty pool, so the grace timer
+        # started ticking at daemon birth rather than when the last server was
+        # evicted. Starts True because a fresh pool has never been populated,
+        # so its emptiness is not a transition worth reporting.
+        self._was_empty = True
 
     def _make_session(self, name, cfg):
         if config.is_stdio(cfg):
@@ -275,7 +286,12 @@ class MCPPool:
                 log.info("[%s] creating new session", name)
                 session = self._make_session(name, cfg)
                 self._pool[name] = session
-            return session
+            self._was_empty = False
+        # [T-mcp-daemon-idle-selfkill] Outside the lock: the pool now holds a
+        # live session, so cancel any pending exit grace. This is THE fix — the
+        # request path, not just the watchdog, must clear the stamp.
+        self._on_active()
+        return session
 
     def call_with_retry(self, name, fn):
         for attempt in range(2):
@@ -310,9 +326,16 @@ class MCPPool:
                     to_evict.append(name)
         for name in to_evict:
             self.evict(name)
+        # [T-mcp-daemon-idle-selfkill] GH#233. Fire on_empty only on a genuine
+        # non-empty -> empty transition (what the docstring always claimed).
+        # Firing on every scan of an already-empty pool started the exit grace
+        # at daemon birth, so the 60s stamp could already be past due by the
+        # time the first call arrived.
         with self._lock:
             alive = len(self._pool)
-        if alive == 0:
+            just_emptied = alive == 0 and not self._was_empty
+            self._was_empty = alive == 0
+        if just_emptied:
             self._on_empty()
         return alive
 
@@ -336,12 +359,28 @@ class DaemonServer:
         self.pid_file = pid_file
         self._running = True
         self._empty_since = None
-        self.pool = MCPPool(on_empty=self._on_pool_empty)
+        self.pool = MCPPool(on_empty=self._on_pool_empty, on_active=self._on_pool_active)
 
     def _on_pool_empty(self):
         if self._empty_since is None:
             self._empty_since = time.time()
             log.info("pool empty, daemon will exit in %ss if no new calls", DAEMON_EXIT_GRACE)
+
+    def _on_pool_active(self):
+        """[T-mcp-daemon-idle-selfkill] GH#233. Cancel a pending exit grace as
+        soon as the pool has a live session again.
+
+        This is the core of the fix. `_empty_since` used to be cleared ONLY
+        inside the 30s watchdog, so a server created between two ticks never
+        reset the timer: the daemon would reach `_empty_since + 60s` while the
+        user was actively using it, set `_running = False`, and `pool.shutdown()`
+        would close every stdio child's stdin. A Node MCP server reading EOF on
+        stdin exits cleanly with rc=0 — exactly the reported symptom, on the
+        reported 60-120s schedule (a 60s grace quantised to a 30s tick).
+        """
+        if self._empty_since is not None:
+            self._empty_since = None
+            log.info("pool active again, exit grace cancelled")
 
     def handle_request(self, data):
         cmd = data.get("cmd", "")

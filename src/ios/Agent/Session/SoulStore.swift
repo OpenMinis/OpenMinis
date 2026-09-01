@@ -1,5 +1,466 @@
 import Foundation
 import SwiftUI
+import UIKit
+
+/// [T-soul-custom-icon] Encode/decode for the Soul identity icon when the
+/// user picks an image rather than an emoji.
+///
+/// Lives in this file rather than its own because `Agent/Session` is a plain
+/// Xcode group, not a synchronized one — a new file there means editing
+/// `project.pbxproj`, which several sessions contend over.
+enum SoulIconImage {
+    /// Rendered edge, in points, of the largest surface that shows the icon
+    /// (the Soul Settings preview card; the chat header draws it at 18pt).
+    static let renderPoints: CGFloat = 32
+    /// Stored edge in pixels — the render size at @3x, so the icon is crisp
+    /// on every current device and never larger than it needs to be.
+    static let storedPixels: CGFloat = renderPoints * 3
+
+    private static let prefix = "data:image/png;base64,"
+
+    static func isDataURI(_ s: String) -> Bool { s.hasPrefix(prefix) }
+
+    /// Why an image was refused.
+    ///
+    /// [T-soul-icon-opaque-rounded] `opaque` is gone. It used to reject any
+    /// image without an alpha channel, on the reasoning that an unframed
+    /// opaque rectangle reads as a broken tile. That reasoning was about
+    /// PRESENTATION, and it is now handled where it belongs: `SoulIconView`
+    /// clips every image to a rounded rectangle, so a JPEG or a flattened PNG
+    /// renders as a normal small avatar. Keeping the refusal would have meant
+    /// turning away the majority of images a user might pick, to solve a
+    /// problem the renderer already solves.
+    enum RejectionReason: Error {
+        case unreadable
+    }
+
+    /// Normalize a picked image into the stored form: square, downscaled,
+    /// PNG, base64 data URI.
+    ///
+    /// Accepts opaque and transparent images alike — anything UIKit can
+    /// decode. Re-encoding to PNG regardless keeps one stored format (so
+    /// `isDataURI`'s single prefix stays valid) and preserves alpha when the
+    /// source had it.
+    static func encode(_ image: UIImage) -> Result<String, RejectionReason> {
+        guard image.cgImage != nil else { return .failure(.unreadable) }
+
+        let square = squareCropped(image)
+        // Square and bounded: the chat header's row height is a hardcoded
+        // layout estimate (28pt), so a non-square icon there would fight the
+        // measured height. Cropping here means every consumer can assume 1:1.
+        let side = min(storedPixels, max(square.size.width, square.size.height) * square.scale)
+        let target = CGSize(width: side, height: side)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1              // size is already in pixels
+        format.opaque = false         // preserve alpha
+        let scaled = UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            square.draw(in: CGRect(origin: .zero, size: target))
+        }
+
+        guard let png = scaled.pngData() else { return .failure(.unreadable) }
+        return .success(prefix + png.base64EncodedString())
+    }
+
+    /// Decode a stored data URI back to an image. Returns nil for an emoji
+    /// value or anything malformed, so callers can fall back to text.
+    static func decode(_ value: String) -> UIImage? {
+        guard isDataURI(value) else { return nil }
+        let b64 = String(value.dropFirst(prefix.count))
+        guard let data = Data(base64Encoded: b64) else { return nil }
+        return UIImage(data: data)
+    }
+
+    /// Centre-crop to 1:1, keeping the shorter edge.
+    private static func squareCropped(_ image: UIImage) -> UIImage {
+        let w = image.size.width, h = image.size.height
+        guard w != h, w > 0, h > 0 else { return image }
+        let side = min(w, h)
+        let origin = CGPoint(x: (w - side) / 2, y: (h - side) / 2)
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side),
+                                       format: format).image { _ in
+            image.draw(at: CGPoint(x: -origin.x, y: -origin.y))
+        }
+    }
+}
+
+/// [T-soul-icon-config-images] Turns whatever `minis-config set soul.icon`
+/// was given into a stored icon value, so the tool and the Settings picker
+/// end up applying the SAME rules.
+///
+/// The picker path is `SoulIconImage.encode` and nothing here re-implements
+/// it: every image source below decodes to a `UIImage` and then goes through
+/// that one function, so alpha rejection, square cropping, the 96px cap and
+/// PNG re-encoding are shared by construction rather than by copy.
+///
+/// Why resolution happens HERE and not in the field's `writer`:
+/// `ConfigField.write` is synchronous and `@MainActor`, but an https source
+/// has to be downloaded. `ConfigOffloadBridge.performWriteBatch` is already
+/// `async`, so the bridge resolves the source to a finished data URI during
+/// the resolve phase — before the confirmation sheet — and the writer stays
+/// synchronous and network-free. That also means the user confirms a change
+/// whose image has already been fetched and validated: the sheet cannot
+/// promise something the write then fails to deliver.
+enum SoulIconSource {
+    /// Ceiling on what any source may expand to in memory before decoding.
+    /// Generous next to a real icon (a 96px PNG is ~1-4 KB) and small enough
+    /// that a hostile or mistaken input cannot exhaust memory.
+    static let maxSourceBytes = 8 * 1024 * 1024
+
+    /// Hard cap on the base64 text accepted as a literal argument. Bounds the
+    /// tool-call payload itself, before any decoding happens.
+    static let maxInlineBase64Chars = 12 * 1024 * 1024
+
+    /// Wall-clock budget for an http(s) fetch.
+    static let downloadTimeout: TimeInterval = 15
+
+    /// Cap on the stored data URI. Mirrors Android's
+    /// `SoulIcon.MAX_DATA_URI_CHARS` — the value syncs between platforms, so
+    /// a value one side would refuse to load must not be storable on the other.
+    static let maxStoredChars = 64 * 1024
+
+    enum SourceError: LocalizedError {
+        case tooLarge(String)
+        case notAnImage(String)
+        case unreadable
+        case notFound(String)
+        case outsideAllowedDirs(String)
+        case badURL(String)
+        case blockedHost(String)
+        case httpStatus(Int)
+        case network(String)
+        case storedTooLarge(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .tooLarge(let what):
+                return "\(what) — the limit is \(maxSourceBytes / 1024 / 1024) MB"
+            case .notAnImage(let detail):
+                return "that isn't a decodable image (\(detail))"
+            case .unreadable:
+                return "the image could not be re-encoded"
+            case .notFound(let p):
+                return "no file at \(p)"
+            case .outsideAllowedDirs(let p):
+                return "\(p) is outside the directories this tool may read. "
+                     + "Use a minis:// URL (e.g. minis://attachments/icon.png) "
+                     + "or a path under the session's minis directories."
+            case .badURL(let s):
+                return "couldn't parse '\(s)' as an image source"
+            case .blockedHost(let h):
+                return "refusing to fetch from '\(h)': only public http(s) "
+                     + "hosts are allowed"
+            case .httpStatus(let code):
+                return "the server returned HTTP \(code)"
+            case .network(let msg):
+                return "download failed: \(msg)"
+            case .storedTooLarge(let n):
+                return "the encoded icon is \(n) chars, over the \(maxStoredChars) limit"
+            }
+        }
+    }
+
+    /// True when `raw` should be treated as an image source rather than as an
+    /// emoji. Deliberately generous: anything that is clearly not a one-glyph
+    /// emoji gets routed here so the user sees a real diagnostic instead of
+    /// "icon must be a single emoji".
+    static func looksLikeImageSource(_ raw: String) -> Bool {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return false }
+        if s.hasPrefix("data:") { return true }
+        if s.hasPrefix("minis://") { return true }
+        if s.hasPrefix("http://") || s.hasPrefix("https://") { return true }
+        if s.hasPrefix("/") || s.hasPrefix("~/") { return true }
+        // A bare base64 blob: long, and only base64 characters. The length
+        // floor keeps short emoji/text from being misread as base64.
+        if s.count > 64, isProbablyBareBase64(s) { return true }
+        return false
+    }
+
+    /// Resolve any accepted source to a stored `data:image/png;base64,…` URI.
+    /// Never returns a path or a remote URL: an address is an import source
+    /// only, so a cleaned-up attachment or a different device cannot leave the
+    /// icon dangling.
+    static func resolveToDataURI(_ raw: String) async throws -> String {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Already stored form — re-encode anyway rather than trusting it, so a
+        // hand-written data URI gets the same alpha/size treatment as a picked
+        // image and cannot smuggle in an oversized or opaque payload.
+        let data: Data
+        if s.hasPrefix("data:") {
+            data = try decodeDataURI(s)
+        } else if s.hasPrefix("minis://") {
+            data = try readMinisURL(s)
+        } else if s.hasPrefix("http://") || s.hasPrefix("https://") {
+            data = try await download(s)
+        } else if s.hasPrefix("/") || s.hasPrefix("~/") {
+            data = try readLocalPath(s)
+        } else if isProbablyBareBase64(s) {
+            guard s.count <= maxInlineBase64Chars else {
+                throw SourceError.tooLarge("the base64 argument is \(s.count) chars")
+            }
+            guard let d = Data(base64Encoded: s, options: [.ignoreUnknownCharacters]) else {
+                throw SourceError.notAnImage("not valid base64")
+            }
+            data = d
+        } else {
+            throw SourceError.badURL(s)
+        }
+
+        guard data.count <= maxSourceBytes else {
+            throw SourceError.tooLarge("the image is \(data.count / 1024) KB")
+        }
+        guard let image = UIImage(data: data) else {
+            throw SourceError.notAnImage("\(data.count) bytes that no image decoder accepted")
+        }
+
+        // The shared rules. Not reimplemented — this is the picker's function.
+        switch SoulIconImage.encode(image) {
+        case .failure(.unreadable): throw SourceError.unreadable
+        case .success(let uri):
+            guard uri.count <= maxStoredChars else {
+                throw SourceError.storedTooLarge(uri.count)
+            }
+            return uri
+        }
+    }
+
+    // MARK: - Sources
+
+    private static func decodeDataURI(_ s: String) throws -> Data {
+        guard s.count <= maxInlineBase64Chars else {
+            throw SourceError.tooLarge("the data URI is \(s.count) chars")
+        }
+        guard let comma = s.firstIndex(of: ",") else {
+            throw SourceError.notAnImage("malformed data URI (no comma)")
+        }
+        let meta = String(s[s.startIndex..<comma])
+        guard meta.contains(";base64") else {
+            throw SourceError.notAnImage("only base64 data URIs are supported")
+        }
+        let b64 = String(s[s.index(after: comma)...])
+        guard let d = Data(base64Encoded: b64, options: [.ignoreUnknownCharacters]) else {
+            throw SourceError.notAnImage("the data URI payload is not valid base64")
+        }
+        return d
+    }
+
+    /// `minis://` goes through the app's own resolver, which is what enforces
+    /// session scoping — this must not reach into another session's files.
+    private static func readMinisURL(_ s: String) throws -> Data {
+        guard let url = URL(string: s) else { throw SourceError.badURL(s) }
+        guard let fileURL = AIChatViewModel.resolveMinisURL(url) else {
+            throw SourceError.notFound(s)
+        }
+        return try readFile(at: fileURL, label: s)
+    }
+
+    /// A raw filesystem path is accepted only inside the minis persistent
+    /// tree. Everything else in the container (Keychain-adjacent plists, other
+    /// apps' shared data, the rootfs) stays unreadable through this tool.
+    private static func readLocalPath(_ s: String) throws -> Data {
+        let expanded = (s as NSString).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded)
+        guard let root = containingAllowedRoot(for: url) else {
+            throw SourceError.outsideAllowedDirs(expanded)
+        }
+        _ = root
+        return try readFile(at: url, label: expanded)
+    }
+
+    /// Canonical containment: resolve BOTH sides through the filesystem before
+    /// comparing, so a symlink inside an allowed directory cannot point out of
+    /// it, and so /var vs /private/var does not produce a false mismatch.
+    /// Same construction as `BackupZipExtractor.safeDestination`.
+    private static func containingAllowedRoot(for url: URL) -> URL? {
+        let target = url.standardizedFileURL.resolvingSymlinksInPath().path
+        for root in allowedRoots() {
+            let base = root.standardizedFileURL.resolvingSymlinksInPath().path
+            if target == base || target.hasPrefix(base + "/") { return root }
+        }
+        return nil
+    }
+
+    /// The directories a config-driven read may touch. Session-scoped dirs use
+    /// the ACTIVE session only, matching `resolveMinisURL`'s isolation rule.
+    private static func allowedRoots() -> [URL] {
+        var roots: [URL] = [
+            AIChatViewModel.minisSkillsPersistentDir,
+            AIChatViewModel.minisMemoryPersistentDir,
+            AIChatViewModel.minisSharedPersistentDir,
+        ]
+        if let sid = AIChatViewModel.activeSessionId {
+            roots.append(AIChatViewModel.minisPersistentBase
+                .appendingPathComponent(sid, isDirectory: true))
+        }
+        return roots
+    }
+
+    private static func readFile(at url: URL, label: String) throws -> Data {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+            throw SourceError.notFound(label)
+        }
+        // Check the size on the way in: reading first and measuring after
+        // would already have spent the memory this cap exists to protect.
+        if let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int),
+           size > maxSourceBytes {
+            throw SourceError.tooLarge("\(label) is \(size / 1024 / 1024) MB")
+        }
+        guard let data = fm.contents(atPath: url.path) else {
+            throw SourceError.notFound(label)
+        }
+        return data
+    }
+
+    // MARK: - http(s)
+
+    /// Fetch an image over http(s) with an allow-list, a deadline and a size
+    /// cap. The host checks are anti-SSRF: this runs on behalf of a model, so
+    /// a URL it invents must not become a probe of the LAN or of link-local
+    /// metadata endpoints.
+    private static func download(_ s: String) async throws -> Data {
+        guard let url = URL(string: s), let scheme = url.scheme?.lowercased() else {
+            throw SourceError.badURL(s)
+        }
+        guard scheme == "http" || scheme == "https" else {
+            throw SourceError.badURL(s)
+        }
+        guard let host = url.host, !host.isEmpty else { throw SourceError.badURL(s) }
+        guard !isBlockedHost(host) else { throw SourceError.blockedHost(host) }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = downloadTimeout
+        req.httpMethod = "GET"
+        req.setValue("image/*", forHTTPHeaderField: "Accept")
+
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = downloadTimeout
+        cfg.timeoutIntervalForResource = downloadTimeout
+        cfg.httpCookieStorage = nil          // no ambient credentials
+        cfg.urlCredentialStorage = nil
+        let session = URLSession(configuration: cfg)
+        defer { session.invalidateAndCancel() }
+
+        let data: Data, response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch {
+            throw SourceError.network(error.localizedDescription)
+        }
+
+        if let http = response as? HTTPURLResponse {
+            guard (200...299).contains(http.statusCode) else {
+                throw SourceError.httpStatus(http.statusCode)
+            }
+            // A redirect could have landed somewhere private; re-check.
+            if let finalHost = http.url?.host, isBlockedHost(finalHost) {
+                throw SourceError.blockedHost(finalHost)
+            }
+        }
+        guard data.count <= maxSourceBytes else {
+            throw SourceError.tooLarge("the download is \(data.count / 1024) KB")
+        }
+        // MIME is advisory only — the real check is whether it decodes, which
+        // the caller does next. A server that mislabels a valid PNG should
+        // still work; a server that sends HTML will fail at decode with a
+        // clearer message than a MIME mismatch would give.
+        return data
+    }
+
+    /// Loopback, link-local, and RFC1918 space, plus the metadata addresses.
+    /// Literal-IP matching only: resolving a hostname here would be a TOCTOU
+    /// race against the connection's own resolution, so hostnames are allowed
+    /// and the URLSession is instead denied ambient credentials.
+    static func isBlockedHost(_ host: String) -> Bool {
+        let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") { return true }
+        if h == "::1" || h == "0:0:0:0:0:0:0:1" { return true }
+        // IPv6 unique-local / link-local
+        if h.hasPrefix("fc") || h.hasPrefix("fd") || h.hasPrefix("fe80:") { return true }
+
+        let parts = h.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4, let a = Int(parts[0]), let b = Int(parts[1]),
+              Int(parts[2]) != nil, Int(parts[3]) != nil else {
+            return false        // a hostname, not a literal IPv4
+        }
+        switch a {
+        case 0, 10, 127: return true                    // this-network, private, loopback
+        case 169 where b == 254: return true            // link-local + AWS/GCP metadata
+        case 172 where (16...31).contains(b): return true
+        case 192 where b == 168: return true
+        case 100 where (64...127).contains(b): return true  // CGNAT
+        default: return false
+        }
+    }
+
+    private static func isProbablyBareBase64(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
+        return s.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+}
+
+/// [T-soul-custom-icon] The Soul identity icon, rendered the same way
+/// everywhere it appears.
+///
+/// Shared so every surface (Soul Settings preview at 32pt, the settings
+/// picker sheet, chat turn header at 18pt) cannot drift apart: they differ
+/// only in `size`. The image branch is drawn 1:1 — `encode` already
+/// guaranteed a square, so this cannot distort.
+///
+/// [T-soul-icon-opaque-rounded] The image clip is a CONTINUOUS ROUNDED
+/// RECTANGLE, and that is the single place the shape is decided. Since
+/// opaque images are now accepted, the renderer is what stops a JPEG from
+/// reading as a hard-edged tile — so the corner treatment has to live in the
+/// shared component, not at each call site, or one surface would inevitably
+/// miss it.
+///
+/// Rounded rather than a circle: at 18pt a circular mask eats the corners of
+/// a small avatar (logos and faces lose noticeably more), and the request was
+/// explicitly for a soft edge, not a crop to round. The radius scales with
+/// `size` so the 18pt header and the 32pt card look like the same shape
+/// rather than one looking markedly boxier than the other.
+struct SoulIconView: View {
+    let icon: String
+    let size: CGFloat
+    /// Gradient used for the default sparkle in the chat header. Nil renders
+    /// the plain emoji glyph, which is what the settings card wants.
+    var sparkleGradient: LinearGradient? = nil
+
+    /// ~22% of the edge: iOS's own app-icon "squircle" proportion, which
+    /// reads as rounded at 18pt without rounding away image content.
+    static func cornerRadius(for size: CGFloat) -> CGFloat { size * 0.22 }
+
+    var body: some View {
+        if let image = SoulIconImage.decode(icon) {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius(for: size),
+                                            style: .continuous))
+        } else if icon.isEmpty, let gradient = sparkleGradient {
+            // Default: keep the SF Symbol so the chat header's existing
+            // gradient treatment is untouched for users who never set one.
+            Image(systemName: "sparkles")
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(gradient)
+        } else {
+            // A user-chosen emoji, or the default sparkle where no gradient
+            // was requested.
+            Text(icon.isEmpty ? "✨" : icon)
+                .font(.system(size: size))
+        }
+    }
+}
 
 /// Persistent personality/identity file living alongside GLOBAL.md and the
 /// daily memory logs. Two-part format: YAML frontmatter (delimited by `---`)
@@ -18,8 +479,34 @@ struct SoulMetadata: Equatable {
     /// `"auto"`, `"zh"`, `"en"`, or any free-form tag.
     var lang: String
 
-    /// The emoji shown in every UI surface (chat bubble header, Soul
-    /// Settings preview card). Hard-coded — see comment on `emoji`.
+    /// [T-soul-custom-icon] User-chosen identity icon. Either a short
+    /// literal (an emoji) or a `data:image/png;base64,…` URI produced by
+    /// `SoulIconImage.encode`. Empty means "use the default sparkle".
+    ///
+    /// This lives in SOUL.md frontmatter, NOT in the body, and that is
+    /// load-bearing: `identitySection()` builds the system prompt from a
+    /// fixed whitelist (`name` / `style` / body) and never serializes
+    /// frontmatter wholesale, so a ~20 KB data URI here costs zero prompt
+    /// tokens. Putting it in the body would both burn context and count
+    /// against the body length limit.
+    var icon: String
+
+    /// The icon shown in every UI surface (chat bubble header, Soul
+    /// Settings preview card): the user's `icon` when set, else the
+    /// canonical sparkle.
+    ///
+    /// `emoji` is deliberately NOT consulted. That field belongs to the
+    /// removed pre-2026-05 customization (see its comment); reviving it
+    /// implicitly would resurrect a value users last set under different
+    /// UI they may not remember. `icon` is opt-in from a fresh choice.
+    var displayIcon: String { icon.isEmpty ? "✨" : icon }
+
+    /// True when `icon` holds an image rather than a text glyph, i.e. the
+    /// UI must decode it instead of rendering it as a `Text`.
+    var iconIsImage: Bool { SoulIconImage.isDataURI(icon) }
+
+    /// Retained so existing call sites keep compiling and keep meaning
+    /// "the fixed sparkle". Prefer `displayIcon`.
     var displayEmoji: String { "✨" }
 
     static let `default` = SoulMetadata(
@@ -35,7 +522,10 @@ struct SoulMetadata: Equatable {
         // baseline that users have to first delete before authoring their
         // own.
         style: "",
-        lang: "auto"
+        lang: "auto",
+        // No icon by default — `displayIcon` falls back to the sparkle, so
+        // an untouched SOUL.md serializes without an `icon:` line at all.
+        icon: ""
     )
 }
 
@@ -82,6 +572,11 @@ enum SoulMDParser {
             switch key {
             case "name":  if !value.isEmpty { meta.name = value }
             case "emoji": if !value.isEmpty { meta.emoji = value }
+            // [T-soul-custom-icon] The value may be a data URI, which itself
+            // contains a colon (`data:image/png;base64,…`). Safe here because
+            // the split above uses `firstIndex(of: ":")` — the key is
+            // everything before the FIRST colon and the rest is taken whole.
+            case "icon":  meta.icon = value
             case "style": meta.style = value
             case "lang":  if !value.isEmpty { meta.lang = value }
             default: break
@@ -90,17 +585,32 @@ enum SoulMDParser {
         return SoulFile(metadata: meta, body: String(body))
     }
 
-    /// Serialize back to SOUL.md text. Emits a 3-key frontmatter
-    /// block (name / style / lang) followed by an empty line and the body.
+    /// Serialize back to SOUL.md text. Emits name / style / lang, plus
+    /// `icon` when the user has set one, followed by an empty line and the
+    /// body.
+    ///
     /// The `emoji` field is deliberately NOT written — the UI is locked to
     /// a fixed sparkle (`displayEmoji`), so persisting a `emoji:` line would
     /// imply user-controlled customization that doesn't exist. Old files
     /// containing `emoji: "..."` still parse cleanly (the value is kept in
     /// memory for round-trip safety) but the line is dropped on the next
     /// save, naturally migrating disk state to the new schema.
+    ///
+    /// [T-soul-custom-icon] `icon` IS written — unlike `emoji`, it backs a
+    /// live feature, so dropping it would mean the setting could not persist.
+    /// Written only when non-empty so an untouched file keeps its existing
+    /// 3-key shape.
+    ///
+    /// Known and accepted: a build predating this field parses `icon:` fine
+    /// (unknown keys hit `default: break`) but its serializer omits it, so
+    /// saving Soul on an older device drops the icon and that deletion syncs
+    /// back. Same one-way migration the `emoji` removal relied on.
     static func serialize(_ file: SoulFile) -> String {
         var out = "---\n"
         out += "name: \"\(escape(file.metadata.name))\"\n"
+        if !file.metadata.icon.isEmpty {
+            out += "icon: \"\(escape(file.metadata.icon))\"\n"
+        }
         out += "style: \"\(escape(file.metadata.style))\"\n"
         out += "lang: \"\(escape(file.metadata.lang))\"\n"
         out += "---\n\n"
@@ -430,7 +940,7 @@ enum SystemPromptBuilder {
         // SOUL body length limit (#356 / 500 EN words / 800 CN chars).
         let soulEditHint =
             "---\n" +
-            "SOUL.md fields (name / style / lang / body) can be edited two ways:\n" +
+            "SOUL.md fields (name / icon / style / lang / body) can be edited two ways:\n" +
             "1. Tool: call `minis-config` to propose changes (user must approve).\n" +
             "2. UI: ask the user to go to Settings → Soul to edit directly.\n" +
             "Pick whichever the user finds easier in context. Do not say you cannot change your personality."

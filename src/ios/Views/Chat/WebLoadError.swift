@@ -47,30 +47,30 @@ struct WebLoadError: Equatable {
         switch (ns.domain, ns.code) {
         case (NSURLErrorDomain, NSURLErrorCannotFindHost),
              (NSURLErrorDomain, NSURLErrorDNSLookupFailed):
-            title = String(localized: "Cannot Open Page")
+            title = AppLocalized("Cannot Open Page")
             message = host.map {
-                String(localized: "Minis can’t open the page because it can’t find the server “\($0)”.")
-            } ?? String(localized: "Minis can’t open the page because it can’t find the server.")
+                AppLocalized("Minis can’t open the page because it can’t find the server “\($0)”.")
+            } ?? AppLocalized("Minis can’t open the page because it can’t find the server.")
             systemImage = "wifi.exclamationmark"
 
         case (NSURLErrorDomain, NSURLErrorCannotConnectToHost):
-            title = String(localized: "Cannot Open Page")
-            message = String(localized: "Minis can’t open the page because it can’t connect to the server.")
+            title = AppLocalized("Cannot Open Page")
+            message = AppLocalized("Minis can’t open the page because it can’t connect to the server.")
             systemImage = "wifi.exclamationmark"
 
         case (NSURLErrorDomain, NSURLErrorNotConnectedToInternet),
              (NSURLErrorDomain, NSURLErrorNetworkConnectionLost),
              (NSURLErrorDomain, NSURLErrorInternationalRoamingOff),
              (NSURLErrorDomain, NSURLErrorDataNotAllowed):
-            title = String(localized: "You Are Not Connected to the Internet")
-            message = String(localized: "The page couldn’t load because you’re not connected to the internet.")
+            title = AppLocalized("You Are Not Connected to the Internet")
+            message = AppLocalized("The page couldn’t load because you’re not connected to the internet.")
             systemImage = "wifi.slash"
 
         case (NSURLErrorDomain, NSURLErrorTimedOut):
-            title = String(localized: "The Connection Timed Out")
+            title = AppLocalized("The Connection Timed Out")
             message = host.map {
-                String(localized: "The server “\($0)” took too long to respond.")
-            } ?? String(localized: "The server took too long to respond.")
+                AppLocalized("The server “\($0)” took too long to respond.")
+            } ?? AppLocalized("The server took too long to respond.")
             systemImage = "clock.badge.exclamationmark"
 
         case (NSURLErrorDomain, NSURLErrorSecureConnectionFailed),
@@ -80,23 +80,23 @@ struct WebLoadError: Equatable {
              (NSURLErrorDomain, NSURLErrorServerCertificateNotYetValid),
              (NSURLErrorDomain, NSURLErrorClientCertificateRejected),
              (NSURLErrorDomain, NSURLErrorClientCertificateRequired):
-            title = String(localized: "This Connection Is Not Private")
+            title = AppLocalized("This Connection Is Not Private")
             message = host.map {
-                String(localized: "Minis can’t verify the identity of the server “\($0)”.")
-            } ?? String(localized: "Minis can’t verify the identity of the server.")
+                AppLocalized("Minis can’t verify the identity of the server “\($0)”.")
+            } ?? AppLocalized("Minis can’t verify the identity of the server.")
             systemImage = "lock.slash"
 
         case (NSURLErrorDomain, NSURLErrorUnsupportedURL),
              (NSURLErrorDomain, NSURLErrorBadURL):
-            title = String(localized: "Cannot Open Page")
-            message = String(localized: "The address isn’t valid.")
+            title = AppLocalized("Cannot Open Page")
+            message = AppLocalized("The address isn’t valid.")
             systemImage = "exclamationmark.triangle"
 
         default:
-            title = String(localized: "Cannot Open Page")
+            title = AppLocalized("Cannot Open Page")
             message = host.map {
-                String(localized: "A problem occurred loading “\($0)”.")
-            } ?? String(localized: "A problem occurred while loading this page.")
+                AppLocalized("A problem occurred loading “\($0)”.")
+            } ?? AppLocalized("A problem occurred while loading this page.")
             systemImage = "exclamationmark.triangle"
         }
     }
@@ -121,7 +121,7 @@ struct WebLoadErrorOverlay: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             Button(action: onRetry) {
-                Label(String(localized: "Try Again"), systemImage: "arrow.clockwise")
+                Label(AppLocalized("Try Again"), systemImage: "arrow.clockwise")
                     .font(.subheadline.weight(.medium))
             }
             .buttonStyle(.borderedProminent)

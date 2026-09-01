@@ -898,7 +898,7 @@ final class BrowserTabPool: ObservableObject {
         guard let releaseSerialSlot = await acquireSerialSlot(tabId: targetId) else {
             let serialWaitMs = Int((CFAbsoluteTimeGetCurrent() - serialWaitStart) * 1000)
             logger.info("[PoolTiming] serial_slot_timeout elapsed=\(serialWaitMs)ms tab=\(targetId) action=\(input.action.rawValue)")
-            return .error(String(localized: "Multiple actions are operating on browser tab \(targetId) at the same time and it could not be acquired in time. Open a new tab (action: new_tab, or pass a different tab_id) and retry this action there so it can run in parallel."))
+            return .error(AppLocalized("Multiple actions are operating on browser tab \(targetId) at the same time and it could not be acquired in time. Open a new tab (action: new_tab, or pass a different tab_id) and retry this action there so it can run in parallel."))
         }
         let serialAcquiredMs = Int((CFAbsoluteTimeGetCurrent() - serialWaitStart) * 1000)
         if serialAcquiredMs > 100 {

@@ -252,6 +252,16 @@ struct AIChatView: View {
     /// callback here and committing the freshest one makes the debounce a
     /// genuine trailing edge.
     @State private var latestInputBarFrameH: CGFloat = 0
+    /// [T-voice-inputbar-collapse-selfheal] Liveness signal for the composer's
+    /// geometry reporting: bumped on EVERY onGeometryChange callback (including
+    /// off-screen ones, which still prove the host is laying out), plus the wall
+    /// clock of the last one. The foreground health probe compares the tick
+    /// across a 900ms window to tell "the composer woke up" apart from "the host
+    /// is silent and the bottom of the screen is blank" — the 2026-08-18 01:29
+    /// failure, where the last callback preceded the blank bar by minutes.
+    @State private var inputBarGeometryTick: Int = 0
+    @State private var inputBarLastGeometryAt: CFAbsoluteTime?
+    @State private var inputBarHealthProbe: Task<Void, Never>?
     /// [T-voice-inputbar-stale-height] False until the FIRST non-zero
     /// inputBarHeight lands. The first write (session open / initial composer
     /// layout) is applied IMMEDIATELY (leading edge) so the message list computes
@@ -461,6 +471,7 @@ struct AIChatView: View {
     /// Set to false in onDisappear (e.g. when another page is pushed),
     /// used to suppress auto-focus so the keyboard doesn't pop up behind other pages.
     @State private var isChatViewVisible: Bool = false
+
 
     // minis:// link preview sheet state — hoisted from MinisOpenURLHandler so
     // sheet presentation originates from a stable window-hierarchy root and
@@ -716,13 +727,13 @@ struct AIChatView: View {
                 titlePillEditSession = nil
             }
         }
-        .alert(String(localized: "Force Pull Messages"), isPresented: $showForcePullConfirm) {
-            Button(String(localized: "Pull from iCloud"), role: .destructive) {
+        .alert(AppLocalized("Force Pull Messages"), isPresented: $showForcePullConfirm) {
+            Button(AppLocalized("Pull from iCloud"), role: .destructive) {
                 runForcePull()
             }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
-            Text(String(localized: "This will delete all local messages for this chat and re-download them from iCloud. Local changes that haven't synced yet will be lost. Continue?"))
+            Text(AppLocalized("This will delete all local messages for this chat and re-download them from iCloud. Local changes that haven't synced yet will be lost. Continue?"))
         }
         // [T-ios-json-open-provider-import-prompt] Shared/opened Provider-export
         // JSON: let the user choose import-as-provider vs add-as-attachment.
@@ -776,57 +787,57 @@ struct AIChatView: View {
         } message: {
             Text("Enhanced cache extends the cache TTL from 5 minutes to 1 hour. Cache writes cost more (2x vs 1.25x base price), but cache reads remain cheap (0.1x). Recommended for long coding sessions where request gaps may exceed 5 minutes.")
         }
-        .alert(String(localized: "Context Near Capacity"), isPresented: Binding(get: { vm.showCompactBeforeSendPrompt }, set: { vm.showCompactBeforeSendPrompt = $0 })) {
-            Button(String(localized: "Compact & Send")) {
+        .alert(AppLocalized("Context Near Capacity"), isPresented: Binding(get: { vm.showCompactBeforeSendPrompt }, set: { vm.showCompactBeforeSendPrompt = $0 })) {
+            Button(AppLocalized("Compact & Send")) {
                 vm.compactAndSend()
             }
             // [T-chat-auto-compact-opt-in] One-tap opt-in: compact now AND
             // remember (globally, UserDefaults "autoCompactOnThreshold") to
             // auto-compact without prompting whenever the threshold fires in
             // future conversations.
-            Button(String(localized: "Compact & Enable Auto-Compact")) {
+            Button(AppLocalized("Compact & Enable Auto-Compact")) {
                 vm.autoCompactEnabled = true
                 vm.compactAndSend()
             }
-            Button(String(localized: "Cancel"), role: .cancel) {
+            Button(AppLocalized("Cancel"), role: .cancel) {
                 vm.cancelCompactBeforeSend()
             }
         } message: {
-            Text(String(localized: "Conversation context is nearly full. Compact the history to free up space before sending. Enabling auto-compact will do this automatically from now on."))
+            Text(AppLocalized("Conversation context is nearly full. Compact the history to free up space before sending. Enabling auto-compact will do this automatically from now on."))
         }
-        .alert(String(localized: "Context Full"), isPresented: Binding(get: { vm.showContextExhaustedPrompt }, set: { vm.showContextExhaustedPrompt = $0 })) {
-            Button(String(localized: "New Session")) {
+        .alert(AppLocalized("Context Full"), isPresented: Binding(get: { vm.showContextExhaustedPrompt }, set: { vm.showContextExhaustedPrompt = $0 })) {
+            Button(AppLocalized("New Session")) {
                 vm.showContextExhaustedPrompt = false
                 vm.cancelCompactBeforeSend()
                 NotificationCenter.default.post(name: .newChatRequested, object: nil)
             }
-            Button(String(localized: "Clear Chat"), role: .destructive) {
+            Button(AppLocalized("Clear Chat"), role: .destructive) {
                 vm.showContextExhaustedPrompt = false
                 vm.cancelCompactBeforeSend()
                 vm.clearChat()
             }
-            Button(String(localized: "Cancel"), role: .cancel) {
+            Button(AppLocalized("Cancel"), role: .cancel) {
                 vm.cancelCompactBeforeSend()
             }
         } message: {
-            Text(String(localized: "The conversation context has reached its limit. Start a new session or clear the chat to continue."))
+            Text(AppLocalized("The conversation context has reached its limit. Start a new session or clear the chat to continue."))
         }
         // [T-new-chat-menu-entry] Streaming guard for the "…" menu's New Chat:
         // confirm → stop the running task, then create; cancel → stay put.
-        .alert(String(localized: "Task Running"), isPresented: $showNewChatStopConfirm) {
-            Button(String(localized: "Stop & New Chat"), role: .destructive) {
+        .alert(AppLocalized("Task Running"), isPresented: $showNewChatStopConfirm) {
+            Button(AppLocalized("Stop & New Chat"), role: .destructive) {
                 vm.cancel()
                 NotificationCenter.default.post(name: .newChatRequested, object: nil)
             }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
-            Text(String(localized: "A task is running in this chat. Starting a new chat will stop it."))
+            Text(AppLocalized("A task is running in this chat. Starting a new chat will stop it."))
         }
-        .alert(String(localized: "Clear Chat"), isPresented: $showClearChatConfirm) {
-            Button(String(localized: "Clear"), role: .destructive) { vm.clearChat() }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+        .alert(AppLocalized("Clear Chat"), isPresented: $showClearChatConfirm) {
+            Button(AppLocalized("Clear"), role: .destructive) { vm.clearChat() }
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
-            Text(String(localized: "All messages in this session will be permanently deleted."))
+            Text(AppLocalized("All messages in this session will be permanently deleted."))
         }
         // Bridge VM's slash-command "/clear" request into the local @State that
         // drives the confirmation alert above, so the menu and slash-command
@@ -837,18 +848,18 @@ struct AIChatView: View {
                 vm.clearChatConfirmRequested = false
             }
         }
-        .alert(String(localized: "Compact Above"), isPresented: Binding(
+        .alert(AppLocalized("Compact Above"), isPresented: Binding(
             get: { compactConfirmMessageId != nil },
             set: { if !$0 { compactConfirmMessageId = nil } }
         )) {
-            Button(String(localized: "Compact"), role: .destructive) {
+            Button(AppLocalized("Compact"), role: .destructive) {
                 if let id = compactConfirmMessageId {
                     Task { await vm.compactBefore(id) }
                 }
             }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
-            Text(String(localized: "Messages above this point will be compacted into a summary. This cannot be undone."))
+            Text(AppLocalized("Messages above this point will be compacted into a summary. This cannot be undone."))
         }
         .offloadPermissionDialog()
         .environment(\.openMinisURL, OpenMinisURLAction { url in
@@ -861,16 +872,16 @@ struct AIChatView: View {
             MinisImageFilePreviewView(fileURL: fileURL)
         }
         .alert(
-            String(localized: "File Not Found"),
+            AppLocalized("File Not Found"),
             isPresented: Binding(
                 get: { missingMinisFileName != nil },
                 set: { if !$0 { missingMinisFileName = nil } }
             ),
             presenting: missingMinisFileName
         ) { _ in
-            Button(String(localized: "OK"), role: .cancel) { missingMinisFileName = nil }
+            Button(AppLocalized("OK"), role: .cancel) { missingMinisFileName = nil }
         } message: { name in
-            Text(String(localized: "\(name) is unavailable. It may have been deleted or not yet synced from iCloud."))
+            Text(AppLocalized("\(name) is unavailable. It may have been deleted or not yet synced from iCloud."))
         }
         .fullScreenCover(item: $imageGallery) { presentation in
             MessageImageGallery(items: presentation.items, startIndex: presentation.startIndex)
@@ -1320,11 +1331,16 @@ struct AIChatView: View {
         }
         .onChange(of: shareCoordinator.bufferVersion) { newVersion in
             // Warm start: user is already in a session when share arrives
-            minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(sessionId ?? "nil") hasBuffer=\(shareCoordinator.pendingShareBuffer != nil)")
+            minisLogger.info("[Share] AIChatView.onChange(bufferVersion)=\(newVersion) sessionId=\(sessionId ?? "nil") draftId=\(draftId ?? "nil") hasBuffer=\(shareCoordinator.pendingShareBuffer != nil)")
             injectPendingShareIfNeeded()
         }
         .onDisappear {
             isChatViewVisible = false
+            // [T-voice-inputbar-collapse-selfheal] The health probe must not
+            // outlive the view — its report would describe a composer that no
+            // longer exists.
+            inputBarHealthProbe?.cancel()
+            inputBarHealthProbe = nil
             if speechManager.state == .recording {
                 speechManager.stopRecording()
             }
@@ -1391,6 +1407,70 @@ struct AIChatView: View {
                 // one for an already-visible view.
                 inputBarHeightDebounce?.cancel()
                 inputBarHeightDebounce = nil
+                // [T-voice-inputbar-collapse-selfheal] …EXCEPT when the composer
+                // has stopped reporting geometry altogether, which is the one
+                // state the note above cannot cover.
+                //
+                // Device 2026-08-18 01:29 (iPhone 17 Pro, no lock, no manual app
+                // switch): a transcript landed and collapsed the panel band in a
+                // single frame (transcriptContentHeight 262→42, an intermediate
+                // panel frame reaching y=1119 on an 874pt window). The system
+                // then drove six inactive↔active cycles in 20s on its own
+                // (snapshot / audio-session interruption right after
+                // `end(.capture)`), each logging `hadResponder=true`. After
+                // `inputBarHeight settled=282.0` at 01:29:15.597 the composer's
+                // onGeometryChange NEVER fired again: its SwiftUI host survived
+                // with alpha=1 and zero subviews (confirmed live via
+                // debug.viewTree — FloatingBarHostingView nkids=0), so the whole
+                // bottom of the screen was empty black with no input bar.
+                //
+                // Nothing could wake it: this subtree deliberately ignores the
+                // keyboard safe area while the voice panel is up
+                // ([T-voice-bg-fg-gap], see the .ignoresSafeArea above), so the
+                // inset churn that would normally force a re-layout is filtered
+                // out by design, and onGeometryChange is the ONLY writer of
+                // inputBarHeight. The user's own workaround — leave the session
+                // and re-enter — worked precisely because `.onAppear` re-arms
+                // the seed ([T-inputbar-stale-across-reentry]); this is that
+                // same recovery, applied without making the user find it.
+                //
+                // Re-arm only when the composer is provably not reporting: the
+                // last on-screen sample disagrees with the committed height, or
+                // no sample was ever recorded. In the healthy case both values
+                // match and this is a no-op, so the mid-animation hazard the
+                // note above warns about is not reintroduced — a re-seed can
+                // only happen where the alternative is a permanently wrong (or
+                // missing) bar.
+                let committedH = inputBarHeight
+                let latestH = latestInputBarFrameH
+                let sinceReport = inputBarLastGeometryAt.map { CFAbsoluteTimeGetCurrent() - $0 } ?? -1
+                if didSeedInputBarHeight,
+                   latestH <= 0 || abs(latestH - committedH) > 0.5 {
+                    didSeedInputBarHeight = false
+                    AppLogger(category: "InputBarLayout").info("[voice-bgfg] scene active — composer geometry stale (committed=\(committedH) latest=\(latestH) lastReport=\(String(format: "%.1f", sinceReport))s ago); re-arming seed so the next callback re-measures")
+                }
+
+                // [T-voice-inputbar-collapse-selfheal] Re-arming only makes the
+                // seed ELIGIBLE to fire; it cannot make a host that has stopped
+                // reporting geometry start again. In the observed failure that
+                // host had zero subviews and emitted nothing for minutes, so
+                // verify the wake-up actually happened and say so loudly when it
+                // did not — this is the line that tells the next investigation
+                // "the self-heal ran and was not enough" instead of leaving them
+                // to re-derive it from a silent log.
+                inputBarHealthProbe?.cancel()
+                let probeBaseline = inputBarGeometryTick
+                inputBarHealthProbe = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(900))
+                    guard !Task.isCancelled else { return }
+                    let ticked = inputBarGeometryTick != probeBaseline
+                    let age = inputBarLastGeometryAt.map { CFAbsoluteTimeGetCurrent() - $0 } ?? -1
+                    if ticked {
+                        AppLogger(category: "InputBarLayout").info("[InputBarHealth] OK after foreground — composer re-reported geometry (h=\(latestInputBarFrameH) committed=\(inputBarHeight))")
+                    } else {
+                        AppLogger(category: "InputBarLayout").error("[InputBarHealth] STALLED — no geometry callback 900ms after foreground. committed=\(inputBarHeight) latest=\(latestInputBarFrameH) lastReport=\(String(format: "%.1f", age))s ago voice=\(voiceInputActive) editing=\(voiceVM.isEditingTranscript) seeded=\(didSeedInputBarHeight). The composer host is not laying out; expect a blank bottom area. Leaving and re-entering the session rebuilds it.")
+                    }
+                }
                 // [T-voice-bg-fg-gap] Foreground reseal: if we return to a
                 // voice-mode-not-editing state, no responder should be armed.
                 // Releasing here is a no-op when nothing is focused and clears
@@ -1439,6 +1519,17 @@ struct AIChatView: View {
                 deepLink.terminalInitCommand = nil
             }
         }
+        // [T-ios-voiceover-announce] Announce the end of a turn to VoiceOver.
+        // Deliberately a SEPARATE observer from the auto-focus handler below:
+        // that one returns early when the auto-focus setting is off, and a
+        // blind user must still hear that the reply ended regardless of an
+        // unrelated keyboard preference. The outcome closure is evaluated at
+        // the end edge so it sees the final cancel/error state.
+        .announceChatTurnEnd(isProcessing: vm.isProcessing) {
+            if vm.userDidCancel { return .stopped }
+            if vm.errorMessage != nil { return .failed }
+            return .finished
+        }
         .onChange(of: vm.isProcessing) { processing in
             if !processing {
                 // Reply reading is handled INCREMENTALLY during streaming (the
@@ -1454,12 +1545,36 @@ struct AIChatView: View {
                 // replies still don't trigger the auto-focus.
                 let autoFocusEnabled = (UserDefaults.standard.object(forKey: "chat.autoFocusAfterReply") as? Bool) ?? true
                 guard autoFocusEnabled else { return }
+                // [T-ios-retry-keyboard] Don't treat the end of a RETRIED turn
+                // as "a reply arrived".
+                //
+                // Trigger chain being cut: the user taps Retry on a failure from
+                // a while back -> retry() sets isProcessing=true -> the re-sent
+                // request fails fast (kernel down, no concurrency slot, or an
+                // immediate provider error) -> isProcessing flips back to false
+                // -> this observer fires. The edge is indistinguishable from a
+                // successful reply, and the delayed block's guards now all pass
+                // (the user IS looking at the chat, nothing is queued, and the
+                // errored message is short so the <600 length check succeeds) —
+                // so the keyboard rises seconds after a tap that only meant
+                // "try that again".
+                //
+                // Scoped to the turn's ORIGIN, not its outcome: auto-focus when
+                // a fresh send fails is existing, accepted behaviour and is
+                // deliberately left alone. Consumed (not just read) so it
+                // governs exactly one turn.
+                let wasRetry = vm.turnStartedByRetry
+                vm.turnStartedByRetry = false
+                guard !wasRetry else { return }
                 if GCKeyboard.coalesced != nil {
                     inputFocused = true
                 } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                         guard !hasOverlayPresented, isChatViewVisible else { return }
                         guard !vm.isProcessing, vm.promptQueue.isEmpty else { return }
+                        // Re-check: a retry started during the 1.5s window would
+                        // otherwise be focused by this older timer.
+                        guard !vm.turnStartedByRetry else { return }
                         let lastAssistantLength = vm.messages.last.flatMap {
                             $0.role == .assistant ? $0.blocks.reduce(0) { $0 + $1.content.count } : nil
                         } ?? 0
@@ -1586,6 +1701,22 @@ struct AIChatView: View {
     }
 
     private func injectPendingShareIfNeeded() {
+        // [T-share-routes-to-background-session] Only the session the share was
+        // ROUTED TO may consume it. Both entry points (onAppear and the
+        // bufferVersion observer) funnel through here, so the check sits at the
+        // single place that actually takes the buffer.
+        //
+        // Previously any mounted chat consumed the buffer on a version bump.
+        // Device log 2026-08-18 23:55:42: a share arriving while the user was
+        // looking at session 87B79110 — a conversation running an agent loop in
+        // the BACKGROUND — was injected straight into its composer, because
+        // that view simply happened to be on screen. ContentView now stamps the
+        // destination on the buffer before navigating; a nil stamp (cold
+        // launch, where the launch flow owns the choice) still passes.
+        guard shareCoordinator.bufferTargets(sessionId, draftId: draftId) else {
+            minisLogger.info("[Share] injectPendingShareIfNeeded — buffer is addressed to another session (mine: sessionId=\(sessionId ?? "nil") draftId=\(draftId ?? "nil")); leaving it")
+            return
+        }
         guard let pending = shareCoordinator.consumeBuffer() else {
             minisLogger.info("[Share] injectPendingShareIfNeeded — no buffer or expired")
             return
@@ -1812,7 +1943,7 @@ struct AIChatView: View {
     private func runForceSync() {
         guard let sid = vm.sessionId, !isForcePulling else { return }
         isForcePulling = true
-        forcePullToast = String(localized: "Marking for upload…")
+        forcePullToast = AppLocalized("Marking for upload…")
         Task {
             let n = await ChatStore.shared.forceSyncSession(sid)
             if #available(iOS 17.0, *) {
@@ -1820,7 +1951,7 @@ struct AIChatView: View {
             }
             await MainActor.run {
                 isForcePulling = false
-                forcePullToast = String(localized: "Marked \(n) records for sync. iCloud is uploading now.")
+                forcePullToast = AppLocalized("Marked \(n) records for sync. iCloud is uploading now.")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                     forcePullToast = nil
                 }
@@ -1831,7 +1962,7 @@ struct AIChatView: View {
     private func runForcePull() {
         guard let sid = vm.sessionId, !isForcePulling else { return }
         isForcePulling = true
-        forcePullToast = String(localized: "Pulling from iCloud…")
+        forcePullToast = AppLocalized("Pulling from iCloud…")
         Task {
             let outcome = await ChatStore.shared.forcePullSession(sessionId: sid)
             // Inbound hydration runs asynchronously after applyPortables
@@ -1846,11 +1977,11 @@ struct AIChatView: View {
                 isForcePulling = false
                 switch outcome {
                 case .applied(let pulled, let deleted):
-                    forcePullToast = String(localized: "Pulled \(pulled) records · removed \(deleted) local")
+                    forcePullToast = AppLocalized("Pulled \(pulled) records · removed \(deleted) local")
                 case .cloudEmpty:
-                    forcePullToast = String(localized: "iCloud has no records for this chat — local messages preserved")
+                    forcePullToast = AppLocalized("iCloud has no records for this chat — local messages preserved")
                 case .failed(let msg):
-                    forcePullToast = String(localized: "Force Pull failed: \(msg) — local messages preserved")
+                    forcePullToast = AppLocalized("Force Pull failed: \(msg) — local messages preserved")
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                     forcePullToast = nil
@@ -1960,7 +2091,8 @@ struct AIChatView: View {
             resolvedText: resolved.map { "\($0.providerLabel) · \($0.modelName)" },
             hasBinding: vm.sessionId != nil && configStore.binding(for: vm.sessionId!) != nil,
             hasProviders: !configStore.instances.isEmpty,
-            showThinkingBadge: !vm.availableThinkingLevels.isEmpty && vm.currentThinkingLevel.isEnabled,
+            showThinkingBadge: !vm.availableThinkingLevels.isEmpty
+                && (vm.currentThinkingLevel.isEnabled || vm.currentModelSupportsReasoning),
             thinkingLevelName: vm.currentThinkingLevel.displayName,
             fallbackTrigger: vm.fallbackTrigger,
             fallbackPulse: fallbackPulseOpacity,
@@ -2124,6 +2256,27 @@ struct AIChatView: View {
                         .layoutPriority(-1)
                     }
                     .buttonStyle(.plain)
+                    // [T-ios-voiceover-labels] This label is assembled from a
+                    // status dot, an optional group glyph, the model name and a
+                    // chevron. Left alone VoiceOver reads those as disconnected
+                    // fragments ("square stack 3d up", "chevron down"), so
+                    // combine the row into one element and state what it is.
+                    // The connection state and group binding are carried as the
+                    // VALUE rather than folded into the label, so VoiceOver
+                    // keeps them distinguishable from the control's name.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text("Model", comment: "VoiceOver label for the model picker button"))
+                    .accessibilityValue(Text(
+                        isGroupBound
+                            ? (isAuthed
+                                ? AppLocalized("\(modelName), group, signed in", comment: "VoiceOver value: model picker, group-bound, authenticated")
+                                : AppLocalized("\(modelName), group, not signed in", comment: "VoiceOver value: model picker, group-bound, not authenticated"))
+                            : (isAuthed
+                                ? AppLocalized("\(modelName), signed in", comment: "VoiceOver value: model picker, authenticated")
+                                : AppLocalized("\(modelName), not signed in", comment: "VoiceOver value: model picker, not authenticated"))
+                    ))
+                    .accessibilityHint(Text("Opens the model picker", comment: "VoiceOver hint for the model picker button"))
+                    .accessibilityAddTraits(.isButton)
                 }
 
                 if let detail = resolved {
@@ -2181,14 +2334,17 @@ struct AIChatView: View {
                                 .layoutPriority(-1)
                         }
                         .buttonStyle(.plain)
-                        // Show the badge only when the model supports thinking
-                        // AND thinking is actually enabled. When the level is Off
-                        // a grey "Off" pill read as ambiguous (users couldn't tell
-                        // it meant "thinking disabled"), so we hide the badge
-                        // entirely rather than render a placeholder. The picker
-                        // still lists Off, so users can turn thinking back off from
-                        // there.
-                        if !vm.availableThinkingLevels.isEmpty, vm.currentThinkingLevel.isEnabled {
+                        // Show the badge whenever thinking is enabled, and ALSO
+                        // when it's Off but the active model supports deep
+                        // thinking — the icon + "Off" pill is then a discoverable
+                        // entry point for turning it on (tap opens the level
+                        // sheet). The Off pill is gated on
+                        // `currentModelSupportsReasoning` so non-reasoning models
+                        // don't grow a dead toggle; an enabled level still shows
+                        // unconditionally (user may have opted in on an
+                        // unknown-capability model).
+                        if !vm.availableThinkingLevels.isEmpty,
+                           vm.currentThinkingLevel.isEnabled || vm.currentModelSupportsReasoning {
                             thinkingLevelBadge
                                 .fixedSize()
                                 // Match the model-name line's descender
@@ -2270,12 +2426,15 @@ struct AIChatView: View {
         // compact label in the title and never larger than the "is thinking…"
         // intensity pill in the message list.
         //
-        // The caller only renders this when `level.isEnabled` (thinking on), so
-        // the badge always shows a real level name — no "Off" placeholder here.
+        // Also rendered when the level is Off (reasoning-capable model with
+        // thinking disabled): the pill then reads icon + "Off" as a tap target
+        // for enabling deep thinking. Dim the icon in that state — matches the
+        // 0.4 Off-row convention in ThinkingLevelSheetView.
         HStack(spacing: 2) {
             Image("ThinkingIcon")
                 .resizable()
                 .frame(width: 6, height: 6)
+                .opacity(level.isEnabled ? 1.0 : 0.4)
             Text(level.displayName)
                 .font(.system(size: 8, weight: .medium))
         }
@@ -2395,6 +2554,8 @@ struct AIChatView: View {
                     .font(.caption)
                     .foregroundStyle(ChatColors.secondaryText)
             }
+            // [T-ios-voiceover-labels] Otherwise announced as "xmark".
+            .accessibilityLabel(Text("Dismiss error", comment: "VoiceOver label for the button that dismisses the error banner"))
         }
         .contentShape(Rectangle())
         .onLongPressGesture {
@@ -2470,10 +2631,20 @@ struct AIChatView: View {
                 inputFocused: inputFocused,
                 onRetryMessage: { vm.retryFromMessage($0); vm.forceScrollToBottom.send() },
                 onRetryLast: { vm.retry(); vm.forceScrollToBottom.send() },
+                // [T-ios-assistant-header-open-soul] Routed through the same
+                // handler every `minis://` link in the transcript uses, so the
+                // identity row and an agent-authored
+                // `[Soul](minis://settings/soul)` link land identically —
+                // no second navigation path to keep in sync.
+                onOpenSoulSettings: {
+                    guard let url = URL(string: "minis://settings/soul") else { return }
+                    _ = handleMinisURLTap(url)
+                },
                 onEdit: { [self] msgId in
                     vm.editMessage(msgId)
                     inputFocused = true
                 },
+                onDeleteFrom: { vm.deleteFromMessage($0) },
                 onWithdraw: { vm.withdrawQueuedMessage($0) },
                 onResume: { vm.resume(); vm.forceScrollToBottom.send() },
                 onStop: { vm.stopCurrentCommand() },
@@ -3003,10 +3174,14 @@ struct AIChatView: View {
     /// Use confirmationDialog on iOS 16, Menu on iOS 17+.
     @ViewBuilder
     private var attachmentMenuButton: some View {
+        // [T-ios-voiceover-labels] Labelled on the shared `icon` so both the
+        // iOS 17 Menu branch and the iOS 16 confirmationDialog branch below
+        // announce the same thing; otherwise VoiceOver reads "plus".
         let icon = Image(systemName: "plus")
             .font(.system(size: 18, weight: .medium))
             .foregroundStyle(ChatColors.secondaryText)
             .frame(width: 34, height: 34)
+            .accessibilityLabel(Text("Add attachment", comment: "VoiceOver label for the attachment button"))
             .background(ChatColors.inputIconBg)
             .clipShape(Circle())
             .overlay(Circle().stroke(ChatColors.inputIconBorder, lineWidth: 0.5))
@@ -3082,9 +3257,15 @@ struct AIChatView: View {
             HStack(spacing: 5) {
                 // Fixed-width icon slot so the size stays constant when the glyph
                 // swaps between wave / slash.
+                // [T-ios-voiceover-labels] The glyph only mirrors the on/off
+                // state that the accessibilityValue below already announces,
+                // and the row carries visible text — so it is pure decoration
+                // for VoiceOver and would otherwise be read as
+                // "speaker wave 2 fill".
                 Image(systemName: (on && !muted) ? "speaker.wave.2.fill" : "speaker.slash.fill")
                     .font(.system(size: 12))
                     .frame(width: 16)
+                    .accessibilityHidden(true)
                 Text("Read replies", comment: "Voice TTS toggle (compact)")
                     .font(.subheadline)
             }
@@ -3098,6 +3279,18 @@ struct AIChatView: View {
             .fixedSize()
         }
         .buttonStyle(.plain)
+        // [T-ios-voiceover-labels] State goes in the VALUE, not the label:
+        // folding "on"/"off" into the label would lose VoiceOver's own
+        // "on/off" semantics and make the control's name change as it toggles.
+        // Muted is a third state the glyph distinguishes visually, so it is
+        // announced too rather than being flattened into "on".
+        .accessibilityValue(Text(
+            on ? (muted
+                    ? AppLocalized("On, muted", comment: "VoiceOver value for the read-replies toggle when enabled but muted")
+                    : AppLocalized("On", comment: "VoiceOver value for the read-replies toggle when enabled"))
+               : AppLocalized("Off", comment: "VoiceOver value for the read-replies toggle when disabled")
+        ))
+        .accessibilityHint(Text("Toggles reading replies aloud", comment: "VoiceOver hint for the read-replies toggle"))
     }
 
     /// `/` button that opens the slash command menu.
@@ -3176,6 +3369,12 @@ struct AIChatView: View {
     }
 
     /// Send / Enqueue / Stop circular button.
+    ///
+    /// [T-ios-voiceover-labels] All three states are icon-only, and two of them
+    /// (send / enqueue) use the SAME glyph, so without explicit labels
+    /// VoiceOver reads "arrow up circle fill" for both and a blind user cannot
+    /// tell what pressing it will do. Each branch therefore names its own
+    /// action; the destructive one also carries a hint.
     @ViewBuilder
     private var sendButton: some View {
         if vm.isProcessing && canEnqueue {
@@ -3185,12 +3384,16 @@ struct AIChatView: View {
                     .foregroundStyle(ChatColors.sendButton)
             }
             .keyboardShortcut(.return, modifiers: .command)
+            .accessibilityLabel(Text("Add to queue", comment: "VoiceOver label for the send button while a reply is generating"))
+            .accessibilityHint(Text("Queues this message to send after the current reply finishes", comment: "VoiceOver hint for the queue button"))
         } else if vm.isProcessing {
             Button { vm.cancel() } label: {
                 Image(systemName: "stop.circle.fill")
                     .font(.system(size: 34))
                     .foregroundStyle(.red)
             }
+            .accessibilityLabel(Text("Stop generating", comment: "VoiceOver label for the stop button"))
+            .accessibilityHint(Text("Stops the reply that is being generated", comment: "VoiceOver hint for the stop button"))
         } else {
             Button { performSend() } label: {
                 Image(systemName: "arrow.up.circle.fill")
@@ -3199,6 +3402,7 @@ struct AIChatView: View {
             }
             .disabled(!canSend)
             .keyboardShortcut(.return, modifiers: .command)
+            .accessibilityLabel(Text("Send", comment: "VoiceOver label for the send button"))
         }
     }
 
@@ -3273,7 +3477,7 @@ struct AIChatView: View {
             // `%@` form ("Message %@ (@ to mention files)") as the lookup
             // key in Localizable.xcstrings, so translators get one
             // parameterized entry per locale instead of one per soul name.
-            placeholder: String(localized: "Message \(soulName) (@ to mention files)"),
+            placeholder: AppLocalized("Message \(soulName) (@ to mention files)"),
             onPasteImage: { image in vm.addImageAttachment(image) },
             onPasteFile: { url in vm.addFileAttachment(from: url) },
             onReturnKey: handleReturnKey,
@@ -3353,8 +3557,8 @@ struct AIChatView: View {
                         persistComposerHeight(resolved)
                     }
             )
-            .accessibilityLabel(String(localized: "Resize input box"))
-            .accessibilityHint(String(localized: "Drag to resize, double tap to toggle"))
+            .accessibilityLabel(AppLocalized("Resize input box"))
+            .accessibilityHint(AppLocalized("Drag to resize, double tap to toggle"))
     }
 
     /// Double-tap: jump between the 50% cap and the default height. Anything
@@ -3554,6 +3758,11 @@ struct AIChatView: View {
                 // the current callback (writing it after the seed's `return`
                 // would leave the confirm reading a stale/zero value).
                 if onscreen { latestInputBarFrameH = newH }
+                // [T-voice-inputbar-collapse-selfheal] Liveness, recorded for
+                // EVERY callback — an off-screen sample is still proof the host
+                // is laying out, which is exactly what the health probe asks.
+                inputBarGeometryTick &+= 1
+                inputBarLastGeometryAt = CFAbsoluteTimeGetCurrent()
 
                 if !didSeedInputBarHeight, onscreen {
                     didSeedInputBarHeight = true
@@ -3999,8 +4208,8 @@ struct AIChatView: View {
                                 ProgressView().scaleEffect(0.7)
                             }
                             Text(FileMentionIndex.shared.isScanning
-                                 ? String(localized: "Scanning files…")
-                                 : String(localized: "No matching files"))
+                                 ? AppLocalized("Scanning files…")
+                                 : AppLocalized("No matching files"))
                                 .font(.system(size: 13))
                                 .foregroundStyle(ChatColors.secondaryText)
                             Spacer()
@@ -4209,7 +4418,7 @@ struct AIChatView: View {
                         let titleColor: Color = isThinkingActive
                             ? .blue : (isSelected ? .white : ChatColors.primaryText)
                         let subtitleText = (cmd.id == "thinking" && !thinkingSupported)
-                            ? String(localized: "Not supported by current model")
+                            ? AppLocalized("Not supported by current model")
                             : cmd.subtitle
                         let subtitleColor: Color = (cmd.id == "thinking" && !thinkingSupported)
                             ? .secondary
@@ -4236,9 +4445,17 @@ struct AIChatView: View {
                 .allowsHitTesting(cmd.id == "thinking")
                 .onTapGesture { onToggleThinking?() }
                 if cmd.id == "memory" {
+                    // [T-ios-voiceover-labels] Status glyph, not a control:
+                    // give it the on/off meaning in words instead of letting
+                    // VoiceOver read "checkmark circle fill" / "slash circle".
                     Image(systemName: memoryEnabled ? "checkmark.circle.fill" : "slash.circle")
                         .font(.system(size: 16))
                         .foregroundStyle(memoryEnabled ? (isSelected ? .white : .green) : (isSelected ? .white.opacity(0.6) : .secondary))
+                        .accessibilityLabel(Text(
+                            memoryEnabled
+                                ? AppLocalized("Memory on", comment: "VoiceOver label for the memory status icon when enabled")
+                                : AppLocalized("Memory off", comment: "VoiceOver label for the memory status icon when disabled")
+                        ))
                 }
                 if cmd.id == "thinking" && thinkingSupported {
                     thinkingLevelPicker
@@ -4464,9 +4681,9 @@ private struct ProviderImportPromptModifier: ViewModifier {
                     onImport: {
                         pending = nil
                         if let label = onImport(item.json) {
-                            result = String(localized: "Imported provider \"\(label)\".")
+                            result = AppLocalized("Imported provider \"\(label)\".")
                         } else {
-                            result = String(localized: "Could not import this provider configuration.")
+                            result = AppLocalized("Could not import this provider configuration.")
                         }
                         try? FileManager.default.removeItem(at: item.fileURL)
                     },
@@ -4481,13 +4698,13 @@ private struct ProviderImportPromptModifier: ViewModifier {
                 )
             }
             .alert(
-                String(localized: "Provider Import"),
+                AppLocalized("Provider Import"),
                 isPresented: Binding(
                     get: { result != nil },
                     set: { if !$0 { result = nil } }
                 )
             ) {
-                Button(String(localized: "OK"), role: .cancel) { result = nil }
+                Button(AppLocalized("OK"), role: .cancel) { result = nil }
             } message: {
                 Text(result ?? "")
             }
@@ -4516,10 +4733,10 @@ private struct ProviderImportSheet: View {
                     .font(.system(size: 40))
                     .foregroundStyle(.tint)
                     .padding(.top, 8)
-                Text(String(localized: "Provider Configuration Detected"))
+                Text(AppLocalized("Provider Configuration Detected"))
                     .font(.headline)
                     .multilineTextAlignment(.center)
-                Text(String(localized: "This JSON file looks like an exported provider configuration. Import it as a new provider, or add it to the chat as a file attachment?"))
+                Text(AppLocalized("This JSON file looks like an exported provider configuration. Import it as a new provider, or add it to the chat as a file attachment?"))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -4528,21 +4745,21 @@ private struct ProviderImportSheet: View {
 
             VStack(spacing: 10) {
                 Button(action: { chose = true; onImport() }) {
-                    Text(String(localized: "Import as Provider"))
+                    Text(AppLocalized("Import as Provider"))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
                 Button(action: { chose = true; onAttach() }) {
-                    Text(String(localized: "Add as Chat Attachment"))
+                    Text(AppLocalized("Add as Chat Attachment"))
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
 
                 Button(role: .cancel, action: { chose = true; onCancel() }) {
-                    Text(String(localized: "Cancel"))
+                    Text(AppLocalized("Cancel"))
                         .frame(maxWidth: .infinity)
                 }
                 .controlSize(.large)
@@ -4902,19 +5119,19 @@ private struct ChatTrailingMenu: View, Equatable {
         #endif
         return Menu {
             Button { onNewChat() } label: {
-                Label(String(localized: "New Chat"), systemImage: "square.and.pencil")
+                Label(AppLocalized("New Chat"), systemImage: "square.and.pencil")
             }
 
             Divider()
 
             // [T-chat-menu-compact-entry] Compact above Clear Chat.
             Button { onCompact() } label: {
-                Label(String(localized: "Compact Messages"), systemImage: "arrow.down.right.and.arrow.up.left")
+                Label(AppLocalized("Compact Messages"), systemImage: "arrow.down.right.and.arrow.up.left")
             }
             .disabled(messagesEmpty)
 
             Button(role: .destructive) { onClearChat() } label: {
-                Label(String(localized: "Clear Chat"), systemImage: "trash")
+                Label(AppLocalized("Clear Chat"), systemImage: "trash")
             }
             .disabled(messagesEmpty)
 
@@ -4924,12 +5141,12 @@ private struct ChatTrailingMenu: View, Equatable {
             // iCloud Sync toggle on.
             if #available(iOS 17.0, *), iCloudSyncEnabled {
                 Button { onForceSync() } label: {
-                    Label(String(localized: "Force iCloud Sync"), systemImage: "icloud.and.arrow.up")
+                    Label(AppLocalized("Force iCloud Sync"), systemImage: "icloud.and.arrow.up")
                 }
                 .disabled(!hasSession || isForcePulling)
 
                 Button { onForcePull() } label: {
-                    Label(String(localized: "Force Pull Messages"), systemImage: "icloud.and.arrow.down")
+                    Label(AppLocalized("Force Pull Messages"), systemImage: "icloud.and.arrow.down")
                 }
                 .disabled(!hasSession || isForcePulling)
 
@@ -4937,30 +5154,30 @@ private struct ChatTrailingMenu: View, Equatable {
             }
 
             Button { onOpenTerminal() } label: {
-                Label(String(localized: "Open Terminal"), systemImage: "terminal")
+                Label(AppLocalized("Open Terminal"), systemImage: "terminal")
             }
 
             Button { onOpenBrowser() } label: {
-                Label(String(localized: "Open Browser"), systemImage: "globe")
+                Label(AppLocalized("Open Browser"), systemImage: "globe")
             }
 
             Button { onBrowseFiles() } label: {
-                Label(String(localized: "Browse Chat Files"), systemImage: "folder")
+                Label(AppLocalized("Browse Chat Files"), systemImage: "folder")
             }
 
             Divider()
 
             Button { onSkills() } label: {
-                Label(String(localized: "Skills in Session"), systemImage: "puzzlepiece.extension")
+                Label(AppLocalized("Skills in Session"), systemImage: "puzzlepiece.extension")
             }
 
             Button { onMCPs() } label: {
-                Label(String(localized: "MCPs in Session"), systemImage: "wrench.and.screwdriver")
+                Label(AppLocalized("MCPs in Session"), systemImage: "wrench.and.screwdriver")
             }
 
             if memoryEnabled {
                 Button { onMemories() } label: {
-                    Label(String(localized: "Memories in Session"), systemImage: "brain.head.profile")
+                    Label(AppLocalized("Memories in Session"), systemImage: "brain.head.profile")
                 }
             }
 
@@ -4968,7 +5185,7 @@ private struct ChatTrailingMenu: View, Equatable {
                 get: { speakEnabled },
                 set: { setSpeakEnabled($0) }
             )) {
-                Label(String(localized: "Speak Responses"), systemImage: "speaker.wave.2")
+                Label(AppLocalized("Speak Responses"), systemImage: "speaker.wave.2")
             }
 
             // [T-codex-fast-mode-menu-group] Model-control toggles in their
@@ -4981,7 +5198,7 @@ private struct ChatTrailingMenu: View, Equatable {
                         get: { enhancedCacheEnabled },
                         set: { setEnhancedCache($0) }
                     )) {
-                        Label(String(localized: "Enhanced Cache"), systemImage: "clock.arrow.circlepath")
+                        Label(AppLocalized("Enhanced Cache"), systemImage: "clock.arrow.circlepath")
                     }
                 }
 
@@ -4990,7 +5207,7 @@ private struct ChatTrailingMenu: View, Equatable {
                         get: { fastModeEnabled },
                         set: { setFastMode($0) }
                     )) {
-                        Label(String(localized: "Enable Fast Mode"), systemImage: "bolt.fill")
+                        Label(AppLocalized("Enable Fast Mode"), systemImage: "bolt.fill")
                     }
                 }
             }
@@ -4998,7 +5215,7 @@ private struct ChatTrailingMenu: View, Equatable {
             Divider()
 
             Button { onTokenUsage() } label: {
-                Label(String(localized: "Token Usage"), systemImage: "number")
+                Label(AppLocalized("Token Usage"), systemImage: "number")
             }
 
             #if DEBUG
@@ -5018,6 +5235,9 @@ private struct ChatTrailingMenu: View, Equatable {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(ChatColors.primaryText)
         }
+        // [T-ios-voiceover-labels] Matches the label the UIKit ellipsis button
+        // elsewhere in this file already sets, so both read the same.
+        .accessibilityLabel(Text("More options", comment: "VoiceOver label for the overflow menu button"))
     }
 }
 
@@ -5098,7 +5318,7 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         button.setImage(UIImage(systemName: "ellipsis", withConfiguration: cfg), for: .normal)
         button.tintColor = UIColor(ChatColors.primaryText)
         button.showsMenuAsPrimaryAction = true
-        button.accessibilityLabel = String(localized: "More options")
+        button.accessibilityLabel = AppLocalized("More options")
         button.menu = Self.buildMenu(key: key, coordinator: context.coordinator)
         context.coordinator.lastKey = key
         return button
@@ -5130,7 +5350,7 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         var groups: [UIMenuElement] = []
 
         groups.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: String(localized: "New Chat"),
+            UIAction(title: AppLocalized("New Chat"),
                      image: UIImage(systemName: "square.and.pencil")) { _ in coordinator.parent.onNewChat() },
         ]))
 
@@ -5139,10 +5359,10 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         // separate inline group so a divider lands between Clear Chat and the
         // sync rows (user-requested layout).
         groups.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: String(localized: "Compact Messages"),
+            UIAction(title: AppLocalized("Compact Messages"),
                      image: UIImage(systemName: "arrow.down.right.and.arrow.up.left"),
                      attributes: key.messagesEmpty ? [.disabled] : []) { _ in coordinator.parent.onCompact() },
-            UIAction(title: String(localized: "Clear Chat"),
+            UIAction(title: AppLocalized("Clear Chat"),
                      image: UIImage(systemName: "trash"),
                      attributes: key.messagesEmpty ? [.destructive, .disabled] : [.destructive]) { _ in coordinator.parent.onClearChat() },
         ]))
@@ -5152,35 +5372,35 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         if #available(iOS 17.0, *), key.iCloudSyncEnabled {
             let disabled: UIMenuElement.Attributes = (!key.hasSession || key.isForcePulling) ? [.disabled] : []
             groups.append(UIMenu(options: .displayInline, children: [
-                UIAction(title: String(localized: "Force iCloud Sync"),
+                UIAction(title: AppLocalized("Force iCloud Sync"),
                          image: UIImage(systemName: "icloud.and.arrow.up"),
                          attributes: disabled) { _ in coordinator.parent.onForceSync() },
-                UIAction(title: String(localized: "Force Pull Messages"),
+                UIAction(title: AppLocalized("Force Pull Messages"),
                          image: UIImage(systemName: "icloud.and.arrow.down"),
                          attributes: disabled) { _ in coordinator.parent.onForcePull() },
             ]))
         }
 
         groups.append(UIMenu(options: .displayInline, children: [
-            UIAction(title: String(localized: "Open Terminal"),
+            UIAction(title: AppLocalized("Open Terminal"),
                      image: UIImage(systemName: "terminal")) { _ in coordinator.parent.onOpenTerminal() },
-            UIAction(title: String(localized: "Open Browser"),
+            UIAction(title: AppLocalized("Open Browser"),
                      image: UIImage(systemName: "globe")) { _ in coordinator.parent.onOpenBrowser() },
-            UIAction(title: String(localized: "Browse Chat Files"),
+            UIAction(title: AppLocalized("Browse Chat Files"),
                      image: UIImage(systemName: "folder")) { _ in coordinator.parent.onBrowseFiles() },
         ]))
 
         var sessionGroup: [UIMenuElement] = [
-            UIAction(title: String(localized: "Skills in Session"),
+            UIAction(title: AppLocalized("Skills in Session"),
                      image: UIImage(systemName: "puzzlepiece.extension")) { _ in coordinator.parent.onSkills() },
-            UIAction(title: String(localized: "MCPs in Session"),
+            UIAction(title: AppLocalized("MCPs in Session"),
                      image: UIImage(systemName: "wrench.and.screwdriver")) { _ in coordinator.parent.onMCPs() },
         ]
         if key.memoryEnabled {
-            sessionGroup.append(UIAction(title: String(localized: "Memories in Session"),
+            sessionGroup.append(UIAction(title: AppLocalized("Memories in Session"),
                                          image: UIImage(systemName: "brain.head.profile")) { _ in coordinator.parent.onMemories() })
         }
-        sessionGroup.append(UIAction(title: String(localized: "Speak Responses"),
+        sessionGroup.append(UIAction(title: AppLocalized("Speak Responses"),
                                      image: UIImage(systemName: "speaker.wave.2"),
                                      state: key.speakEnabled ? .on : .off) { _ in
             coordinator.parent.setSpeakEnabled(!key.speakEnabled)
@@ -5192,7 +5412,7 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         // their own inline group so dividers separate them on both sides.
         var modelControlGroup: [UIMenuElement] = []
         if key.showEnhancedCacheToggle {
-            modelControlGroup.append(UIAction(title: String(localized: "Enhanced Cache"),
+            modelControlGroup.append(UIAction(title: AppLocalized("Enhanced Cache"),
                                               image: UIImage(systemName: "clock.arrow.circlepath"),
                                               state: key.enhancedCacheEnabled ? .on : .off) { _ in
                 coordinator.parent.setEnhancedCache(!key.enhancedCacheEnabled)
@@ -5202,7 +5422,7 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         // service_tier=priority (the wire value codex_cli_rs sends for its
         // Fast mode) into Codex requests while enabled; 2x credit burn.
         if key.showFastModeToggle {
-            modelControlGroup.append(UIAction(title: String(localized: "Enable Fast Mode"),
+            modelControlGroup.append(UIAction(title: AppLocalized("Enable Fast Mode"),
                                               image: UIImage(systemName: "bolt.fill"),
                                               state: key.fastModeEnabled ? .on : .off) { _ in
                 coordinator.parent.setFastMode(!key.fastModeEnabled)
@@ -5213,7 +5433,7 @@ private struct ChatTrailingMenuButton: UIViewRepresentable {
         }
 
         var tailGroup: [UIMenuElement] = [
-            UIAction(title: String(localized: "Token Usage"),
+            UIAction(title: AppLocalized("Token Usage"),
                      image: UIImage(systemName: "number")) { _ in coordinator.parent.onTokenUsage() },
         ]
         #if DEBUG
@@ -5265,11 +5485,11 @@ private struct MoveToSessionSheet: View {
                         dismiss()
                         onSelect(newId)
                     } label: {
-                        Label(String(localized: "New Chat"), systemImage: "plus.bubble")
+                        Label(AppLocalized("New Chat"), systemImage: "plus.bubble")
                     }
                 }
 
-                Section(isSearching ? String(localized: "Results") : String(localized: "Recent")) {
+                Section(isSearching ? AppLocalized("Results") : AppLocalized("Recent")) {
                     ForEach(displayedSessions) { session in
                         Button {
                             dismiss()
@@ -5278,13 +5498,13 @@ private struct MoveToSessionSheet: View {
                             HStack(spacing: 8) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     highlightedText(
-                                        session.title ?? String(localized: "New Chat"),
+                                        session.title ?? AppLocalized("New Chat"),
                                         font: .system(size: 16, weight: .semibold),
                                         color: Color(UIColor.label)
                                     )
                                     .lineLimit(1)
                                     highlightedText(
-                                        session.lastMessage ?? String(localized: "No messages yet"),
+                                        session.lastMessage ?? AppLocalized("No messages yet"),
                                         font: .system(size: 14),
                                         color: Color(UIColor.secondaryLabel)
                                     )
@@ -5299,13 +5519,13 @@ private struct MoveToSessionSheet: View {
                     }
                 }
             }
-            .searchable(text: $searchText, prompt: String(localized: "Search chats..."))
+            .searchable(text: $searchText, prompt: AppLocalized("Search chats..."))
             .onChange(of: searchText) { _ in scheduleSearch() }
-            .navigationTitle(String(localized: "Move to…"))
+            .navigationTitle(AppLocalized("Move to…"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Cancel")) { dismiss() }
+                    Button(AppLocalized("Cancel")) { dismiss() }
                 }
             }
         }
@@ -5376,7 +5596,7 @@ private struct MoveToSessionSheet: View {
         let seconds = Int(now.timeIntervalSince(date))
         if calendar.isDateInToday(date) {
             if seconds < 60 {
-                return String(localized: "Just now")
+                return AppLocalized("Just now")
             } else if seconds < 3600 {
                 let mins = seconds / 60
                 return "\(mins) min ago"
@@ -5385,7 +5605,7 @@ private struct MoveToSessionSheet: View {
                 return "\(hrs) hr ago"
             }
         } else if calendar.isDateInYesterday(date) {
-            return String(localized: "Yesterday")
+            return AppLocalized("Yesterday")
         } else {
             let diff = calendar.dateComponents([.day], from: date, to: now)
             if let days = diff.day, days < 7 {
@@ -5504,8 +5724,8 @@ private struct SessionLockGateOverlay: View {
                     promptForBiometricUnlock()
                 } label: {
                     Label(attemptFailed
-                          ? String(localized: "Try again")
-                          : String(localized: "Unlock"),
+                          ? AppLocalized("Try again")
+                          : AppLocalized("Unlock"),
                           systemImage: "faceid")
                         .font(.system(size: 16, weight: .semibold))
                         .padding(.horizontal, 22).padding(.vertical, 10)
@@ -5535,7 +5755,7 @@ private struct SessionLockGateOverlay: View {
         guard !promptInFlight else { return }
         promptInFlight = true
         Task { @MainActor in
-            let reason = String(localized: "Unlock this chat session")
+            let reason = AppLocalized("Unlock this chat session")
             let ok = await BiometricAuth.authenticate(reason: reason)
             promptInFlight = false
             if ok {
@@ -5670,7 +5890,7 @@ private struct SpeechLanguagePickerSheet: View {
                 let others = filteredLocales.filter { !preferredCodes.contains($0.language.languageCode?.identifier ?? "") }
 
                 if !preferred.isEmpty {
-                    Section(String(localized: "Preferred", comment: "Section header for preferred speech languages")) {
+                    Section(AppLocalized("Preferred", comment: "Section header for preferred speech languages")) {
                         ForEach(preferred, id: \.identifier) { loc in
                             languageRow(loc)
                         }
@@ -5678,7 +5898,7 @@ private struct SpeechLanguagePickerSheet: View {
                 }
 
                 if !others.isEmpty {
-                    Section(String(localized: "All Languages", comment: "Section header for all speech languages")) {
+                    Section(AppLocalized("All Languages", comment: "Section header for all speech languages")) {
                         ForEach(others, id: \.identifier) { loc in
                             languageRow(loc)
                         }
@@ -5690,7 +5910,7 @@ private struct SpeechLanguagePickerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Done", comment: "Dismiss speech language picker")) {
+                    Button(AppLocalized("Done", comment: "Dismiss speech language picker")) {
                         dismiss()
                     }
                 }

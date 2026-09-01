@@ -279,13 +279,20 @@ enum ChatStoreSyncHydrators {
         let sortOrder = intField(record, "sortOrder") ?? 0
         let updatedAt = dateField(record, "updatedAt") ?? record.updatedAt
 
+        // [T-token-attribution-snapshot] Absent from a sender on an older
+        // build; nil flows through to the COALESCE guards in
+        // mergeRemoteMessage, which keep whatever this device already has.
         await ChatStore.shared.mergeRemoteMessage(
             id: id, sessionId: sessionId, role: role,
             partsJson: partsJson, createdAt: createdAt,
             tokenUsageJson: tokenUsageJson, sortOrder: sortOrder,
             reasoningContent: reasoningContent,
             streamInterruptCount: streamInterruptCount,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            modelId: optionalStringField(record, "modelId"),
+            modelDisplayName: optionalStringField(record, "modelDisplayName"),
+            providerType: optionalStringField(record, "providerType"),
+            providerInstanceId: optionalStringField(record, "providerInstanceId")
         )
     }
 

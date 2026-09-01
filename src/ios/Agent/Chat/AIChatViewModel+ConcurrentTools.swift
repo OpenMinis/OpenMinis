@@ -206,7 +206,7 @@ extension AIChatViewModel {
             AppLogger(category: "ToolPreflight").warning(
                 "[ToolRepair] REFUSED truncated write tool=\(tu.name) id=\(tu.id) strategy=\(tag) path=\(path)"
             )
-            let uiMessage = String(localized: "Blocked: arguments were truncated in transit")
+            let uiMessage = AppLocalized("Blocked: arguments were truncated in transit")
             let modelMessage = """
             Error: This call was NOT executed. Its argument stream was truncated in transit \
             (repair strategy: \(tag)), so the `content` your client sent was cut short and would \
@@ -245,7 +245,7 @@ extension AIChatViewModel {
             AppLogger(category: "ToolPreflight").warning(
                 "[ToolPreflight] BLOCKED tool=\(tu.name) id=\(tu.id) reason=\"\(preflightError)\" argsKeys=[\(tu.args.keys.sorted().joined(separator: ","))] chunkCount=\(chunkRing.count) lastChunk=<<<\(chunkRing.last?.prefix(500) ?? "")>>>"
             )
-            let uiMessage = String(localized: "Blocked invalid tool call")
+            let uiMessage = AppLocalized("Blocked invalid tool call")
             let modelMessage = "Error: Tool call rejected before execution. \(preflightError) The arguments your client sent were empty or missing required fields — re-issue the call with all required parameters filled in. Do not retry with the same empty arguments."
             if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
                 messages[msgIdx].blocks[blockIdx].content = uiMessage
@@ -904,7 +904,7 @@ extension AIChatViewModel {
                 // path already gets, so "arguments were altered" is visible in
                 // the transcript rather than buried in a log line.
                 blk.toolStatus = .failed(
-                    message: String(localized: "Arguments truncated in transit — result may be incomplete")
+                    message: AppLocalized("Arguments truncated in transit — result may be incomplete")
                 )
             } else {
                 blk.toolStatus = toolSuccess

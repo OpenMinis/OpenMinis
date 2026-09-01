@@ -8,6 +8,26 @@ struct AboutView: View {
         return "\(version) (\(build))"
     }()
 
+    /// When this binary was built, from the executable's modification date.
+    ///
+    /// Exists because the version string alone cannot answer "is the fix I
+    /// just shipped actually running on that device?" — CFBundleVersion is
+    /// static across rebuilds, so an OTA install that silently didn't replace
+    /// the app looks identical to one that did. That ambiguity has cost real
+    /// debugging time on the test devices. Same source as the debug server's
+    /// `buildDate`, but visible in Release too, where no debug server exists.
+    private let buildDate: String = {
+        guard let url = Bundle.main.executableURL,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let mod = attrs[.modificationDate] as? Date
+        else { return "unknown" }
+        let fmt = DateFormatter()
+        // Local time, seconds included: this gets compared by eye against the
+        // timestamp of a build that just finished.
+        fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return fmt.string(from: mod)
+    }()
+
     var body: some View {
         List {
             // MARK: - Project Info
@@ -28,6 +48,11 @@ struct AboutView: View {
                     Text("Version \(appVersion)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    Text("Built \(buildDate)")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        // Selectable so it can be copied into a bug report.
+                        .textSelection(.enabled)
                     Text("Minis is Your Fully Local, Fully Private On-Device Agent.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)

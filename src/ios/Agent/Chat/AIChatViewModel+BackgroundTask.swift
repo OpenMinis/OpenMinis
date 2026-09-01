@@ -205,10 +205,10 @@ extension AIChatViewModel {
                 // user's own terms instead of claiming completion.
                 if allAssistantTurns.contains(where: { isInternalOnly($0) }) {
                     logger.info("[BackgroundNotification] source=fallback-interrupted")
-                    return String(localized: "Task interrupted by a new message. Open the session to continue.")
+                    return AppLocalized("Task interrupted by a new message. Open the session to continue.")
                 }
                 logger.info("[BackgroundNotification] source=fallback")
-                return String(localized: "Task completed.")
+                return AppLocalized("Task completed.")
             }()
             logger.info("[BackgroundNotification] responseSummary ready length=\(responseSummary.count) first20=\(String(responseSummary.prefix(20)).debugDescription) wasBackground=\(wasBackground)")
             let fallbackTitle = messages.first(where: { $0.role == .user })?.content.prefix(60).description ?? "Agent task"
@@ -342,7 +342,15 @@ extension AIChatViewModel {
         case .info: toolName = "info"
         }
 
-        let desc = toolBlock.toolDescription
+        // [T-ios-tool-title-lost-in-status] Prefer the model-supplied
+        // `tool_title` (persisted as `toolSummary`) over the derived
+        // `toolDescription`, matching every other display site
+        // (AssistantBlockView.displayText, SessionsOffloadBridge,
+        // GetSessionStatusIntent, ToolLiveSheet). This site read
+        // `toolDescription` alone, so a tool call WITH a title still surfaced
+        // the generic derivation — e.g. a `read_image` whose title was
+        // "查看页面截图" reported the bare filename / "Read image" instead.
+        let desc = toolBlock.toolSummary ?? toolBlock.toolDescription
         let elapsed: String
         if let start = toolBlock.toolStartTime {
             elapsed = String(format: "%.1fs", Date().timeIntervalSince(start))
@@ -398,7 +406,16 @@ extension AIChatViewModel {
         let summary = "tool=\(toolName) status=\(statusStr) elapsed=\(elapsed)\(pidInfo) desc=\"\(desc.prefix(40))\"\(outputPreview)\(browserInfo)"
         SessionActivityTracker.shared.currentToolStatus = "\(toolName): \(statusStr)"
         if let sid = self.sessionId {
-            SessionActivityTracker.shared.updateToolInfo(sessionId: sid, toolName: toolName, toolStatus: statusStr)
+            // [T-ios-tool-title-lost-in-status] `toolStatus` is the USER-FACING
+            // string (the SSE path at AIChatViewModel+SSEStream.swift ~830
+            // passes `toolSummary ?? toolDescription` here, and the Live
+            // Activity renders it as the tool's subtitle). This site passed the
+            // internal lifecycle token instead — "running" / "streaming(512B)" —
+            // so whenever the background path won the race the descriptive
+            // title was replaced by machine state. Pass the same descriptive
+            // text; the lifecycle token stays in `currentToolStatus` above,
+            // which is what actually wants it.
+            SessionActivityTracker.shared.updateToolInfo(sessionId: sid, toolName: toolName, toolStatus: desc)
         }
         return summary
     }
@@ -626,11 +643,21 @@ extension AIChatViewModel {
         // can have many in flight at once and a stop tap should cancel
         // the entire batch. [T-concurrent-tools 2026-05-25]
         if !runningCommandPids.isEmpty {
-            // Coordinator's stopCurrentCommand() is already "kill every
-            // in-flight pid across every session", which matches what we
-            // want for concurrent tool execution: one stop tap = cancel
-            // every shell currently running.
-            Task { await ISHExecutionCoordinator.shared.stopCurrentCommand() }
+            // [T-shell-stop-blocked-by-actor] SYNCHRONOUS and nonisolated —
+            // deliberately not `Task { await …stopCurrentCommand() }`.
+            //
+            // That form has to queue on the coordinator actor, and the case
+            // Stop exists for is exactly when the coordinator is stuck: a
+            // guest process wedged on iSH's global `pids_lock` blocks the
+            // actor, so the kill request sat in the queue behind the very
+            // thing it was meant to kill. Field crash 2026-08-23 20:11 shows
+            // no `Coordinator stopping command` line at all — the user
+            // pressed Stop and the code never ran.
+            //
+            // Killing needs nothing from the actor but the pid, which is
+            // mirrored under a lock, so this runs right here on the caller.
+            let killed = ISHExecutionCoordinator.stopAllNonisolated()
+            logger.info("⏹️ stopCurrentCommand — signalled \(killed) shell pid(s)")
         }
         runningCommandPids.removeAll()
         commandStartTime = nil

@@ -37,15 +37,27 @@ actor VoiceCorrectionRecorder {
                     asrProvider: String = "", source: String = "asr_transcript") async {
         // [T-voice-correction-collection-consent] Persisting learning data is
         // opt-in (default off). Correction still runs; it just doesn't learn.
-        guard VoiceCorrectionCollectionConsent.collectionEnabled else {
+        //
+        // The consent gate is evaluated as `persist` rather than an early return, so that
+        // in DEBUG the trace below still sees the edit. Consent governs what we WRITE to
+        // voice-correction.db; it is not a reason for a developer inspecting their own
+        // device to be unable to see which cases the corrector missed. Nothing below
+        // touches the DB when `persist` is false.
+        let persist = VoiceCorrectionCollectionConsent.collectionEnabled
+        #if !DEBUG
+        guard persist else {
             logger.info("[VoiceCorrection][Record] skipped — collection consent off")
             return
         }
+        #endif
         let beforeText = before.trimmingCharacters(in: .whitespacesAndNewlines)
         let afterText = after.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !beforeText.isEmpty, !afterText.isEmpty, beforeText != afterText else { return }
         guard let normalizer = PhoneticNormalizerRegistry.normalizer(for: locale) else { return }
-        guard let db = VoiceCorrectionDB.shared else { return }
+        let db = VoiceCorrectionDB.shared
+        #if !DEBUG
+        guard db != nil else { return }
+        #endif
 
         // Sentence-align first (§5.1): only sentences that actually changed are diffed, so
         // an edit at the end of a long transcript doesn't re-diff the untouched start.
@@ -83,6 +95,18 @@ actor VoiceCorrectionRecorder {
             let verdict = CorrectionAdmission.judge(from: candidate.from, to: candidate.to,
                                                     normalizer: normalizer,
                                                     sentenceLength: candidate.sentenceLen)
+            #if DEBUG
+            // Capture the span BEFORE the admission gate, so the trace also holds the
+            // ones we drop — a legitimate fix misjudged as a "rewrite" is exactly the
+            // case that is otherwise invisible (the log line carries lengths only).
+            await VoiceCorrectionTrace.shared.recordManualEdit(
+                source: source, locale: locale, before: beforeText, after: afterText,
+                from: candidate.from, to: candidate.to,
+                fromPhoneticKey: fromKey, toPhoneticKey: normalizer.normalize(candidate.to),
+                admitted: verdict.isAdmitted && !fromKey.isEmpty,
+                reason: fromKey.isEmpty ? "empty_phonetic_key" : verdict.reason,
+                sentenceLen: candidate.sentenceLen)
+            #endif
             guard verdict.isAdmitted, !fromKey.isEmpty else {
                 droppedRewrite += 1
                 // [T-log-noise-privacy 2026-07-18] Reason tag + lengths only —
@@ -94,17 +118,23 @@ actor VoiceCorrectionRecorder {
             // Context sample capped: it's for debugging/display, not storage of the user's
             // whole message (design §3.2 "≤50 token").
             let context = String(candidate.context.prefix(50))
-            await db.upsertConfusion(phoneticKey: fromKey,
-                                     originalVariant: candidate.from,
-                                     correctedTerm: candidate.to,
-                                     locale: locale,
-                                     contextSample: context,
-                                     asrProvider: asrProvider,
-                                     source: source)
+            if persist, let db {
+                await db.upsertConfusion(phoneticKey: fromKey,
+                                         originalVariant: candidate.from,
+                                         correctedTerm: candidate.to,
+                                         locale: locale,
+                                         contextSample: context,
+                                         asrProvider: asrProvider,
+                                         source: source)
+            }
             kept += 1
         }
 
-        logger.info("[VoiceCorrection][Record] source=\(source) diff candidates=\(candidatesWithLen.count) kept=\(kept)(asr_correction) dropped=\(droppedRewrite)(rewrite) beforeLen=\(beforeText.count) afterLen=\(afterText.count)")
+        // `admitted` is the admission verdict; `persisted` says whether those rows were
+        // actually written. They diverge in DEBUG with consent off — where the run still
+        // proceeds so the trace can observe the misses — so log both rather than one
+        // number that means different things depending on a flag.
+        logger.info("[VoiceCorrection][Record] source=\(source) persisted=\(persist) diff candidates=\(candidatesWithLen.count) admitted=\(kept)(asr_correction) dropped=\(droppedRewrite)(rewrite) beforeLen=\(beforeText.count) afterLen=\(afterText.count)")
     }
 
     /// The user rejected an AI suggestion (design §15.3.4).

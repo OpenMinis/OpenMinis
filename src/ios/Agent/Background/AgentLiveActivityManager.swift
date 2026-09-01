@@ -609,12 +609,12 @@ final class AgentLiveActivityManager {
         let prev = (lastPushedState as? AgentActivityAttributes.ContentState)?
             .sessions.first { $0.sessionId == sessionId }
         var snap = prev ?? LiveSessionSnapshot(
-            sessionId: sessionId, title: String(localized: "Agent Task"),
+            sessionId: sessionId, title: AppLocalized("Agent Task"),
             toolIcon: "checkmark.circle.fill", toolStatus: "", loopIteration: 0
         )
         snap.isCompleted = true
         snap.toolIcon = "checkmark.circle.fill"
-        snap.toolStatus = String(localized: "Completed")
+        snap.toolStatus = AppLocalized("Completed")
         snap.lastMessage = Self.collapseLastMessage(lastMessage)
         completedSessionSnapshots[sessionId] = snap
         logger.info("[LiveActivity][markCompleted] sid=\(sessionId.prefix(8)) — other sessions still active, updating in-place")
@@ -799,9 +799,9 @@ final class AgentLiveActivityManager {
 
     /// Neutral placeholders used by Privacy Mode. Localized so the redacted
     /// strings still match the user's language.
-    private static var privacyTaskTitle: String { String(localized: "Agent Task") }
-    private static var privacyWorkingStatus: String { String(localized: "Working…") }
-    private static var privacyCompletedStatus: String { String(localized: "Completed") }
+    private static var privacyTaskTitle: String { AppLocalized("Agent Task") }
+    private static var privacyWorkingStatus: String { AppLocalized("Working…") }
+    private static var privacyCompletedStatus: String { AppLocalized("Completed") }
     private static let privacyNeutralIcon = "circle.dashed"
 
     @available(iOS 16.2, *)
@@ -955,7 +955,7 @@ final class AgentLiveActivityManager {
         let completedSessions = runningSessions.map { s -> LiveSessionSnapshot in
             var c = s
             c.isCompleted = true
-            c.toolStatus = String(localized: "Completed")
+            c.toolStatus = AppLocalized("Completed")
             c.lastMessage = resolvedMessages[s.sessionId] ?? ""
             return c
         }
@@ -998,7 +998,7 @@ final class AgentLiveActivityManager {
         // model-facing instruction on the lock screen. Substituting a neutral
         // status keeps the capsule truthful without exposing the prompt.
         if RawMessage.isInternalBridgeText(raw) {
-            return String(localized: "Task interrupted by a new message")
+            return AppLocalized("Task interrupted by a new message")
         }
         let collapsed = raw
             .replacingOccurrences(of: "\n", with: " ")

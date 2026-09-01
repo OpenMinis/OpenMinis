@@ -160,11 +160,40 @@ struct ConversationContext: Sendable, Equatable {
     /// Budgeted per-message excerpts, oldest→newest, already role-labeled.
     var recentExcerpts: [String] = []
 
+    /// [T-voice-correction-debug-capture] Mining telemetry for the DEBUG trace: the
+    /// per-term rarity scores behind `rareTermsDigest`, and the shape of each excerpt.
+    ///
+    /// Held in one `Mining` box that is deliberately EXCLUDED from `==` (the custom
+    /// operator below) and from `isEmpty`: it observes how the context was built, and is
+    /// never part of what the context IS. Folding it into equality would make two
+    /// identical prompts compare unequal because one was built from more scanned
+    /// messages — and `ConversationContext: Equatable` is what the unit tests assert on.
+    struct Mining: Sendable {
+        struct DigestTerm: Sendable { let term: String; let score: Int; let count: Int }
+        struct ExcerptMeta: Sendable {
+            let role: String; let newestIndex: Int; let kind: String; let chars: Int
+        }
+        var digestScores: [DigestTerm] = []
+        var excerpts: [ExcerptMeta] = []
+        var scannedMessageCount = 0
+        var buildMs = 0
+    }
+    var mining = Mining()
+
     var isEmpty: Bool {
         (lastUserMessage?.isEmpty ?? true) && (lastAgentReply?.isEmpty ?? true)
             && (rareTermsDigest?.isEmpty ?? true) && recentExcerpts.isEmpty
     }
     static let empty = ConversationContext(lastUserMessage: nil, lastAgentReply: nil)
+
+    /// Equality over the CONTENT fields only — `mining` is observational (see above), and
+    /// synthesised equality would additionally require `Mining: Equatable`.
+    static func == (lhs: ConversationContext, rhs: ConversationContext) -> Bool {
+        lhs.lastUserMessage == rhs.lastUserMessage
+            && lhs.lastAgentReply == rhs.lastAgentReply
+            && lhs.rareTermsDigest == rhs.rareTermsDigest
+            && lhs.recentExcerpts == rhs.recentExcerpts
+    }
 }
 
 /// UI-framework-free projection of a chat turn, so the builder is unit-testable
@@ -263,10 +292,12 @@ enum CorrectionContextBuilder {
         }
         var digestTerms: [String] = []
         var digestChars = 0
+        var digestScores: [ConversationContext.Mining.DigestTerm] = []
         for entry in ranked {
             let cost = entry.display.count + (digestTerms.isEmpty ? 0 : 1) // +1 for "、"
             guard digestChars + cost <= CorrectionContextBudget.rareDigest else { continue }
             digestTerms.append(entry.display)
+            digestScores.append(.init(term: entry.display, score: entry.score, count: entry.count))
             digestChars += cost
         }
         let digest = digestTerms.isEmpty ? nil : digestTerms.joined(separator: "、")
@@ -278,6 +309,7 @@ enum CorrectionContextBuilder {
         // messages only earn a slot with rare-content sentences.
         var excerptBudget = CorrectionContextBudget.messageExcerpts
         var rendered: [(newestIndex: Int, line: String)] = []
+        var excerptMeta: [ConversationContext.Mining.ExcerptMeta] = []
 
         for m in scannedMessages {
             guard excerptBudget > 80 else {
@@ -315,6 +347,8 @@ enum CorrectionContextBuilder {
 
             let line = "【\(m.role.rawValue)·\(m.newestIndex == 0 ? "最新" : "前第\(m.newestIndex + 1)条")】\(picked.joined(separator: ""))"
             rendered.append((m.newestIndex, line))
+            excerptMeta.append(.init(role: m.role.rawValue, newestIndex: m.newestIndex,
+                                     kind: isGrounding ? "grounding" : "rare", chars: line.count))
             excerptBudget -= line.count
             // [T-log-noise-privacy 2026-07-18] info → debug (per-excerpt line).
             logger.debug("[CorrectionContext] excerpt msg#\(m.newestIndex)(\(m.role.rawValue)) kind=\(isGrounding ? "grounding" : "rare") sentences=\(picked.count)/\(m.sentences.count) chars=\(line.count) budget_left=\(excerptBudget)")
@@ -330,6 +364,11 @@ enum CorrectionContextBuilder {
         var ctx = ConversationContext.empty
         ctx.rareTermsDigest = digest
         ctx.recentExcerpts = excerpts
+        ctx.mining = ConversationContext.Mining(
+            digestScores: digestScores,
+            excerpts: excerptMeta.sorted { $0.newestIndex > $1.newestIndex },
+            scannedMessageCount: scannedMessages.count,
+            buildMs: ms)
         return ctx
     }
 }

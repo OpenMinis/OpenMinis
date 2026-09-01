@@ -85,7 +85,15 @@ actor VoiceCorrectionEngine {
             .map { normalizer.normalize($0) }
             .filter { !$0.isEmpty }
             .uniqued()
-        guard !keys.isEmpty else { return [] }
+        guard !keys.isEmpty else {
+            #if DEBUG
+            // Still record the shape: "0 keys" (every token was a single character) is a
+            // real and otherwise invisible reason for a correction to have no evidence.
+            lastRetrieval = (tokens: tokens, keys: [],
+                             ms: Int(Date().timeIntervalSince(started) * 1000), cacheHit: false)
+            #endif
+            return []
+        }
 
         let (cached, missing) = partitionByCache(keys)
         var candidates = cached
@@ -112,6 +120,9 @@ actor VoiceCorrectionEngine {
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         let bySource = Dictionary(grouping: fused, by: \.sourceIdentifier).mapValues(\.count)
         logger.info("[VoiceCorrection][Retrieve] tokens=\(tokens.count) keys=\(keys.count) candidatesFound=\(fused.count) sources=\(bySource) cacheHit=\(missing.isEmpty) durationMs=\(ms)")
+        #if DEBUG
+        lastRetrieval = (tokens: tokens, keys: keys, ms: ms, cacheHit: missing.isEmpty)
+        #endif
         if ms > VoiceCorrectionConfig.retrievalBudgetMs {
             logger.warning("[VoiceCorrection][Retrieve] OVER BUDGET budget=\(VoiceCorrectionConfig.retrievalBudgetMs)ms elapsed=\(ms)ms")
         }
@@ -147,7 +158,8 @@ actor VoiceCorrectionEngine {
     func correct(transcript: String,
                  locale: String = "zh",
                  context: ConversationContext = .empty,
-                 persistEvent: Bool = true) async -> Suggestion {
+                 persistEvent: Bool = true,
+                 trigger: String = "auto") async -> Suggestion {
         let started = Date()
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
@@ -164,9 +176,24 @@ actor VoiceCorrectionEngine {
                                                 context: context, locale: locale)
             }
 
+            #if DEBUG
+            // [T-voice-correction-debug-capture] Open the trace only once the strategy has
+            // returned, because the prompt it actually sent (and which evidence survived
+            // clamping) is only knowable then. `finish` below closes it with the verdict.
+            let traceID = await recordTraceBegin(trigger: trigger, locale: locale, text: text,
+                                                 candidates: candidates, context: context,
+                                                 outcome: outcome)
+            #endif
+
             let corrected = outcome.correctedText
             if corrected == text {
                 logger.info("[VoiceCorrection][Correct] modelGroup=\(outcome.modelGroupUsed) changed=false durationMs=\(outcome.durationMs)")
+                #if DEBUG
+                await VoiceCorrectionTrace.shared.finish(
+                    id: traceID, corrected: corrected, changed: false, appliedPairs: [],
+                    rejectedReason: nil, modelGroup: outcome.modelGroupUsed,
+                    totalMs: outcome.durationMs)
+                #endif
                 return Suggestion(original: text, corrected: text, hasChange: false,
                                   modelGroupUsed: outcome.modelGroupUsed, durationMs: outcome.durationMs,
                                   rejectedReason: nil, diffSummary: "", appliedPairs: [])
@@ -176,6 +203,14 @@ actor VoiceCorrectionEngine {
             let ratio = VoiceCorrectionDiff.charChangeRatio(from: text, to: corrected)
             if ratio > VoiceCorrectionConfig.maxCharChangeRatio {
                 logger.warning("[VoiceCorrection][Correct] REJECTED reason=diff_too_large charChangeRatio=\(String(format: "%.2f", ratio)) threshold=\(VoiceCorrectionConfig.maxCharChangeRatio)")
+                #if DEBUG
+                // Keep the model's rejected output in `corrected` — seeing WHAT it tried
+                // to rewrite is the whole point of tracing a rejection.
+                await VoiceCorrectionTrace.shared.finish(
+                    id: traceID, corrected: corrected, changed: false, appliedPairs: [],
+                    rejectedReason: "diff_too_large", modelGroup: outcome.modelGroupUsed,
+                    totalMs: outcome.durationMs)
+                #endif
                 return Suggestion(original: text, corrected: text, hasChange: false,
                                   modelGroupUsed: outcome.modelGroupUsed, durationMs: outcome.durationMs,
                                   rejectedReason: "diff_too_large", diffSummary: "", appliedPairs: [])
@@ -193,6 +228,12 @@ actor VoiceCorrectionEngine {
                                                sourceSummary: summary.isEmpty ? nil : summary)
             }
 
+            #if DEBUG
+            await VoiceCorrectionTrace.shared.finish(
+                id: traceID, corrected: corrected, changed: true, appliedPairs: pairs,
+                rejectedReason: nil, modelGroup: outcome.modelGroupUsed, totalMs: ms)
+            #endif
+
             return Suggestion(original: text, corrected: corrected, hasChange: true,
                               modelGroupUsed: outcome.modelGroupUsed, durationMs: ms,
                               rejectedReason: nil, diffSummary: summary, appliedPairs: pairs)
@@ -200,11 +241,98 @@ actor VoiceCorrectionEngine {
             let ms = Int(Date().timeIntervalSince(started) * 1000)
             let reason = (error is CorrectionTimeoutError) ? "llm_timeout" : "llm_error:\(error)"
             logger.error("[VoiceCorrection][Correct] FAILED reason=\(reason) fallback=original_text durationMs=\(ms)")
+            #if DEBUG
+            // The strategy threw before returning an outcome, so there is no prompt and no
+            // trace to close — open and immediately close a run that carries the retrieval
+            // and context evidence anyway. A timeout that only ever fires when the digest
+            // is large is exactly the pattern this makes visible.
+            let failedID = await recordTraceBegin(trigger: trigger, locale: locale, text: text,
+                                                  candidates: candidates, context: context,
+                                                  outcome: nil)
+            await VoiceCorrectionTrace.shared.finish(
+                id: failedID, corrected: text, changed: false, appliedPairs: [],
+                rejectedReason: reason, modelGroup: "none", totalMs: ms)
+            #endif
             return Suggestion(original: text, corrected: text, hasChange: false,
                               modelGroupUsed: "none", durationMs: ms, rejectedReason: reason,
                               diffSummary: "", appliedPairs: [])
         }
     }
+
+    #if DEBUG
+    // MARK: - DEBUG trace [T-voice-correction-debug-capture]
+
+    /// Retrieval telemetry from the most recent `retrieveCandidates` call, so the trace can
+    /// report tokens/keys/timing without re-running segmentation (which would both cost
+    /// ~10ms on the critical path and, worse, report numbers from a second run rather than
+    /// the one that produced the candidates).
+    private var lastRetrieval: (tokens: [String], keys: [String], ms: Int, cacheHit: Bool)?
+
+    /// Assemble one trace entry. `outcome == nil` means the strategy threw, so there is no
+    /// prompt to record — everything upstream of the model call is still captured.
+    private func recordTraceBegin(trigger: String,
+                                  locale: String,
+                                  text: String,
+                                  candidates: [CorrectionCandidate],
+                                  context: ConversationContext,
+                                  outcome: CorrectionOutcome?) async -> Int {
+        let weights = Dictionary(uniqueKeysWithValues: sources.map { ($0.sourceIdentifier, $0.defaultWeight) })
+
+        // The token that produced a candidate's key isn't carried on the candidate, so
+        // resolve it back from the retrieval tokens. Built ONCE as a key→token map: doing
+        // it inline per candidate would be O(candidates × tokens) pinyin normalizations
+        // (~300 for a long transcript) on the correction path, to populate a debug field.
+        // First token wins, matching the order `retrieveCandidates` keyed them in.
+        var tokenForKey: [String: String] = [:]
+        if let normalizer = PhoneticNormalizerRegistry.normalizer(for: locale) {
+            for token in lastRetrieval?.tokens ?? [] where token.count >= 2 {
+                let key = normalizer.normalize(token)
+                if !key.isEmpty, tokenForKey[key] == nil { tokenForKey[key] = token }
+            }
+        }
+
+        let candidateInfos = candidates.map { c in
+            VoiceCorrectionTrace.CandidateInfo(
+                token: tokenForKey[c.phoneticKey] ?? "",
+                phoneticKey: c.phoneticKey, term: c.term, source: c.sourceIdentifier,
+                confidence: c.confidence,
+                fusedScore: (weights[c.sourceIdentifier] ?? 0.5) * c.confidence,
+                evidence: c.evidence)
+        }
+        let digest = context.mining.digestScores.map {
+            VoiceCorrectionTrace.ScoredTerm(term: $0.term, score: $0.score, count: $0.count,
+                                            backgroundRank: BackgroundWordFrequency.shared.rank(of: $0.term))
+        }
+        // Excerpt bodies live in `context.recentExcerpts`, their metadata in
+        // `context.mining.excerpts`. Both are produced by the builder in the same
+        // oldest→newest order, so `zip` pairs them correctly — and, unlike index
+        // arithmetic, degrades to "no rows" rather than to mispaired rows if a future
+        // change ever makes the two lists diverge in length.
+        let withText = zip(context.mining.excerpts, context.recentExcerpts).map { meta, line in
+            VoiceCorrectionTrace.MessageExcerpt(
+                role: meta.role, newestIndex: meta.newestIndex, kind: meta.kind,
+                text: line, chars: meta.chars)
+        }
+
+        return await VoiceCorrectionTrace.shared.begin(
+            trigger: trigger, locale: locale, transcript: text,
+            segmentedTokens: lastRetrieval?.tokens ?? [],
+            phoneticKeys: lastRetrieval?.keys ?? [],
+            candidates: candidateInfos,
+            retrievalMs: lastRetrieval?.ms ?? 0,
+            retrievalCacheHit: lastRetrieval?.cacheHit ?? false,
+            scannedMessageCount: context.mining.scannedMessageCount,
+            digestTerms: digest,
+            digestChars: context.rareTermsDigest?.count ?? 0,
+            excerpts: withText,
+            excerptChars: context.recentExcerpts.reduce(0) { $0 + $1.count },
+            contextBuildMs: context.mining.buildMs,
+            promptVocabTerms: outcome?.diagnostics?.vocabTerms ?? [],
+            promptConfusionLines: outcome?.diagnostics?.confusionLines ?? [],
+            blockChars: outcome?.diagnostics?.blockChars ?? [:],
+            prompt: outcome?.prompt ?? "")
+    }
+    #endif
 
     /// Prompt the engine would send, without sending it — backs
     /// `debug.voiceCorrection.dryRunCorrection` (design §10.2b).

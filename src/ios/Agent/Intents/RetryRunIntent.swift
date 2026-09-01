@@ -90,7 +90,7 @@ struct RetryRunIntent: AppIntent {
             }
             return .result(
                 value: SendPromptResult(sessionId: session.id, modelName: "N/A", status: "Error", isNewSession: false),
-                dialog: IntentDialog(stringLiteral: String(localized: "No user messages found in this session."))
+                dialog: IntentDialog(stringLiteral: AppLocalized("No user messages found in this session."))
             )
         }
 
@@ -171,7 +171,7 @@ struct RetryRunIntent: AppIntent {
         if sendCompletionNotification {
             ShortcutNotification.post(
                 id: "shortcut-retry-\(sid)",
-                title: String(localized: "Minis: Retrying"),
+                title: AppLocalized("Minis: Retrying"),
                 body: "\(modelName): \(promptPreview)\(targetMessage.content.count > 50 ? "…" : "")",
                 sessionId: sid
             )
@@ -192,7 +192,7 @@ struct RetryRunIntent: AppIntent {
             if sendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-retry-done-\(sid)",
-                    title: String(localized: "Minis: Retry Done"),
+                    title: AppLocalized("Minis: Retry Done"),
                     body: "\(modelName): \(String(responseText.prefix(200)))",
                     sessionId: sid
                 )
@@ -227,7 +227,7 @@ struct RetryRunIntent: AppIntent {
             if capturedSendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-retry-done-\(capturedSid)",
-                    title: String(localized: "Minis: Retry Done"),
+                    title: AppLocalized("Minis: Retry Done"),
                     body: "\(capturedModelName): \(summary)",
                     sessionId: capturedSid
                 )
@@ -246,7 +246,7 @@ struct RetryRunIntent: AppIntent {
         // has exactly one placeholder. Inlining the ternary would bake a second
         // one into the key and make it fragile to translate.
         let elidedPreview = promptPreview + (targetMessage.content.count > 50 ? "…" : "")
-        return .result(value: result, dialog: IntentDialog(stringLiteral: String(localized: "Retrying from message: \(elidedPreview)")))
+        return .result(value: result, dialog: IntentDialog(stringLiteral: AppLocalized("Retrying from message: \(elidedPreview)")))
     }
 
     static var parameterSummary: some ParameterSummary {

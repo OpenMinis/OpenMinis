@@ -74,7 +74,7 @@ struct AssistantBlockView: View {
             // Truncate middle if more than 9 reason lines
             let displayReasons: [String] = {
                 if reasonLines.count <= 9 { return reasonLines }
-                return Array(reasonLines.prefix(4)) + [String(localized: "⋯ \(reasonLines.count - 8) more")] + Array(reasonLines.suffix(4))
+                return Array(reasonLines.prefix(4)) + [AppLocalized("⋯ \(reasonLines.count - 8) more")] + Array(reasonLines.suffix(4))
             }()
             VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(displayReasons.enumerated()), id: \.offset) { _, line in
@@ -105,7 +105,7 @@ struct AssistantBlockView: View {
                 Button {
                     UIPasteboard.general.string = block.content
                 } label: {
-                    Label(String(localized: "Copy Error"), systemImage: "doc.on.doc")
+                    Label(AppLocalized("Copy Error"), systemImage: "doc.on.doc")
                 }
             }
         }
@@ -435,7 +435,7 @@ struct ToolCapsuleView: View {
                     Button {
                         UIPasteboard.general.string = toolDetailsClipboard
                     } label: {
-                        Label(String(localized: "Copy Tool Details"), systemImage: "doc.on.doc")
+                        Label(AppLocalized("Copy Tool Details"), systemImage: "doc.on.doc")
                     }
                     // [T-ios-retry-hide-when-processing] Only expose the
                     // destructive Re-run action when the agent loop is idle.
@@ -458,7 +458,7 @@ struct ToolCapsuleView: View {
                                 userInfo: ["blockId": block.id]
                             )
                         } label: {
-                            Label(String(localized: "Re-run From Here"), systemImage: "arrow.clockwise")
+                            Label(AppLocalized("Re-run From Here"), systemImage: "arrow.clockwise")
                         }
                     }
                     // [T-ios-memory-write-revoke] Undo the daily-log entry this
@@ -470,7 +470,7 @@ struct ToolCapsuleView: View {
                         Button(role: .destructive) {
                             showRevokeMemoryAlert = true
                         } label: {
-                            Label(String(localized: "Undo This Memory Write"), systemImage: "trash.slash")
+                            Label(AppLocalized("Undo This Memory Write"), systemImage: "trash.slash")
                         }
                     }
                 }
@@ -490,15 +490,15 @@ struct ToolCapsuleView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, 6)
-                .accessibilityLabel(Text(String(localized: "Background suspension info")))
+                .accessibilityLabel(Text(AppLocalized("Background suspension info")))
             }
             Spacer(minLength: 0)
         }
         .alert(
-            String(localized: "Task may have been paused"),
+            AppLocalized("Task may have been paused"),
             isPresented: $showBgHintAlert
         ) {
-            Button(String(localized: "Go Enable")) {
+            Button(AppLocalized("Go Enable")) {
                 // Deep-link to Settings → Permissions → Background, nudging the
                 // recommended rows ON — they highlight only while still OFF
                 // (= minis://settings/background?focus=…:true,…:true). Location
@@ -508,35 +508,35 @@ struct ToolCapsuleView: View {
                     rawQueryValue: "enhancedBackgroundExecution:true,backgroundSpeakEnabled:true,locationTrackingEnabled:true")
                 DeepLinkCoordinator.shared.pendingSettingsTarget = .background
             }
-            Button(String(localized: "Maybe Later"), role: .cancel) {}
+            Button(AppLocalized("Maybe Later"), role: .cancel) {}
         } message: {
-            Text(String(localized: "This tool may have been paused by the system while running in the background. Enable enhanced background execution to improve background task reliability."))
+            Text(AppLocalized("This tool may have been paused by the system while running in the background. Enable enhanced background execution to improve background task reliability."))
         }
         // [T-ios-memory-write-revoke] Mirrors the Revoke Memory confirmation in
         // SessionMemoryView: confirm, then report the outcome in place — the
         // user stays in the transcript, no navigation. The bubble itself is
         // left alone; only the underlying daily-log file changed.
         .alert(
-            String(localized: "Revoke Memory"),
+            AppLocalized("Revoke Memory"),
             isPresented: $showRevokeMemoryAlert
         ) {
-            Button(String(localized: "Cancel"), role: .cancel) {}
-            Button(String(localized: "Revoke"), role: .destructive) {
+            Button(AppLocalized("Cancel"), role: .cancel) {}
+            Button(AppLocalized("Revoke"), role: .destructive) {
                 // The menu item is gated on the cheap enum+args check, so the
                 // `content` parse can still come back empty here (malformed or
                 // still-streaming args). Report that rather than failing silently.
                 if let written = memoryWriteContent {
                     revokeMemoryResult = MemoryWriteRevoker.revoke(writtenContent: written)
                 } else {
-                    revokeMemoryResult = String(localized: "No written content to revoke.")
+                    revokeMemoryResult = AppLocalized("No written content to revoke.")
                 }
                 showRevokeMemoryResultAlert = true
             }
         } message: {
-            Text(String(localized: "Remove this memory entry from the daily log? This cannot be undone."))
+            Text(AppLocalized("Remove this memory entry from the daily log? This cannot be undone."))
         }
         .alert(revokeMemoryResult ?? "", isPresented: $showRevokeMemoryResultAlert) {
-            Button(String(localized: "OK")) {}
+            Button(AppLocalized("OK")) {}
         }
         .onChange(of: isStreaming) { streaming in
             dotsActive = streaming
@@ -749,7 +749,7 @@ struct ThinkingBlockView: View {
                     .resizable()
                     .frame(width: 14, height: 14)
                     .foregroundStyle(.blue)
-                Text(String(localized: "Deep Thinking"))
+                Text(AppLocalized("Deep Thinking"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.blue)
                 if isStreaming {
@@ -1062,7 +1062,7 @@ struct ThinkingLevelSheetView: View {
                     }
                 }
             }
-            .navigationTitle(String(localized: "Thinking Intensity"))
+            .navigationTitle(AppLocalized("Thinking Intensity"))
             .navigationBarTitleDisplayMode(.inline)
         }
     }

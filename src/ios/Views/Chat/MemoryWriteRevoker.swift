@@ -25,7 +25,7 @@ enum MemoryWriteRevoker {
     static func revoke(writtenContent: String) -> String {
         let written = writtenContent.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !written.isEmpty else {
-            return String(localized: "No written content to revoke.")
+            return AppLocalized("No written content to revoke.")
         }
 
         let fm = FileManager.default
@@ -68,14 +68,14 @@ enum MemoryWriteRevoker {
                 let newFileContent = nsContent.replacingCharacters(in: removeRange, with: "")
                 do {
                     try newFileContent.write(to: fileURL, atomically: true, encoding: .utf8)
-                    return String(localized: "Removed from \(dateStr).md")
+                    return AppLocalized("Removed from \(dateStr).md")
                 } catch {
-                    return String(localized: "Error writing file: \(error.localizedDescription)")
+                    return AppLocalized("Error writing file: \(error.localizedDescription)")
                 }
             }
         }
 
-        return String(localized: "Entry not found in recent daily logs.")
+        return AppLocalized("Entry not found in recent daily logs.")
     }
 
     /// Pull the `content` argument out of a `memory_write` tool call's input

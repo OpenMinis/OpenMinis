@@ -58,13 +58,13 @@ struct SkillsManagementView: View {
         List {
             if store.skills.isEmpty {
                 Section {
-                    Text(String(localized: "No skills installed. Tap + to import a SKILL.md from GitHub or paste one manually."))
+                    Text(AppLocalized("No skills installed. Tap + to import a SKILL.md from GitHub or paste one manually."))
                         .foregroundStyle(.secondary)
                         .font(.subheadline)
                 }
             } else if filteredSkills.isEmpty {
                 Section {
-                    Text(String(localized: "No skills match \"\(searchQuery)\"."))
+                    Text(AppLocalized("No skills match \"\(searchQuery)\"."))
                         .foregroundStyle(.secondary)
                         .font(.subheadline)
                 }
@@ -103,7 +103,7 @@ struct SkillsManagementView: View {
         }
         .navigationTitle("Skills")
         .searchable(text: $searchQuery, placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: Text(String(localized: "Search skills")))
+                    prompt: Text(AppLocalized("Search skills")))
         .onAppear { store.reload() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -134,12 +134,12 @@ struct SkillsManagementView: View {
                     Button {
                         showImportSheet = true
                     } label: {
-                        Label(String(localized: "Import Skill"), systemImage: "square.and.arrow.down")
+                        Label(AppLocalized("Import Skill"), systemImage: "square.and.arrow.down")
                     }
                     Button {
                         showSkillsBrowser = true
                     } label: {
-                        Label(String(localized: "Minis Skills"), systemImage: "globe")
+                        Label(AppLocalized("Minis Skills"), systemImage: "globe")
                     }
                     // Skill iCloud sync is wired through SyncV2; hide the
                     // force-sync entry entirely when the user has the
@@ -149,7 +149,7 @@ struct SkillsManagementView: View {
                         Button {
                             forceSyncAllSkills()
                         } label: {
-                            Label(String(localized: "Force iCloud Sync All"), systemImage: "icloud.and.arrow.up")
+                            Label(AppLocalized("Force iCloud Sync All"), systemImage: "icloud.and.arrow.up")
                         }
                     }
                 } label: {
@@ -184,7 +184,7 @@ struct SkillsManagementView: View {
         let count = store.skills.count
         for s in store.skills { store.forceMarkDirty(s.id) }
         SyncCore.shared.scheduleSend(delay: 0.5)
-        forceSyncAllToast = String(localized: "Queued \(count) skills for sync")
+        forceSyncAllToast = AppLocalized("Queued \(count) skills for sync")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { forceSyncAllToast = nil }
     }
 
@@ -259,8 +259,8 @@ private struct ImportSkillSheet: View {
                     }
 
                 case .file:
-                    Section(footer: Text(String(localized: "Supports SKILL.md, .skill, and .zip files."))) {
-                        Button(String(localized: "Choose File…")) {
+                    Section(footer: Text(AppLocalized("Supports SKILL.md, .skill, and .zip files."))) {
+                        Button(AppLocalized("Choose File…")) {
                             showFilePicker = true
                         }
                     }
@@ -274,15 +274,15 @@ private struct ImportSkillSheet: View {
                     }
                 }
             }
-            .navigationTitle(String(localized: "Import Skill"))
+            .navigationTitle(AppLocalized("Import Skill"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(String(localized: "Cancel")) { dismiss() }
+                    Button(AppLocalized("Cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if importMode != .file {
-                        Button(String(localized: "Import")) { performImport() }
+                        Button(AppLocalized("Import")) { performImport() }
                             .disabled(isImporting || (importMode == .url ? urlText.isEmpty : pastedContent.isEmpty))
                     }
                 }
@@ -484,7 +484,7 @@ private struct SkillDetailView: View {
                 // ── Meta ──────────────────────────────────────────────
                 Section {
                     HStack {
-                        Text(String(localized: "Name"))
+                        Text(AppLocalized("Name"))
                         Spacer()
                         if isEditingName {
                             TextField("Skill name", text: $editingName, onCommit: {
@@ -522,14 +522,14 @@ private struct SkillDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         case .file:
-                            Text(String(localized: "File import")).foregroundStyle(.secondary)
+                            Text(AppLocalized("File import")).foregroundStyle(.secondary)
                         case .bundled:
-                            Text(String(localized: "Built-in")).foregroundStyle(.secondary)
+                            Text(AppLocalized("Built-in")).foregroundStyle(.secondary)
                         case .session:
-                            Text(String(localized: "Session created")).foregroundStyle(.secondary)
+                            Text(AppLocalized("Session created")).foregroundStyle(.secondary)
                         }
                     }
-                    LabeledContent(String(localized: "Usage")) {
+                    LabeledContent(AppLocalized("Usage")) {
                         let freq = store.usageFrequency(for: skill.id)
                         Text(usageFrequencyLabel(freq))
                             .foregroundStyle(usageFrequencyColor(freq))
@@ -576,7 +576,7 @@ private struct SkillDetailView: View {
                             }
                             Spacer()
                             if showRescanDone {
-                                Text(String(localized: "Done")).foregroundStyle(.green).font(.caption)
+                                Text(AppLocalized("Done")).foregroundStyle(.green).font(.caption)
                             }
                         }
                     }
@@ -594,13 +594,13 @@ private struct SkillDetailView: View {
                         } label: {
                             HStack {
                                 Label {
-                                    Text(String(localized: "Force iCloud Sync"))
+                                    Text(AppLocalized("Force iCloud Sync"))
                                 } icon: {
                                     SettingsActionIcon(systemImage: "icloud.and.arrow.up", color: .indigo)
                                 }
                                 Spacer()
                                 if showForceSyncDone {
-                                    Text(String(localized: "Queued")).foregroundStyle(.green).font(.caption)
+                                    Text(AppLocalized("Queued")).foregroundStyle(.green).font(.caption)
                                 }
                             }
                         }
@@ -647,13 +647,13 @@ private struct SkillDetailView: View {
                     } label: {
                         HStack {
                             Spacer()
-                            Label(String(localized: "Delete Skill"), systemImage: "trash")
+                            Label(AppLocalized("Delete Skill"), systemImage: "trash")
                             Spacer()
                         }
                     }
                 }
             } else {
-                Text(String(localized: "Skill not found.")).foregroundStyle(.secondary)
+                Text(AppLocalized("Skill not found.")).foregroundStyle(.secondary)
             }
         }
         .navigationTitle(skill?.name ?? "Skill")
@@ -690,23 +690,23 @@ private struct SkillDetailView: View {
                 }
             }
         }
-        .alert(String(localized: "Delete Skill"), isPresented: $showDeleteConfirm) {
-            Button(String(localized: "Delete"), role: .destructive) {
+        .alert(AppLocalized("Delete Skill"), isPresented: $showDeleteConfirm) {
+            Button(AppLocalized("Delete"), role: .destructive) {
                 store.deleteSkill(skillId)
                 dismiss()
             }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
-            Text(String(localized: "Are you sure you want to delete this skill? This action cannot be undone."))
+            Text(AppLocalized("Are you sure you want to delete this skill? This action cannot be undone."))
         }
     }
 
     private func usageFrequencyLabel(_ freq: SkillStore.UsageFrequency) -> String {
         switch freq {
-        case .never:  return String(localized: "Never Used")
-        case .low:    return String(localized: "Low Usage")
-        case .regular: return String(localized: "Regular Usage")
-        case .high:   return String(localized: "High Usage")
+        case .never:  return AppLocalized("Never Used")
+        case .low:    return AppLocalized("Low Usage")
+        case .regular: return AppLocalized("Regular Usage")
+        case .high:   return AppLocalized("High Usage")
         }
     }
 
@@ -883,7 +883,7 @@ private struct SkillFileDetailView: View {
             .toolbar {
                 if hasChanges {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button(String(localized: "Save")) { save() }
+                        Button(AppLocalized("Save")) { save() }
                     }
                 }
             }
@@ -932,22 +932,22 @@ struct MinisSkillsBrowserView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(String(localized: "Done")) { dismiss() }
+                    Button(AppLocalized("Done")) { dismiss() }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(String(localized: "Import This")) {
+                    Button(AppLocalized("Import This")) {
                         coordinator.importCurrentSkill()
                     }
                     .disabled(coordinator.hudState == .importing)
                 }
             }
-            .alert(String(localized: "Skill Already Exists"), isPresented: $coordinator.showOverwriteConfirm) {
-                Button(String(localized: "Update"), role: .destructive) {
+            .alert(AppLocalized("Skill Already Exists"), isPresented: $coordinator.showOverwriteConfirm) {
+                Button(AppLocalized("Update"), role: .destructive) {
                     coordinator.confirmOverwrite()
                 }
-                Button(String(localized: "Cancel"), role: .cancel) {}
+                Button(AppLocalized("Cancel"), role: .cancel) {}
             } message: {
-                Text(String(localized: "\"\(coordinator.pendingOverwriteName)\" is already installed. Update to the latest version?"))
+                Text(AppLocalized("\"\(coordinator.pendingOverwriteName)\" is already installed. Update to the latest version?"))
             }
         }
     }
@@ -959,12 +959,12 @@ struct MinisSkillsBrowserView: View {
             case .importing:
                 ProgressView()
                     .tint(.white)
-                Text(String(localized: "Importing…"))
+                Text(AppLocalized("Importing…"))
                     .foregroundStyle(.white)
             case .success(let name):
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                Text(String(localized: "\(name) imported"))
+                Text(AppLocalized("\(name) imported"))
                     .foregroundStyle(.white)
                     .lineLimit(1)
             case .error(let msg):
@@ -1028,7 +1028,7 @@ private class SkillBrowserCoordinator: ObservableObject {
 
         // Check if URL points to a specific skill directory
         if !isSkillDirectoryURL(url) {
-            hudState = .hint(String(localized: "Select a skill folder first"))
+            hudState = .hint(AppLocalized("Select a skill folder first"))
             Task {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if case .hint = hudState { hudState = .hidden }

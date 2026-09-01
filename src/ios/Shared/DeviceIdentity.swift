@@ -44,19 +44,73 @@ enum DeviceIdentity {
     }()
 
     /// Human-readable device name with short ID suffix for disambiguation.
-    /// Prefers user-set name (e.g. "Ethan's iPhone") if available (iOS returns it when
-    /// the privacy entitlement is present). Falls back to hardware model (e.g. "iPhone 16 Pro").
-    /// Always appends a 4-char ID suffix (e.g. "· A3F2").
+    ///
+    /// Prefers a name the user typed in Settings ([T-backup-device-name-setting]),
+    /// then the name iOS reports (which is only personalized when the privacy
+    /// entitlement is present), then the hardware model (e.g. "iPhone 16 Pro").
+    /// Always appends a 4-char ID suffix (e.g. "· A3F2") so two devices that
+    /// resolve to the same words are still distinguishable in the sync list.
     static var deviceName: String {
         let shortId = String(deviceId.suffix(4)).uppercased()
+        return "\(displayName) · \(shortId)"
+    }
+
+    // MARK: - User-set device name
+
+    /// [T-backup-device-name-setting] A name the user typed for this device,
+    /// or nil when they have not set one.
+    ///
+    /// Exists because `UIDevice.current.name` is not the name the user sees on
+    /// their own device: since iOS 16 it returns the MODEL ("iPhone") unless
+    /// the app holds the user-assigned-device-name entitlement. So the
+    /// automatic identity cannot tell two iPhones apart, which is precisely
+    /// what backup filenames and the sync device list need it to do. Letting
+    /// the user type a name is the fix that needs no entitlement.
+    ///
+    /// Stored in UserDefaults rather than the Keychain alongside `deviceId`
+    /// on purpose: the id must survive reinstall because zone names are keyed
+    /// on it, whereas a display name is a preference — resurrecting a name the
+    /// user set on a since-deleted install would be surprising, not helpful.
+    ///
+    /// Setting it to nil, empty, or whitespace clears the override and returns
+    /// to the automatic name. Values are trimmed and length-capped on the way
+    /// in so a stray paste cannot store something unusable.
+    static var customName: String? {
+        get {
+            let raw = UserDefaults.standard.string(forKey: customNameKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (raw?.isEmpty == false) ? raw : nil
+        }
+        set {
+            let trimmed = newValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !trimmed.isEmpty else {
+                UserDefaults.standard.removeObject(forKey: customNameKey)
+                return
+            }
+            UserDefaults.standard.set(String(trimmed.prefix(customNameMaxLength)),
+                                      forKey: customNameKey)
+        }
+    }
+
+    static let customNameKey = "device.customName"
+    /// Generous enough for "Ethan's Work iPhone 17 Pro", short enough that it
+    /// cannot dominate a backup filename or a row in the sync device list.
+    static let customNameMaxLength = 48
+
+    /// The automatic name, i.e. what `displayName` falls back to when the user
+    /// has set nothing. Kept separate so the settings field can show it as its
+    /// placeholder — the user sees the default they are about to override.
+    static var automaticName: String {
         let userName = UIDevice.current.name
         let genericNames: Set<String> = ["iPhone", "iPad", "iPod touch", "Mac", "Apple Watch"]
-        // If UIDevice returns a personalized name, use it
-        if !genericNames.contains(userName) {
-            return "\(userName) · \(shortId)"
-        }
-        // Otherwise use hardware model
-        return "\(modelName) · \(shortId)"
+        return genericNames.contains(userName) ? modelName : userName
+    }
+
+    /// The name to show for this device anywhere in the UI: the user's own if
+    /// they set one, otherwise the automatic name. No id suffix — see
+    /// `deviceName` for the disambiguated form used by sync.
+    static var displayName: String {
+        customName ?? automaticName
     }
 
     /// Hardware model name (e.g. "iPhone 16 Pro", "iPad Pro 13\" (M4)", "MacBook Pro").

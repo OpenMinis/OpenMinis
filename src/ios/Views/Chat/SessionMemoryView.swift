@@ -156,8 +156,8 @@ struct SessionMemoryView: View {
                     : "\(lineCount) lines (full)"
                 let label: String
                 switch dayOffset {
-                case 0: label = String(localized: "Today")
-                case 1: label = String(localized: "Yesterday")
+                case 0: label = AppLocalized("Today")
+                case 1: label = AppLocalized("Yesterday")
                 default: label = dateStr
                 }
                 items.append(AutoItem(
@@ -492,7 +492,7 @@ private struct MemoryWriteDetailView: View {
     /// not drift between the two entry points.
     private func revokeEntry() -> String {
         guard let written = item.writtenContent else {
-            return String(localized: "No written content to revoke.")
+            return AppLocalized("No written content to revoke.")
         }
         return MemoryWriteRevoker.revoke(writtenContent: written)
     }

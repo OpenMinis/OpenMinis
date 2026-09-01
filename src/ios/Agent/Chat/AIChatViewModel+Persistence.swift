@@ -307,6 +307,28 @@ extension AIChatViewModel {
                     if let usage = continuation.usage {
                         assistant.usage = usage
                     }
+                    // [T-error-persist-retry-clear-ios] Resolve stale-vs-genuine
+                    // persisted errors across a merged agent run. A persisted
+                    // error_info always sits on the row that was LAST at stall
+                    // time; if further assistant rows follow, the loop provably
+                    // progressed past that error (a retry succeeded), so the
+                    // banner is stale — clear it rather than showing a red error
+                    // mid-way through a visibly completed conversation (observed
+                    // on device: DeepSeek stream stalled silently, watchdog
+                    // persisted the error, retry() resumed and finished, reload
+                    // re-materialised the banner from the orphaned row). A
+                    // NEWER row's error wins in the other direction: a run that
+                    // genuinely ends in a stall keeps its banner because the
+                    // final row carries it (this also fixes the inverse bug
+                    // where a mid-run continuation row's error was silently
+                    // dropped by this merge and the banner vanished on reload).
+                    if continuation.error != nil {
+                        logger.info("[ErrorPersist] reload: carrying error from so=\(raw.sortOrder) onto merged message")
+                        assistant.error = continuation.error
+                    } else if assistant.error != nil {
+                        logger.info("[ErrorPersist] reload: clearing stale mid-run error at so=\(raw.sortOrder) — later assistant rows exist")
+                        assistant.error = nil
+                    }
                     assistant.lastSourceSortOrder = raw.sortOrder
                 } else {
                     // First assistant message in this turn
@@ -800,7 +822,47 @@ extension AIChatViewModel {
                 }
                 return false
             }()
-            isInterrupted = allToolResults || isContinueMessage
+            // [T-ios-orphan-user-tail GH#262/#263] Third interrupted shape: a
+            // plain-text user turn with NO reply after it at all.
+            //
+            // How it is produced: `send()` persists the user turn BEFORE the
+            // request goes out (AIChatViewModel ~2645). If the process dies
+            // between that write and the reply landing — iOS reclaiming a
+            // backgrounded app is the reported case, `BG task grants: 0` — the
+            // assistant side never reaches the store. And it cannot be
+            // reconstructed later, because ChatStore.appendMessages drops any
+            // assistant row with no echoable content (the ~2633 filter that
+            // exists to avoid `400 content or tool_calls must be set`). The
+            // same filter also swallows persistErrorInfo's empty-parts carrier
+            // row, so an early network failure lands here too.
+            //
+            // The result is a tail that looks finished but never got a reply,
+            // and — before this case existed — reported canResume=false: no
+            // PAUSED badge, no Resume, and `retry()` bailing at its own
+            // "last must be assistant" guard. The session had NO recovery
+            // affordance at all and the user could only start a new chat.
+            //
+            // Deliberately the LAST clause: the two shapes above describe a
+            // turn that was mid-flight, this one describes a turn that never
+            // started. Ordering keeps their (more specific) logging and
+            // semantics intact.
+            //
+            // False-positive safety — this must never fire on a turn that is
+            // simply still waiting. Four independent gates already hold:
+            //   1. `!isProcessing` (this function's guard) — send() sets it
+            //      true at ~2424, BEFORE persisting the user row at ~2645, and
+            //      only clears it in the task epilogue, so the entire in-flight
+            //      window is excluded in-process.
+            //   2. `SessionActivityTracker.isActive` (checked below) — covers a
+            //      second VM observing a session another VM is driving.
+            //   3. This function only runs from loadSession() / the SKIP-LOAD
+            //      re-enter — never mid-stream.
+            //   4. The list cell re-checks `!vm.isProcessing && !trackerActive`
+            //      before drawing the banner (CollectionViewMessageListV3 ~1462).
+            // A cold start after a kill satisfies all four precisely because
+            // the process that was processing no longer exists.
+            let isUnansweredUserTurn = !allToolResults && !isContinueMessage
+            isInterrupted = allToolResults || isContinueMessage || isUnansweredUserTurn
         } else if lastEntry.role == .assistant {
             let hasToolUse = lastEntry.parts.contains {
                 if case .toolUse = $0 { return true }; return false
@@ -816,6 +878,15 @@ extension AIChatViewModel {
             if SessionActivityTracker.shared.isActive(sessionId) {
                 logger.info("[SessionLoad] \(sessionId.prefix(8)) — tail looks interrupted but tracker says active, skipping canResume=true")
             } else if !canResume {
+                // [T-ios-group-pause-badge-restamp] This is a RE-DETECTION of an
+                // interruption that already happened (possibly days ago) — the
+                // persisted tail still looks unfinished. It is not a new entry
+                // into the paused state, so the badge must keep its original
+                // entry timestamp; otherwise merely opening or cold-start
+                // scanning an old chat resets the group card's 24h freshness
+                // window and a long-stale pause flags its group forever.
+                isRedetectingInterruptedTail = true
+                defer { isRedetectingInterruptedTail = false }
                 canResume = true
                 if let lastAssistant = messages.last, lastAssistant.role == .assistant {
                     self.committedBlockCount = lastAssistant.blocks.count
@@ -1288,7 +1359,17 @@ extension AIChatViewModel {
 
     /// Persist an AgentMessage to the database as a RawMessage.
     /// Build a RawMessage from an AgentMessage without persisting it.
-    func buildRawMessage(_ msg: AgentMessage, tokenUsage: TokenUsage? = nil, snapshots: [String: (toolName: String, snapshot: ToolSnapshot)] = [:], thoughtSignatures: [String: String] = [:], reasoningContent: String? = nil, streamInterruptCount: Int = 0, toolStatuses: [String: String] = [:]) async -> RawMessage? {
+    /// [T-token-attribution-snapshot] `modelEntryId` identifies the entry that
+    /// ACTUALLY served this turn, and must be supplied by the caller from the
+    /// send loop's `activeEntryId` — the value failover reassigns when it moves
+    /// to a backup model.
+    ///
+    /// Do NOT resolve it here from the session or from `selectedModel`: by the
+    /// time a turn is persisted the session may already point somewhere else,
+    /// which is the exact defect the snapshot exists to remove. nil simply
+    /// leaves the row unattributed (rendered as "estimated") rather than
+    /// recording a guess.
+    func buildRawMessage(_ msg: AgentMessage, tokenUsage: TokenUsage? = nil, snapshots: [String: (toolName: String, snapshot: ToolSnapshot)] = [:], thoughtSignatures: [String: String] = [:], reasoningContent: String? = nil, streamInterruptCount: Int = 0, toolStatuses: [String: String] = [:], modelEntryId: String? = nil) async -> RawMessage? {
         await ensureSession()
         guard let sessionId else { return nil }
 
@@ -1339,13 +1420,24 @@ extension AIChatViewModel {
             )
         }
 
-        return RawMessage(
+        var raw = RawMessage(
             id: UUID().uuidString, sessionId: sessionId,
             role: msg.role == .user ? .user : .assistant,
             parts: parts, createdAt: Date(), tokenUsage: storedUsage,
             reasoningContent: reasoningContent ?? msg.reasoningContent,
             streamInterruptCount: streamInterruptCount
         )
+        // [T-token-attribution-snapshot] Resolved from the entry the caller
+        // says served this turn — the provider TYPE is stored as its rawValue
+        // so grouping never depends on a localized display string.
+        if let eid = modelEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
+            raw.modelId = entry.model.id
+            raw.modelDisplayName = entry.model.displayName
+            raw.providerType = ProviderConfigStore.shared
+                .instance(for: entry.providerInstanceId)?.providerType.rawValue
+            raw.providerInstanceId = entry.providerInstanceId
+        }
+        return raw
     }
 
     /// Phase B: Return the LLM-facing view of agentHistory.
@@ -1775,10 +1867,10 @@ extension AIChatViewModel {
     /// Callers should write the returned id back to `agentHistory[i].dbMessageId`
     /// so compact logic can later resolve boundaries by id.
     @discardableResult
-    func persistAgentMessage(_ msg: AgentMessage, tokenUsage: TokenUsage? = nil, snapshots: [String: (toolName: String, snapshot: ToolSnapshot)] = [:], thoughtSignatures: [String: String] = [:], reasoningContent: String? = nil, streamInterruptCount: Int = 0) async -> String? {
+    func persistAgentMessage(_ msg: AgentMessage, tokenUsage: TokenUsage? = nil, snapshots: [String: (toolName: String, snapshot: ToolSnapshot)] = [:], thoughtSignatures: [String: String] = [:], reasoningContent: String? = nil, streamInterruptCount: Int = 0, modelEntryId: String? = nil) async -> String? {
         let sid = self.sessionId ?? "nil"
         logger.info("[Persist] enter sid=\(sid.prefix(8)) role=\(msg.role.rawValue) parts=\(msg.parts.count)")
-        guard let raw = await buildRawMessage(msg, tokenUsage: tokenUsage, snapshots: snapshots, thoughtSignatures: thoughtSignatures, reasoningContent: reasoningContent, streamInterruptCount: streamInterruptCount) else {
+        guard let raw = await buildRawMessage(msg, tokenUsage: tokenUsage, snapshots: snapshots, thoughtSignatures: thoughtSignatures, reasoningContent: reasoningContent, streamInterruptCount: streamInterruptCount, modelEntryId: modelEntryId) else {
             logger.warning("[Persist] buildRawMessage returned nil sid=\(sid.prefix(8)) role=\(msg.role.rawValue) — NOT WRITTEN")
             return nil
         }
@@ -1801,13 +1893,59 @@ extension AIChatViewModel {
     /// — the row doesn't exist yet, and the eventual INSERT carries error_info itself
     /// only if set on RawMessage; for the common "set error after persist" ordering
     /// this UPDATE is what writes it. iCloud is untouched (error_info is device-local).
+    ///
+    /// [T-ios-error-banner-lost] When no assistant row has been persisted yet,
+    /// this used to give up and return — which is exactly the case that loses
+    /// the error. A request that fails EARLY (bad API key, refused connection,
+    /// provider 4xx before any content) never reaches the point where the
+    /// assistant turn is written, so there was no row to hang error_info on and
+    /// the banner existed only in memory. Switching sessions or backgrounding
+    /// the app destroys the per-session @StateObject view model, and with it the
+    /// only copy of the error: the user comes back to a chat that looks like
+    /// nothing happened.
+    ///
+    /// So when the assistant row is missing, write a minimal one now, purely to
+    /// carry the error. It is a real assistant row with empty content, which is
+    /// what the reload path already renders errors from (a user row cannot show
+    /// one — `ChatMessageRow` only draws `inlineError` for the assistant), and
+    /// it matches the in-memory shape the send path already uses for the
+    /// context-exhausted case (`ChatMessage(role: .assistant, content: "")` with
+    /// `.error` set).
     func persistErrorInfo(_ error: String?) async {
-        guard let dbId = agentHistory.last(where: { $0.role == .assistant && $0.dbMessageId != nil })?.dbMessageId else {
-            logger.info("[ErrorPersist] skip — no persisted assistant message id yet (error=\(error != nil))")
+        if let dbId = agentHistory.last(where: { $0.role == .assistant && $0.dbMessageId != nil })?.dbMessageId {
+            let ok = await ChatStore.shared.updateMessageErrorInfo(messageId: dbId, errorInfo: error)
+            logger.info("[ErrorPersist] wrote error_info to msg=\(dbId.prefix(8)) cleared=\(error == nil) ok=\(ok)")
             return
         }
-        await ChatStore.shared.updateMessageErrorInfo(messageId: dbId, errorInfo: error)
-        logger.info("[ErrorPersist] wrote error_info to msg=\(dbId.prefix(8)) cleared=\(error == nil)")
+
+        // Clearing is a no-op when there is nothing persisted: an absent row
+        // already means "no error", and creating one to record its absence
+        // would put an empty assistant bubble in the transcript.
+        guard let error else {
+            logger.info("[ErrorPersist] skip clear — no persisted assistant row")
+            return
+        }
+
+        // Only for a real session. A draft has no session id yet, so there is
+        // nothing to reload into and nothing to lose.
+        guard sessionId != nil else {
+            logger.info("[ErrorPersist] skip — no sessionId (draft)")
+            return
+        }
+
+        let carrier = AgentMessage(role: .assistant, parts: [])
+        guard let newId = await persistAgentMessage(carrier) else {
+            logger.warning("[ErrorPersist] failed to persist error-carrier assistant row")
+            return
+        }
+        // Record the id so a later clear (retry succeeding) can find this row
+        // instead of orphaning it — the same link `retry()` walks.
+        var stamped = carrier
+        stamped.dbMessageId = newId
+        agentHistory.append(stamped)
+
+        let ok = await ChatStore.shared.updateMessageErrorInfo(messageId: newId, errorInfo: error)
+        logger.info("[ErrorPersist] created carrier row msg=\(newId.prefix(8)) for early failure ok=\(ok)")
     }
 
 }

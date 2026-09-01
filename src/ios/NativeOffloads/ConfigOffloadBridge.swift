@@ -540,10 +540,14 @@ private let logger = AppLogger(category: "ConfigOffload")
                 oldValue = .null
             }
 
-            let newValue: ConfigValue
+            // `var` (not `let`): [T-soul-icon-config-images] rewrites this in
+            // place when an image source resolves to a data URI.
+            var newValue: ConfigValue
             let displayVerb: String
             let displayPath: String
-            let displayOld: String
+            // `var`: [T-soul-icon-config-images] collapses a stored data URI
+            // to "<image>" so the confirm sheet never shows base64.
+            var displayOld: String
             var displayNew: String
             if isAppend {
                 guard case .array(let elemSchema) = field.valueSchema else {
@@ -602,6 +606,37 @@ private let logger = AppLogger(category: "ConfigOffload")
                 displayNew = newValue.displayString
             }
 
+            // [T-soul-icon-config-images] Resolve an image source to its
+            // stored form BEFORE the confirmation sheet.
+            //
+            // Three reasons this belongs here rather than in the writer:
+            //   1. `ConfigField.write` is synchronous and @MainActor; an
+            //      https source needs an await. This function is already async.
+            //   2. The user should confirm a change that has already been
+            //      fetched and validated — otherwise the sheet promises
+            //      something the write may then fail to deliver.
+            //   3. A failed fetch becomes a clean tool error instead of a
+            //      half-applied batch.
+            //
+            // What lands in `newValue` is the finished data URI; what lands in
+            // the sheet and the audit log is the literal "<image>", so neither
+            // ever carries base64.
+            if field.path == "soul.icon", case .string(let rawIcon) = newValue,
+               SoulIconSource.looksLikeImageSource(rawIcon) {
+                do {
+                    let dataURI = try await SoulIconSource.resolveToDataURI(rawIcon)
+                    newValue = .string(dataURI)
+                    displayNew = "<image>"
+                } catch {
+                    let reason = (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
+                    return [
+                        "ok": false, "error": "validation_failed",
+                        "reason": "Can't use that image: \(reason)",
+                    ]
+                }
+            }
+
             // [T-minis-config-provider-add] If this field holds a credential
             // (path ends in a secret key, e.g. providers.<id>.apiKey), mask the
             // value persisted to the audit and shown in the confirm sheet. The
@@ -616,6 +651,18 @@ private let logger = AppLogger(category: "ConfigOffload")
                let mv = mo[fieldLeaf] {
                 auditNewValue = mv
                 displayNew = mv.displayString
+            }
+
+            // [T-soul-icon-config-images] Keep the encoded icon out of the
+            // audit log and the confirm sheet. `displayString` truncates at 80
+            // chars, which would still splash 75 characters of base64 across
+            // both surfaces — and the audit column stores the value in full.
+            if case .string(let sv) = auditNewValue, SoulIconImage.isDataURI(sv) {
+                auditNewValue = .string("<image>")
+                displayNew = "<image>"
+            }
+            if case .string(let ov) = oldValue, SoulIconImage.isDataURI(ov) {
+                displayOld = "<image>"
             }
 
             resolved.append(.fieldWrite(field: field, oldValue: oldValue, newValue: newValue, auditNewValue: auditNewValue))

@@ -81,7 +81,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
         var errorDescription: String? {
             switch self {
             case .badConfig(let m): return m
-            case .cancelled: return String(localized: "Authorization was cancelled.")
+            case .cancelled: return AppLocalized("Authorization was cancelled.")
             case .exchangeFailed(let m): return m
             }
         }
@@ -181,6 +181,16 @@ final class MCPOAuthController: NSObject, ObservableObject {
         var expiresAt: TimeInterval
     }
 
+    /// [T-ios-backup-credential-restore] Write tokens back from a backup.
+    ///
+    /// Narrow entry point so the importer doesn't need `keychainSet` (private)
+    /// widened for everyone. Takes the already-decoded blob so the importer
+    /// never has to know this type's storage layout.
+    static func restoreTokens(_ tokens: StoredTokens, server: String) {
+        guard let data = try? JSONEncoder().encode(tokens) else { return }
+        keychainSet(data, account: "\(server)#tokens")
+    }
+
     static func tokens(server: String) -> StoredTokens? {
         guard let data = keychainGet(account: "\(server)#tokens") else { return nil }
         return try? JSONDecoder().decode(StoredTokens.self, from: data)
@@ -273,18 +283,18 @@ final class MCPOAuthController: NSObject, ObservableObject {
     /// guest bridge file.
     func authorize(server: String, oauth: MCPOAuthConfig) async throws {
         guard !oauth.clientId.trimmingCharacters(in: .whitespaces).isEmpty else {
-            throw OAuthError.badConfig(String(localized: "Client ID is required."))
+            throw OAuthError.badConfig(AppLocalized("Client ID is required."))
         }
         guard let authBase = URL(string: oauth.authorizationEndpoint),
               authBase.scheme?.hasPrefix("http") == true else {
-            throw OAuthError.badConfig(String(localized: "Authorization Endpoint must be a valid https URL."))
+            throw OAuthError.badConfig(AppLocalized("Authorization Endpoint must be a valid https URL."))
         }
         guard URL(string: oauth.tokenEndpoint)?.scheme?.hasPrefix("http") == true else {
-            throw OAuthError.badConfig(String(localized: "Token Endpoint must be a valid https URL."))
+            throw OAuthError.badConfig(AppLocalized("Token Endpoint must be a valid https URL."))
         }
         let redirect = (oauth.redirectURI?.isEmpty == false ? oauth.redirectURI! : Self.defaultRedirectURI)
         guard let redirectURL = URL(string: redirect), let scheme = redirectURL.scheme else {
-            throw OAuthError.badConfig(String(localized: "Redirect URI is invalid."))
+            throw OAuthError.badConfig(AppLocalized("Redirect URI is invalid."))
         }
         // [T-mcp-oauth-loopback] Loopback redirect (the default) → local HTTP
         // server + in-app Safari (RFC 8252; what Google et al. accept).
@@ -329,7 +339,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
         }
         comps.queryItems = items
         guard let authURL = comps.url else {
-            throw OAuthError.badConfig(String(localized: "Could not build the authorization URL."))
+            throw OAuthError.badConfig(AppLocalized("Could not build the authorization URL."))
         }
 
         logger.info("[Authorize] '\(server)' starting (endpointHost=\(authBase.host ?? "?"), mode=\(isLoopback ? "loopback" : "scheme:\(scheme)"))")
@@ -339,7 +349,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
         } else if scheme == "http" || scheme == "https" {
             // A public http(s) redirect can't be intercepted by a native app
             // (that's a web-app flow). Point the user at the loopback form.
-            throw OAuthError.badConfig(String(localized: "An http(s) Redirect URI must use localhost, e.g. \(Self.defaultRedirectURI)."))
+            throw OAuthError.badConfig(AppLocalized("An http(s) Redirect URI must use localhost, e.g. \(Self.defaultRedirectURI)."))
         } else {
             code = try await runSchemeFlow(authURL: authURL, scheme: scheme, state: state)
         }
@@ -368,11 +378,11 @@ final class MCPOAuthController: NSObject, ObservableObject {
         guard let http = resp as? HTTPURLResponse, http.statusCode < 400 else {
             let body = String(data: data, encoding: .utf8)?.prefix(200) ?? ""
             logger.error("[Authorize] '\(server)' token exchange HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)")
-            throw OAuthError.exchangeFailed(String(localized: "Token exchange failed: \(String(body))"))
+            throw OAuthError.exchangeFailed(AppLocalized("Token exchange failed: \(String(body))"))
         }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let access = obj["access_token"] as? String else {
-            throw OAuthError.exchangeFailed(String(localized: "Token endpoint returned no access_token."))
+            throw OAuthError.exchangeFailed(AppLocalized("Token endpoint returned no access_token."))
         }
         let expiresIn = (obj["expires_in"] as? NSNumber)?.doubleValue ?? 0
         let stored = StoredTokens(
@@ -408,7 +418,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
         presentSafari(url: authURL)
         let result = try await server.waitForCallback(timeout: 300)
         guard result.state == state else {
-            throw OAuthError.exchangeFailed(String(localized: "State mismatch in the OAuth callback."))
+            throw OAuthError.exchangeFailed(AppLocalized("State mismatch in the OAuth callback."))
         }
         return result.code
     }
@@ -429,18 +439,18 @@ final class MCPOAuthController: NSObject, ObservableObject {
             session.prefersEphemeralWebBrowserSession = false
             self.activeSession = session
             if !session.start() {
-                cont.resume(throwing: OAuthError.exchangeFailed(String(localized: "Could not present the authorization page.")))
+                cont.resume(throwing: OAuthError.exchangeFailed(AppLocalized("Could not present the authorization page.")))
             }
         }
         activeSession = nil
 
         let cbComps = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)
         guard cbComps?.queryItems?.first(where: { $0.name == "state" })?.value == state else {
-            throw OAuthError.exchangeFailed(String(localized: "State mismatch in the OAuth callback."))
+            throw OAuthError.exchangeFailed(AppLocalized("State mismatch in the OAuth callback."))
         }
         guard let code = cbComps?.queryItems?.first(where: { $0.name == "code" })?.value else {
             let err = cbComps?.queryItems?.first(where: { $0.name == "error" })?.value ?? "no code"
-            throw OAuthError.exchangeFailed(String(localized: "Authorization failed: \(err)"))
+            throw OAuthError.exchangeFailed(AppLocalized("Authorization failed: \(err)"))
         }
         return code
     }

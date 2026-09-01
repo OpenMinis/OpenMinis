@@ -450,9 +450,9 @@ final class MCPStore: ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .empty: return String(localized: "Paste some JSON to import.")
-            case .unparseable: return String(localized: "Couldn't parse that as JSON.")
-            case .noServers: return String(localized: "No MCP servers found in that JSON.")
+            case .empty: return AppLocalized("Paste some JSON to import.")
+            case .unparseable: return AppLocalized("Couldn't parse that as JSON.")
+            case .noServers: return AppLocalized("No MCP servers found in that JSON.")
             }
         }
     }
@@ -655,7 +655,7 @@ final class MCPStore: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .kernelNotBooted:
-                return String(localized: "The terminal engine isn't running yet. Open a chat or the terminal once, then retry.")
+                return AppLocalized("The terminal engine isn't running yet. Open a chat or the terminal once, then retry.")
             case .cliFailed(let msg):
                 return msg
             }
@@ -695,7 +695,7 @@ final class MCPStore: ObservableObject {
                 return MCPToolInfo(name: name, description: (t["description"] as? String) ?? "")
             }
         }
-        throw ToolsRefreshError.cliFailed(String(localized: "Unexpected CLI output (no JSON result). Check the server's connectivity."))
+        throw ToolsRefreshError.cliFailed(AppLocalized("Unexpected CLI output (no JSON result). Check the server's connectivity."))
     }
 
     // MARK: - iCloud sync (per-server MCPServerItem records) [T-mcp-per-server-sync]
