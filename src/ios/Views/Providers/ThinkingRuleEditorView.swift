@@ -28,20 +28,22 @@ struct ThinkingRuleEditorView: View {
         case extraBodyToggle
         case deepSeekSibling
         case qwenDual
+        case qwenRootOnly
         case customPath
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .omitEverything:       return String(localized: "Send nothing")
-            case .reasoningEffort:      return String(localized: "reasoning_effort (root)")
-            case .reasoningEffortNested:return String(localized: "reasoning.effort (nested)")
-            case .booleanToggle:        return String(localized: "Boolean toggle")
-            case .extraBodyToggle:      return String(localized: "extra_body toggle")
-            case .deepSeekSibling:      return String(localized: "thinking + reasoning_effort")
-            case .qwenDual:             return String(localized: "enable_thinking + budget")
-            case .customPath:           return String(localized: "Custom field path")
+            case .omitEverything:       return AppLocalized("Send nothing")
+            case .reasoningEffort:      return AppLocalized("reasoning_effort (root)")
+            case .reasoningEffortNested:return AppLocalized("reasoning.effort (nested)")
+            case .booleanToggle:        return AppLocalized("Boolean toggle")
+            case .extraBodyToggle:      return AppLocalized("extra_body toggle")
+            case .deepSeekSibling:      return AppLocalized("thinking + reasoning_effort")
+            case .qwenDual:             return AppLocalized("enable_thinking + budget")
+            case .qwenRootOnly:         return AppLocalized("enable_thinking only")
+            case .customPath:           return AppLocalized("Custom field path")
             }
         }
 
@@ -50,21 +52,23 @@ struct ThinkingRuleEditorView: View {
         var explanation: String {
             switch self {
             case .omitEverything:
-                return String(localized: "No thinking field at all. Use for endpoints that reject unknown keys outright.")
+                return AppLocalized("No thinking field at all. Use for endpoints that reject unknown keys outright.")
             case .reasoningEffort:
-                return String(localized: "Standard OpenAI Chat Completions shape.")
+                return AppLocalized("Standard OpenAI Chat Completions shape.")
             case .reasoningEffortNested:
-                return String(localized: "OpenAI Responses / OpenRouter shape.")
+                return AppLocalized("OpenAI Responses / OpenRouter shape.")
             case .booleanToggle:
-                return String(localized: "A plain on/off switch with no intensity tiers.")
+                return AppLocalized("A plain on/off switch with no intensity tiers.")
             case .extraBodyToggle:
-                return String(localized: "A switch nested under extra_body, as some gateways require.")
+                return AppLocalized("A switch nested under extra_body, as some gateways require.")
             case .deepSeekSibling:
-                return String(localized: "DeepSeek's shape: a thinking switch and reasoning_effort as sibling root fields.")
+                return AppLocalized("DeepSeek's shape: a thinking switch and reasoning_effort as sibling root fields.")
             case .qwenDual:
-                return String(localized: "Qwen/DashScope: enable_thinking and a token budget, sent at the root and in extra_body.")
+                return AppLocalized("Qwen/DashScope: enable_thinking and a token budget, sent at the root and in extra_body. Use ONLY for DashScope itself — other gateways reject the unknown extra_body field with a 400.")
+            case .qwenRootOnly:
+                return AppLocalized("Qwen on a third-party gateway: a bare root-level enable_thinking, with no extra_body wrapper and no thinking_budget. Relays commonly reject both of those with a 400, so this is the safe choice for self-hosted vLLM/SGLang and OpenAI-compatible relays serving qwen models.")
             case .customPath:
-                return String(localized: "Advanced: write a value at a dotted field path. Not validated by Minis.")
+                return AppLocalized("Advanced: write a value at a dotted field path. Not validated by Minis.")
             }
         }
     }
@@ -175,7 +179,7 @@ struct ThinkingRuleEditorView: View {
                 .textInputAutocapitalization(.never)
             TextField("Value at High", text: $customHighValue)
                 .autocorrectionDisabled()
-        case .omitEverything, .deepSeekSibling, .qwenDual:
+        case .omitEverything, .deepSeekSibling, .qwenDual, .qwenRootOnly:
             EmptyView()
         }
     }
@@ -196,6 +200,7 @@ struct ThinkingRuleEditorView: View {
         case .extraBodyToggle:       return .extraBodyToggle(path: extraBodyPath)
         case .deepSeekSibling:       return .deepSeekSibling
         case .qwenDual:              return .qwenDual
+        case .qwenRootOnly:          return .qwenRootOnly
         case .customPath:
             return .customPath(path: customPath,
                                values: [.high: customHighValue],
@@ -229,7 +234,7 @@ struct ThinkingRuleEditorView: View {
     private func seedFromExisting() {
         guard let e = existing else { return }
         label = createsNew && !e.isEditable
-            ? String(localized: "Copy of \(e.label)")
+            ? AppLocalized("Copy of \(e.label)")
             : e.label
         switch e.scope {
         case .allModels: scopeIsAllModels = true
@@ -245,6 +250,7 @@ struct ThinkingRuleEditorView: View {
         case .extraBodyToggle(let p): choice = .extraBodyToggle; extraBodyPath = p
         case .deepSeekSibling: choice = .deepSeekSibling
         case .qwenDual: choice = .qwenDual
+        case .qwenRootOnly: choice = .qwenRootOnly
         case .customPath(let p, let vals, let off):
             choice = .customPath; customPath = p
             customHighValue = vals[.high] ?? ""

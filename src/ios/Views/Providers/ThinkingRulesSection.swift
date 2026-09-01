@@ -242,7 +242,7 @@ struct ThinkingRulesSection: View {
         let all = userRules + builtInRules
         guard let idx = all.firstIndex(where: { $0.scope.matches(model) }) else { return nil }
         let rule = all[idx]
-        return String(localized: "\(model) → rule #\(idx + 1) “\(rule.label)”")
+        return AppLocalized("\(model) → rule #\(idx + 1) “\(rule.label)”")
     }
 }
 

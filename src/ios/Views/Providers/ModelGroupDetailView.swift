@@ -85,9 +85,9 @@ struct ModelGroupDetailView: View {
                 if let group {
                     Button {
                         UIPasteboard.general.string = "group:\(group.id)"
-                        MinisToast.show(String(localized: "Copied: \(group.name)"))
+                        MinisToast.show(AppLocalized("Copied: \(group.name)"))
                     } label: {
-                        Label(String(localized: "Copy Shortcut Model ID"), systemImage: "link")
+                        Label(AppLocalized("Copy Shortcut Model ID"), systemImage: "link")
                     }
                 }
             }
@@ -227,7 +227,7 @@ struct ModelGroupDetailView: View {
                 HStack {
                     Text("Models")
                     Spacer()
-                    Button(editMode.isEditing ? String(localized: "Done") : String(localized: "Edit")) {
+                    Button(editMode.isEditing ? AppLocalized("Done") : AppLocalized("Edit")) {
                         withAnimation {
                             editMode = editMode.isEditing ? .inactive : .active
                         }
@@ -369,13 +369,13 @@ struct ModelGroupDetailView: View {
         let store = self.store
         let voiceNote: String? = {
             if store.voiceInputGroupId == gid {
-                return String(localized: "This group drives Voice Input — only models that accept audio input are listed.", comment: "Add-models filter note for the bound voice input group")
+                return AppLocalized("This group drives Voice Input — only models that accept audio input are listed.", comment: "Add-models filter note for the bound voice input group")
             }
             if store.voiceOutputGroupId == gid {
-                return String(localized: "This group drives Voice Output — only models that can output audio are listed.", comment: "Add-models filter note for the bound voice output group")
+                return AppLocalized("This group drives Voice Output — only models that can output audio are listed.", comment: "Add-models filter note for the bound voice output group")
             }
             if store.visionGroupId == gid {
-                return String(localized: "This group describes images for models that cannot see them — only models that accept image input are listed.", comment: "Add-models filter note for the bound vision group")
+                return AppLocalized("This group describes images for models that cannot see them — only models that accept image input are listed.", comment: "Add-models filter note for the bound vision group")
             }
             return nil
         }()
@@ -592,7 +592,7 @@ private struct ContextLimitSlider: View {
         ("200K", 200_000),
         ("400K", 400_000),
         ("1M",   1_000_000),
-        (String(localized: "Unlimited"), Int.max),
+        (AppLocalized("Unlimited"), Int.max),
     ]
 
     private var sliderIndex: Double {
@@ -609,8 +609,8 @@ private struct ContextLimitSlider: View {
     }
 
     private var currentLabel: String {
-        guard let v = value else { return steps.last?.label ?? String(localized: "Unlimited") }
-        if v >= Int.max { return String(localized: "Unlimited") }
+        guard let v = value else { return steps.last?.label ?? AppLocalized("Unlimited") }
+        if v >= Int.max { return AppLocalized("Unlimited") }
         if let match = steps.first(where: { $0.tokens == v }) { return match.label }
         return "\(v / 1000)K"
     }

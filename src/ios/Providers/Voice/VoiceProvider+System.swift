@@ -24,7 +24,7 @@ final class SystemVoiceProvider: NSObject, VoiceInputCapable, VoiceOutputCapable
     /// `createdAt` is a fixed epoch so the value is stable/deterministic.
     static let providerInstance = ProviderInstance(
         id: builtinProviderId,
-        label: String(localized: "System", comment: "Built-in Apple speech engine provider name"),
+        label: AppLocalized("System", comment: "Built-in Apple speech engine provider name"),
         providerType: .openAI,          // arbitrary — never used for auth/routing; System routes by id
         credentialType: .apiKey,        // arbitrary — System needs no credential
         isEnabled: true,
@@ -103,6 +103,45 @@ final class SystemVoiceProvider: NSObject, VoiceInputCapable, VoiceOutputCapable
         VoiceLog.log("prewarm recognizer for \(loc.identifier)")
     }
 
+    // MARK: - Audio validation
+
+    /// Smallest buffer that could plausibly hold decodable audio. A canonical
+    /// WAV header is 44 bytes, so anything at or below that is header-only or
+    /// truncated and has no samples at all.
+    private static let minimumDecodableAudioBytes = 44
+
+    /// Throw unless the file at `url` really contains a usable audio track.
+    ///
+    /// [T-ios-speech-no-audio-track] Guards the uncatchable
+    /// AVAssetReaderAudioMixOutput exception described at the call site. Checks
+    /// both halves of what that initializer needs: at least one audio track, and
+    /// a finite, positive duration (a track can exist while the file is
+    /// truncated to zero length).
+    private func validateHasAudioTrack(at url: URL) async throws {
+        let asset = AVURLAsset(url: url)
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard !tracks.isEmpty else {
+                VoiceLog.log("system ASR rejected: no audio track in \(url.lastPathComponent)")
+                throw VoiceProviderError.noAudioData
+            }
+            let duration = try await asset.load(.duration)
+            let seconds = CMTimeGetSeconds(duration)
+            guard seconds.isFinite, seconds > 0 else {
+                VoiceLog.log("system ASR rejected: non-positive duration (\(seconds)s) in \(url.lastPathComponent)")
+                throw VoiceProviderError.noAudioData
+            }
+        } catch let error as VoiceProviderError {
+            throw error
+        } catch {
+            // Loading the asset failed outright (unreadable, unknown container).
+            // Treat that the same way: the file is not something we can safely
+            // hand to Speech.
+            VoiceLog.log("system ASR rejected: asset load failed for \(url.lastPathComponent): \(error.localizedDescription)")
+            throw VoiceProviderError.noAudioData
+        }
+    }
+
     // MARK: - Voice input (offline SFSpeechRecognizer)
 
     func transcribe(_ request: VoiceInputRequest) async throws -> VoiceInputResponse {
@@ -125,6 +164,16 @@ final class SystemVoiceProvider: NSObject, VoiceInputCapable, VoiceOutputCapable
         let wantOnDevice = request.onDeviceRecognition ?? recognizer.supportsOnDeviceRecognition
         let useOnDevice = wantOnDevice && recognizer.supportsOnDeviceRecognition
 
+        // [T-ios-speech-no-audio-track] Reject an empty/undersized buffer before
+        // it ever becomes a file. A WAV header alone is 44 bytes and carries no
+        // samples; anything at or below that cannot contain a decodable track,
+        // and handing such a file to Speech aborts the process (see the asset
+        // check below for why this cannot be caught).
+        guard request.audioData.count > Self.minimumDecodableAudioBytes else {
+            VoiceLog.log("system ASR rejected: audioData \(request.audioData.count) bytes is too small to contain audio")
+            throw VoiceProviderError.noAudioData
+        }
+
         // SFSpeechRecognizer needs a file URL, so spill the WAV to tmp.
         let tmpURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice_input_\(UUID().uuidString).wav")
@@ -134,6 +183,16 @@ final class SystemVoiceProvider: NSObject, VoiceInputCapable, VoiceOutputCapable
             throw VoiceProviderError.parseError("Failed to write temp audio file")
         }
         defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        // [T-ios-speech-no-audio-track] The write above succeeding does NOT mean
+        // the file is usable: a truncated or header-only buffer writes fine and
+        // still has no decodable audio track. SFSpeechURLRecognitionRequest then
+        // reaches -[AVAssetReaderAudioMixOutput initWithAudioTracks:], which
+        // raises NSInvalidArgumentException on an empty track array — on Speech's
+        // OWN dispatch queue, so it unwinds to _objc_terminate and aborts the
+        // process. It is not catchable from here, which is why this has to be
+        // checked up front rather than wrapped in a do/catch.
+        try await validateHasAudioTrack(at: tmpURL)
 
         let recognitionRequest = SFSpeechURLRecognitionRequest(url: tmpURL)
         // Report partial results so we can salvage text if the recognizer never

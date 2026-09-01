@@ -1026,6 +1026,9 @@ enum RequestBodyPatcher {
     private static var _thinkingBudget: Int = 0
     private static var _thinkingEffort: String? = nil
     private static var _thinkingDisabled: Bool = false
+    /// [T-ios-thinking-flag-cross-request] Model the pending `_thinkingDisabled`
+    /// intent was computed for; "" means unstamped (legacy callers).
+    private static var _thinkingDisabledModelId: String = ""
 
     /// Set thinking budget tokens for the next request (0 = disabled).
     /// Used for legacy Claude models (<= 4.5) that take `thinking.type="enabled"`
@@ -1049,18 +1052,33 @@ enum RequestBodyPatcher {
     /// Explicitly disable thinking for the next request. Needed for adaptive
     /// models (Claude 4.6+/5) whose SERVER default is thinking-on when the
     /// request has no thinking field — omission is not "off" there.
-    static func setThinkingDisabled() {
+    ///
+    /// [T-ios-thinking-flag-cross-request] `modelId` is the model the intent was
+    /// computed FOR. These three flags are process-global and are consumed by
+    /// whichever request reaches `URLProtocol.startLoading` next — and the set
+    /// (in AnthropicAgentProvider, before the SDK builds the body) is separated
+    /// from the take (when the request actually goes out) by a wide window.
+    /// Anything else that fires an Anthropic request in between — title
+    /// generation, which calls `streamAgentMessage(thinkingLevel: .off)` on a
+    /// possibly DIFFERENT model — can consume an intent that was never meant
+    /// for it, or leave one behind for the next turn. Stamping the model lets
+    /// the consumer drop a mismatched intent instead of applying it blindly.
+    static func setThinkingDisabled(modelId: String = "") {
         thinkingLock.lock()
         _thinkingDisabled = true
+        _thinkingDisabledModelId = modelId
         thinkingLock.unlock()
     }
 
-    private static func takeThinkingDisabled() -> Bool {
+    /// Returns (disabled, modelIdItWasSetFor).
+    private static func takeThinkingDisabled() -> (Bool, String) {
         thinkingLock.lock()
         defer { thinkingLock.unlock() }
         let d = _thinkingDisabled
+        let m = _thinkingDisabledModelId
         _thinkingDisabled = false
-        return d
+        _thinkingDisabledModelId = ""
+        return (d, m)
     }
 
     private static func takeThinkingBudget() -> Int {
@@ -1193,9 +1211,9 @@ enum RequestBodyPatcher {
     static func injectThinkingConfig(into request: NSMutableURLRequest) {
         let budget = takeThinkingBudget()
         let effort = takeThinkingEffort()
-        let disabled = takeThinkingDisabled()
+        let (disabledRaw, disabledForModel) = takeThinkingDisabled()
         // Nothing to do if the caller didn't set any thinking intent for this request.
-        guard budget > 0 || effort != nil || disabled else { return }
+        guard budget > 0 || effort != nil || disabledRaw else { return }
 
         guard let body = request.httpBody,
               var json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { return }
@@ -1203,11 +1221,36 @@ enum RequestBodyPatcher {
         let modelId = (json["model"] as? String) ?? ""
         let useAdaptive = AnthropicProvider.modelUsesAdaptiveThinking(modelId)
 
+        // [T-ios-thinking-flag-cross-request] Honour the disable intent only if
+        // it was computed for THIS model. The flags are process-global and are
+        // claimed by whichever request reaches startLoading first, so an intent
+        // set for model A can otherwise be applied to a request for model B
+        // (title generation fires its own `.off` Anthropic request on a
+        // possibly different model between the set and the take). An unstamped
+        // intent ("" — no caller passed a model) is honoured as before so this
+        // cannot silently drop a legitimate disable.
+        let disabled = disabledRaw
+            && (disabledForModel.isEmpty || disabledForModel == modelId)
+        if disabledRaw && !disabled {
+            logger.info("[Thinking] dropped cross-request disable intent set for \(disabledForModel) — this request is \(modelId)")
+        }
+
         if disabled {
-            // Explicit off. Only adaptive models need it on the wire (their
-            // server default is thinking-on); legacy models are off by
-            // omission, and enable-intent always wins if both were set.
-            if useAdaptive, budget <= 0, effort == nil {
+            // Explicit off. Only 4.6-4.x needs it on the wire (their server
+            // default is thinking-on); legacy models are off by omission, and
+            // enable-intent always wins if both were set.
+            //
+            // [T-ios-claude5-thinking-disabled-400] Claude 5+ is excluded even
+            // though it is "adaptive": it rejects the value with
+            // `"thinking.type.disabled" is not supported for this model` and
+            // defaults to adaptive when the field is absent. This is the OAuth
+            // wire path (fable 5 / Opus 5 login), i.e. exactly where the 400
+            // was reported — it re-derives the decision from the on-wire model
+            // id rather than reusing the resolver's shape, so it needs the same
+            // gate independently.
+            if useAdaptive,
+               AnthropicProvider.modelAcceptsExplicitThinkingDisabled(modelId),
+               budget <= 0, effort == nil {
                 json["thinking"] = ["type": "disabled"]
                 if let newBody = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) {
                     request.httpBody = newBody

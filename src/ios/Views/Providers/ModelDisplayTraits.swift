@@ -46,9 +46,9 @@ extension ModelEntry {
             let isOnlineASR = id.hasSuffix("/system-asr-online")
             let subtitle: String
             if isOnlineASR {
-                subtitle = String(localized: "iOS built-in, needs network", comment: "Cloud built-in ASR subtitle")
+                subtitle = AppLocalized("iOS built-in, needs network", comment: "Cloud built-in ASR subtitle")
             } else {
-                subtitle = String(localized: "iOS built-in, works offline", comment: "Built-in engine subtitle")
+                subtitle = AppLocalized("iOS built-in, works offline", comment: "Built-in engine subtitle")
             }
             return ModelDisplayTraits(
                 isOffline: !isOnlineASR,

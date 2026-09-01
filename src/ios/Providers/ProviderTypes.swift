@@ -69,21 +69,21 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
     var pickerSubtitle: String {
         switch self {
         case .openAI, .openAIResponses:
-            return String(localized: "Works with Codex, DeepSeek, Moonshot, Groq and other compatible vendors")
+            return AppLocalized("Works with Codex, DeepSeek, Moonshot, Groq and other compatible vendors")
         case .anthropic:
-            return String(localized: "Works with Claude and Anthropic-protocol-compatible services")
+            return AppLocalized("Works with Claude and Anthropic-protocol-compatible services")
         case .gemini:
-            return String(localized: "Works with the Gemini series and Google AI Studio")
+            return AppLocalized("Works with the Gemini series and Google AI Studio")
         case .openRouter:
-            return String(localized: "Aggregates GPT, Claude, Gemini, Llama and other mainstream models")
+            return AppLocalized("Aggregates GPT, Claude, Gemini, Llama and other mainstream models")
         case .xAI:
-            return String(localized: "Works with the Grok series of models")
+            return AppLocalized("Works with the Grok series of models")
         case .kimiCode:
-            return String(localized: "Sign in with your Kimi Code / Coding Plan subscription")
+            return AppLocalized("Sign in with your Kimi Code / Coding Plan subscription")
         case .antigravity:
-            return String(localized: "\(builtInModels.count) built-in models")
+            return AppLocalized("\(builtInModels.count) built-in models")
         case .unsupported:
-            return String(localized: "\(builtInModels.count) built-in models")
+            return AppLocalized("\(builtInModels.count) built-in models")
         }
     }
 

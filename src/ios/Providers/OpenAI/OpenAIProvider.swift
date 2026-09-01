@@ -29,6 +29,13 @@ private func resolvedAPIBase(_ base: String, appendV1: Bool) -> String {
 /// URLSession.shared uses a 60-second timeoutIntervalForRequest which can kill
 /// long-running streams (e.g. large file_write generation). This session gives
 /// the server 10 minutes of idle time before timing out.
+///
+/// [T-ios-stream-connection-reuse] Used by the NON-STREAMING calls only
+/// (image generation, model listing, image download). Those complete inside a
+/// single `data(for:)` await, so a shared pool is exactly right for them:
+/// they benefit from connection reuse and never sit idle holding a stream
+/// open. The SSE streaming path deliberately does NOT use this session — see
+/// `makeStreamingSession()`.
 private let streamingSession: URLSession = {
     let config = URLSessionConfiguration.default
     config.timeoutIntervalForRequest = 600  // 10 minutes
@@ -38,6 +45,43 @@ private let streamingSession: URLSession = {
     LLMSessionRegistry.shared.register(session)
     return session
 }()
+
+/// [T-ios-stream-connection-reuse] A FRESH session for one SSE stream, torn
+/// down when that stream ends.
+///
+/// Why per-request rather than the shared pool above: the shared session is a
+/// process-level singleton, so its pooled HTTP/2 connections to the provider
+/// survive for as long as the app runs — observed on device holding a single
+/// connection open for 20+ minutes while backgrounded. HTTP/2 multiplexes
+/// streams over one connection, so when a relay silently drops or wedges the
+/// stream carrying our request, the socket stays healthy and CFNetwork has
+/// nothing to report: the read simply never produces another byte. That is
+/// exactly the shape of the 2026-08-18 22:11 field stall — connection
+/// established normally (1.87s), 47 events inside the first 50ms, then 120.0s
+/// of perfect silence with no transport-level error at all.
+///
+/// URLSession exposes no per-request "don't reuse" switch (HTTP/2 forbids the
+/// `Connection` header, and there is no pool-age API), so the only way to
+/// guarantee a stream never inherits a stale multiplexed connection is to give
+/// it its own session and invalidate that session when the stream finishes.
+///
+/// This mirrors what the Anthropic path already does in practice: SwiftAnthropic
+/// routes through a `URLProtocol`, which Foundation instantiates once PER
+/// REQUEST, and each instance lazily creates its own inner `URLSession`. There
+/// the per-request session is a side effect of needing to rewrite auth headers
+/// on a SDK whose request type is module-internal; here we own the code, so we
+/// get the same connection behaviour directly, without the interception layer.
+///
+/// Deliberately NOT registered with `LLMSessionRegistry`: that registry exists
+/// to evict long-lived pooled connections on network-interface changes, and a
+/// session that lives for exactly one stream has nothing to evict.
+private func makeStreamingSession() -> URLSession {
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 600  // 10 minutes — matches the shared session
+    // One stream per session, so there is no second connection to pool.
+    config.httpMaximumConnectionsPerHost = 1
+    return URLSession(configuration: config)
+}
 
 /// LLMProvider implementation for OpenAI models.
 /// Supports two modes:
@@ -233,6 +277,12 @@ final class OpenAIProvider: LLMProvider {
     /// other OpenAI-compatible endpoint uses `Authorization: Bearer`. Centralized
     /// so the Azure branch can never accidentally set the wrong header.
     private func applyKeyAuth(_ request: inout URLRequest, token: String) {
+        // [T-empty-key-compat-endpoints] A keyless third-party endpoint
+        // (ollama, LM Studio, LiteLLM, private relays) is a supported
+        // configuration. Send NO auth header rather than a malformed
+        // `Authorization: Bearer ` / empty `api-key:` — strict gateways
+        // reject the empty form, whereas an absent header is universally fine.
+        guard !token.isEmpty else { return }
         if isAzure {
             request.setValue(token, forHTTPHeaderField: "api-key")
         } else {
@@ -265,6 +315,43 @@ final class OpenAIProvider: LLMProvider {
         let base = resolvedAPIBase(customBaseURL ?? "https://api.openai.com", appendV1: appendV1Suffix)
         let v1Path = appendV1Suffix ? "/v1" : ""
         return URL(string: URLBuilding.join(base, v1Path, defaultPath))
+    }
+
+    /// [T-ios-custom-endpoint-url-crash] `endpointURL` / `URL(string:)` return
+    /// nil for a base the user typed wrong, and every call site used to force-
+    /// unwrap that — so a typo in the provider's Base URL field crashed the app
+    /// instead of showing an error.
+    ///
+    /// `effectiveCustomBaseURL` already trims surrounding whitespace, so the
+    /// surviving nil cases are malformations INSIDE the string: a space in the
+    /// host or port (`https://10.0.0.5 :8080`, `https://10.0.0.5:80 80`), a
+    /// non-numeric port (`https://host:port`), a stray control character from a
+    /// paste. All of them are ordinary user error and must surface as a
+    /// readable message.
+    ///
+    /// The message names the offending value and the field to fix, because at
+    /// the point this fires the user is staring at a request that failed for
+    /// no visible reason.
+    private func requireEndpointURL(defaultPath: String) throws -> URL {
+        guard let url = endpointURL(defaultPath: defaultPath) else {
+            let shown = customBaseURL ?? "(default)"
+            throw LLMError.providerError(
+                message: "Invalid endpoint URL: \(shown). Check the provider's Base URL — it must be a full URL such as https://host:port, with no spaces."
+            )
+        }
+        return url
+    }
+
+    /// [T-ios-custom-endpoint-url-crash] Same guard for the two `streamRaw`
+    /// sites, which build their URL inline rather than through `endpointURL`.
+    private func requireURL(_ string: String) throws -> URL {
+        guard let url = URL(string: string) else {
+            let shown = customBaseURL ?? "(default)"
+            throw LLMError.providerError(
+                message: "Invalid endpoint URL: \(shown). Check the provider's Base URL — it must be a full URL such as https://host:port, with no spaces."
+            )
+        }
+        return url
     }
 
     /// Build the request URL for Azure OpenAI. Mirrors the official
@@ -480,12 +567,24 @@ final class OpenAIProvider: LLMProvider {
             stream: true
         )
 
-        let (byteStream, response) = try await streamingSession.bytes(for: request)
+        // [T-ios-stream-connection-reuse] Own session for this stream; see
+        // `makeStreamingSession()`. Invalidated on every exit path below so the
+        // connection is torn down rather than returned to a long-lived pool.
+        let session = makeStreamingSession()
+        let byteStream: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (byteStream, response) = try await session.bytes(for: request)
+        } catch {
+            session.finishTasksAndInvalidate()
+            throw error
+        }
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
 
         if !(200..<300).contains(statusCode) {
             var body = ""
             for try await line in byteStream.lines { body += line }
+            session.finishTasksAndInvalidate()
             throw mapHTTPError(statusCode: statusCode, body: body)
         }
 
@@ -530,7 +629,162 @@ final class OpenAIProvider: LLMProvider {
                     continuation.finish(throwing: self.mapError(error))
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            // [T-ios-stream-connection-reuse] Cancel the pump AND tear down
+            // this stream's session. Fires on normal finish, thrown error, and
+            // consumer cancellation alike, so the connection is never returned
+            // to a pool that could hand it to a later request.
+            continuation.onTermination = { _ in
+                task.cancel()
+                session.finishTasksAndInvalidate()
+            }
+        }
+    }
+
+    // MARK: - Request body size guard
+
+    /// Hard ceiling on the serialized request body. Above this we refuse the
+    /// request instead of handing it to JSONSerialization.
+    ///
+    /// Sizing: serializing costs roughly 3x the body at peak — NSJSONSerialization
+    /// grows one contiguous output buffer by doubling, so the old and the new
+    /// (2x) buffer are both live across the realloc, on top of the source
+    /// dictionary that is already resident. 32MB therefore means a ~100MB spike.
+    /// That is a real but survivable cost against the app's footprint budget,
+    /// which ISHKernel's fork guard puts at 1-2GB for the WHOLE process (UI,
+    /// conversation, iSH rootfs included) — and the crash happens precisely when
+    /// a long conversation has already eaten most of it.
+    ///
+    /// Note this is a backstop against process death, not a context-window
+    /// policy: the model will reject anything this large long before memory does.
+    /// No legitimate text request comes close (200k tokens of text is under 1MB);
+    /// reaching 32MB means something pathological is in the history, in practice
+    /// inlined base64 images, which the token estimator badly under-counts and
+    /// which are exactly what pushed the reported crash over the edge.
+    private static let maxRequestBodyBytes = 32 * 1024 * 1024
+
+    /// Ceiling for the DEBUG-only on-wire body capture, which copies the whole
+    /// serialized body into a String. Well below the request ceiling because this
+    /// copy is pure diagnostics — nothing about the request depends on it.
+    private static let maxDebugCaptureBytes = 8 * 1024 * 1024
+
+    /// Approximate the serialized JSON size of a request body WITHOUT serializing it.
+    ///
+    /// [T-ios-openai-body-oom] This exists because the failure it guards against
+    /// cannot be caught. When NSJSONSerialization cannot grow its output buffer it
+    /// calls _CFRaiseMemoryException -> abort(); that is a process abort, not a
+    /// Swift error and not an ObjC exception we can catch, so `try` around
+    /// `JSONSerialization.data` is useless. The check has to happen BEFORE the call.
+    ///
+    /// Accuracy only has to be good enough to separate "normal request" from
+    /// "about to abort the process", so this walks the tree and counts bytes
+    /// without building any strings. Strings are measured with utf8.count (exact
+    /// for the content, ignoring escapes) and given a small allowance for quoting.
+    /// It deliberately does not recurse without limit — a pathological nesting
+    /// depth returns the ceiling rather than blowing the Swift stack, which would
+    /// be its own crash.
+    private static func estimateSerializedSize(_ value: Any, depth: Int = 0) -> Int {
+        // Deeply nested input is not something we can measure safely; report it as
+        // over-limit so the caller rejects it rather than recursing into a stack
+        // overflow. Real bodies nest a handful of levels.
+        if depth > 64 { return maxRequestBodyBytes }
+
+        switch value {
+        case let s as String:
+            // +2 for the quotes. Escaping can only make the output longer (a
+            // quote or backslash becomes 2 bytes, a control character becomes 6
+            // as ), so utf8.count is a lower bound, never an over-estimate.
+            // Measured against real JSONSerialization output this is within 5% on
+            // ordinary text and exact on base64 — but escape-heavy content (JSON
+            // embedded in a tool result, Windows paths) measured ~0.79 of actual,
+            // so scale up to stay on the conservative side. Over-estimating costs
+            // nothing here: the ceiling is far above any legitimate request.
+            return (s.utf8.count * 5) / 4 + 2
+        case let dict as [String: Any]:
+            var total = 2 // {}
+            for (k, v) in dict {
+                // key quotes + colon + comma
+                total += k.utf8.count + 4
+                total += estimateSerializedSize(v, depth: depth + 1)
+                // Bail out early once we are already over — no point walking the
+                // rest of a body we are going to reject, and this keeps the guard
+                // cheap on exactly the huge inputs where it matters.
+                if total >= maxRequestBodyBytes { return total }
+            }
+            return total
+        case let array as [Any]:
+            var total = 2 // []
+            for v in array {
+                total += estimateSerializedSize(v, depth: depth + 1) + 1 // comma
+                if total >= maxRequestBodyBytes { return total }
+            }
+            return total
+        case let data as Data:
+            // Not valid JSON input, but if it ever appears it would be huge.
+            return data.count
+        case is NSNull:
+            return 4
+        case let n as NSNumber:
+            // Covers Bool and every numeric type; 20 bytes covers Int64/Double text.
+            return CFGetTypeID(n) == CFBooleanGetTypeID() ? 5 : 20
+        default:
+            return 16
+        }
+    }
+
+    /// Reject a body that would abort the process during serialization.
+    ///
+    /// Throws a recoverable `LLMError.providerError` so the agent loop surfaces a
+    /// readable message (and can fall back / let the user compact) instead of the
+    /// app disappearing mid-stream.
+    private func guardRequestBodySize(_ body: [String: Any], context: String) throws {
+        let estimated = Self.estimateSerializedSize(body)
+        if estimated >= Self.maxRequestBodyBytes {
+            let estimatedMB = estimated / (1024 * 1024)
+            let limitMB = Self.maxRequestBodyBytes / (1024 * 1024)
+            logger.error(
+                "🛑 [\(context)] request body ~\(estimatedMB)MB exceeds the \(limitMB)MB ceiling; "
+                + "refusing to serialize (would risk an out-of-memory abort). "
+                + "Conversation likely contains large inlined attachments."
+            )
+            throw LLMError.providerError(
+                message: String(
+                    format: AppLocalized("Request too large (about %1$d MB, limit %2$d MB). Start a new conversation or remove large images/attachments, then try again."),
+                    estimatedMB, limitMB
+                )
+            )
+        }
+
+        // [T-ios-openai-body-oom] Second gate: dynamic headroom. The fixed
+        // ceiling above assumes the process still has ~100MB to spare, but the
+        // crash population is exactly the sessions that have already eaten most
+        // of the footprint budget — TestFlight BJhH4xxkZcrKGOmwgHZ3Ez (1.13(14))
+        // aborted in __CFReallocationFailed on a body well under the ceiling.
+        // Serializing costs ~3x the body at peak (source dict + old buffer +
+        // doubled new buffer), so require that much headroom from the kernel's
+        // own accounting before committing. The 4MB floor keeps ordinary text
+        // requests exempt: near-death transient dips must not fail a request
+        // that would have cost a few hundred KB to serialize anyway.
+        let headroomFloor = 4 * 1024 * 1024
+        if estimated > headroomFloor {
+            let available = Int(os_proc_available_memory())
+            // os_proc_available_memory() returns 0 when the limit is unknown
+            // (e.g. some extension/simulator contexts) — treat that as "no
+            // information", never as "no memory".
+            if available > 0, estimated * 3 > available {
+                let estimatedMB = estimated / (1024 * 1024)
+                let availableMB = available / (1024 * 1024)
+                logger.error(
+                    "🛑 [\(context)] request body ~\(estimatedMB)MB needs ~\(estimatedMB * 3)MB to serialize "
+                    + "but only \(availableMB)MB of process memory remains; refusing to serialize "
+                    + "(would abort in __CFReallocationFailed)."
+                )
+                throw LLMError.providerError(
+                    message: String(
+                        format: AppLocalized("Not enough memory to send this request (about %1$d MB needed, %2$d MB free). Close other sessions or restart the app, then try again."),
+                        estimatedMB * 3, availableMB
+                    )
+                )
+            }
         }
     }
 
@@ -585,7 +839,7 @@ final class OpenAIProvider: LLMProvider {
             } else {
                 let base = resolvedAPIBase(customBaseURL ?? "https://api.openai.com", appendV1: appendV1Suffix)
                 let v1Path = appendV1Suffix ? "/v1" : ""
-                url = URL(string: URLBuilding.join(base, v1Path, "/responses"))!
+                url = try requireURL(URLBuilding.join(base, v1Path, "/responses"))
             }
             request = URLRequest(url: url)
             let token = try await getToken()
@@ -597,7 +851,7 @@ final class OpenAIProvider: LLMProvider {
             } else {
                 let base = resolvedAPIBase(customBaseURL ?? "https://api.openai.com", appendV1: appendV1Suffix)
                 let v1Path = appendV1Suffix ? "/v1" : ""
-                url = URL(string: URLBuilding.join(base, v1Path, "/chat/completions"))!
+                url = try requireURL(URLBuilding.join(base, v1Path, "/chat/completions"))
             }
             request = URLRequest(url: url)
             let token = try await getToken()
@@ -609,6 +863,11 @@ final class OpenAIProvider: LLMProvider {
         for (key, value) in extraHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // [T-ios-openai-body-oom] Must run BEFORE serializing: an out-of-memory
+        // inside JSONSerialization aborts the process and cannot be caught. This
+        // is the agent loop's request path, where the body grows with every turn.
+        try guardRequestBodySize(body, context: "streamRaw")
+
         // Use .sortedKeys so every request with the same body produces byte-identical
         // JSON, letting DeepSeek's prefix-based disk cache match from the 0th token.
         // Without this, Swift's dictionary iteration order randomizes top-level /
@@ -618,9 +877,22 @@ final class OpenAIProvider: LLMProvider {
         #if DEBUG
         // Capture the actual on-wire body bytes for debug.llmRequests, so parity
         // checks can compare exactly what DeepSeek received (byte-for-byte).
-        if let onWireBody = request.httpBody,
-           let bodyStr = String(data: onWireBody, encoding: .utf8) {
-            LastAPIRequestBody.shared.set(bodyStr, provider: "OpenAI")
+        //
+        // Skip the capture on very large bodies: this makes a full second copy of
+        // the serialized request as a String, so on a long conversation it doubles
+        // the very allocation that D.2 crashes on. Release is unaffected (the whole
+        // block is DEBUG-only), but a debug build should not OOM where the shipped
+        // build would not. Byte-parity checks are done on ordinary-sized requests.
+        if let onWireBody = request.httpBody {
+            if onWireBody.count <= Self.maxDebugCaptureBytes,
+               let bodyStr = String(data: onWireBody, encoding: .utf8) {
+                LastAPIRequestBody.shared.set(bodyStr, provider: "OpenAI")
+            } else {
+                LastAPIRequestBody.shared.set(
+                    "<body omitted: \(onWireBody.count) bytes exceeds the debug capture limit>",
+                    provider: "OpenAI"
+                )
+            }
         }
         let maskedHeaders: [String: String] = (request.allHTTPHeaderFields ?? [:]).reduce(into: [:]) { acc, pair in
             acc[pair.key] = pair.key == "Authorization" ? "Bearer ***" : pair.value
@@ -633,12 +905,24 @@ final class OpenAIProvider: LLMProvider {
         logOutgoingRequest(url: url, headers: request.allHTTPHeaderFields, body: body)
         #endif
 
-        let (byteStream, response) = try await streamingSession.bytes(for: request)
+        // [T-ios-stream-connection-reuse] Own session for this stream; see
+        // `makeStreamingSession()`. This is the agent loop's request path — the
+        // one the 22:11 stall happened on.
+        let session = makeStreamingSession()
+        let byteStream: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (byteStream, response) = try await session.bytes(for: request)
+        } catch {
+            session.finishTasksAndInvalidate()
+            throw error
+        }
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
 
         if !(200..<300).contains(statusCode) {
             var body = ""
             for try await line in byteStream.lines { body += line }
+            session.finishTasksAndInvalidate()
             throw mapHTTPError(statusCode: statusCode, body: body)
         }
 
@@ -653,7 +937,14 @@ final class OpenAIProvider: LLMProvider {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            // [T-ios-stream-connection-reuse] Cancel the pump AND tear down
+            // this stream's session. Fires on normal finish, thrown error, and
+            // consumer cancellation alike, so the connection is never returned
+            // to a pool that could hand it to a later request.
+            continuation.onTermination = { _ in
+                task.cancel()
+                session.finishTasksAndInvalidate()
+            }
         }
 
         return (lineStream, statusCode)
@@ -710,7 +1001,7 @@ final class OpenAIProvider: LLMProvider {
             url = azure
         } else {
             // [T-model-use-endpoint-override] honor the absolute-path override
-            url = endpointURL(defaultPath: "/chat/completions")!
+            url = try requireEndpointURL(defaultPath: "/chat/completions")
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -758,6 +1049,9 @@ final class OpenAIProvider: LLMProvider {
             body["model"] = model.id
         }
 
+        // [T-ios-openai-body-oom] See streamRaw — carries the conversation too.
+        try guardRequestBodySize(body, context: "chatCompletions")
+
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
         #if DEBUG
@@ -802,7 +1096,7 @@ final class OpenAIProvider: LLMProvider {
             // forceResponsesAPI or custom base — use /v1/responses on the
             // configured base. [T-model-use-endpoint-override] honors the
             // absolute-path override (never reaches the Codex branch above).
-            url = endpointURL(defaultPath: "/responses")!
+            url = try requireEndpointURL(defaultPath: "/responses")
         }
 
         var request = URLRequest(url: url)
@@ -872,6 +1166,9 @@ final class OpenAIProvider: LLMProvider {
             for (k, v) in chatExtraBody { body[k] = v }
             body["model"] = model.id
         }
+
+        // [T-ios-openai-body-oom] See streamRaw — carries the conversation too.
+        try guardRequestBodySize(body, context: "responsesAPI")
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
 
@@ -1197,7 +1494,7 @@ final class OpenAIProvider: LLMProvider {
             }
             url = u
         } else {
-            url = endpointURL(defaultPath: "/chat/completions")!
+            url = try requireEndpointURL(defaultPath: "/chat/completions")
         }
 
         var request = URLRequest(url: url)
@@ -1211,6 +1508,10 @@ final class OpenAIProvider: LLMProvider {
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
         if let bodyObject, method.uppercased() != "GET" {
+            // [T-ios-openai-body-oom] Passthrough bodies are caller-supplied and
+            // can carry conversation-scale payloads — same abort risk as the
+            // three chat builders, same guard.
+            try guardRequestBodySize(bodyObject, context: "rawPassthrough")
             request.httpBody = try JSONSerialization.data(withJSONObject: bodyObject, options: [.sortedKeys])
         }
 
@@ -1305,6 +1606,11 @@ final class OpenAIProvider: LLMProvider {
         // If the user explicitly set response_format, respect it and don't run
         // the b64_json probe/retry below.
         let userSetResponseFormat = imageExtraBody["response_format"] != nil
+
+        // [T-ios-openai-body-oom] Image edit/gen bodies can inline multi-MB
+        // base64 source images via imageExtraBody. Guard once up front — the
+        // loop below only toggles the tiny response_format key between rounds.
+        try guardRequestBodySize(body, context: "generateImage")
 
         // Try b64_json first; if the provider rejects it, retry without response_format
         var triedWithoutFormat = userSetResponseFormat

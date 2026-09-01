@@ -602,7 +602,7 @@ enum VoiceProviderResolver {
 
     private static func label(for entry: ModelEntry?, includeInstance: Bool = true) -> String {
         guard let entry else {
-            return String(localized: "System", comment: "Built-in Apple speech engine")
+            return AppLocalized("System", comment: "Built-in Apple speech engine")
         }
         // Only append the instance label when asked AND it isn't the built-in
         // System engine (whose synthetic "System" instance just duplicates the

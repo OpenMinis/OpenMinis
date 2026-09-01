@@ -105,8 +105,12 @@ final class AnthropicAgentProvider: AgentProvider {
             // call with max_tokens=256 → stop_reason=max_tokens,
             // thinking_tokens=256/256, empty body). Legacy (<=4.5) models
             // default to no thinking, so absence is fine there.
-            RequestBodyPatcher.setThinkingDisabled()
-            logger.info("Thinking explicitly DISABLED (adaptive default-on model, level=off)")
+            // [T-ios-thinking-flag-cross-request] Stamp the model this intent
+            // belongs to — the flag is process-global and another Anthropic
+            // request (e.g. title generation, also `.off`, possibly a different
+            // model) may reach the wire between this set and its take.
+            RequestBodyPatcher.setThinkingDisabled(modelId: model.id)
+            logger.info("Thinking explicitly DISABLED (adaptive default-on model, level=off) model=\(self.model.id)")
         }
 
         // Anthropic-compat proxies (e.g. DeepSeek's deepseek-v4-pro endpoint

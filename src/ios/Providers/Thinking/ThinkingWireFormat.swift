@@ -61,6 +61,29 @@ enum ThinkingWireFormat: Equatable {
     /// against a fixed threshold (a5a0de20).
     case qwenDual
 
+    /// [T-ios-qwen-extra-body-400] Bare root-level `enable_thinking` — no `extra_body`
+    /// envelope and no `thinking_budget`. The minimal shape for a qwen-named model served
+    /// by something that is not DashScope.
+    ///
+    /// Both omissions were forced by measurement against a real relay
+    /// (tokenrhythm.studio, qwen3.8-max / qwen3.7-max), probing one field at a time:
+    ///
+    ///   | body                                  | result |
+    ///   |---------------------------------------|--------|
+    ///   | baseline (no thinking fields)         | 200    |
+    ///   | + `enable_thinking`                   | 200    |
+    ///   | + `enable_thinking`, `thinking_budget`| 400    |
+    ///
+    /// So `enable_thinking` is portable but `thinking_budget` is NOT: the gateway answers
+    /// `400 UNKNOWN_FIELD` and the whole request fails rather than degrading. `extra_body`
+    /// fails the same way. Both fields stay in `qwenDual` because DashScope's documented
+    /// contract does use them — this case exists precisely so that contract is not
+    /// imposed on endpoints that never agreed to it.
+    ///
+    /// The `*qwen*` built-in rule matches on the MODEL NAME alone, which is why a relay
+    /// ever received the DashScope shape to begin with.
+    case qwenRootOnly
+
     // MARK: - Declared but not yet routed here (Phase 2)
 
     /// Anthropic `thinking:{type:…, budget_tokens:N}`. Claude 4.6+ uses *adaptive*

@@ -67,7 +67,7 @@ struct VoiceProviderTemplate: Identifiable {
             providerType: .openAI,
             baseURL: "https://api.elevenlabs.io",
             appendV1: false,
-            capability: String(localized: "Speech synthesis (TTS)", comment: "Voice provider capability"),
+            capability: AppLocalized("Speech synthesis (TTS)", comment: "Voice provider capability"),
             baseURLMarkers: ["elevenlabs"],
             mockModels: [
                 // The model `id` is the ElevenLabs voice_id.
@@ -86,7 +86,7 @@ struct VoiceProviderTemplate: Identifiable {
             providerType: .openAI,
             baseURL: "https://api.deepgram.com",
             appendV1: false,
-            capability: String(localized: "Recognition + synthesis", comment: "Voice provider capability"),
+            capability: AppLocalized("Recognition + synthesis", comment: "Voice provider capability"),
             baseURLMarkers: ["deepgram"],
             mockModels: [
                 LLMModel(id: "nova-2", displayName: "Nova-2 (ASR)", provider: "deepgram", modalityOverride: .audioInput),
@@ -105,7 +105,7 @@ struct VoiceProviderTemplate: Identifiable {
             providerType: .openAI,
             baseURL: "https://eastasia.tts.speech.microsoft.com",
             appendV1: false,
-            capability: String(localized: "Speech synthesis (TTS)", comment: "Voice provider capability"),
+            capability: AppLocalized("Speech synthesis (TTS)", comment: "Voice provider capability"),
             baseURLMarkers: ["tts.speech.microsoft.com"],
             mockModels: [
                 // Chinese (Mandarin)
@@ -156,7 +156,7 @@ struct VoiceProviderTemplate: Identifiable {
             ],
             symbol: "cloud",
             tint: .blue,
-            note: String(localized: "Enter the Azure Speech Services subscription key. Set the base URL to your region, e.g. https://eastasia.tts.speech.microsoft.com", comment: "Azure TTS note")
+            note: AppLocalized("Enter the Azure Speech Services subscription key. Set the base URL to your region, e.g. https://eastasia.tts.speech.microsoft.com", comment: "Azure TTS note")
         ),
         VoiceProviderTemplate(
             id: "minimax",
@@ -164,7 +164,7 @@ struct VoiceProviderTemplate: Identifiable {
             providerType: .anthropic,
             baseURL: "https://api.minimax.io",
             appendV1: false,
-            capability: String(localized: "Speech synthesis (TTS)", comment: "Voice provider capability"),
+            capability: AppLocalized("Speech synthesis (TTS)", comment: "Voice provider capability"),
             baseURLMarkers: ["minimax"],
             mockModels: [
                 LLMModel(id: "speech-2.8-hd", displayName: "MiniMax Speech 2.8 HD",
@@ -178,11 +178,11 @@ struct VoiceProviderTemplate: Identifiable {
         ),
         VoiceProviderTemplate(
             id: "alibaba",
-            name: String(localized: "Alibaba Bailian", comment: "Voice provider name"),
+            name: AppLocalized("Alibaba Bailian", comment: "Voice provider name"),
             providerType: .openAI,
             baseURL: "https://dashscope.aliyuncs.com/compatible-mode",
             appendV1: true,
-            capability: String(localized: "Recognition + synthesis", comment: "Voice provider capability"),
+            capability: AppLocalized("Recognition + synthesis", comment: "Voice provider capability"),
             baseURLMarkers: ["dashscope"],
             mockModels: [
                 LLMModel(id: "paraformer-realtime-v2", displayName: "Paraformer Realtime v2",
@@ -196,11 +196,11 @@ struct VoiceProviderTemplate: Identifiable {
         ),
         VoiceProviderTemplate(
             id: "doubao",
-            name: String(localized: "Doubao (Volcano)", comment: "Voice provider name"),
+            name: AppLocalized("Doubao (Volcano)", comment: "Voice provider name"),
             providerType: .openAI,
             baseURL: "https://openspeech.bytedance.com",
             appendV1: false,
-            capability: String(localized: "Recognition + synthesis", comment: "Voice provider capability"),
+            capability: AppLocalized("Recognition + synthesis", comment: "Voice provider capability"),
             baseURLMarkers: ["openspeech.bytedance", "volcano"],
             mockModels: [
                 LLMModel(id: "bigmodel", displayName: "Doubao ASR (bigmodel)",
@@ -228,15 +228,15 @@ struct VoiceProviderTemplate: Identifiable {
             ],
             symbol: "mic.and.signal.meter",
             tint: .blue,
-            note: String(localized: "Enter the API Key from the Volcano Engine new console.", comment: "Voice provider credential note")
+            note: AppLocalized("Enter the API Key from the Volcano Engine new console.", comment: "Voice provider credential note")
         ),
         VoiceProviderTemplate(
             id: "xunfei",
-            name: String(localized: "iFlytek (Xunfei)", comment: "Voice provider name"),
+            name: AppLocalized("iFlytek (Xunfei)", comment: "Voice provider name"),
             providerType: .openAI,
             baseURL: "https://iat-api.xfyun.cn",
             appendV1: false,
-            capability: String(localized: "Recognition + synthesis", comment: "Voice provider capability"),
+            capability: AppLocalized("Recognition + synthesis", comment: "Voice provider capability"),
             baseURLMarkers: ["xfyun"],
             mockModels: [
                 LLMModel(id: "iat", displayName: "iFlytek IAT (ASR)",
@@ -248,15 +248,15 @@ struct VoiceProviderTemplate: Identifiable {
             ],
             symbol: "mic",
             tint: .indigo,
-            note: String(localized: "iFlytek needs App ID and API Secret — enter them as \"appId;apiKey;apiSecret\" in the API Key field.", comment: "Voice provider credential note")
+            note: AppLocalized("iFlytek needs App ID and API Secret — enter them as \"appId;apiKey;apiSecret\" in the API Key field.", comment: "Voice provider credential note")
         ),
         VoiceProviderTemplate(
             id: "mimo",
-            name: String(localized: "Xiaomi MiMo", comment: "Voice provider name"),
+            name: AppLocalized("Xiaomi MiMo", comment: "Voice provider name"),
             providerType: .openAI,
             baseURL: "https://api.xiaomimimo.com",
             appendV1: true,
-            capability: String(localized: "Recognition + synthesis", comment: "Voice provider capability"),
+            capability: AppLocalized("Recognition + synthesis", comment: "Voice provider capability"),
             baseURLMarkers: ["xiaomimimo"],
             mockModels: [
                 LLMModel(id: "mimo-v2.5-asr", displayName: "MiMo ASR v2.5",

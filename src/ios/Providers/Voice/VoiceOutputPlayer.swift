@@ -418,7 +418,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
                         self.synthFailureTick &+= 1   // flash the control red
                         self.logger.error("TTS synth failed #\(seq): \(error.localizedDescription)")
                         VoiceLog.log("TTS synth FAILED #\(seq) after all retries + split: \(error.localizedDescription)")
-                        MinisToast.show(String(localized: "Voice synthesis failed — some content may not be read aloud."),
+                        MinisToast.show(AppLocalized("Voice synthesis failed — some content may not be read aloud."),
                                         systemImage: "exclamationmark.triangle.fill")
                         self.pumpPlayback()
                         self.pumpPrefetch()
