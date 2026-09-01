@@ -55,14 +55,125 @@ class RootfsManager {
         return tag.trimmingCharacters(in: .whitespacesAndNewlines) == currentArch
     }
 
+    /// Why `isInstalled` came back false, as a short loggable string.
+    ///
+    /// [T-rootfs-arch-tag-observability] `isInstalled` collapses several very
+    /// different situations into one `false`, and the caller that acts on it
+    /// (`installIfNeeded`) then deletes the whole rootfs. When that happened on
+    /// a test device on 2026-08-21, the logs could not say WHICH condition had
+    /// tripped — the rootfs had booted fine hours earlier, so the arch tag went
+    /// missing at some point in between and nothing recorded it. This
+    /// distinguishes the cases so the next occurrence is diagnosable rather
+    /// than another forensic reconstruction.
+    private func archTagDiagnostic() -> String {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: dataPath.path) { return "data-dir-missing" }
+        if !fm.fileExists(atPath: archTagPath.path) { return "arch-file-missing" }
+        do {
+            let raw = try String(contentsOf: archTagPath, encoding: .utf8)
+            let tag = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if tag.isEmpty { return "arch-file-empty" }
+            return tag == currentArch ? "ok(\(tag))" : "arch-mismatch(found=\(tag) want=\(currentArch))"
+        } catch {
+            // Exists but unreadable — permissions, or a partially written file.
+            return "arch-file-unreadable(\(error.localizedDescription))"
+        }
+    }
+
+    /// Get the existing rootfs directory out of the way so a fresh copy can be
+    /// installed at `rootfsPath`.
+    ///
+    /// [T-rootfs-undeletable-blocks-install] Tries a plain recursive delete
+    /// first, and if that fails, MOVES the tree aside instead of giving up.
+    ///
+    /// Why the fallback is necessary: a recursive delete has to traverse every
+    /// entry, so one unreachable entry anywhere in the tree fails the whole
+    /// operation. Observed on a device on 2026-08-21 — a leftover test tree
+    /// under `data/root/` nested ~10 levels of 80-character directory names
+    /// deep pushed absolute paths past PATH_MAX (1024), and `removeItem` failed
+    /// with POSIX 63 ENAMETOOLONG ("File name too long"), surfaced by
+    /// Foundation as the thoroughly misleading "the file name
+    /// \"alpine-rootfs\" is invalid". Because the old code let that error
+    /// propagate, `installIfNeeded()` aborted BEFORE unzipping, so the rootfs
+    /// could never be reinstalled: every launch retried the same delete, hit
+    /// the same error, and iSH stayed permanently unbootable. Reinstalling from
+    /// the UI did not help either — that button calls this very function.
+    ///
+    /// `rename(2)` only touches the directory ENTRY, never the contents, so it
+    /// is unaffected by anything pathological inside — depth, name length, or
+    /// permissions. Moving the tree aside therefore succeeds where deleting it
+    /// cannot, and the install can proceed. We then attempt a best-effort
+    /// cleanup of the moved-aside tree; if that also fails the tree is left in
+    /// place (leaking disk) rather than blocking the user, and is logged so it
+    /// can be reclaimed later.
+    private func discardOldRootfs() throws {
+        let fm = FileManager.default
+        do {
+            try fm.removeItem(at: rootfsPath)
+            return
+        } catch {
+            let ns = error as NSError
+            logger.warning(
+                "[Rootfs] delete failed for \(rootfsPath.path) — "
+                + "domain=\(ns.domain) code=\(ns.code) "
+                + "underlying=\(String(describing: ns.userInfo[NSUnderlyingErrorKey])) "
+                + "desc=\(error.localizedDescription). Falling back to move-aside."
+            )
+        }
+
+        // Same parent directory: rename(2) cannot cross filesystems, and a
+        // Documents -> tmp move would risk EXDEV on some configurations.
+        let parent = rootfsPath.deletingLastPathComponent()
+        let stamp = Int(Date().timeIntervalSince1970)
+        let aside = parent.appendingPathComponent(".alpine-rootfs-broken-\(stamp)")
+        do {
+            try fm.moveItem(at: rootfsPath, to: aside)
+            logger.warning("[Rootfs] moved undeletable rootfs aside to \(aside.lastPathComponent); install will continue")
+        } catch {
+            // Nothing left to try: we can neither delete nor move the old tree,
+            // so installing on top of it would produce a mixed-version rootfs.
+            // Fail loudly rather than silently corrupting it.
+            logger.error("[Rootfs] move-aside ALSO failed for \(rootfsPath.path): \(error.localizedDescription)")
+            throw error
+        }
+
+        // Best-effort reclaim. Expected to fail for exactly the reason the
+        // original delete did; that is acceptable — correctness (a working
+        // rootfs) matters more than the disk this leaks.
+        //
+        // [review] Also retry EVERY previously stranded tree, not just the one
+        // we just created. The name is timestamped, so each occurrence makes a
+        // new directory; without this sweep a device that hits this repeatedly
+        // accumulates one full rootfs copy per occurrence with nothing ever
+        // reclaiming them. A retry is worth attempting because the usual reason
+        // the delete failed is a path that is too long *from this container's
+        // prefix* — after an app container migration the prefix changes, and a
+        // tree that was undeletable before can become deletable.
+        for name in (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        where name.hasPrefix(".alpine-rootfs-broken-") {
+            let stranded = parent.appendingPathComponent(name)
+            if (try? fm.removeItem(at: stranded)) != nil {
+                logger.info("[Rootfs] reclaimed stranded \(name)")
+                continue
+            }
+            let bytes = (try? stranded.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?
+                .totalFileAllocatedSize ?? 0
+            logger.warning(
+                "[Rootfs] could not reclaim \(name) (~\(bytes) bytes); "
+                + "left on disk. Delete it from the guest shell (paths are short there) "
+                + "or via Files if space is needed."
+            )
+        }
+    }
+
     func installIfNeeded() throws {
         if FileManager.default.fileExists(atPath: rootfsPath.path) && !isInstalled {
-            print("RootfsManager: Arch mismatch or missing tag, reinstalling \(currentArch) rootfs...")
-            try FileManager.default.removeItem(at: rootfsPath)
+            logger.warning("[Rootfs] arch tag missing or mismatched — will delete and reinstall \(currentArch). archTag=\(archTagDiagnostic()) path=\(rootfsPath.path)")
+            try discardOldRootfs()
         }
 
         guard !isInstalled else {
-            print("RootfsManager: Already installed (\(currentArch)) at \(rootfsPath.path)")
+            logger.info("[Rootfs] already installed (\(currentArch)) at \(rootfsPath.path)")
             return
         }
 
@@ -74,7 +185,7 @@ class RootfsManager {
             )
         }
 
-        print("RootfsManager: Installing rootfs from \(zipURL.path)...")
+        logger.info("[Rootfs] installing from \(zipURL.path)")
 
         // Create destination directory
         try FileManager.default.createDirectory(
@@ -99,7 +210,7 @@ class RootfsManager {
         // Flag fresh install so first-boot tasks (e.g. mirror auto-detect) can trigger.
         UserDefaults.standard.set(true, forKey: "rootfs.freshInstall")
 
-        print("RootfsManager: Installation complete (\(currentArch)) at \(rootfsPath.path)")
+        logger.info("[Rootfs] installation complete (\(currentArch)) at \(rootfsPath.path)")
     }
 
     /// Reset (delete) the rootfs, forcing a fresh install on next launch
@@ -107,7 +218,7 @@ class RootfsManager {
     /// - Returns: URL of backup directory if keepUserData was true, nil otherwise
     @discardableResult
     func reset(keepUserData: Bool = false) throws -> URL? {
-        print("RootfsManager: Resetting rootfs...")
+        logger.warning("[Rootfs] reset requested — deleting \(rootfsPath.path)")
 
         var backupURL: URL?
 
@@ -126,14 +237,16 @@ class RootfsManager {
 
                 try FileManager.default.copyItem(at: userDataPath, to: backupPath)
                 backupURL = backupPath
-                print("RootfsManager: User data backed up to \(backupPath.path)")
+                logger.info("[Rootfs] user data backed up to \(backupPath.path)")
             }
         }
 
-        // Delete rootfs
+        // Delete rootfs. Uses the same move-aside fallback as installIfNeeded:
+        // a reset exists precisely to recover from a broken rootfs, so it must
+        // not be the one operation that a broken rootfs can block.
         if FileManager.default.fileExists(atPath: rootfsPath.path) {
-            try FileManager.default.removeItem(at: rootfsPath)
-            print("RootfsManager: Rootfs deleted from \(rootfsPath.path)")
+            try discardOldRootfs()
+            logger.warning("[Rootfs] rootfs removed from \(rootfsPath.path)")
         }
 
         // [T-rootfs-reset-terminal-crash] If the kernel already booted this
@@ -146,7 +259,7 @@ class RootfsManager {
             logger.warning("Rootfs reset while kernel booted; terminal disabled until app relaunch")
         }
 
-        print("RootfsManager: Reset complete. Run installIfNeeded() to reinstall.")
+        logger.info("[Rootfs] reset complete — installIfNeeded() will reinstall")
 
         return backupURL
     }
@@ -172,7 +285,7 @@ class RootfsManager {
         // Copy backup to rootfs
         try FileManager.default.copyItem(at: backupURL, to: userDataPath)
 
-        print("RootfsManager: User data restored from \(backupURL.path)")
+        logger.info("[Rootfs] user data restored from \(backupURL.path)")
     }
 
     /// Overlay default configuration files from the bundle onto the rootfs.
@@ -282,7 +395,7 @@ class RootfsManager {
             let marker = usrLib.appendingPathComponent(entry).appendingPathComponent("EXTERNALLY-MANAGED")
             if fm.fileExists(atPath: marker.path) {
                 try? fm.removeItem(at: marker)
-                print("[DefaultMount] Removed EXTERNALLY-MANAGED from \(entry)")
+                logger.info("[DefaultMount] removed EXTERNALLY-MANAGED from \(entry)")
             }
         }
     }
@@ -518,6 +631,12 @@ class RootfsManager {
 
 // Minimal ZIP archive reader with safe unaligned memory access
 private class ZIPArchive {
+    /// Own logger: this is a separate type from RootfsManager, and its failures
+    /// (a corrupt archive, an unsupported compression method) are exactly the
+    /// kind that must survive in the daily log file rather than vanishing into
+    /// a print() the way the rootfs lifecycle messages used to.
+    private let logger = AppLogger(category: "RootfsZIP")
+
     struct Entry {
         let path: String
         let isDirectory: Bool
@@ -537,7 +656,7 @@ private class ZIPArchive {
         do {
             try parseZipFile()
         } catch {
-            print("ZIPArchive: Parse error: \(error)")
+            logger.error("[RootfsZIP] parse error: \(error)")
             return nil
         }
     }
@@ -647,7 +766,7 @@ private class ZIPArchive {
         } else if entry.compressionMethod == 8 {
             return decompressDeflate(compressedData, expectedSize: entry.uncompressedSize)
         } else {
-            print("ZIPArchive: Unsupported compression method: \(entry.compressionMethod)")
+            logger.error("[RootfsZIP] unsupported compression method: \(entry.compressionMethod)")
             return nil
         }
     }

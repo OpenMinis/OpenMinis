@@ -41,7 +41,7 @@ struct TerminalKeyboardAccessory: View {
                 // (external keyboard scenario), tapping Show re-focuses to
                 // bring up the software keyboard.
                 QuickCommandButton(
-                    label: softwareKeyboardVisible ? String(localized: "Hide") : String(localized: "Show"),
+                    label: softwareKeyboardVisible ? AppLocalized("Hide") : AppLocalized("Show"),
                     icon: softwareKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard"
                 ) {
                     if softwareKeyboardVisible {
@@ -62,7 +62,7 @@ struct TerminalKeyboardAccessory: View {
                 // Paste — reuses the same path the long-press edit menu uses
                 // (clears any lingering selection before feeding pasteboard
                 // bytes into the emulator, so rendering is not gated).
-                QuickCommandButton(label: String(localized: "Paste"), icon: "doc.on.clipboard") {
+                QuickCommandButton(label: AppLocalized("Paste"), icon: "doc.on.clipboard") {
                     onPaste()
                 }
 

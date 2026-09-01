@@ -1705,8 +1705,24 @@ static const char *gov_zone_name(int zone) {
 // execution so the INT_TIMER tick hook actually runs. cpu_poke only sets an
 // atomic flag (the same channel signal delivery uses), so this is safe under
 // pids_lock and O(MAX_PID) over a flat array — ~µs per sweep.
+//
+// [T-ish-gov-trylock] TRYLOCK, never a blocking lock. The sweep itself is
+// cheap, but ACQUIRING pids_lock is not when a guest is holding it: this
+// runs on a 10 Hz dispatch timer, so a blocking wait puts the governor queue
+// in the same queue as everything else contending for that lock. The
+// 2026-08-23 20:11 crash caught this thread parked in __psynch_mutexwait
+// behind a wedged waitpid — one more waiter making the convoy worse, for
+// work that is pure optimisation.
+//
+// Skipping is free: the throttle ratio was already published with an atomic
+// store BEFORE this call, so accuracy does not depend on the poke at all.
+// The poke only makes chained guest code notice the new ratio sooner, and
+// cpu_poke is a single idempotent atomic store — so a skipped tick is picked
+// up by the next one 100ms later. Missing a poke costs latency, never
+// correctness.
 static void gov_poke_all_tasks(void) {
-    lock(&pids_lock);
+    if (trylock(&pids_lock) != 0)
+        return;  // contended — next tick (100ms) will do it
     for (int i = 1; i < MAX_PID; i++) {
         struct pid *pid = pid_get(i);
         if (pid == NULL || pid->task == NULL) continue;

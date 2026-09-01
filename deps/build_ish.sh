@@ -192,8 +192,17 @@ build_ish() {
 
     # Configure meson build
     MESON_BUILDTYPE="release"
+    # meson's `release` buildtype only implies -O3; it does NOT define NDEBUG
+    # (that is a separate `b_ndebug` option). Without it every assert() in the
+    # kernel stays live in a shipping build, so a failed assertion calls
+    # abort() on a user's device instead of being a development-only check.
+    # That is how the mem_ptr() CoW assert reached TestFlight as a SIGABRT in
+    # sys_execve/args_copy. Keep asserts in debug builds, compile them out of
+    # release ones.
+    MESON_NDEBUG="true"
     if [ "$BUILD_TYPE" == "debug" ]; then
         MESON_BUILDTYPE="debug"
+        MESON_NDEBUG="false"
     fi
 
     # Check if already configured
@@ -203,14 +212,19 @@ build_ish() {
         meson setup "$BUILD_DIR" \
             --cross-file "$CROSS_FILE" \
             --buildtype="$MESON_BUILDTYPE" \
+            -Db_ndebug="$MESON_NDEBUG" \
             -Dlog="" \
             -Dlog_handler=nslog \
             -Dkernel=ish \
             -Dengine=asbestos \
             -Dguest_arch=arm64
     else
+        # Reconfigure both options: an existing build-ios/ from before
+        # b_ndebug was introduced would otherwise keep asserts enabled.
         log_info "Meson already configured, reconfiguring..."
-        meson configure "$BUILD_DIR" --buildtype="$MESON_BUILDTYPE"
+        meson configure "$BUILD_DIR" \
+            --buildtype="$MESON_BUILDTYPE" \
+            -Db_ndebug="$MESON_NDEBUG"
     fi
 
     # Build libraries

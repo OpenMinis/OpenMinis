@@ -136,6 +136,11 @@ build_fakefsify() {
     # Configure for native build (not cross-compile)
     if [ ! -f "$BUILD_DIR/build.ninja" ]; then
         log_info "Configuring native meson build..."
+        # Deliberately no -Db_ndebug here (unlike build_ish.sh, which disables
+        # asserts for release). This build produces only tools/fakefsify, a
+        # host-side tool that runs on this Mac and never ships to a device, so
+        # a failed assert is a loud build failure rather than a user crash —
+        # which is what we want while generating a rootfs.
         meson setup "$BUILD_DIR" \
             --buildtype=release \
             -Dlog="" \

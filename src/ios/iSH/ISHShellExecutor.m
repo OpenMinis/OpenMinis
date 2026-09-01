@@ -9,6 +9,7 @@
 #import "ISHKernel.h"
 
 #include <poll.h>
+#include <libkern/OSAtomic.h>
 #include "ish/kernel/init.h"
 #include "ish/kernel/calls.h"
 #include "ish/kernel/task.h"
@@ -16,6 +17,25 @@
 #include "ish/kernel/fs.h"
 #include "ish/fs/devices.h"
 #include "ish/fs/real.h"
+
+#pragma mark - Leak Guard Tunables
+
+/// Hard cap on how long a single reader thread may live.
+///
+/// Not a command timeout — callers set their own, and this is far above any of
+/// them. It only bounds the damage from a reader that never observed the
+/// signal to stop, so a stranded thread cannot hold a concurrent-queue slot
+/// for the life of the process.
+static const NSTimeInterval ISHShellExecutorReaderMaxLifetime = 3600.0; // 1h
+
+/// How often the stale-context sweeper runs.
+static const NSTimeInterval ISHShellExecutorSweepInterval = 60.0;
+
+/// How long past its last sign of life a context may sit in _activeExecutions
+/// before the sweeper reclaims it. Must comfortably exceed the longest command
+/// anyone runs, because the sweeper cannot distinguish "still working" from
+/// "stranded" — it only sees an entry that has been there a long time.
+static const NSTimeInterval ISHShellExecutorStaleContextAge = 7200.0; // 2h
 
 #pragma mark - Result Implementation
 
@@ -36,6 +56,13 @@
 @interface ISHShellExecutionContext : NSObject {
     int _stdoutPipe[2];
     int _stderrPipe[2];
+    /// Reader count. A plain int32 driven by OSAtomic rather than an `atomic`
+    /// property: `self.liveReaders--` on an atomic property is still a
+    /// read-modify-write with a gap between the load and the store, so two
+    /// readers finishing at once can both read N and both store N-1. Losing a
+    /// decrement leaves the count permanently above zero and the pipes never
+    /// close; losing it the other way closes them while a reader still polls.
+    int32_t _liveReaders;
 }
 @property (nonatomic) int guestPid;
 @property (nonatomic) NSDate *startTime;
@@ -46,9 +73,20 @@
 @property (nonatomic) dispatch_semaphore_t waitSemaphore;
 @property (nonatomic) ISHShellExecutionResult *result;
 @property (atomic) BOOL isCompleted;
+/// Readers still running for this context. Incremented before each reader is
+/// dispatched and decremented as it returns, so `cleanup` can tell whether the
+/// pipe fds are still being polled. Mutated only via retainReader/releaseReader.
+@property (readonly) int32_t liveReaders;
+- (void)retainReader;
+/// Returns the count remaining after this reader leaves.
+- (int32_t)releaseReader;
+/// Set once the run has been finalised (by exit OR by timeout), so the two
+/// paths cannot both finalise the same context. See +finalizeContext:.
+@property (atomic) BOOL didFinalize;
 
 - (int *)stdoutPipe;
 - (int *)stderrPipe;
+- (BOOL)closePipesIfNoReaders;
 
 @end
 
@@ -76,17 +114,64 @@
     return self;
 }
 
+/// Close the pipe fds, but ONLY once no reader thread is still polling them.
+/// Returns YES if the fds were closed (or were already closed).
+///
+/// Closing an fd that another thread is blocked in poll() on is a
+/// use-after-free of the descriptor number: poll does not fail, the number is
+/// immediately reusable, and the next pipe()/open() in the process hands the
+/// same number to someone else — after which this reader is reading a
+/// DIFFERENT command's pipe and appending that output to this command's
+/// buffer. So the close is gated on the reader count reaching zero; readers
+/// are told to stop by `isCompleted`, and whoever observes the last one leave
+/// performs the close.
+///
+/// The fd array is guarded by @synchronized(self) because the closing thread
+/// and the last reader can reach here at the same time; without it both can
+/// see a non-negative fd and close it twice, and a double close is just as
+/// dangerous as an early one (it can close an unrelated, freshly-recycled fd).
+- (int32_t)liveReaders {
+    return OSAtomicAdd32(0, &_liveReaders);   // atomic load
+}
+
+- (void)retainReader {
+    OSAtomicIncrement32(&_liveReaders);
+}
+
+- (int32_t)releaseReader {
+    return OSAtomicDecrement32(&_liveReaders);
+}
+
+- (BOOL)closePipesIfNoReaders {
+    if (self.liveReaders > 0) return NO;
+    @synchronized(self) {
+        if (_stdoutPipe[0] >= 0) close(_stdoutPipe[0]);
+        if (_stdoutPipe[1] >= 0) close(_stdoutPipe[1]);
+        if (_stderrPipe[0] >= 0) close(_stderrPipe[0]);
+        if (_stderrPipe[1] >= 0) close(_stderrPipe[1]);
+        _stdoutPipe[0] = _stdoutPipe[1] = -1;
+        _stderrPipe[0] = _stderrPipe[1] = -1;
+    }
+    return YES;
+}
+
+/// Ask readers to stop, then close if they already have.
+///
+/// Kept as `cleanup` because existing call sites use it, but note the two
+/// distinct cases: on the failure paths in the launch routine no reader has
+/// been started yet (liveReaders == 0), so this closes immediately, which is
+/// what those paths need. Once readers are running the close is deferred to
+/// whichever reader exits last.
 - (void)cleanup {
-    if (_stdoutPipe[0] >= 0) close(_stdoutPipe[0]);
-    if (_stdoutPipe[1] >= 0) close(_stdoutPipe[1]);
-    if (_stderrPipe[0] >= 0) close(_stderrPipe[0]);
-    if (_stderrPipe[1] >= 0) close(_stderrPipe[1]);
-    _stdoutPipe[0] = _stdoutPipe[1] = -1;
-    _stderrPipe[0] = _stderrPipe[1] = -1;
+    self.isCompleted = YES;
+    [self closePipesIfNoReaders];
 }
 
 - (void)dealloc {
-    [self cleanup];
+    // Last resort. If a reader were somehow still running, `self` could not be
+    // deallocating — the reader block retains the context — so by definition
+    // liveReaders is 0 here and closing is safe.
+    [self closePipesIfNoReaders];
 }
 
 @end
@@ -98,6 +183,17 @@
 static NSMutableDictionary<NSNumber *, ISHShellExecutionContext *> *_activeExecutions;
 static dispatch_queue_t _readerQueue;
 static dispatch_once_t _onceToken;
+static dispatch_source_t _sweepTimer;
+
+/// Live reader threads across all executions. The leak this file exists to
+/// prevent shows up here as a number that only ever goes up: each stranded
+/// command pins two readers on a DISPATCH_QUEUE_CONCURRENT queue, and once
+/// GCD's worker pool is exhausted no new command can run at all.
+static int32_t _globalLiveReaders = 0;
+/// How many contexts the sweeper has had to reclaim. Non-zero means a run
+/// finished without either the exit notification or the timeout path
+/// finalising it — i.e. a bug upstream of the sweeper, worth seeing in logs.
+static int32_t _sweptContexts = 0;
 
 + (void)initialize {
     if (self == [ISHShellExecutor class]) {
@@ -112,7 +208,77 @@ static dispatch_once_t _onceToken;
                                                  selector:@selector(processDidExit:)
                                                      name:ISHProcessExitedNotification
                                                    object:nil];
+
+        [self startStaleContextSweeper];
     }
+}
+
+#pragma mark - Stale Context Sweeper
+
+/// Periodically reclaim contexts that were never finalised.
+///
+/// The timeout path and the exit notification between them should finalise
+/// every run, so in a correct build this never fires. It is here because the
+/// failure it guards against is not proportionate: one missed teardown pins
+/// two reader threads for the life of the process, and enough of them make the
+/// app unable to run any command until the device is restarted. A periodic
+/// check is cheap; that outcome is not.
+///
+/// Anything it reclaims is a bug upstream, so it logs at a level meant to be
+/// noticed rather than cleaning up quietly.
++ (void)startStaleContextSweeper {
+    _sweepTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                         dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(_sweepTimer,
+                              dispatch_time(DISPATCH_TIME_NOW,
+                                            (int64_t)(ISHShellExecutorSweepInterval * NSEC_PER_SEC)),
+                              (uint64_t)(ISHShellExecutorSweepInterval * NSEC_PER_SEC),
+                              (uint64_t)(5 * NSEC_PER_SEC));   // generous leeway: not time-critical
+    dispatch_source_set_event_handler(_sweepTimer, ^{
+        [self sweepStaleContexts];
+    });
+    dispatch_resume(_sweepTimer);
+}
+
++ (void)sweepStaleContexts {
+    NSMutableArray<ISHShellExecutionContext *> *stale = [NSMutableArray array];
+
+    // Collect under the lock, finalise outside it. finalizeContext: invokes
+    // the caller's completion block, and running arbitrary caller code while
+    // holding the registry lock is how a deadlock gets introduced — that block
+    // is free to start another command.
+    @synchronized(_activeExecutions) {
+        for (NSNumber *key in _activeExecutions) {
+            ISHShellExecutionContext *ctx = _activeExecutions[key];
+            NSTimeInterval age = -[ctx.startTime timeIntervalSinceNow];
+            if (age > ISHShellExecutorStaleContextAge) {
+                [stale addObject:ctx];
+            }
+        }
+    }
+
+    if (stale.count == 0) return;
+
+    NSLog(@"ISHShellExecutor[sweep]: reclaiming %lu stale context(s) — these should "
+          @"have been finalised by exit or timeout; liveReaders=%d",
+          (unsigned long)stale.count, _globalLiveReaders);
+
+    for (ISHShellExecutionContext *ctx in stale) {
+        NSLog(@"ISHShellExecutor[sweep]: pid=%d age=%.0fs isCompleted=%d readers=%d",
+              ctx.guestPid, -[ctx.startTime timeIntervalSinceNow],
+              ctx.isCompleted, ctx.liveReaders);
+        OSAtomicIncrement32(&_sweptContexts);
+        [self finalizeContext:ctx exitCode:-1 error:ISHShellExecutorErrorTimeout];
+    }
+}
+
+/// Reader/leak counters, for diagnosing this class of problem from a log.
++ (NSString *)leakGuardStatus {
+    NSUInteger active;
+    @synchronized(_activeExecutions) { active = _activeExecutions.count; }
+    return [NSString stringWithFormat:
+            @"activeExecutions=%lu liveReaders=%d sweptContexts=%d",
+            (unsigned long)active, _globalLiveReaders, _sweptContexts];
 }
 
 #pragma mark - Public API
@@ -517,12 +683,51 @@ static dispatch_once_t _onceToken;
         // emu task threads spinning (gh-NNN leak). killProcessGroup sweeps the
         // pgid + descendants and escalates SIGTERM→SIGKILL.
         [self killProcessGroup:pid];
-        result = [[ISHShellExecutionResult alloc] init];
-        result.error = ISHShellExecutorErrorTimeout;
-        result.pid = pid;
-        result.exitCode = -1;
-        result.output = @"";
-        result.errorOutput = @"";
+
+        // Clean up HERE rather than waiting to be told the process died.
+        //
+        // [T-ish-shell-timeout-leak] This is the leak. The timeout path used
+        // to kill and return, leaving every teardown step to the
+        // ISHProcessExitedNotification that killProcessGroup was expected to
+        // provoke. When that notification does not arrive — a task already
+        // reaped as a zombie is skipped by the exit hook — nothing ever ran:
+        // the context stayed in _activeExecutions, isCompleted stayed NO, and
+        // both reader threads polled a dead pipe forever. Each timeout burned
+        // two threads of a DISPATCH_QUEUE_CONCURRENT pool permanently, and
+        // after roughly thirty of them no shell command could start at all,
+        // with a device restart the only way back.
+        //
+        // Waiting on the notification was always the wrong shape: it makes
+        // cleanup conditional on the cooperation of a process we have just
+        // decided to kill. Now the timeout owns its own teardown, and the
+        // notification (if it does arrive) is a no-op thanks to didFinalize.
+        //
+        // Killing first, finalising second is deliberate: the signals go out
+        // while the pipes are still open, so anything the command wrote before
+        // dying is still readable and lands in the result rather than being
+        // discarded with the fds.
+        NSLog(@"ISHShellExecutor[timeout]: pid=%d exceeded %.1fs — killed and cleaning up",
+              pid, timeout);
+
+        ISHShellExecutionContext *timedOutCtx;
+        @synchronized(_activeExecutions) {
+            timedOutCtx = _activeExecutions[@(pid)];
+        }
+        [self finalizeTimedOutPid:pid];
+
+        // Prefer the finalised result: it carries whatever output the command
+        // produced before the deadline. Only synthesise one if the context had
+        // already gone (a normal exit that raced this timeout by microseconds).
+        if (timedOutCtx.result) {
+            result = timedOutCtx.result;
+        } else {
+            result = [[ISHShellExecutionResult alloc] init];
+            result.error = ISHShellExecutorErrorTimeout;
+            result.pid = pid;
+            result.exitCode = -1;
+            result.output = @"";
+            result.errorOutput = @"";
+        }
     }
 
     return result;
@@ -627,6 +832,88 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
     });
 }
 
+#pragma mark - Finalisation
+
+/// Finish a run exactly once: capture output, stop readers, release the
+/// registry entry, fire the completion callback and wake any sync waiter.
+///
+/// Both completion paths funnel through here — the normal exit notification
+/// and the timeout self-heal — because they genuinely race. A command that
+/// exits microseconds before its deadline delivers ISHProcessExitedNotification
+/// while executeCommandSync is already returning from a timed-out semaphore
+/// wait. Before this, the timeout path did none of this work (that was the
+/// leak); doing it in both places without a guard would instead double-invoke
+/// the completion callback and double-signal the semaphore.
+///
+/// `didFinalize` is the guard, swapped under @synchronized(ctx) so only one
+/// caller can ever proceed. It is deliberately NOT `isCompleted`: that flag
+/// means "readers should stop" and is set at other times too.
++ (void)finalizeContext:(ISHShellExecutionContext *)ctx
+               exitCode:(int)exitCode
+                  error:(ISHShellExecutorError)error {
+    if (!ctx) return;
+
+    @synchronized(ctx) {
+        if (ctx.didFinalize) return;
+        ctx.didFinalize = YES;
+    }
+
+    // Tell readers to stop. Any that are mid-poll return within 500ms (the
+    // poll timeout) and the last one out closes the pipes.
+    ctx.isCompleted = YES;
+
+    ctx.result.exitCode = exitCode;
+    ctx.result.error = error;
+    if (ctx.result.duration == 0) {
+        ctx.result.duration = -[ctx.startTime timeIntervalSinceNow];
+    }
+
+    // Same lock the readers append under — see the heap-corruption note in
+    // processDidExit. Taking it here keeps -copy from tearing NSMutableString's
+    // storage against a concurrent appendString.
+    NSString *outCopy;
+    NSString *errCopy;
+    @synchronized(ctx.stdoutBuffer) { outCopy = [ctx.stdoutBuffer copy]; }
+    @synchronized(ctx.stderrBuffer) { errCopy = [ctx.stderrBuffer copy]; }
+    ctx.result.output = outCopy ?: @"";
+    ctx.result.errorOutput = errCopy ?: @"";
+
+    [self unregisterContextForPid:ctx.guestPid];
+
+    // Closes now only if the readers have already gone; otherwise the last
+    // reader out does it. Never closes an fd that is still being polled.
+    [ctx closePipesIfNoReaders];
+
+    if (ctx.completion) {
+        ctx.completion(ctx.result);
+    }
+    if (ctx.waitSemaphore) {
+        dispatch_semaphore_signal(ctx.waitSemaphore);
+    }
+}
+
++ (void)finalizeTimedOutPid:(int)pid {
+    ISHShellExecutionContext *ctx;
+    @synchronized(_activeExecutions) {
+        ctx = _activeExecutions[@(pid)];
+    }
+    if (!ctx) {
+        // Already finalised — the command exited normally just before the
+        // deadline, or this is a second call. Nothing to do.
+        return;
+    }
+    NSLog(@"ISHShellExecutor[timeout]: finalising pid=%d after kill (readers=%d)",
+          pid, ctx.liveReaders);
+    [self finalizeContext:ctx exitCode:-1 error:ISHShellExecutorErrorTimeout];
+}
+
+/// Drop a context from the registry. Safe to call for a pid that is not there.
++ (void)unregisterContextForPid:(int)pid {
+    @synchronized(_activeExecutions) {
+        [_activeExecutions removeObjectForKey:@(pid)];
+    }
+}
+
 #pragma mark - Process Exit Handling
 
 + (void)processDidExit:(NSNotification *)notification {
@@ -637,13 +924,17 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
     @synchronized(_activeExecutions) {
         ctx = _activeExecutions[@(pid)];
         if (!ctx) return;
-        [_activeExecutions removeObjectForKey:@(pid)];
+        // NOTE: intentionally NOT removed here. The removal now happens in
+        // +finalizeContext:, after the drain window below. Removing it up
+        // front left a ~200ms hole in which the sweeper could see no entry
+        // for a run that had not finished, and in which a timeout could not
+        // find the context it needed to finalise.
     }
 
-    if (ctx.isCompleted) return;
+    if (ctx.didFinalize) return;
 
-    // Record exit code and duration immediately
-    ctx.result.exitCode = exitCode;
+    // Record duration immediately — the drain delay below must not be counted
+    // as part of the command's runtime.
     ctx.result.duration = -[ctx.startTime timeIntervalSinceNow];
     NSUInteger outLen, errLen;
     @synchronized(ctx.stdoutBuffer) { outLen = ctx.stdoutBuffer.length; }
@@ -657,42 +948,42 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
     // Give readers 200ms to flush, then finalize.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        ctx.isCompleted = YES;
-
-        // Now capture output after readers have had time to drain pipes.
-        // Reader threads append to stdoutBuffer/stderrBuffer under
-        // @synchronized(buffer) (see processLines / readPipe partial-line
-        // path); take the same lock here so a concurrent appendString
-        // doesn't tear NSMutableString's internal storage during -copy.
-        // Without this, libsystem_malloc on iOS 26.5+ catches the corrupted
-        // free list and traps with EXC_BREAKPOINT inside the reader's next
-        // appendString — see the readPipe heap-corruption crash reports.
-        NSString *outCopy;
-        NSString *errCopy;
-        @synchronized(ctx.stdoutBuffer) { outCopy = [ctx.stdoutBuffer copy]; }
-        @synchronized(ctx.stderrBuffer) { errCopy = [ctx.stderrBuffer copy]; }
-        ctx.result.output = outCopy;
-        ctx.result.errorOutput = errCopy;
-
-        [ctx cleanup];
-
-        // Call completion callback
-        if (ctx.completion) {
-            ctx.completion(ctx.result);
-        }
-
-        // Signal semaphore for sync execution
-        if (ctx.waitSemaphore) {
-            dispatch_semaphore_signal(ctx.waitSemaphore);
-        }
+        [self finalizeContext:ctx
+                     exitCode:exitCode
+                        error:ISHShellExecutorErrorNone];
     });
 }
 
 #pragma mark - Pipe Reading
 
 + (void)startReaderForPipe:(int)fd context:(ISHShellExecutionContext *)ctx isStdErr:(BOOL)isStdErr {
+    // Counted BEFORE the dispatch, not inside the block: between the two the
+    // reader is already committed but has not started, and a cleanup landing
+    // in that window would otherwise see zero readers and close the fd out
+    // from under the one about to poll it.
+    [ctx retainReader];
+    OSAtomicIncrement32(&_globalLiveReaders);
+
     dispatch_async(_readerQueue, ^{
-        [self readPipe:fd context:ctx isStdErr:isStdErr];
+        @try {
+            [self readPipe:fd context:ctx isStdErr:isStdErr];
+        } @finally {
+            // @finally so the count is right even if something above throws;
+            // a reader that "leaked" only in the bookkeeping would keep the
+            // pipes open forever, which is the bug being fixed here.
+            int32_t remaining = OSAtomicDecrement32(&_globalLiveReaders);
+            int32_t ctxRemaining = [ctx releaseReader];
+            // Whoever leaves last closes the fds — by then nobody can poll
+            // them. If the run was already finalised this is the close that
+            // actually releases the descriptors. Using this reader's own
+            // decrement result, so exactly one reader sees zero.
+            if (ctxRemaining <= 0 && ctx.isCompleted) {
+                [ctx closePipesIfNoReaders];
+            }
+            if (remaining < 0) {
+                NSLog(@"ISHShellExecutor[reader]: BUG — global reader count went negative (%d)", remaining);
+            }
+        }
     });
 }
 
@@ -744,7 +1035,32 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
     // Use poll() instead of non-blocking read + usleep for reliable EOF detection
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
 
+    // Backstop against a reader outliving every other mechanism.
+    //
+    // The loop below exits on isCompleted, EOF, or a poll/read error, which
+    // covers every path we know of. This deadline exists for the ones we do
+    // not: a thread stuck here is not merely idle, it holds a slot in a
+    // concurrent GCD queue, and enough of them stop the app from running any
+    // command at all. Bounding the loop turns "device needs a restart" into
+    // "one command's tail output was truncated".
+    //
+    // Deliberately generous — this must never cut a legitimately long-running
+    // command short. A build or a package install can quietly produce nothing
+    // for a long time; ISHShellExecutorReaderMaxLifetime is far beyond any
+    // timeout a caller passes, so in practice only a stranded reader reaches
+    // it. Hitting it at all is a bug, so it logs loudly.
+    NSDate *readerDeadline = [NSDate dateWithTimeIntervalSinceNow:
+                              ISHShellExecutorReaderMaxLifetime];
+
     while (!ctx.isCompleted) {
+        if ([readerDeadline timeIntervalSinceNow] <= 0) {
+            NSLog(@"ISHShellExecutor[reader]: %s hit the %.0fs lifetime cap for pid=%d "
+                  @"(isCompleted=%d) — abandoning to protect the thread pool",
+                  streamName, (double)ISHShellExecutorReaderMaxLifetime,
+                  ctx.guestPid, ctx.isCompleted);
+            break;
+        }
+
         // poll with 500ms timeout so we periodically check isCompleted
         int pr = poll(&pfd, 1, 500);
 
