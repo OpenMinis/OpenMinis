@@ -1262,7 +1262,29 @@ class SkillRepository(private val context: Context) {
             // rewriting the frontmatter and even `rm -rf` + recreate all fail
             // to heal it — only renaming the skill works, because that mints a
             // new row id.
-            if (description == ">" || description == "|" || description.isBlank()) {
+            // [T-android-skill-stale-name] The NAME is stale-checked too, and
+            // independently of the description.
+            //
+            // Before, healing was gated entirely on the description: a row
+            // whose description was fine but whose name was empty never
+            // entered this block at all, and even when it did, the name was
+            // only filled in `if (name.isBlank())` — inside a branch that
+            // additionally required a non-blank re-parsed description. A skill
+            // could therefore sit with a good description and a blank name
+            // forever, showing as an empty row in the skills list while the
+            // real name sat in SKILL.md one directory away.
+            //
+            // Note on scope: the iOS report (e4af3ad81) described names stuck
+            // at the literal "Untitled Skill". That constant is iOS-only —
+            // grep finds no such string in this codebase, and Android's
+            // parseSkillMd `return null`s on a missing name rather than
+            // substituting a placeholder, so a row can only ever be stuck
+            // BLANK here, never at that literal. The check below is written
+            // against blankness for that reason; adding the iOS literal would
+            // be matching a value this platform cannot produce.
+            val nameStale = name.isBlank()
+            val descStale = description == ">" || description == "|" || description.isBlank()
+            if (descStale || nameStale) {
                 val skillMd = File(skillsDir, "$id/SKILL.md")
                 if (skillMd.exists()) {
                     val reparsed = parseSkillMd(runCatching { skillMd.readText() }.getOrNull() ?: "")
@@ -1271,19 +1293,35 @@ class SkillRepository(private val context: Context) {
                     // parses to null or yields an empty description, and
                     // writing that back would wipe good metadata — the exact
                     // hazard that kept this check narrow in the first place.
-                    // Combined with the guard above (the stored value must be
-                    // blank or a block-scalar leftover to get here), a
+                    // Combined with the guards above (the stored value must be
+                    // blank or a block-scalar leftover to get here), a name or
                     // description the user deliberately set can never be
                     // overwritten.
-                    if (reparsed != null && reparsed.description.isNotBlank()) {
-                        description = reparsed.description
-                        if (name.isBlank()) name = reparsed.name
-                        if (version.isBlank()) version = reparsed.version
-                        db.execSQL(
-                            "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
-                            arrayOf<Any>(name, description, version, System.currentTimeMillis(), id),
-                        )
-                        Log.i(TAG, "Self-healed skill description for $id")
+                    if (reparsed != null) {
+                        var changed = false
+                        if (descStale && reparsed.description.isNotBlank()) {
+                            description = reparsed.description
+                            changed = true
+                        }
+                        // parseSkillMd returns null unless it found a non-blank
+                        // name, so reparsed.name is always real here — but the
+                        // isNotBlank() guard is kept so this stays correct if
+                        // that parser contract ever loosens.
+                        if (nameStale && reparsed.name.isNotBlank()) {
+                            name = reparsed.name
+                            changed = true
+                        }
+                        if (version.isBlank()) {
+                            version = reparsed.version
+                            changed = true
+                        }
+                        if (changed) {
+                            db.execSQL(
+                                "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
+                                arrayOf<Any>(name, description, version, System.currentTimeMillis(), id),
+                            )
+                            Log.i(TAG, "Self-healed skill name/description for $id")
+                        }
                     }
                 }
             }

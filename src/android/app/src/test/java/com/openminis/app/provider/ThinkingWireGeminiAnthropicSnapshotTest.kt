@@ -47,6 +47,11 @@ class ThinkingWireGeminiAnthropicSnapshotTest {
         // through to null.
         "gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts",
         "gemini-2.5-pro-preview-tts", "gemini-3-pro-image-preview",
+        // [T-gemini37-minimal-400] 3.6 vs 3.7 pins the OFF-floor split: everything
+        // through 3.6 accepts thinkingLevel "minimal", 3.7 rejects it with a 400 and
+        // must fall back to "low". The golden previously had no 3.5/3.6/3.7 entry at
+        // all, which is why the unusable-at-Off regression reached users.
+        "gemini-3.6-flash", "gemini-3.7-flash",
         "unknown-gemini-model",
     )
 
@@ -122,15 +127,15 @@ gemini/gemini-3-pro-preview/LOW -> {includeThoughts:true,thinkingLevel:"low"}
 gemini/gemini-3-pro-preview/MEDIUM -> {includeThoughts:true,thinkingLevel:"medium"}
 gemini/gemini-3-pro-preview/HIGH -> {includeThoughts:true,thinkingLevel:"high"}
 gemini/gemini-3-pro-preview/XHIGH -> {includeThoughts:true,thinkingLevel:"high"}
-gemini/gemini-3-pro-preview/MAX -> {includeThoughts:true,thinkingLevel:"low"}
-gemini/gemini-3-pro-preview/ULTRA -> {includeThoughts:true,thinkingLevel:"low"}
+gemini/gemini-3-pro-preview/MAX -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3-pro-preview/ULTRA -> {includeThoughts:true,thinkingLevel:"high"}
 gemini/gemini-3-flash-preview/OFF -> {thinkingLevel:"minimal"}
 gemini/gemini-3-flash-preview/LOW -> {includeThoughts:true,thinkingLevel:"low"}
 gemini/gemini-3-flash-preview/MEDIUM -> {includeThoughts:true,thinkingLevel:"medium"}
 gemini/gemini-3-flash-preview/HIGH -> {includeThoughts:true,thinkingLevel:"high"}
 gemini/gemini-3-flash-preview/XHIGH -> {includeThoughts:true,thinkingLevel:"high"}
-gemini/gemini-3-flash-preview/MAX -> {includeThoughts:true,thinkingLevel:"low"}
-gemini/gemini-3-flash-preview/ULTRA -> {includeThoughts:true,thinkingLevel:"low"}
+gemini/gemini-3-flash-preview/MAX -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3-flash-preview/ULTRA -> {includeThoughts:true,thinkingLevel:"high"}
 gemini/gemini-flash-latest/OFF -> null
 gemini/gemini-flash-latest/LOW -> null
 gemini/gemini-flash-latest/MEDIUM -> null
@@ -187,6 +192,20 @@ gemini/gemini-3-pro-image-preview/HIGH -> null
 gemini/gemini-3-pro-image-preview/XHIGH -> null
 gemini/gemini-3-pro-image-preview/MAX -> null
 gemini/gemini-3-pro-image-preview/ULTRA -> null
+gemini/gemini-3.6-flash/OFF -> {thinkingLevel:"minimal"}
+gemini/gemini-3.6-flash/LOW -> {includeThoughts:true,thinkingLevel:"low"}
+gemini/gemini-3.6-flash/MEDIUM -> {includeThoughts:true,thinkingLevel:"medium"}
+gemini/gemini-3.6-flash/HIGH -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.6-flash/XHIGH -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.6-flash/MAX -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.6-flash/ULTRA -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.7-flash/OFF -> {thinkingLevel:"low"}
+gemini/gemini-3.7-flash/LOW -> {includeThoughts:true,thinkingLevel:"low"}
+gemini/gemini-3.7-flash/MEDIUM -> {includeThoughts:true,thinkingLevel:"medium"}
+gemini/gemini-3.7-flash/HIGH -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.7-flash/XHIGH -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.7-flash/MAX -> {includeThoughts:true,thinkingLevel:"high"}
+gemini/gemini-3.7-flash/ULTRA -> {includeThoughts:true,thinkingLevel:"high"}
 gemini/unknown-gemini-model/OFF -> null
 gemini/unknown-gemini-model/LOW -> null
 gemini/unknown-gemini-model/MEDIUM -> null

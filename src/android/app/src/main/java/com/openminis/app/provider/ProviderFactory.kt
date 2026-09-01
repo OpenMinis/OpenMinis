@@ -43,7 +43,11 @@ object ProviderFactory {
                 if (basePath != null) GeminiProvider(apiKey, model, basePath)
                 else GeminiProvider(apiKey, model)
             }
-            ProviderType.openAI -> {
+            // [T-android-provider-type-parity] openAIResponses shares this
+            // branch: on iOS it is "OpenAI with forceResponsesAPI = true", and
+            // the Responses endpoint is already reachable here through the
+            // instance's useResponsesAPI flag (forced on below for this type).
+            ProviderType.openAI, ProviderType.openAIResponses -> {
                 // Manual bearer token (set via Manual Bearer Token UI / imported
                 // from JSON) bypasses the Codex OAuth flow entirely and is sent
                 // verbatim as `Authorization: Bearer …` against api.openai.com
@@ -77,7 +81,13 @@ object ProviderFactory {
                         apiKey = effectiveKey,
                         model = model,
                         basePath = base,
-                        useResponsesAPI = instance.useResponsesAPI,
+                        // [T-android-provider-type-parity] The dedicated
+                        // Responses type forces the endpoint regardless of the
+                        // per-instance flag — that IS its definition, and an
+                        // instance imported from iOS carries no Android-side
+                        // useResponsesAPI value to have set.
+                        useResponsesAPI = instance.useResponsesAPI ||
+                            instance.providerType == ProviderType.openAIResponses,
                         // [T-provider-custom-user-agent] Covers both chat and
                         // /responses for custom-base OpenAI-compat relays; null
                         // on the official direct path.
@@ -116,6 +126,13 @@ object ProviderFactory {
                     instance.credentialType == ProviderCredential.oauth) {
                     com.openminis.app.auth.OAuthManager.forInstance(context, instance)?.loadManualBearerToken()
                 } else null
+                // [T-android-xai-priority] Mark this provider as eligible for
+                // Priority Processing. This is a CAPABILITY flag only — whether
+                // the tier is actually requested is the user's global Fast Mode
+                // toggle (FastModePrefs), which the body builders read at
+                // request time. Set ONLY here, so the xAI-specific
+                // `service_tier` key can never leak into another vendor's body;
+                // a strict OpenAI-compatible relay 400s on unknown keys.
                 if (instance.credentialType == ProviderCredential.oauth && manualBearer.isNullOrEmpty()
                     && context != null) {
                     val oauthManager = com.openminis.app.auth.XAIOAuthManager(context, instance.id)
@@ -126,14 +143,14 @@ object ProviderFactory {
                         },
                         model = model,
                         basePath = base,
-                    )
+                    ).also { it.supportsPriorityProcessing = true }
                 } else {
                     val effectiveKey = if (!manualBearer.isNullOrEmpty()) manualBearer else apiKey
                     OpenAIProvider(
                         apiKey = effectiveKey,
                         model = model,
                         basePath = base,
-                    )
+                    ).also { it.supportsPriorityProcessing = true }
                 }
             }
             ProviderType.kimiCode -> {
@@ -170,6 +187,15 @@ object ProviderFactory {
                         basePath = base,
                     )
                 }
+            }
+            // [T-android-provider-type-parity] Types this build can decode and
+            // display but not drive. Reaching here means the user selected a
+            // model on an instance restored from another platform (or a newer
+            // build) whose provider Android cannot speak. Fail with a clear
+            // credential error rather than constructing a provider that would
+            // emit malformed requests. iOS throws FactoryError here likewise.
+            ProviderType.antigravity, ProviderType.unsupported -> {
+                throw com.openminis.app.data.model.LLMError.InvalidApiKey()
             }
         }
         // [T-android-thinking-rules-phase2] Tag OpenAI-family providers with their

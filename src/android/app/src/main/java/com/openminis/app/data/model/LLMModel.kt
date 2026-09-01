@@ -124,6 +124,12 @@ data class LLMModel(
         // / build / fast / code-fast variants surfaced by xAI docs and
         // OpenClaw's catalog (port iOS db973552).
         // Official xAI catalog (docs.x.ai/docs/models) - synced from CLIProxyAPI models.json
+        // [T-provider-dynamic-catalog-reconcile] grok-4.6 added for GH#265.
+        // Note this list is now a SEED/FALLBACK, not the whole story: since
+        // that fix refreshModels does a real GET /v1/models against api.x.ai,
+        // so a model released after this build still shows up. Keeping the
+        // list current only improves the pre-network first paint.
+        val grok46 = LLMModel("grok-4.6", "Grok 4.6", "xAI", supportsReasoning = true)
         val grok45 = LLMModel("grok-4.5", "Grok 4.5", "xAI", supportsReasoning = true)
         val grok43 = LLMModel("grok-4.3", "Grok 4.3", "xAI", supportsReasoning = true)
         val grok420Reasoning = LLMModel("grok-4.20-0309-reasoning", "Grok 4.20 Reasoning", "xAI", supportsReasoning = true)
@@ -139,6 +145,7 @@ data class LLMModel(
         val grokCodeFast1 = LLMModel("grok-code-fast-1", "Grok Code Fast 1", "xAI", supportsReasoning = true)
 
         val allXAI = listOf(
+            grok46,
             grok45,
             grok43,
             grok420Reasoning,
@@ -284,7 +291,12 @@ data class LLMModel(
      * when routed through the same model.
      */
     fun capabilityPromptFragment(): String? {
-        val inputs = inputModalities?.map { it.lowercase() } ?: emptyList()
+        // [T-android-vision-native-check-misses-image_input] normalizeModalities,
+        // not a bare lowercase: OpenAI / OpenRouter spell these "image_input" /
+        // "audio_input", models.dev spells them bare. Lowercasing alone left the
+        // suffix intact, so a vision model from an OpenAI-shaped catalog was told
+        // in its own system prompt that it could NOT see images.
+        val inputs = inputModalities.normalizeModalities() ?: emptyList()
         val hasImage = "image" in inputs
         val hasPdf = "pdf" in inputs
         val hasAudio = "audio" in inputs
@@ -345,7 +357,14 @@ data class LLMModel(
  * `"image" in modalities` checks, and capability fragments work uniformly.
  */
 fun String.normalizeModalityName(): String =
-    removeSuffix("_input").removeSuffix("_output").lowercase()
+    // [T-android-modality-normalize-case-order] Lowercase FIRST, then strip.
+    // The reverse order silently failed on any non-lowercase spelling:
+    // removeSuffix("_input") matches literally, so "IMAGE_INPUT" kept its
+    // suffix and normalized to "image_input", which then compared unequal to
+    // "image" everywhere — hasImageInput / hasAudioInput / hasAudioOutput and
+    // the Vision Group member filter all read such a model as lacking the
+    // modality it actually declares.
+    lowercase().removeSuffix("_input").removeSuffix("_output")
 
 fun List<String>?.normalizeModalities(): List<String>? =
     this?.map { it.normalizeModalityName() }?.distinct()?.takeIf { it.isNotEmpty() }

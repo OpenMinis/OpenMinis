@@ -5,6 +5,7 @@ import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.db.MessageEntity
+import com.openminis.app.data.model.ModelAttributionSnapshot
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
@@ -334,12 +335,25 @@ class ChatRepository(internal val dao: ChatDao) {
     suspend fun updateLastAssistantError(sessionId: String, errorInfo: String?) =
         dao.updateLastAssistantError(sessionId, errorInfo)
 
+    /**
+     * [T-token-attribution-snapshot] `modelSnapshot` records which model
+     * ACTUALLY produced this message.
+     *
+     * It must be supplied by the caller from the request context — do NOT
+     * resolve it in here by reading the session. The session's `model_id` is
+     * rewritten on every switch, including automatic failover, and by the time
+     * a turn finishes it may already point at a different model than the one
+     * that served it. Reading it here would reproduce the exact bug this
+     * snapshot exists to fix, only scoped to one row instead of the whole
+     * session.
+     */
     suspend fun appendMessage(
         sessionId: String,
         role: String,
         partsJson: String,
         tokenUsage: String? = null,
         reasoningContent: String? = null,
+        modelSnapshot: ModelAttributionSnapshot? = null,
     ): MessageEntity {
         val sortOrder = dao.nextSortOrder(sessionId)
         val now = System.currentTimeMillis()
@@ -363,10 +377,30 @@ class ChatRepository(internal val dao: ChatDao) {
             tokenUsage = tokenUsage,
             sortOrder = sortOrder,
             reasoningContent = reasoningContent,
+            modelId = modelSnapshot?.modelId,
+            modelDisplayName = modelSnapshot?.displayName,
+            providerType = modelSnapshot?.providerTypeRaw,
+            providerInstanceId = modelSnapshot?.providerInstanceId,
         )
         dao.insertMessage(message)
+        // [T-android-preview-flicker-toolresult] Only overwrite the preview
+        // when this row actually yields one. A tool-result row is
+        // `[{"type":"toolResult",…}]`, a shape extractTextPreview does not
+        // summarize (it handles text / mediaRef / toolUse), so it returns
+        // null — and writing that null blanked the column, flipping the
+        // session list to "No messages yet" the instant a tool finished. The
+        // live preview pushed before the tool ran had just put the tool title
+        // there, so a multi-tool run visibly oscillated between the title and
+        // the empty state on every tool boundary.
+        //
+        // The row's own timestamp is still worth recording: it is what keeps
+        // the session sorted as recently-active while a long tool chain runs.
         val preview = extractTextPreview(capped)
-        dao.updateLastMessage(sessionId, preview, now)
+        if (preview != null) {
+            dao.updateLastMessage(sessionId, preview, now)
+        } else {
+            dao.touchSession(sessionId, now)
+        }
         return message
     }
 
@@ -389,130 +423,8 @@ class ChatRepository(internal val dao: ChatDao) {
         dao.updateLastMessage(sessionId, preview, System.currentTimeMillis())
     }
 
-    private fun extractTextPreview(partsJson: String): String? {
-        try {
-            val array = org.json.JSONArray(partsJson)
-            var hasMedia = false
-            // T-android-session-last-message-tool-call: also track the most
-            // recent tool_use so a mid-tool-call assistant turn (no text yet)
-            // renders as a short tool summary instead of falling through to
-            // "No messages yet" in the session list.
-            var lastToolUse: org.json.JSONObject? = null
-            for (i in 0 until array.length()) {
-                val obj = array.getJSONObject(i)
-                val type = obj.optString("type")
-                if (type == "text") {
-                    val text = obj.optString("value", "")
-                    if (text.isNotBlank()) {
-                        return cleanPreview(text)
-                    }
-                } else if (type == "mediaRef") {
-                    hasMedia = true
-                } else if (type == "toolUse") {
-                    val v = obj.optJSONObject("value")
-                    if (v != null) lastToolUse = v
-                }
-            }
-            if (hasMedia) return "[Image]"
-            if (lastToolUse != null) return summarizeToolUse(lastToolUse)
-        } catch (_: Exception) {
-            if (partsJson.isNotBlank()) return cleanPreview(partsJson)
-        }
-        return null
-    }
 
-    /**
-     * Build a short preview string for a `toolUse` value block. Used by the
-     * session list when an assistant turn is mid-tool-call and has no text
-     * part yet. Strategy mirrors iOS ChatStore.summarizeToolUse (T-ios-
-     * session-last-message-tool-call):
-     *   1. Prefer model-supplied `tool_title` (carried in the on-disk shape
-     *      as `value.description`, or inside the embedded `input` JSON).
-     *   2. Else pick the most meaningful arg per known tool family.
-     *   3. Else fall back to `🔧 <toolName>`.
-     * Output capped at 100 chars to match cleanPreview's text ceiling.
-     */
-    private fun summarizeToolUse(value: org.json.JSONObject): String {
-        val toolName = value.optString("name", "")
-        // `description` is where ChatViewModel persists the captured
-        // tool_title (see writeAssistantParts / writeAssistantPartsForLive
-        // in ChatViewModel.kt — both pass block.toolTitle into "description").
-        val description = value.optString("description", "").trim()
 
-        // `input` is stored as an escaped JSON STRING, not a nested object
-        // (see ChatViewModel.kt:6491 / :6539). Parse defensively.
-        val input: org.json.JSONObject = try {
-            val raw = value.opt("input")
-            when (raw) {
-                is org.json.JSONObject -> raw
-                is String -> if (raw.isBlank()) org.json.JSONObject() else org.json.JSONObject(raw)
-                else -> org.json.JSONObject()
-            }
-        } catch (_: Exception) {
-            org.json.JSONObject()
-        }
-
-        fun str(key: String): String? {
-            val v = input.optString(key, "").trim()
-            return if (v.isEmpty()) null else v
-        }
-        fun cap(s: String, n: Int = 100): String =
-            if (s.length > n) s.substring(0, n) + "…" else s
-
-        // 1. tool_title — checked both on the outer `description` field and
-        //    inside `input` (the model writes it into args; we mirror what
-        //    iOS does and accept either location).
-        val title = str("tool_title") ?: description.takeIf { it.isNotEmpty() }
-        if (title != null) return cap(cleanPreview(title))
-
-        // 2. per-tool key argument
-        when (toolName) {
-            "shell_execute" -> str("command")?.let { return cap(cleanPreview("$ $it")) }
-            "file_read" -> str("path")?.let { return cap(cleanPreview("Reading $it")) }
-            "file_write" -> str("path")?.let { return cap(cleanPreview("Writing $it")) }
-            "file_edit" -> str("path")?.let { return cap(cleanPreview("Editing $it")) }
-            "browser_use" -> {
-                val action = str("action") ?: "browse"
-                val url = str("url")
-                return if (url != null) cap(cleanPreview("$action $url"))
-                else cap(cleanPreview("browser_use $action"))
-            }
-            "memory_write" -> str("content")?.let { return cap(cleanPreview("memory_write: $it")) }
-            "memory_get" -> {
-                val arr = input.optJSONArray("keywords")
-                if (arr != null && arr.length() > 0) {
-                    val joined = buildString {
-                        for (i in 0 until arr.length()) {
-                            if (i > 0) append(", ")
-                            append(arr.optString(i))
-                        }
-                    }
-                    if (joined.isNotBlank()) return cap(cleanPreview("memory_get: $joined"))
-                }
-                str("keywords")?.let { return cap(cleanPreview("memory_get: $it")) }
-            }
-        }
-
-        // 3. final fallback
-        return cap("🔧 ${toolName.ifBlank { "tool" }}")
-    }
-
-    private fun cleanPreview(raw: String): String {
-        return stripSystemReminders(raw)
-            .replace(Regex("[\r\n]+"), " ")      // newlines → space
-            .replace(Regex("#{1,6}\\s"), "")      // headings: ## Title → Title
-            .replace(Regex("\\*{1,3}|_{1,3}"), "")// bold/italic markers
-            .replace(Regex("~~"), "")              // strikethrough
-            .replace(Regex("`{1,3}"), "")          // inline/fenced code markers
-            .replace(Regex("^\\s*[-*+]\\s", RegexOption.MULTILINE), "") // list bullets
-            .replace(Regex("^\\s*\\d+\\.\\s", RegexOption.MULTILINE), "") // ordered list
-            .replace(Regex("^>\\s?", RegexOption.MULTILINE), "")       // blockquote
-            .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1") // [text](url) → text
-            .replace(Regex("!\\[([^]]*)]\\([^)]+\\)"), "$1") // ![alt](url) → alt
-            .replace(Regex("\\s{2,}"), " ")        // collapse whitespace
-            .trim()
-            .take(100)
-    }
 
     // ───────────────── T188: minis-sessions-cli backend ─────────────────
     //
@@ -803,6 +715,132 @@ class ChatRepository(internal val dao: ChatDao) {
     }
 
     companion object {
+        private fun cleanPreview(raw: String): String {
+            return stripSystemReminders(raw)
+                .replace(Regex("[\r\n]+"), " ")      // newlines → space
+                .replace(Regex("#{1,6}\\s"), "")      // headings: ## Title → Title
+                .replace(Regex("\\*{1,3}|_{1,3}"), "")// bold/italic markers
+                .replace(Regex("~~"), "")              // strikethrough
+                .replace(Regex("`{1,3}"), "")          // inline/fenced code markers
+                .replace(Regex("^\\s*[-*+]\\s", RegexOption.MULTILINE), "") // list bullets
+                .replace(Regex("^\\s*\\d+\\.\\s", RegexOption.MULTILINE), "") // ordered list
+                .replace(Regex("^>\\s?", RegexOption.MULTILINE), "")       // blockquote
+                .replace(Regex("\\[([^]]+)]\\([^)]+\\)"), "$1") // [text](url) → text
+                .replace(Regex("!\\[([^]]*)]\\([^)]+\\)"), "$1") // ![alt](url) → alt
+                .replace(Regex("\\s{2,}"), " ")        // collapse whitespace
+                .trim()
+                .take(100)
+        }
+
+        /**
+         * Build a short preview string for a `toolUse` value block. Used by the
+         * session list when an assistant turn is mid-tool-call and has no text
+         * part yet. Strategy mirrors iOS ChatStore.summarizeToolUse (T-ios-
+         * session-last-message-tool-call):
+         *   1. Prefer model-supplied `tool_title` (carried in the on-disk shape
+         *      as `value.description`, or inside the embedded `input` JSON).
+         *   2. Else pick the most meaningful arg per known tool family.
+         *   3. Else fall back to `🔧 <toolName>`.
+         * Output capped at 100 chars to match cleanPreview's text ceiling.
+         */
+        private fun summarizeToolUse(value: org.json.JSONObject): String {
+            val toolName = value.optString("name", "")
+            // `description` is where ChatViewModel persists the captured
+            // tool_title (see writeAssistantParts / writeAssistantPartsForLive
+            // in ChatViewModel.kt — both pass block.toolTitle into "description").
+            val description = value.optString("description", "").trim()
+
+            // `input` is stored as an escaped JSON STRING, not a nested object
+            // (see ChatViewModel.kt:6491 / :6539). Parse defensively.
+            val input: org.json.JSONObject = try {
+                val raw = value.opt("input")
+                when (raw) {
+                    is org.json.JSONObject -> raw
+                    is String -> if (raw.isBlank()) org.json.JSONObject() else org.json.JSONObject(raw)
+                    else -> org.json.JSONObject()
+                }
+            } catch (_: Exception) {
+                org.json.JSONObject()
+            }
+
+            fun str(key: String): String? {
+                val v = input.optString(key, "").trim()
+                return if (v.isEmpty()) null else v
+            }
+            fun cap(s: String, n: Int = 100): String =
+                if (s.length > n) s.substring(0, n) + "…" else s
+
+            // 1. tool_title — checked both on the outer `description` field and
+            //    inside `input` (the model writes it into args; we mirror what
+            //    iOS does and accept either location).
+            val title = str("tool_title") ?: description.takeIf { it.isNotEmpty() }
+            if (title != null) return cap(cleanPreview(title))
+
+            // 2. per-tool key argument
+            when (toolName) {
+                "shell_execute" -> str("command")?.let { return cap(cleanPreview("$ $it")) }
+                "file_read" -> str("path")?.let { return cap(cleanPreview("Reading $it")) }
+                "file_write" -> str("path")?.let { return cap(cleanPreview("Writing $it")) }
+                "file_edit" -> str("path")?.let { return cap(cleanPreview("Editing $it")) }
+                "browser_use" -> {
+                    val action = str("action") ?: "browse"
+                    val url = str("url")
+                    return if (url != null) cap(cleanPreview("$action $url"))
+                    else cap(cleanPreview("browser_use $action"))
+                }
+                "memory_write" -> str("content")?.let { return cap(cleanPreview("memory_write: $it")) }
+                "memory_get" -> {
+                    val arr = input.optJSONArray("keywords")
+                    if (arr != null && arr.length() > 0) {
+                        val joined = buildString {
+                            for (i in 0 until arr.length()) {
+                                if (i > 0) append(", ")
+                                append(arr.optString(i))
+                            }
+                        }
+                        if (joined.isNotBlank()) return cap(cleanPreview("memory_get: $joined"))
+                    }
+                    str("keywords")?.let { return cap(cleanPreview("memory_get: $it")) }
+                }
+            }
+
+            // 3. final fallback
+            return cap("🔧 ${toolName.ifBlank { "tool" }}")
+        }
+
+        // `internal` so the restore path can rebuild a session's preview from the
+        // messages it just imported — see BackupImporter [T-android-restore-preview].
+        internal fun extractTextPreview(partsJson: String): String? {
+            try {
+                val array = org.json.JSONArray(partsJson)
+                var hasMedia = false
+                // T-android-session-last-message-tool-call: also track the most
+                // recent tool_use so a mid-tool-call assistant turn (no text yet)
+                // renders as a short tool summary instead of falling through to
+                // "No messages yet" in the session list.
+                var lastToolUse: org.json.JSONObject? = null
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    val type = obj.optString("type")
+                    if (type == "text") {
+                        val text = obj.optString("value", "")
+                        if (text.isNotBlank()) {
+                            return cleanPreview(text)
+                        }
+                    } else if (type == "mediaRef") {
+                        hasMedia = true
+                    } else if (type == "toolUse") {
+                        val v = obj.optJSONObject("value")
+                        if (v != null) lastToolUse = v
+                    }
+                }
+                if (hasMedia) return "[Image]"
+                if (lastToolUse != null) return summarizeToolUse(lastToolUse)
+            } catch (_: Exception) {
+                if (partsJson.isNotBlank()) return cleanPreview(partsJson)
+            }
+            return null
+        }
         // <system-reminder>...</system-reminder> blocks are runtime nudges
         // injected into user-role messages by the harness (e.g. task-tracker
         // reminders). They never represent what the user actually typed, so

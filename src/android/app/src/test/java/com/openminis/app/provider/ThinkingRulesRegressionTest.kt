@@ -598,4 +598,116 @@ class ThinkingRulesRegressionTest {
             )
         }
     }
+
+    // ── [T-thinking-levels-data-driven] declared tiers drive the UI ceiling ──
+    //
+    // Field report (Alice, 2026-08-20..31): deepseek-v4 and GLM could not be
+    // pushed past "high" on Android no matter what the picker was set to, while
+    // the same models reached "max" on iOS. Two layers disagreed: the catalog
+    // declares `["high","max"]`, but the ceiling came from the hardcoded XHIGH
+    // default, so the strongest thing a user could ASK for was "xhigh" — which
+    // is not in the declared set, so clampEffort snapped it DOWN to "high".
+    // Mirrors iOS testDeclaredTiersOverrideSubstringCeiling (47dc71b3).
+
+    /**
+     * Rule: a declared effort set is a STRONGER statement than any id-substring rule and
+     * must raise the ceiling to the declared top tier — otherwise a tier the catalog
+     * declares is clamped to on the wire yet unselectable in the UI.
+     */
+    @Test
+    fun `declared tiers override the substring ceiling`() {
+        val m = model("glm-5.2", reasoningEffortValues = listOf("high", "max"))
+        assertEquals(
+            "a declared top tier of 'max' must be reachable from the UI: ${m.reasoningEffortValues}",
+            ThinkingLevel.MAX,
+            m.catalogMaxThinkingLevel,
+        )
+    }
+
+    /**
+     * Rule: sparse declarations yield one option per DISTINCT wire tier, so every option
+     * the user can pick produces a different request.
+     */
+    @Test
+    fun `sparse declaration yields distinct selectable levels`() {
+        val m = model("glm-5.2", reasoningEffortValues = listOf("high", "max"))
+        val levels = m.selectableThinkingLevels
+        assertEquals(
+            "selectable levels must be distinct — duplicates mean a slider that changes nothing",
+            levels.size,
+            levels.toSet().size,
+        )
+        assertEquals(
+            "a [high, max] declaration must surface exactly two options, got $levels",
+            listOf(ThinkingLevel.HIGH, ThinkingLevel.MAX),
+            levels,
+        )
+    }
+
+    /**
+     * The end-to-end assertion behind the field report: asking for MAX on a real
+     * deepseek-v4 id must put `"max"` on the wire, not the "high" the old ceiling
+     * produced. Goes through sendMessageClamped, so it covers ceiling → clamp → body.
+     */
+    @Test
+    fun `deepseek v4 max request reaches the wire as max`() {
+        for (id in listOf("deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2")) {
+            val body = capture(
+                model = model(id, reasoningEffortValues = listOf("high", "max")),
+                level = ThinkingLevel.MAX,
+            )
+            assertEquals(
+                "$id must send reasoning_effort=max when the user asks for MAX: $body",
+                "max",
+                body.optString("reasoning_effort", null),
+            )
+        }
+    }
+
+    /**
+     * The other direction, and the reason this fix belongs in the ceiling rather than in
+     * clampEffort: a NARROW declaration must LOWER the ceiling too. `gpt-5.3` matches no
+     * id rule (so it used to ride the XHIGH default), but a backend declaring only
+     * `["low","high"]` 400s on xhigh. iOS resolves this to .high through the same path.
+     */
+    @Test
+    fun `narrow declaration lowers the ceiling below the default`() {
+        val m = model("gpt-5.3", reasoningEffortValues = listOf("low", "high"))
+        assertEquals(
+            "a declared set topping out at 'high' must cap the ceiling there: " +
+                "${m.reasoningEffortValues}",
+            ThinkingLevel.HIGH,
+            m.catalogMaxThinkingLevel,
+        )
+        val body = capture(model = m, level = ThinkingLevel.MAX)
+        assertEquals(
+            "an undeclared tier must never reach the wire: $body",
+            "high",
+            body.optString("reasoning_effort", null),
+        )
+    }
+
+    /**
+     * Guard on the fix's blast radius: a model that declares NOTHING must still resolve
+     * through the legacy id-rule/default path, unchanged.
+     */
+    @Test
+    fun `undeclared model still uses the id-rule ceiling`() {
+        assertEquals(
+            "no declaration → hardcoded default is still XHIGH",
+            ThinkingLevel.XHIGH,
+            model("some-unknown-reasoner").catalogMaxThinkingLevel,
+        )
+        assertEquals(
+            "no declaration → an id rule still applies (mimo caps at high)",
+            ThinkingLevel.HIGH,
+            model("mimo-v2.5").catalogMaxThinkingLevel,
+        )
+        assertEquals(
+            "a non-reasoning model is OFF regardless of declarations",
+            ThinkingLevel.OFF,
+            model("gpt-4o", supportsReasoning = false, reasoningEffortValues = listOf("high", "max"))
+                .catalogMaxThinkingLevel,
+        )
+    }
 }
