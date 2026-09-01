@@ -2,8 +2,11 @@ package com.openminis.app.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -106,6 +109,7 @@ enum class PickerModalityFilter {
  * the surrounding chrome (Scaffold + TopAppBar + confirm button) and
  * retains access to the LazyListState for reorder / scroll-to.
  */
+@OptIn(ExperimentalLayoutApi::class)
 fun LazyListScope.modelEntryPickerItems(
     instances: List<ProviderInstance>,
     availableEntries: List<ModelEntry>,
@@ -335,28 +339,36 @@ fun LazyListScope.modelEntryPickerItems(
                                     entry.model.displayName,
                                     style = MaterialTheme.typography.bodyMedium,
                                 )
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                // [T-android-provider-voice] Modality chips
+                                // (iOS entryRow modalityBadges: img / audio /
+                                // video / pdf and the -out variants).
+                                //
+                                // [T-android-modality-chip] FlowRow, NOT Row: this
+                                // was the one call site 0e7b742cc missed when it
+                                // fixed the same defect in the three picker sheets.
+                                // In a plain Row an overflowing chip is squeezed
+                                // until Compose wraps it character-by-character —
+                                // "img-out" drew as a vertical letter column, and
+                                // because the Row is CenterVertically that column
+                                // inflated the row height until the model name
+                                // floated above the selection dot. The shared
+                                // ModalityBadge (maxLines=1 + softWrap=false) stops
+                                // a chip breaking internally; FlowRow is what gives
+                                // it somewhere to go, wrapping whole chips instead.
+                                // Overflow here is about total chip width, not any
+                                // single label: a long model id plus 4 chips
+                                // overflows the weight(1f) column just as surely.
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    itemVerticalAlignment = Alignment.CenterVertically,
+                                ) {
                                     Text(
                                         entry.model.id,
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                                     )
-                                    // [T-android-provider-voice] Modality chips
-                                    // (iOS entryRow modalityBadges: img / audio /
-                                    // video / pdf and the -out variants).
                                     modalityBadges(entry.model).forEach { badge ->
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            badge,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceContainerHigh,
-                                                    RoundedCornerShape(3.dp),
-                                                )
-                                                .padding(horizontal = 4.dp, vertical = 1.dp),
-                                        )
+                                        ModalityBadge(badge)
                                     }
                                 }
                             }
@@ -470,5 +482,11 @@ fun providerDotColor(providerType: ProviderType?): Color = when (providerType) {
     ProviderType.openRouter -> Color(0xFF00BCD4)
     ProviderType.xAI -> Color(0xFFFF7043)
     ProviderType.kimiCode -> Color(0xFF5C6BC0) // indigo — Kimi accent
+    // [T-android-provider-type-parity] Responses API instances are
+    // OpenAI under the hood — same green dot. Undrivable types share
+    // the neutral gray used for "no provider".
+    ProviderType.openAIResponses -> Color(0xFF4CAF50)
+    ProviderType.antigravity,
+    ProviderType.unsupported -> Color(0xFF8E8E93)
     null -> Color(0xFF8E8E93)
 }

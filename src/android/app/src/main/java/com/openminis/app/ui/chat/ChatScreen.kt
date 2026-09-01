@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -59,6 +60,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.layout.Arrangement
@@ -93,6 +95,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -133,9 +136,11 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.ripple
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
+import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.data.FileMentionIndex
@@ -166,6 +171,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -227,6 +234,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -321,8 +329,93 @@ private const val STREAM_END_ARM_GRACE_MS = 1_500L
  * 10→7dp) so rowHeight ≈ 42dp covers a 14sp title + 11sp subtitle + 7dp
  * vertical padding; 42*4 + 8 ≈ 176dp. Keeps 4 rows visible with no extra
  * blank space at the bottom.
+ *
+ * This is the height at the DEFAULT font scale only — see
+ * [slashPickerHeight], which is what the pickers actually use.
  */
 private val SLASH_PICKER_FIXED_HEIGHT: Dp = 176.dp
+
+/**
+ * Upper bound for [slashPickerHeight]. At the largest accessibility font
+ * sizes an honestly-scaled 4-row band would grow past 300dp and the popup
+ * would cover most of a small screen, pushing the composer out of reach.
+ * Past this point the band stops growing and the rows scroll instead —
+ * which is the same fallback overflow already uses.
+ */
+private val SLASH_PICKER_MAX_HEIGHT: Dp = 280.dp
+
+/**
+ * [T-android-slash-picker-fontscale] The picker band's height, scaled with
+ * the system font size.
+ *
+ * Why this is not a constant any more: the row's text is sized in `sp`, so
+ * at fontScale > 1 a 14sp title and 11sp subtitle render TALLER than the
+ * 14dp+11dp the fixed 176dp band was budgeted against, while the band
+ * itself — being `dp` — does not move, so the last visible row gets
+ * clipped mid-glyph. Reported on a Xiaomi 23127PN0CC (Android 16) whose
+ * display defaults to a font scale above 1.0.
+ *
+ * Measured on a Pixel 4a (density 2.75) while fixing this, and worth
+ * recording because it contradicts the constant's own arithmetic: the
+ * real row pitch is ~61.7dp, not the ~42dp the 176dp figure assumes. So
+ * the band only ever showed ~2.8 rows, and the third row's subtitle was
+ * already clipped at fontScale 1.0 — font scaling makes an existing bug
+ * worse rather than causing it. The 4-row budget is therefore aspirational
+ * at every scale; this function keeps the same intent (and the same
+ * default-scale pixels) while letting the band grow with the text, and
+ * deliberately does NOT re-lock the default-scale height to ~256dp, which
+ * would fit 4 real rows but is a visual change nobody asked for.
+ *
+ * The scaling is applied to the TEXT portion only, because that is the
+ * only part that scales: the 7dp vertical padding and the 18dp leading
+ * icon are `dp` and stay put. Modelling the row as
+ * `max(textHeight, iconHeight) + padding` mirrors the `Row`'s own
+ * `CenterVertically` measurement, so the band tracks what is actually
+ * drawn instead of a second, independent guess at it.
+ *
+ * At fontScale 1.0 this returns [SLASH_PICKER_FIXED_HEIGHT] verbatim, so
+ * the default-font layout is byte-identical to before — the computed path
+ * is only consulted when the user has actually scaled their font up.
+ */
+/**
+ * [T-android-chat-max-content-width] Reading-measure cap for the conversation
+ * and the composer on a wide window.
+ *
+ * 900dp verbatim from iOS `AIChatView.maxContentWidth`, which returns 900 in the
+ * regular horizontal size class and nil in compact. The unit maps directly: an
+ * iOS point and an Android dp are both 1/160 inch at baseline density, so the
+ * two platforms cap at the same physical measure.
+ *
+ * No explicit compact branch is needed to match "nil when compact": `widthIn`
+ * is an upper bound, so on any window narrower than this — every phone, and a
+ * tablet's list pane — it is inert and the content still fills the width.
+ */
+private val CHAT_MAX_CONTENT_WIDTH = 900.dp
+
+@Composable
+private fun slashPickerHeight(
+    titleSp: TextUnit = 14.sp,
+    subtitleSp: TextUnit = 11.sp,
+    verticalPadding: Dp = 7.dp,
+    iconSize: Dp = 18.dp,
+): Dp {
+    val fontScale = LocalDensity.current.fontScale
+    if (fontScale <= 1f) return SLASH_PICKER_FIXED_HEIGHT
+
+    val density = LocalDensity.current
+    return with(density) {
+        // Compose applies a ~1.2x line-height multiplier to a bare
+        // fontSize; the two Text rows are maxLines=1 so each contributes
+        // exactly one line.
+        val textHeight = (titleSp.toDp() + subtitleSp.toDp()) * 1.2f
+        val rowHeight = maxOf(textHeight, iconSize) + verticalPadding * 2
+        (rowHeight * SLASH_PICKER_VISIBLE_ROWS + 8.dp)
+            .coerceIn(SLASH_PICKER_FIXED_HEIGHT, SLASH_PICKER_MAX_HEIGHT)
+    }
+}
+
+/** Rows visible in the picker band before it starts scrolling. */
+private const val SLASH_PICKER_VISIBLE_ROWS = 4
 
 /**
  * Draw a thin scroll thumb on the right edge of a [LazyColumn] (or any
@@ -395,6 +488,27 @@ fun ChatScreen(
     skillRepository: com.openminis.app.data.repository.SkillRepository? = null,
     mcpRepository: com.openminis.app.data.repository.MCPRepository? = null,
     onBack: () -> Unit,
+    /**
+     * [T-android-tablet-split] True when this chat is rendered as the DETAIL
+     * pane beside the session list. The back arrow is suppressed then: it means
+     * "return to the list", and the list is already on screen, so the arrow has
+     * nowhere meaningful to go. SwiftUI's NavigationSplitView omits the
+     * detail-column back button for the same reason; ListDetailPaneScaffold
+     * does not, so it has to be done by hand.
+     */
+    isTwoPane: Boolean = false,
+    /**
+     * [T-android-tablet-sidebar-collapse] Show/hide the session list, or null
+     * when there is nothing to toggle.
+     *
+     * Two-pane frees up the navigation slot (the back arrow means "return to
+     * the list", which is pointless while the list is visible), and that slot
+     * is exactly where a user looks for the list. So the collapse control
+     * takes it over rather than being added somewhere new.
+     */
+    onToggleSidebar: (() -> Unit)? = null,
+    /** Whether the list is currently hidden — decides which way the icon points. */
+    sidebarCollapsed: Boolean = false,
     /** [T-new-chat-menu-entry] "New Chat" from the chat "..." menu: caller
      *  navigates to a fresh draft chat (same funnel as the session list's
      *  new-chat button), replacing this chat on the back stack. */
@@ -448,11 +562,16 @@ fun ChatScreen(
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
+    // [T-android-compact-progress] null when no compaction is running.
+    val compactProgress by viewModel.compactProgress.collectAsState()
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
     val sessionTitle by viewModel.sessionTitle.collectAsState()
     val sessionCategory by viewModel.sessionCategory.collectAsState()
     val attachments by viewModel.attachments.collectAsState()
+    // [T-android-paste-placeholder] Folded pastes, rendered as chips above the
+    // attachment row.
+    val pastedTexts by viewModel.pastedTexts.collectAsState()
     val availableGroups by viewModel.availableGroups.collectAsState()
     val selectedGroupId by viewModel.selectedGroupId.collectAsState()
     val showBrowserSheet by viewModel.showBrowserSheet.collectAsState()
@@ -517,7 +636,13 @@ fun ChatScreen(
     val shareBufferVersion by com.openminis.app.share.ShareCoordinator.bufferVersion.collectAsState()
     androidx.compose.runtime.LaunchedEffect(shareBufferVersion) {
         if (shareBufferVersion == 0) return@LaunchedEffect
-        val pending = com.openminis.app.share.ShareCoordinator.consumeBuffer(context)
+        // [XSessionDiag] sessionId is passed for LOGGING ONLY — consumeBuffer
+        // ignores it for every decision (see its KDoc). It records which chat
+        // actually drained the global share buffer.
+        val pending = com.openminis.app.share.ShareCoordinator.consumeBuffer(
+            context,
+            diagSessionId = sessionId,
+        )
             ?: return@LaunchedEffect
         com.openminis.app.logging.AppLogger.info(
             "ChatScreen",
@@ -546,6 +671,16 @@ fun ChatScreen(
                 }
             }
         }
+        // [XSessionDiag] Hypothesis 2: the composer state AFTER injection. If the
+        // reported corrupted input was assembled here, this line holds it verbatim
+        // (head-truncated) together with the session that received it — which is
+        // the direct check against a user's "I only typed 你好" report.
+        com.openminis.app.logging.AppLogger.info(
+            "XSessionDiag",
+            "[XSessionDiag] share/injected: session=${sessionId.take(8)} " +
+                "items=${pending.items.size} draftLen=${draft.length} " +
+                "draftHead=\"${draft.take(200).replace("\n", "\\n")}\"",
+        )
         viewModel.markShareInjected()
         com.openminis.app.share.SharedShareStore.cleanSharedFiles(context)
     }
@@ -701,6 +836,37 @@ fun ChatScreen(
     val coroutineScope = rememberCoroutineScope()
 
     var showModelPicker by remember { mutableStateOf(false) }
+    // [T-android-modelpicker-stuck-ripple] Interaction source for the navbar
+    // model-picker row, owned here so the press can be drained when the picker
+    // closes. See the clickable's comment for why the release never arrives on
+    // its own.
+    // [T-android-modelpicker-stuck-ripple] The row owns an InteractionSource
+    // that is REPLACED whenever the picker closes, rather than one whose
+    // presses we try to cancel individually.
+    //
+    // Why replacement: opening the picker puts a modal sheet over this row, so
+    // the pointer's UP never reaches the clickable — Compose emits
+    // PressInteraction.Press with no matching Release and the ripple stays
+    // lit, still visible after the sheet closes as a permanent grey highlight.
+    //
+    // The obvious fix (collect the interactions, remember the open presses,
+    // emit Cancel for each on close) does NOT work reliably, and shipping it
+    // was the first attempt: MutableInteractionSource's flow has replay=0 and
+    // the collector is started by a LaunchedEffect coroutine, so a Press that
+    // lands before that coroutine is dispatched is never observed. The
+    // bookkeeping list is then empty, no Cancel is emitted, and the ripple
+    // stays exactly as stuck as before — while the ripple's own internal
+    // subscriber, registered during composition, did see it.
+    //
+    // Handing the clickable a brand-new source drops every interaction the old
+    // one was holding, with no dependence on collector timing.
+    var modelPickerInteractionGeneration by remember { mutableIntStateOf(0) }
+    val modelPickerInteraction = remember(modelPickerInteractionGeneration) {
+        MutableInteractionSource()
+    }
+    LaunchedEffect(showModelPicker) {
+        if (!showModelPicker) modelPickerInteractionGeneration++
+    }
     // [T-android-thinking-badge-navbar] Whether the thinking-level sheet
     // (opened by tapping the navbar thinking badge) is presented. Mirrors iOS
     // AIChatView.showThinkingLevelSheet.
@@ -717,6 +883,11 @@ fun ChatScreen(
     // backing state without needing fragile scope wiring.
     var showMoveSheet by remember { mutableStateOf(false) }
     var showClearChatDialog by remember { mutableStateOf(false) }
+    // [T-android-delete-from-here] Id of the message a pending "Delete From
+    // Here" would cut at, or null when no confirmation is open. Holding the
+    // id (rather than a boolean plus a separate field) keeps the dialog and
+    // its target impossible to desynchronize.
+    var deleteFromHereTargetId by remember { mutableStateOf<String?>(null) }
     // [T-new-chat-menu-entry] Confirmation gate for "New Chat" while the
     // current session is still streaming — stopping the running task needs
     // an explicit confirm; idle sessions skip the dialog entirely.
@@ -1454,11 +1625,42 @@ fun ChatScreen(
     // command input short-circuits to the command runner (mirrors the tap
     // path). Caller decides whether to invoke this — gating (canActivate,
     // armFraction, swipedUp) stays at the call site.
+    // [T-android-hwkeyboard-keep-focus] With a physical keyboard attached,
+    // dropping focus after a send is wrong: there is no on-screen keyboard
+    // occupying half the display to reclaim, and the user's hands are already
+    // on the keys — they expect to type the next message immediately, the way
+    // every desktop chat client behaves. Without this a hardware-keyboard user
+    // has to reach up and tap the composer again after every single send.
+    //
+    // Read from Configuration rather than an input-device scan: `qwerty` +
+    // `keysexposed` is exactly the state Android already tracks for this, it
+    // updates live when a Bluetooth keyboard connects or a cover folds shut,
+    // and it recomposes the caller for free. Verified on a Mate Pad, which
+    // reports `keysexposed-qwerty` with its keyboard attached.
+    val configuration = LocalConfiguration.current
+    val hasHardwareKeyboard = configuration.keyboard ==
+        android.content.res.Configuration.KEYBOARD_QWERTY &&
+        configuration.hardKeyboardHidden ==
+        android.content.res.Configuration.HARDKEYBOARDHIDDEN_NO
+
+    /**
+     * [T-android-hwkeyboard-keep-focus] Release the composer after a send —
+     * except on a hardware keyboard, where focus is kept so the user can keep
+     * typing. Centralised so every send path makes the same choice; there are
+     * four of them (button, Enter, slash-command via either) and they had
+     * drifted into repeating the same two lines.
+     */
+    val releaseComposerAfterSend: () -> Unit = {
+        if (!hasHardwareKeyboard) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+    }
+
     val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
         if (viewModel.tryExecuteInputAsSlashCommand(rawText)) {
             viewModel.setInputText("")
-            keyboardController?.hide()
-            focusManager.clearFocus()
+            releaseComposerAfterSend()
             return@handler
         }
         lastSendTimeMs = System.currentTimeMillis()
@@ -1477,8 +1679,7 @@ fun ChatScreen(
         // command-row paths keep their own restore behaviour untouched.
         viewModel.endSlashSessionForSend()
         viewModel.setInputText("")
-        keyboardController?.hide()
-        focusManager.clearFocus()
+        releaseComposerAfterSend()
         viewModel.sendMessage(rawText)
         noteSendForInputModePref()
         userScrolledAway = false
@@ -2010,7 +2211,12 @@ fun ChatScreen(
     // the recreated activity (the user wasn't typing anyway), and the
     // common new-session path still works because the 300 ms delay lets
     // the Modifier attach.
-    LaunchedEffect(Unit) {
+    // [T-android-draft-placeholder-row] Keyed on sessionId, not Unit. In the
+    // two-pane layout the detail pane is NOT recreated when the user starts
+    // another new chat — only the pane's content key changes — so a
+    // `LaunchedEffect(Unit)` would fire for the first draft of the screen's
+    // life and never again, leaving every subsequent New Chat unfocused.
+    LaunchedEffect(sessionId) {
         if (sessionId.startsWith("__new__")) {
             // Small delay to let the layout settle before requesting focus
             kotlinx.coroutines.delay(300)
@@ -2204,8 +2410,16 @@ fun ChatScreen(
                     }
                 }
                 is ChatLinkAction.ExternalApp ->
+                    // [T-android-user-initiated-scheme-dispatch] The user
+                    // tapped this link in a chat message — dispatch whatever
+                    // scheme it carries.
                     com.openminis.app.ui.browser.BrowserExternalSchemeHandler
-                        .handle(context, action.url)
+                        .handle(
+                            context,
+                            action.url,
+                            com.openminis.app.ui.browser.BrowserExternalSchemeHandler
+                                .Origin.USER_INITIATED,
+                        )
                 is ChatLinkAction.Web -> previewUrl = action.url
             }
         }
@@ -2388,7 +2602,20 @@ fun ChatScreen(
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(6.dp))
-                                    .clickable { showModelPicker = true }
+                                    // [T-android-modelpicker-stuck-ripple] Own the
+                                    // interaction source so the press can be
+                                    // released explicitly. Opening the picker
+                                    // sheet puts a modal window over this row, so
+                                    // the pointer's UP never reaches the clickable:
+                                    // Compose emits PressInteraction.Press with no
+                                    // matching Release and the ripple stays lit
+                                    // behind the sheet — still there after the
+                                    // sheet closes, reading as a permanent grey
+                                    // highlight on the title bar.
+                                    .clickable(
+                                        interactionSource = modelPickerInteraction,
+                                        indication = ripple(),
+                                    ) { showModelPicker = true }
                                     .padding(horizontal = 4.dp, vertical = 1.dp),
                             ) {
                                 // Line 1: green dot + group name + dropdown arrow (iOS: "● Default ⌄")
@@ -2418,26 +2645,51 @@ fun ChatScreen(
                                     // config → terminal badge string. Mirrors
                                     // the #476 TopBar title fallback pattern
                                     // (commit b4c88775).
+                                    //
+                                    // [T-android-group-resolve-skip-uncredentialed]
+                                    // ...but only while a group is ACTUALLY
+                                    // bound. This chain used to run
+                                    // unconditionally, so a session that failed
+                                    // to resolve its group — and was therefore
+                                    // running on a model from the new-chat
+                                    // default chain, unrelated to any group —
+                                    // still displayed the default group's name.
+                                    // The header then contradicted the model
+                                    // line right below it and made a real
+                                    // routing failure read as normal operation,
+                                    // which is what made that bug hard to spot.
+                                    // Mirrors iOS, which keys the group glyph
+                                    // off the binding (`isGroupBound`) rather
+                                    // than off a name lookup.
                                     val groupNameDisplay = selectedGroupName.ifEmpty {
-                                        val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                                        availableGroups.firstOrNull { it.id == defaultGroupId }?.name
-                                            ?: stringResource(R.string.model_picker_default_badge)
+                                        if (selectedGroupId == null) {
+                                            ""
+                                        } else {
+                                            val defaultGroupId = providerRepository.defaultPrimaryGroupId
+                                            availableGroups.firstOrNull { it.id == defaultGroupId }?.name
+                                                ?: stringResource(R.string.model_picker_default_badge)
+                                        }
                                     }
-                                    Text(
-                                        text = groupNameDisplay,
-                                        fontSize = 12.sp,
-                                        lineHeight = 14.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = ChatColors.secondaryText,
-                                        maxLines = 1,
-                                        style = noFontPad,
-                                    )
-                                    Icon(
-                                        Icons.Default.KeyboardArrowDown,
-                                        contentDescription = null,
-                                        tint = ChatColors.tertiaryText,
-                                        modifier = Modifier.size(14.dp),
-                                    )
+                                    // Drop the whole affordance when no group is
+                                    // bound — an empty label would still leave
+                                    // a dangling chevron pointing at nothing.
+                                    if (groupNameDisplay.isNotEmpty()) {
+                                        Text(
+                                            text = groupNameDisplay,
+                                            fontSize = 12.sp,
+                                            lineHeight = 14.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = ChatColors.secondaryText,
+                                            maxLines = 1,
+                                            style = noFontPad,
+                                        )
+                                        Icon(
+                                            Icons.Default.KeyboardArrowDown,
+                                            contentDescription = null,
+                                            tint = ChatColors.tertiaryText,
+                                            modifier = Modifier.size(14.dp),
+                                        )
+                                    }
                                 }
                                 // Line 2: "provider · model" (iOS: "MiniMax ·
                                 // MiniMax-M2.7") + the thinking-level badge laid
@@ -2536,8 +2788,81 @@ fun ChatScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    // [T-android-tablet-split] See `isTwoPane`.
+                    if (!isTwoPane) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    } else if (onToggleSidebar != null) {
+                        // [T-android-tablet-sidebar-collapse] The slot the back
+                        // arrow vacates in two-pane becomes the sidebar toggle.
+                        //
+                        // ONE glyph for both states — the list icon, meaning
+                        // "the session list", with the action stated in the
+                        // content description instead.
+                        //
+                        // A directional chevron was tried for the expanded
+                        // state and is wrong here: this is the slot that used
+                        // to hold the back arrow, so a leading chevron reads as
+                        // "go back" — precisely the meaning two-pane removed.
+                        // Swapping the glyph on toggle also makes the control
+                        // look like two different buttons rather than one
+                        // switch. A stable icon whose accessible label changes
+                        // is both clearer and honest about what it targets.
+                        //
+                        // `Menu` rather than `List`, which this first used.
+                        // List draws a bulleted list — dots plus rules — whose
+                        // ink sat high and left in the 24dp box (measured 41x23
+                        // px with its mass above centre), so it read as a small
+                        // mark floating above the ⋮ at the other end of this
+                        // same bar. Menu's three full-width bars fill the box
+                        // symmetrically and optically centre against it; both
+                        // glyphs now share a baseline to the pixel. Menu is
+                        // also the conventional sidebar-toggle icon.
+                        //
+                        // [T-android-split-toggle-align] Two corrections, both
+                        // measured on a Mate Pad against the SESSION LIST's
+                        // toolbar rather than this bar's own ⋮ — the toggle sits
+                        // hard against the pane seam, so the icons it is read
+                        // beside are the list's Schedule/Terminal, not the
+                        // kebab at the far end of this bar. Aligned only to the
+                        // kebab, it measured 8px shorter and 3.5px lower than
+                        // its actual neighbours.
+                        //
+                        // 1. `offset(y = -2.dp)`: this bar is 68dp (see
+                        //    expandedHeight below — sized for the 3-row title
+                        //    and NOT reducible without re-triggering
+                        //    T-topbar-model-row-clip), while the list's bar is
+                        //    M3's default 64dp. A TopAppBar centres its
+                        //    navigation icon in its OWN height, so the 4dp
+                        //    difference put this glyph 2dp below the list's row.
+                        //    Offsetting by half the delta lands it on the list's
+                        //    baseline while leaving the taller bar intact.
+                        //
+                        // 2. `size(28.dp)`: Menu's three bars ink only ~12 of
+                        //    their 24dp viewport (bars at y=6/11/16), where the
+                        //    circular Schedule and boxy Terminal fill ~20 of
+                        //    theirs. At a matched box size Menu therefore reads
+                        //    markedly lighter and smaller. Scaling the box to
+                        //    28dp brings its ink to ~14dp, closing most of the
+                        //    optical gap. The IconButton's 48dp touch target is
+                        //    unchanged, so this is purely visual weight.
+                        IconButton(
+                            onClick = onToggleSidebar,
+                            modifier = Modifier.offset(y = (-2).dp),
+                        ) {
+                            Icon(
+                                Icons.Filled.Menu,
+                                contentDescription = stringResource(
+                                    if (sidebarCollapsed) {
+                                        R.string.chat_show_sidebar
+                                    } else {
+                                        R.string.chat_hide_sidebar
+                                    },
+                                ),
+                                modifier = Modifier.size(28.dp),
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -2697,7 +3022,7 @@ fun ChatScreen(
                                         Icon(Icons.Default.Bolt, contentDescription = null)
                                     },
                                     trailingIcon = {
-                                        Switch(
+                                        SettingsSwitch(
                                             checked = enhancedCacheOn,
                                             onCheckedChange = {
                                                 if (enhancedCacheOn) {
@@ -2733,7 +3058,7 @@ fun ChatScreen(
                                         Icon(Icons.Default.Bolt, contentDescription = null)
                                     },
                                     trailingIcon = {
-                                        Switch(
+                                        SettingsSwitch(
                                             checked = fastModeOn,
                                             onCheckedChange = { viewModel.setFastModeEnabled(it) },
                                         )
@@ -2754,7 +3079,7 @@ fun ChatScreen(
                                     Icon(Icons.Default.Compress, contentDescription = null)
                                 },
                                 trailingIcon = {
-                                    Switch(
+                                    SettingsSwitch(
                                         checked = autoCompactOn,
                                         onCheckedChange = { viewModel.setAutoCompactEnabled(it) },
                                     )
@@ -2815,11 +3140,15 @@ fun ChatScreen(
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
+        // [T-android-scroll-fab-content-inset] The chat pane's own width, used
+        // below to inset the scroll buttons to the capped content column.
+        var chatPaneWidthPx by remember { mutableStateOf(0) }
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .imePadding(),
+                .imePadding()
+                .onGloballyPositioned { chatPaneWidthPx = it.size.width },
         ) {
         Column(
             modifier = Modifier.fillMaxSize(),
@@ -2833,6 +3162,10 @@ fun ChatScreen(
             // keystroke. [T-android-composer-input-blocked-while-streaming]
             LaunchedEffect(isUserDragging) {
                 if (isUserDragging) {
+                    // Not releaseComposerAfterSend(): this is scroll-to-dismiss,
+                    // a direct request to get the keyboard out of the way, and
+                    // it must obey even with a hardware keyboard attached (the
+                    // user may be scrolling back to read something).
                     keyboardController?.hide()
                     focusManager.clearFocus()
                 }
@@ -3338,6 +3671,15 @@ fun ChatScreen(
                 DisposableEffect(selectionReader) {
                     onDispose { selectionReader.shutdown() }
                 }
+                // [T-android-readaloud-stop-stale] A reply the user asked to be
+                // read aloud keeps playing while the next turn is being
+                // generated — desirable during thinking, but once the new reply
+                // starts producing text the stale audio must yield or the two
+                // overlap. The ViewModel signals on the first text delta; the
+                // player is screen-scoped, so the stop happens here.
+                LaunchedEffect(viewModel, selectionReader) {
+                    viewModel.stopStaleReadAloud.collect { selectionReader.stop() }
+                }
                 val markdownToolbar = remember(context, messageBounds, viewModel, inputFocusRequester, keyboardController, selectionController, selectionReader) {
                     MinisMarkdownTextToolbar(
                         context = context,
@@ -3353,6 +3695,10 @@ fun ChatScreen(
                             keyboardController?.show()
                         },
                         onReadAloud = { snippet -> selectionReader.speak(snippet) },
+                        // [T-android-readaloud-selection-vs-reply] Whole-reply
+                        // replay, hidden while streaming via isStreamingNow.
+                        onReadFromStart = { fullText -> selectionReader.speak(fullText) },
+                        isStreamingNow = { viewModel.isStreaming.value },
                         selectionController = selectionController,
                     )
                 }
@@ -3431,6 +3777,21 @@ fun ChatScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
+                        // [T-android-chat-max-content-width] Cap the reading
+                        // measure on a wide window, mirroring iOS
+                        // AIChatView.maxContentWidth (900pt when the horizontal
+                        // size class is regular, uncapped when compact). Without
+                        // it, a tablet stretches every bubble and code block the
+                        // full pane width and lines get too long to track.
+                        // Applied to the LazyColumn rather than to each row so
+                        // messages, tool cards and dividers all share one
+                        // measure and stay vertically aligned.
+                        // `wrapContentWidth` centres the capped column inside
+                        // the pane. `align` is unavailable here — the enclosing
+                        // AlwaysStretchOverscrollBox passes a plain lambda, not
+                        // a BoxScope.
+                        .wrapContentWidth(Alignment.CenterHorizontally)
+                        .widthIn(max = CHAT_MAX_CONTENT_WIDTH)
                         .padding(horizontal = 16.dp)
                         .onGloballyPositioned {
                             listRootCoords = it
@@ -3505,6 +3866,18 @@ fun ChatScreen(
                         .lastOrNull { it.role == "assistant" }
                         ?.error
                         ?.isNotBlank() == true
+                    // [T-android-compact-progress] Live compaction status, so a
+                    // long-running compact reads as "working" rather than
+                    // "hung". Sits above the resume banner because the two are
+                    // mutually exclusive in practice (compaction blocks sends).
+                    compactProgress?.let { progress ->
+                        item(key = "__compact_progress__", contentType = "compact_progress") {
+                            CompactProgressIndicator(
+                                progress = progress,
+                                onCancel = { viewModel.cancelCompact() },
+                            )
+                        }
+                    }
                     if (canResume && !isStreaming && error == null && !lastAssistantHasError) {
                         item(key = "__resume_banner__", contentType = "resume_banner") {
                             ResumeBanner(onResume = {
@@ -3663,6 +4036,15 @@ fun ChatScreen(
                                         tracedScrollToItem("RETRY-FROM-MSG", 0, 0)
                                     }
                                     safeMutate { viewModel.retryFromMessage(item.message.id) }
+                                }),
+                                // [T-android-delete-from-here] Gated while
+                                // streaming for the same reason as Retry:
+                                // truncating rows under a live agent loop
+                                // leaves agentHistory describing messages that
+                                // no longer exist. Opens a confirmation rather
+                                // than cutting straight away — there is no undo.
+                                onDeleteFromHere = if (isStreaming) null else ({
+                                    deleteFromHereTargetId = item.message.id
                                 }),
                                 // T187: long-press → Edit pulls the user message
                                 // text into the composer; the next send truncates
@@ -3959,6 +4341,21 @@ fun ChatScreen(
                         // through the same screen-scoped lazy player the
                         // Compose-SelectionContainer toolbar uses.
                         onReadAloud = { snippet -> selectionReader.speak(snippet) },
+                        // [T-android-readaloud-selection-vs-reply] Replay the
+                        // whole message the selection belongs to.
+                        //
+                        // Suppressed while a reply is streaming, matching iOS
+                        // (CollectionViewMessageListV3.swift:328 — "whole-reply
+                        // replay is suppressed while this reply is still
+                        // streaming"). Reading a half-arrived answer from the
+                        // start would narrate a text that is still growing, and
+                        // the user would hear it stop mid-thought. "Read
+                        // Selection" stays available throughout, because a
+                        // range the user could select is a range that already
+                        // exists.
+                        onReadFromStart = if (isStreaming) null else {
+                            { fullText -> selectionReader.speak(fullText) }
+                        },
                     ),
                 )
                 // iOS-style selection handle dots, one at each endpoint.
@@ -3998,6 +4395,25 @@ fun ChatScreen(
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
+                            // [T-android-chat-max-content-width] The tool status
+                            // bar is part of the conversation column, so it
+                            // takes the same cap as the message list and the
+                            // composer. Without it the bar alone spanned the
+                            // full pane while everything above and below it was
+                            // capped, so on a tablet it visibly overhung both.
+                            //
+                            // ORDER MATTERS: widthIn must come BEFORE
+                            // fillMaxWidth. fillMaxWidth pins the incoming
+                            // MIN width to the full pane as well as the max, so
+                            // a widthIn placed after it is raised back up by
+                            // that min and does nothing — which is exactly how
+                            // the first attempt at this failed. Declared first,
+                            // widthIn narrows the constraint and fillMaxWidth
+                            // then fills the already-narrowed one.
+                            //
+                            // BottomCenter on the parent centres the result, so
+                            // no extra alignment is needed.
+                            .widthIn(max = CHAT_MAX_CONTENT_WIDTH)
                             .fillMaxWidth()
                             .onGloballyPositioned { toolBarHeightPx = it.size.height }
                             .padding(horizontal = 12.dp)
@@ -4083,6 +4499,24 @@ fun ChatScreen(
                     )
                 }
 
+                // [T-android-scroll-fab-content-inset] Keep the two scroll
+                // buttons on the conversation's right edge, not the pane's.
+                //
+                // They are BottomEnd-aligned in the same Box as the message
+                // list, so a fixed end padding pins them to whatever the pane
+                // happens to be. Once the content gained a 900dp cap and
+                // centred itself, that left them stranded far outside the text
+                // on a tablet. Adding back half the leftover width puts them on
+                // the column's edge instead, so they track it at any pane
+                // width.
+                //
+                // Zero on a phone: the pane is narrower than the cap, leftover
+                // is 0, and the padding stays the original 12dp.
+                val fabEndInset = with(LocalDensity.current) {
+                    val leftover = chatPaneWidthPx.toDp() - CHAT_MAX_CONTENT_WIDTH
+                    if (leftover > 0.dp) leftover / 2 else 0.dp
+                }
+
                 // Scroll-to-bottom FAB (iOS: circle chevron.down, bottom-right)
                 // T138 phase 2 v3: show on user-scroll intent, not transient
                 // layout state. Otherwise the FAB flickers whenever multi-tool
@@ -4125,7 +4559,7 @@ fun ChatScreen(
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(end = 12.dp, bottom = upBaseBottom + 46.dp)
+                            .padding(end = 12.dp + fabEndInset, bottom = upBaseBottom + 46.dp)
                             .shadow(4.dp, CircleShape)
                             .size(36.dp),
                         colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
@@ -4177,7 +4611,7 @@ fun ChatScreen(
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(end = 12.dp, bottom = fabBottomPadding)
+                            .padding(end = 12.dp + fabEndInset, bottom = fabBottomPadding)
                             .shadow(4.dp, CircleShape)
                             .size(36.dp),
                         colors = androidx.compose.material3.IconButtonDefaults.filledIconButtonColors(
@@ -4220,10 +4654,35 @@ fun ChatScreen(
                 )
             }
 
+            // [T-android-slash-popup-width] The composer's laid-out width, read
+            // back by the slash / mention popups below so they line up with it.
+            var composerWidthPx by remember { mutableStateOf(0) }
+
             // ─── Input area (iOS-style: rounded box with text + buttons below) ───
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // [T-android-chat-max-content-width] Same cap and centring
+                    // as the message list, so the composer stays aligned with
+                    // the conversation instead of spanning a wide pane on its
+                    // own. iOS applies maxContentWidth to both for this reason
+                    // (AIChatView: the ComposerSurface and the list share it).
+                    .wrapContentWidth(Alignment.CenterHorizontally)
+                    .widthIn(max = CHAT_MAX_CONTENT_WIDTH)
+                    // [T-android-slash-popup-width] Publish the composer's real
+                    // laid-out width so the slash / mention popups can match it.
+                    // A Popup is a separate window: `fillMaxWidth` inside one
+                    // fills the WINDOW, not the anchor, so without this the menu
+                    // spans the whole tablet — starting under the session list
+                    // and running past the composer's right edge.
+                    //
+                    // MUST come AFTER widthIn/wrapContentWidth. A modifier
+                    // measures the node as constrained by the modifiers BEFORE
+                    // it, so placed above the cap this reported the full pane
+                    // width and the popup faithfully matched the wrong number —
+                    // which is exactly how the first attempt at this fix still
+                    // looked broken.
+                    .onGloballyPositioned { composerWidthPx = it.size.width }
                     .navigationBarsPadding()
                     .padding(horizontal = 12.dp)
                     .padding(top = 2.dp, bottom = 8.dp),
@@ -4299,7 +4758,23 @@ fun ChatScreen(
                         val slashListState = androidx.compose.foundation.lazy.rememberLazyListState()
                         Box(
                             modifier = Modifier
-                                .fillMaxWidth()
+                                // [T-android-slash-popup-width] Match the
+                                // composer, not the window. A Popup is its own
+                                // window, so fillMaxWidth here filled the whole
+                                // tablet; the menu began under the session list
+                                // and overhung the composer's right edge. Fall
+                                // back to fillMaxWidth only until the first
+                                // measurement arrives (width 0 would collapse
+                                // the panel on the very first frame).
+                                .then(
+                                    if (composerWidthPx > 0) {
+                                        Modifier.width(
+                                            with(LocalDensity.current) { composerWidthPx.toDp() },
+                                        )
+                                    } else {
+                                        Modifier.fillMaxWidth()
+                                    },
+                                )
                                 .padding(horizontal = 12.dp)
                                 // T240: keep a thin visible border instead of the
                                 // diffuse 8dp halo that bled out past the panel edge.
@@ -4311,7 +4786,10 @@ fun ChatScreen(
                                 state = slashListState,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(SLASH_PICKER_FIXED_HEIGHT)
+                                    // [T-android-slash-picker-fontscale] Defaults
+                                    // match this list's own row (14sp/11sp text,
+                                    // 7dp padding, 18dp icon).
+                                    .height(slashPickerHeight())
                                     .verticalScrollbar(slashListState),
                             ) {
                             itemsIndexed(filteredSlashCommands, key = { _, c -> c.id }) { index, cmd ->
@@ -4473,7 +4951,18 @@ fun ChatScreen(
                     ) {
                         Column(
                             modifier = Modifier
-                                .fillMaxWidth()
+                                // [T-android-slash-popup-width] Same as the
+                                // slash menu — match the composer, not the
+                                // popup's own window.
+                                .then(
+                                    if (composerWidthPx > 0) {
+                                        Modifier.width(
+                                            with(LocalDensity.current) { composerWidthPx.toDp() },
+                                        )
+                                    } else {
+                                        Modifier.fillMaxWidth()
+                                    },
+                                )
                                 .padding(horizontal = 12.dp)
                                 .shadow(elevation = 8.dp, shape = RoundedCornerShape(10.dp))
                                 .background(ChatColors.inputBg, RoundedCornerShape(10.dp))
@@ -4523,7 +5012,20 @@ fun ChatScreen(
                                     state = mentionListState,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(SLASH_PICKER_FIXED_HEIGHT)
+                                        // [T-android-slash-picker-fontscale] Same
+                                        // clipping applies here — this list shares
+                                        // the band height but has its OWN row
+                                        // metrics (13sp/11sp, 8dp padding, 16dp
+                                        // icon), so it passes them rather than
+                                        // inheriting the slash row's.
+                                        .height(
+                                            slashPickerHeight(
+                                                titleSp = 13.sp,
+                                                subtitleSp = 11.sp,
+                                                verticalPadding = 8.dp,
+                                                iconSize = 16.dp,
+                                            ),
+                                        )
                                         .verticalScrollbar(mentionListState),
                                 ) {
                                     itemsIndexed(mentionEntries, key = { _, e -> e.linuxPath }) { i, entry ->
@@ -4831,6 +5333,49 @@ fun ChatScreen(
                         }
                     }
                     // Attachment thumbnails inside the box (iOS: 64×64 squares)
+                    // [T-android-paste-placeholder] One chip per folded paste,
+                    // above the attachment row. Same 12dp gutter so the two
+                    // rows share the composer's left edge.
+                    if (pastedTexts.isNotEmpty()) {
+                        LazyRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            items(pastedTexts, key = { it.id }) { pasted ->
+                                PastedTextChip(
+                                    pasted = pasted,
+                                    onRemove = {
+                                        // Remove the marker from the composer
+                                        // in the SAME edit that drops the
+                                        // buffer entry, so the two can never
+                                        // disagree. Anchored on the exact
+                                        // literal, so neighbouring text and
+                                        // other ids are untouched — deleting
+                                        // #2 cannot disturb #20, because the
+                                        // trailing ']' makes the match exact.
+                                        val marker = pasted.placeholder
+                                        val cur = inputFieldValue.text
+                                        val at = cur.indexOf(marker)
+                                        if (at >= 0) {
+                                            val stripped =
+                                                cur.substring(0, at) +
+                                                    cur.substring(at + marker.length)
+                                            inputFieldValue =
+                                                androidx.compose.ui.text.input.TextFieldValue(
+                                                    text = stripped,
+                                                    selection =
+                                                        androidx.compose.ui.text.TextRange(at),
+                                                )
+                                            viewModel.setInputText(stripped)
+                                        }
+                                        viewModel.removePastedText(pasted.id)
+                                    },
+                                )
+                            }
+                        }
+                    }
                     if (attachments.isNotEmpty()) {
                         LazyRow(
                             modifier = Modifier
@@ -5042,6 +5587,24 @@ fun ChatScreen(
                     // Text field (iOS: placeholder "Message Minis", no border)
                     run {
                         val interactionSource = remember { MutableInteractionSource() }
+                        // [T-android-composer-placeholder-rotation] Which entry
+                        // of the placeholder pool is showing, and whether the
+                        // composer has ever been focused in this session.
+                        //
+                        // rememberSaveable, not remember: a config change
+                        // (rotation, dark-mode toggle, font-scale change)
+                        // otherwise resets the index to the default AND clears
+                        // the first-focus flag, so the next tap would re-run
+                        // first-focus logic and the hint the user was reading
+                        // would snap back.
+                        var placeholderIndex by rememberSaveable {
+                            mutableIntStateOf(ComposerPlaceholderRotation.DEFAULT_INDEX)
+                        }
+                        var composerHasFocusedBefore by rememberSaveable { mutableStateOf(false) }
+                        // TalkBack pins the placeholder — see the picker's
+                        // accessibility note. Read live rather than cached so
+                        // enabling the screen reader mid-session takes effect.
+                        val screenReaderEnabled = rememberScreenReaderEnabled()
                         val mergedTextStyle = MaterialTheme.typography.bodyMedium.copy(
                             fontSize = 16.5.sp * chatInputFontScale,
                             color = MaterialTheme.colorScheme.onSurface,
@@ -5072,8 +5635,7 @@ fun ChatScreen(
                             // turn. Mirrors iOS performSend().
                             if (viewModel.tryExecuteInputAsSlashCommand(inputText)) {
                                 viewModel.setInputText("")
-                                keyboardController?.hide()
-                                focusManager.clearFocus()
+                                releaseComposerAfterSend()
                                 return@handler true
                             }
                             // T160: snapshot → clear state + IME →
@@ -5085,8 +5647,7 @@ fun ChatScreen(
                             val toSend = inputText
                             lastSendTimeMs = System.currentTimeMillis()
                             viewModel.setInputText("")
-                            keyboardController?.hide()
-                            focusManager.clearFocus()
+                            releaseComposerAfterSend()
                             viewModel.sendMessage(toSend)
                             noteSendForInputModePref()
                             userScrolledAway = false
@@ -5165,10 +5726,67 @@ fun ChatScreen(
                                         }
                                     }
                                 }
-                                inputFieldValue = tfv
-                                if (inputText != tfv.text) {
-                                    viewModel.setInputText(tfv.text)
-                                    viewModel.updateSlashMenuState(tfv.text)
+                                // [T-android-paste-placeholder] Fold a large
+                                // single-shot insertion into a `[Pasted#N]`
+                                // marker before anything else sees it.
+                                //
+                                // Detected by length jump rather than by
+                                // intercepting paste: Compose's BasicTextField
+                                // exposes no paste hook, and the alternative
+                                // (swapping in an AndroidView/EditText to
+                                // override onTextContextMenuItem) would put the
+                                // @-mention and slash-command logic below onto a
+                                // different text pipeline. A jump test costs
+                                // nothing and covers every source — long-press
+                                // Paste, hardware Ctrl+V, and IME bulk commit —
+                                // because all three surface as one big value
+                                // change.
+                                //
+                                // Placed BEFORE `inputFieldValue = tfv` and the
+                                // mention/slash updates on purpose: those must
+                                // see the SHORT text. Letting them run on the
+                                // raw paste first would make the @-picker scan a
+                                // 50 KB string and could pop the slash menu on a
+                                // '/' buried in pasted content.
+                                // [T-android-paste-oversize] The size split
+                                // lives INSIDE the stash lambda rather than
+                                // beside this call, because foldLongPasteIfNeeded
+                                // is what locates the inserted run — branching
+                                // outside would mean re-deriving that prefix/
+                                // suffix diff and keeping two copies of it in
+                                // step.
+                                //
+                                // Returning "" for the file case is what removes
+                                // the pasted text from the field entirely: the
+                                // fold substitutes the marker for the run, so an
+                                // empty marker deletes it. That is the intent —
+                                // the content is now a chip in the attachment
+                                // row, and leaving a stray literal behind would
+                                // send it twice.
+                                //
+                                // If the write fails the text is stashed as an
+                                // ordinary placeholder instead, so an unwritable
+                                // cache degrades to the old behaviour rather
+                                // than losing what the user pasted.
+                                val value = foldLongPasteIfNeeded(
+                                    old = inputFieldValue,
+                                    new = tfv,
+                                    stash = { pasted ->
+                                        if (pasted.length > PASTE_AS_FILE_THRESHOLD) {
+                                            if (viewModel.stashPastedTextAsFile(pasted) != null) {
+                                                ""
+                                            } else {
+                                                viewModel.stashPastedText(pasted)
+                                            }
+                                        } else {
+                                            viewModel.stashPastedText(pasted)
+                                        }
+                                    },
+                                )
+                                inputFieldValue = value
+                                if (inputText != value.text) {
+                                    viewModel.setInputText(value.text)
+                                    viewModel.updateSlashMenuState(value.text)
                                 }
                                 // Drive the @ mention picker on every keystroke
                                 // and selection change — caret position alone
@@ -5177,15 +5795,35 @@ fun ChatScreen(
                                 // the slash-menu-priority case and any
                                 // non-mention caret state.
                                 viewModel.updateMentionMenuState(
-                                    text = tfv.text,
-                                    caret = tfv.selection.end,
+                                    text = value.text,
+                                    caret = value.selection.end,
                                 )
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 25.dp)
                                 .focusRequester(inputFocusRequester)
-                                .onFocusChanged { inputFocused = it.isFocused }
+                                .onFocusChanged {
+                                    // [T-android-composer-placeholder-rotation]
+                                    // Advance the placeholder on the focus-GAIN
+                                    // edge only. Guarding on the previous value
+                                    // matters: onFocusChanged also fires on
+                                    // focus loss and on recompositions that
+                                    // re-report the same state, and rotating on
+                                    // those would swap the hint while the user
+                                    // is typing or dismissing the keyboard.
+                                    if (it.isFocused && !inputFocused) {
+                                        placeholderIndex = ComposerPlaceholderRotation.nextIndex(
+                                            current = placeholderIndex,
+                                            hasFocusedBefore = composerHasFocusedBefore,
+                                            sessionHasMessages = messages.isNotEmpty(),
+                                            screenReaderOn = screenReaderEnabled,
+                                            randomIndex = { bound -> kotlin.random.Random.nextInt(bound) },
+                                        )
+                                        composerHasFocusedBefore = true
+                                    }
+                                    inputFocused = it.isFocused
+                                }
                                 .onKeyEvent { event ->
                                     // T-at-filepicker-keyboard: while the @-mention
                                     // menu is open, hardware Up/Down navigates the
@@ -5193,6 +5831,43 @@ fun ChatScreen(
                                     // Falls through to the normal Return-send path
                                     // when there are no mention candidates so the
                                     // user isn't stuck if the menu is empty.
+                                    // [T-android-slash-tab-complete] Tab fills in
+                                    // the highlighted slash command — the shell
+                                    // convention, and the reason a user types
+                                    // "/andr" then reaches for Tab rather than
+                                    // the mouse.
+                                    //
+                                    // The slash menu has no selection cursor
+                                    // (unlike the mention menu, which tracks one
+                                    // for its arrow keys), so "highlighted" is
+                                    // the first row — the same one the list is
+                                    // already scrolled to and the one the user
+                                    // is looking at.
+                                    //
+                                    // Claimed BEFORE the mention block and the
+                                    // Enter handling below so Tab never falls
+                                    // through to focus traversal, which would
+                                    // move focus out of the composer and leave
+                                    // the menu open behind it.
+                                    if (showSlashMenu &&
+                                        event.type == KeyEventType.KeyDown &&
+                                        event.key == Key.Tab
+                                    ) {
+                                        val first = filteredSlashCommands.firstOrNull()
+                                        if (first != null) {
+                                            val newText = viewModel.executeSlashCommand(first, inputText)
+                                            viewModel.setInputText(newText)
+                                            // Caret to the end: executeSlashCommand
+                                            // leaves "/<name> " for a Skill, and the
+                                            // point of completing is to keep typing
+                                            // arguments right after it.
+                                            inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
+                                                text = newText,
+                                                selection = androidx.compose.ui.text.TextRange(newText.length),
+                                            )
+                                            return@onKeyEvent true
+                                        }
+                                    }
                                     if (showMentionMenu && event.type == KeyEventType.KeyDown) {
                                         when (event.key) {
                                             Key.DirectionUp -> {
@@ -5203,7 +5878,13 @@ fun ChatScreen(
                                                 viewModel.mentionMenuDown()
                                                 return@onKeyEvent true
                                             }
-                                            Key.Enter -> {
+                                            // [T-android-slash-tab-complete] Tab
+                                            // completes here too, so the two
+                                            // menus answer the same key the same
+                                            // way. This one HAS a selection
+                                            // cursor, so Tab takes the selected
+                                            // row rather than the first.
+                                            Key.Enter, Key.Tab -> {
                                                 val result = viewModel.executeSelectedMention(
                                                     currentText = inputFieldValue.text,
                                                     currentCaret = inputFieldValue.selection.end,
@@ -5219,6 +5900,15 @@ fun ChatScreen(
                                                 }
                                                 // Menu open but no candidates → fall
                                                 // through to Return-send / newline.
+                                                //
+                                                // [T-android-slash-tab-complete]
+                                                // ...but only for Enter. Tab must
+                                                // still be swallowed: falling
+                                                // through would hand it to the
+                                                // Enter handling below and SEND
+                                                // the message, which is not
+                                                // remotely what Tab means.
+                                                if (event.key == Key.Tab) return@onKeyEvent true
                                             }
                                             Key.Escape -> {
                                                 viewModel.dismissMentionMenu()
@@ -5287,16 +5977,25 @@ fun ChatScreen(
                                         // here live.
                                         val soulName by com.openminis.app.agent.SoulStore
                                             .cachedMetadata.collectAsState()
-                                        Text(
-                                            stringResource(
-                                                R.string.chat_input_placeholder,
-                                                soulName.name,
-                                            ),
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
-                                            fontSize = 16.5.sp * chatInputFontScale,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                        // [T-android-composer-placeholder-rotation]
+                                        // Crossfade between hints. Reduce-motion
+                                        // (animator scale 0) skips the fade and
+                                        // swaps instantly — matching the iOS
+                                        // Reduce Motion branch.
+                                        val fadeMs = if (animationsDisabled(context)) 0 else 220
+                                        Crossfade(
+                                            targetState = placeholderIndex,
+                                            animationSpec = tween(durationMillis = fadeMs),
+                                            label = "composerPlaceholder",
+                                        ) { idx ->
+                                            Text(
+                                                composerPlaceholderText(idx, soulName.name),
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
+                                                fontSize = 16.5.sp * chatInputFontScale,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
                                     },
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedBorderColor = Color.Transparent,
@@ -6010,6 +6709,33 @@ fun ChatScreen(
                         viewModel.clearChat()
                         viewModel.setInputText("")
                         showClearChatDialog = false
+                    },
+                )
+            }
+            // [T-android-delete-from-here] Confirm before truncating. The cut
+            // removes the tapped message AND everything after it with no undo,
+            // so the body states how many messages that actually is — "delete
+            // from here" alone doesn't convey whether it's one message or
+            // forty. Counting from the live list keeps it accurate even if the
+            // conversation grew while the menu was open.
+            deleteFromHereTargetId?.let { targetId ->
+                val affected = remember(targetId, messages) {
+                    val idx = messages.indexOfFirst { it.id == targetId }
+                    if (idx < 0) 0 else messages.size - idx
+                }
+                MinisAlertDialog(
+                    onDismissRequest = { deleteFromHereTargetId = null },
+                    title = stringResource(R.string.chat_longpress_delete_from_here),
+                    text = pluralStringResource(
+                        R.plurals.chat_delete_from_here_dialog_body,
+                        affected,
+                        affected,
+                    ),
+                    confirmText = stringResource(R.string.chat_delete_from_here_confirm),
+                    isDestructive = true,
+                    onConfirm = {
+                        viewModel.deleteFromMessage(targetId)
+                        deleteFromHereTargetId = null
                     },
                 )
             }

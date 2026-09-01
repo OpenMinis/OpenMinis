@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -33,6 +32,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.logging.AppLogger
 import java.io.File
 
@@ -126,7 +126,7 @@ internal fun LargeContentBadge(
                 modifier = Modifier.padding(end = 8.dp),
             )
 
-            TextButton(
+            MinisTextButton(
                 onClick = {
                     AppLogger.info(
                         "LargeContentGuard",
@@ -148,7 +148,7 @@ internal fun LargeContentBadge(
                 )
             }
 
-            TextButton(
+            MinisTextButton(
                 onClick = {
                     val ok = exportLargeContentToFile(context, content, stableKey)
                     Toast.makeText(

@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTask
@@ -241,7 +242,7 @@ private fun ScheduledTaskRow(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Switch(checked = task.enabled, onCheckedChange = onToggle)
+            SettingsSwitch(checked = task.enabled, onCheckedChange = onToggle)
         }
 
         // [T-android-scheduled-tasks-run-records] Long-press menu: Edit / Run

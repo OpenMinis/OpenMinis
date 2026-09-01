@@ -111,9 +111,16 @@ class WebViewHolder(
                 }
                 // T134: intent:// / market:// / tel: / mailto: get routed
                 // out instead of trying to load as a page.
+                // [T-android-user-initiated-scheme-dispatch] This WebView is
+                // on screen and the user tapped the link inside it.
                 return com.openminis.app.ui.browser
                     .BrowserExternalSchemeHandler
-                    .handle(view.context, request.url)
+                    .handle(
+                        view.context,
+                        request.url,
+                        com.openminis.app.ui.browser.BrowserExternalSchemeHandler
+                            .Origin.USER_INITIATED,
+                    )
             }
 
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
@@ -156,6 +163,96 @@ class WebViewHolder(
 
             override fun onReceivedIcon(view: WebView?, icon: Bitmap?) {
                 if (icon != null) pageFavicon = icon
+            }
+
+            // [T-android-js-dialogs-256] Show real alert/confirm/prompt dialogs.
+            //
+            // WebChromeClient's defaults return false, which makes WebView
+            // dismiss the dialog itself and hand the page a canned answer
+            // (`false` / `null`) with nothing shown — so a page's alert() simply
+            // vanished and confirm() silently took the cancel branch. This is
+            // the user-facing preview, where a human IS present, so the fix is
+            // to show the dialog and block the page on their answer. The agent
+            // browser does the opposite by design; see BrowserUseManager.
+            //
+            // The dialog context must come from `view?.context`, NOT the
+            // holder's stored context: the WebView is constructed with the
+            // Application context (see the class doc — it has to outlive any one
+            // composition), and an Application context has no window token, so
+            // AlertDialog.Builder(appContext) throws at show(). `view.context`
+            // is the Activity once attached, which is always the case by the
+            // time a page can run script.
+            //
+            // Every path must settle `result` exactly once: leaving a JsResult
+            // unanswered wedges the page's JS thread forever. Hence the
+            // setOnCancelListener on each (back button / tap-outside) and the
+            // cancel() fallback when no Activity context is available.
+
+            override fun onJsAlert(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                result: android.webkit.JsResult?,
+            ): Boolean {
+                val ctx = view?.context ?: return false.also { result?.cancel() }
+                if (ctx !is android.app.Activity) { result?.cancel(); return true }
+                android.app.AlertDialog.Builder(ctx)
+                    .setMessage(message.orEmpty())
+                    .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
+            }
+
+            override fun onJsConfirm(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                result: android.webkit.JsResult?,
+            ): Boolean {
+                val ctx = view?.context ?: return false.also { result?.cancel() }
+                if (ctx !is android.app.Activity) { result?.cancel(); return true }
+                android.app.AlertDialog.Builder(ctx)
+                    .setMessage(message.orEmpty())
+                    .setPositiveButton(android.R.string.ok) { _, _ -> result?.confirm() }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
+            }
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: android.webkit.JsPromptResult?,
+            ): Boolean {
+                val ctx = view?.context ?: return false.also { result?.cancel() }
+                if (ctx !is android.app.Activity) { result?.cancel(); return true }
+                val input = android.widget.EditText(ctx).apply {
+                    setText(defaultValue.orEmpty())
+                    setSelection(text.length)
+                }
+                // Inset the field so it doesn't sit flush against the dialog
+                // edges, matching the platform's own prompt styling.
+                val pad = (16 * ctx.resources.displayMetrics.density).toInt()
+                val wrapper = android.widget.FrameLayout(ctx).apply {
+                    setPadding(pad, pad / 2, pad, 0)
+                    addView(input)
+                }
+                android.app.AlertDialog.Builder(ctx)
+                    .setMessage(message.orEmpty())
+                    .setView(wrapper)
+                    // confirm() carries the typed text back to the page; a bare
+                    // confirm() would resolve prompt() to "" instead.
+                    .setPositiveButton(android.R.string.ok) { _, _ ->
+                        result?.confirm(input.text?.toString().orEmpty())
+                    }
+                    .setNegativeButton(android.R.string.cancel) { _, _ -> result?.cancel() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
             }
         }
         // T-htmlpreview-resize: sheet→fullscreen toggle, IME open/close,

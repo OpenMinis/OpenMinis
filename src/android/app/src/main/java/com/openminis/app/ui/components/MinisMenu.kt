@@ -9,7 +9,6 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -43,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.openminis.app.ui.theme.ChatColors
 
 /**
  * App-wide popup menu with a unified look: softer rounded corners, a lifted
@@ -71,7 +71,7 @@ fun MinisMenu(
     // in dark, a subtle shade in light) so the menu pops out — same fix already
     // validated on the text-selection toolbar (T-android-text-toolbar-dark-
     // visibility). The dark-mode `border` below adds the extra edge definition.
-    containerColor: Color = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.surfaceContainerHigh else Color.White,
+    containerColor: Color = if (ChatColors.isDark) MaterialTheme.colorScheme.surfaceContainerHigh else Color.White,
     tonalElevation: Dp = 3.dp,
     // [T-android-menu-launcher-shadow] Analyzed against the Pixel Launcher
     // long-press popup (screenshot sample): its shadow is a WIDE, very
@@ -86,7 +86,7 @@ fun MinisMenu(
     // Light mode now also gets a hairline (was null): with the launcher-style
     // soft halo replacing the old tight shadow, the popup's edge needs a
     // subtle line of its own to stay crisply bounded on light surfaces.
-    border: BorderStroke? = if (isSystemInDarkTheme()) {
+    border: BorderStroke? = if (ChatColors.isDark) {
         BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
     } else {
         BorderStroke(0.5.dp, Color.Black.copy(alpha = 0.05f))
@@ -213,7 +213,7 @@ fun MinisMenu(
  */
 @Composable
 fun MinisMenuDivider(modifier: Modifier = Modifier) {
-    val tint = if (isSystemInDarkTheme()) Color.White else Color.Black
+    val tint = if (ChatColors.isDark) Color.White else Color.Black
     HorizontalDivider(
         modifier = modifier.padding(horizontal = 14.dp, vertical = 4.dp),
         thickness = 1.dp,

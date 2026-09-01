@@ -237,6 +237,19 @@ object DebugMethodRegistry {
             example = ex("text" to "hello world"),
         ),
         MethodSpec(
+            name = "debug.setClipboard",
+            description = "Put text on the system clipboard from inside the app process, " +
+                "so `input keyevent PASTE` can trigger a REAL single-shot paste. " +
+                "debug.inputText types per character and therefore cannot exercise " +
+                "paste-detection logic.",
+            params = listOf(
+                ParamSpec("text", "string", required = true, description = "Text to place on the clipboard."),
+                ParamSpec("label", "string", required = false, default = "minis-debug", description = "ClipData label."),
+            ),
+            returns = "{ok, length, clipboardLength}",
+            example = ex("text" to "a long block of text"),
+        ),
+        MethodSpec(
             name = "debug.llmRequests",
             description = "Return captured LLM provider requests/responses for debugging.",
             params = listOf(

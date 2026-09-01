@@ -39,6 +39,8 @@ import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.PauseCircle
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.ui.platform.LocalConfiguration
+import android.content.res.Configuration
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -135,6 +137,22 @@ fun TerminalScreen(
     // the keyboard-toggle button in the accessory bar to deliberately invoke
     // the IME — that single user action handles both opening the keyboard
     // and (via the toggle) closing it, and a single back press now exits.
+
+    // [T-android-terminal-enter-keeps-focus] ...but DO auto-focus when a
+    // hardware keyboard is attached.
+    //
+    // Every objection in the note above is about the soft IME: it pops up
+    // unsolicited over the output, and it fights the back gesture. With a
+    // physical keyboard there is no IME to pop — focus is invisible — so the
+    // only thing auto-focus changes is that the keys the user presses arrive
+    // somewhere. Without it, opening the terminal and typing does nothing at
+    // all, with no on-screen hint as to why.
+    val cfg = LocalConfiguration.current
+    val hasHardwareKeyboard = cfg.keyboard == Configuration.KEYBOARD_QWERTY &&
+        cfg.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO
+    LaunchedEffect(hasHardwareKeyboard) {
+        if (hasHardwareKeyboard) inputController.requestFocus()
+    }
 
     DisposableEffect(Unit) {
         onDispose { terminalSession.stop() }

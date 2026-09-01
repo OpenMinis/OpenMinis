@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -12,6 +13,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
@@ -37,10 +39,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.IntOffset
@@ -73,6 +78,33 @@ import kotlin.math.abs
  * The handler intentionally does NOT consume the initial Down event: that
  * lets LazyColumn's flingable still receive scroll gestures that don't turn
  * into a long-press. Only once the long-press fires do we begin consuming.
+ *
+ * ## Mouse (external pointing device)
+ *
+ * [T-android-mouse-text-selection] A mouse takes a DIFFERENT path through
+ * this same handler, because the touch contract above is wrong for it in
+ * both directions:
+ *
+ *  - **Press-drag selects immediately — no long-press wait.** With a finger,
+ *    an immediate drag has to mean "scroll", because the finger is also the
+ *    only way to scroll and the gesture is ambiguous at the moment it starts.
+ *    A mouse has a wheel, so drag is unambiguous and the long-press
+ *    requirement is pure friction: it makes the user hold still for 400ms
+ *    before a gesture whose intent was already clear.
+ *  - **Drag selects CHARACTERS, not words.** [beginSelectionWord] exists
+ *    because a fingertip covers several characters and cannot express a
+ *    precise offset. A mouse cursor is a single pixel, so snapping to word
+ *    bounds would override an intent the user CAN state exactly. Word
+ *    granularity stays reachable through double-click.
+ *  - **Right-click opens the menu**, at the cursor, without disturbing an
+ *    existing selection — the platform convention on every desktop OS, and
+ *    the only discoverable way to reach the actions when there is no
+ *    long-press.
+ *
+ * Detection is per-gesture (`down.type`), not a global mode, so a 2-in-1 with
+ * both a touchscreen and a trackpad behaves correctly under either input
+ * without any setting. Stylus deliberately keeps the TOUCH path: it shares
+ * the fingertip's imprecision and has no second button to open a menu with.
  */
 fun Modifier.minisTextKitSelectionGesture(
     controller: SelectionController,
@@ -86,10 +118,33 @@ fun Modifier.minisTextKitSelectionGesture(
     pointerInput(controller, listState, reverseLayout) {
     val longPressTimeoutMs = android.view.ViewConfiguration.getLongPressTimeout().toLong()
     val touchSlopPx = viewConfiguration.touchSlop
+    val doubleTapTimeoutMs = android.view.ViewConfiguration.getDoubleTapTimeout().toLong()
+    // Time of the last completed mouse click and where it landed, so the
+    // NEXT click can decide whether it is the second half of a double-click.
+    var lastMouseClickUptimeMs = 0L
+    var lastMouseClickPoint = Offset.Zero
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         val downLocal = down.position
         var lastWindowPoint = localToWindow(downLocal, rootCoordinates)
+
+        // ── Mouse: bypass the long-press contract entirely ───────────────
+        if (down.type == PointerType.Mouse) {
+            val handled = handleMouseGesture(
+                controller = controller,
+                down = down,
+                downLocal = downLocal,
+                downWindowPoint = lastWindowPoint,
+                rootCoordinates = rootCoordinates,
+                touchSlopPx = touchSlopPx,
+                doubleTapTimeoutMs = doubleTapTimeoutMs,
+                lastClickUptimeMs = lastMouseClickUptimeMs,
+                lastClickPoint = lastMouseClickPoint,
+            )
+            lastMouseClickUptimeMs = handled.clickUptimeMs
+            lastMouseClickPoint = handled.clickPoint
+            return@awaitEachGesture
+        }
 
         // ── Handle-drag short-circuit ────────────────────────────────────
         // If a selection already exists and the user pressed within reach
@@ -137,6 +192,7 @@ fun Modifier.minisTextKitSelectionGesture(
         // press still flows through to other gesture handlers (e.g. the
         // user bubble's own long-press → action menu).
         val hit = controller.hitTestStrict(lastWindowPoint) ?: return@awaitEachGesture
+        controller.selectionFromMouse.value = false
         controller.beginSelectionWord(hit)
         // Fired HERE, not at the long-press timeout: the strict hit-test above
         // returns null over a non-selectable region, and buzzing before it
@@ -187,6 +243,170 @@ fun Modifier.minisTextKitSelectionGesture(
             controller.dragIntent.value = null
         }
     }
+    }
+}
+
+/**
+ * What a completed mouse gesture leaves behind for the next one: the time and
+ * place of the click, so a following click can be recognised as a double.
+ * Both are zeroed when the gesture was not a plain click (a drag, or a
+ * right-click), which correctly prevents those from starting a double-click
+ * pair.
+ */
+private data class MouseGestureOutcome(
+    val clickUptimeMs: Long,
+    val clickPoint: Offset,
+)
+
+private val MOUSE_NO_CLICK = MouseGestureOutcome(0L, Offset.Zero)
+
+/**
+ * [T-android-mouse-text-selection] The mouse branch of
+ * [minisTextKitSelectionGesture]. See that function's docs for why mouse
+ * input does not go through the long-press contract.
+ *
+ * Recognises three gestures, decided in this order:
+ *
+ *  1. **Secondary button down** → open the action menu at the cursor. If the
+ *     cursor is inside an existing selection, that selection is KEPT (the
+ *     desktop convention: right-clicking a highlighted passage acts on the
+ *     passage). Otherwise the word under the cursor is selected first, so the
+ *     menu always has a subject and never appears over nothing.
+ *  2. **Primary press within the double-click window, near the previous
+ *     click** → select the word. This is the only route to word granularity
+ *     for a mouse, drag having been given character granularity.
+ *  3. **Primary press-and-drag** → character-precise range selection, live as
+ *     the cursor moves.
+ *
+ * A primary press that neither drags nor doubles simply clears the selection
+ * on release, matching the touch path's tap-to-dismiss.
+ *
+ * Returns the click bookkeeping the caller must carry into the next gesture.
+ */
+private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.handleMouseGesture(
+    controller: SelectionController,
+    down: androidx.compose.ui.input.pointer.PointerInputChange,
+    downLocal: Offset,
+    downWindowPoint: Offset,
+    rootCoordinates: () -> LayoutCoordinates?,
+    touchSlopPx: Float,
+    doubleTapTimeoutMs: Long,
+    lastClickUptimeMs: Long,
+    lastClickPoint: Offset,
+): MouseGestureOutcome {
+    // Any press dismisses a menu left open by a previous right-click, before
+    // that press is interpreted. The Popup itself cannot do this: it is
+    // non-focusable (so it never steals focus from the composer) and therefore
+    // sees no outside clicks. Dismissal is separate from clearing the
+    // selection — clicking away from the menu should retire the menu while
+    // leaving the highlight for the next right-click to act on.
+    controller.dismissContextMenu()
+
+    // ── 1. Right-click → context menu ───────────────────────────────────
+    // Read the button state from the event that delivered this DOWN rather
+    // than from the change itself: `buttons` lives on PointerEvent, and on
+    // a right-press the primary button is not down at all.
+    if (currentEvent.buttons.isSecondaryPressed) {
+        val hit = controller.hitTestStrict(downWindowPoint) ?: return MOUSE_NO_CLICK
+        // Keep an existing selection when the click lands inside it; the
+        // user is targeting what they already highlighted. Only when the
+        // click is outside (or there is nothing selected) do we select the
+        // word under the cursor to give the menu a subject.
+        if (!controller.selectionContains(hit)) {
+            controller.selectionFromMouse.value = true
+            controller.beginSelectionWord(hit)
+        }
+        controller.requestContextMenu(downWindowPoint)
+        down.consume()
+        // Swallow the rest of this gesture so the release does not fall
+        // through to the tap-clears-selection path and dismiss the menu we
+        // just opened.
+        consumeUntilRelease(down.id)
+        return MOUSE_NO_CLICK
+    }
+
+    // ── 2. Double-click → select the word ───────────────────────────────
+    val isDoubleClick = lastClickUptimeMs != 0L &&
+        (down.uptimeMillis - lastClickUptimeMs) <= doubleTapTimeoutMs &&
+        (downLocal - lastClickPoint).getDistance() <= touchSlopPx * 2
+    if (isDoubleClick) {
+        val hit = controller.hitTestStrict(downWindowPoint)
+        if (hit != null) {
+            controller.selectionFromMouse.value = true
+            controller.beginSelectionWord(hit)
+            down.consume()
+            consumeUntilRelease(down.id)
+            // Not a click for double-click purposes — otherwise a third
+            // click would pair with this one and re-select the word.
+            return MOUSE_NO_CLICK
+        }
+    }
+
+    // ── 3. Primary press-drag → character-precise selection ─────────────
+    // Do NOT consume the DOWN yet, and do not begin a selection: a press
+    // that never moves must remain available to whatever else wants it
+    // (link clicks, LazyColumn's own handling). Selection begins only once
+    // the cursor has actually travelled past slop.
+    var dragging = false
+    while (true) {
+        val ev = awaitPointerEvent(PointerEventPass.Initial)
+        val change = ev.changes.firstOrNull { it.id == down.id }
+            ?: return MOUSE_NO_CLICK
+        val windowPoint = localToWindow(change.position, rootCoordinates)
+
+        if (!change.pressed) {
+            if (dragging) {
+                controller.dragIntent.value = null
+                return MOUSE_NO_CLICK
+            }
+            // A plain click: clear any selection (same rule as a touch tap —
+            // strict hit-test, so clicking a user bubble or padding leaves an
+            // adjacent selection alone) and record it as a double-click
+            // candidate.
+            if (controller.selection.value != null &&
+                controller.hitTestStrict(windowPoint) != null
+            ) {
+                controller.clearSelection()
+            }
+            return MouseGestureOutcome(change.uptimeMillis, change.position)
+        }
+
+        if (!dragging) {
+            if ((change.position - downLocal).getDistance() < touchSlopPx) continue
+            // Anchor at the character under the ORIGINAL press, not the
+            // current position — the run the user meant to select starts
+            // where the button went down, and slop has since moved the
+            // cursor a few pixels away from it.
+            val anchor = controller.hitTestStrict(downWindowPoint)
+                ?: return MOUSE_NO_CLICK
+            controller.selectionFromMouse.value = true
+            controller.beginSelection(anchor)
+            dragging = true
+            down.consume()
+        }
+
+        controller.dragIntent.value = SelectionController.DragIntent(
+            point = windowPoint,
+            handle = SelectionController.Handle.End,
+        )
+        change.consume()
+    }
+}
+
+/**
+ * Swallow every remaining event of the gesture identified by [pointerId], up
+ * to and including the release. Used after a mouse gesture has already done
+ * its work (opened the menu, selected a word) so the trailing UP cannot be
+ * re-interpreted downstream as a fresh click.
+ */
+private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.consumeUntilRelease(
+    pointerId: androidx.compose.ui.input.pointer.PointerId,
+) {
+    while (true) {
+        val ev = awaitPointerEvent(PointerEventPass.Initial)
+        val change = ev.changes.firstOrNull { it.id == pointerId } ?: return
+        change.consume()
+        if (!change.pressed) return
     }
 }
 
@@ -391,6 +611,9 @@ fun MinisSelectionHandlesHost(
 ) {
     val sel by controller.selection
     if (sel == null) return
+    // [T-android-mouse-text-selection] No handle dots for a mouse selection —
+    // see SelectionController.selectionFromMouse.
+    if (controller.selectionFromMouse.value) return
     // Recompute handle anchors every frame so the Popups follow the
     // underlying shards as the LazyColumn scrolls. The shards' positions
     // change inside their parent's layout pass, which doesn't invalidate
@@ -642,10 +865,26 @@ data class SelectionToolbarActions(
     val onAddToInput: ((String) -> Unit)? = null,
     /**
      * [T-android-selection-readaloud] Speak the currently-selected plain text
-     * through Minis TTS. Null hides the button. Mirrors iOS's "Read Aloud /
-     * Read Selection" selection-menu action.
+     * through Minis TTS. Null hides the button. Mirrors iOS's "Read Selection".
      */
     val onReadAloud: ((String) -> Unit)? = null,
+    /**
+     * [T-android-readaloud-selection-vs-reply] Speak the WHOLE message that
+     * owns the selection, from its beginning — iOS's "Read from Start".
+     *
+     * Separate from [onReadAloud] because the two differ in scope, not in
+     * mechanism: one speaks the highlighted range, the other restarts the
+     * entire reply. Android previously offered only the first, under the
+     * ambiguous label "Read Aloud", so a user who wanted the reply narrated
+     * had to select the whole thing by hand.
+     *
+     * Receives the message's markdown source; the TTS layer sanitizes markdown
+     * on enqueue (VoiceTextSanitizer), which is the same contract the existing
+     * read-aloud paths rely on. Null hides the button — the caller passes null
+     * while the reply is still streaming, matching iOS, where replaying a
+     * half-arrived answer would narrate a truncated text.
+     */
+    val onReadFromStart: ((String) -> Unit)? = null,
 )
 
 @Composable
@@ -712,13 +951,27 @@ fun MinisSelectionToolbarHost(
             }
     }
     val anchorHandle = activeDragHandle ?: lastDraggedHandle.value
-    val rect = when (anchorHandle) {
+    // [T-android-mouse-text-selection] A right-click pins the menu to the
+    // cursor instead of to the selection. See SelectionController
+    // .contextMenuRequest for why the two anchors differ.
+    val menuPoint = controller.contextMenuRequest.value
+    val rect = if (menuPoint != null) {
+        androidx.compose.ui.geometry.Rect(
+            left = menuPoint.x,
+            top = menuPoint.y,
+            right = menuPoint.x,
+            bottom = menuPoint.y,
+        )
+    } else when (anchorHandle) {
         SelectionController.Handle.Start -> controller.draggedHandleLineRect(SelectionController.Handle.Start)
         SelectionController.Handle.End -> controller.draggedHandleLineRect(SelectionController.Handle.End)
         else -> null
     } ?: controller.visibleSelectionEndLineRect()
         ?: controller.visibleSelectionWindowRect()
-    if (rect != null && rect.width <= 0f && rect.height <= 0f) return
+    // A zero-size rect normally means "selection is off-screen", but the
+    // right-click anchor above is legitimately zero-size (a single point), so
+    // it must not be caught by that guard.
+    if (menuPoint == null && rect != null && rect.width <= 0f && rect.height <= 0f) return
     val anchor = remember(rect) {
         if (rect != null) IntRect(
             left = rect.left.toInt(),
@@ -733,15 +986,22 @@ fun MinisSelectionToolbarHost(
     // rule as the vertical anchor above): the actively-dragged handle
     // takes priority, then the last-dragged handle, then the midpoint
     // between both handles as the idle default.
-    val centerX = when (anchorHandle) {
+    val centerX = menuPoint?.x ?: when (anchorHandle) {
         SelectionController.Handle.Start ->
             controller.handleAnchor(SelectionController.Handle.Start)?.x
         SelectionController.Handle.End ->
             controller.handleAnchor(SelectionController.Handle.End)?.x
         else -> null
     } ?: controller.handlesCenterX()
-    val positionProvider = remember(anchor, viewportBounds, centerX) {
-        FloatingSelectionToolbarPositionProvider(anchor, viewportBounds, centerX)
+    val positionProvider = remember(anchor, viewportBounds, centerX, menuPoint != null) {
+        FloatingSelectionToolbarPositionProvider(
+            anchor = anchor,
+            viewport = viewportBounds,
+            preferredCenterX = centerX,
+            // A cursor anchor needs no handle clearance — there is no handle
+            // dot under a mouse cursor to avoid.
+            atCursor = menuPoint != null,
+        )
     }
     val clipboard = LocalClipboardManager.current
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -805,9 +1065,18 @@ fun MinisSelectionToolbarHost(
 
                 val labelCopy = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy)
                 val labelAddToInput = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_add_to_chat_input)
-                val labelCopyMarkdown = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_markdown)
-                val labelCopyRichText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_rich_text)
-                val labelReadAloud = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_read_aloud)
+                val labelCopyFullText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_full_text)
+                val labelCopyAsMarkdown = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_as_markdown)
+                val labelCopyAsRichText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_as_rich_text)
+                val labelCopyAsPlainText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copy_as_plain_text)
+                val toastCopiedAsPlainText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copied_as_plain_text_toast)
+                // [T-android-readaloud-selection-vs-reply] Three labels: the
+                // group parent keeps the plain "Read Aloud" wording (which is
+                // exactly right for a container), while the children carry the
+                // scope. selection_read_aloud is now "Read Selection".
+                val labelReadSelection = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_read_aloud)
+                val labelReadFromStart = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_read_from_start)
+                val labelReadAloud = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.read_aloud_group)
                 val toastCopiedAsMarkdown = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copied_as_markdown_toast)
                 val toastCopiedAsRichText = androidx.compose.ui.res.stringResource(com.openminis.app.R.string.selection_copied_as_rich_text_toast)
                 // [T-android-markdown-table-copy-actions] Copy Table / Copy
@@ -844,23 +1113,6 @@ fun MinisSelectionToolbarHost(
                         }
                         controller.clearSelection()
                     })
-                    if (actions?.onAddToInput != null) {
-                        add(SelectionAction(labelAddToInput) {
-                            val text = controller.selectedPlainText()
-                            if (text.isNotEmpty()) actions.onAddToInput.invoke(text)
-                            controller.clearSelection()
-                        })
-                    }
-                    // [T-android-selection-readaloud] Speak ONLY the selected
-                    // substring (not the message's markdown source) through
-                    // Minis TTS.
-                    if (actions?.onReadAloud != null) {
-                        add(SelectionAction(labelReadAloud) {
-                            val text = controller.selectedPlainText()
-                            if (text.isNotEmpty()) actions.onReadAloud.invoke(text)
-                            controller.clearSelection()
-                        })
-                    }
                     // Copy Markdown / Copy Rich Text are ALWAYS offered when the
                     // selection contains rendered text. Earlier we gated them on
                     // resolveSelectionMarkdown() returning non-null, but that hid
@@ -868,24 +1120,125 @@ fun MinisSelectionToolbarHost(
                     // publish, the recompose race after a previous click, cross-
                     // shard selections where the cache briefly hadn't populated).
                     // Resolve lazily at click time and fall back to plain text.
-                    add(SelectionAction(labelCopyMarkdown) {
-                        val source = actions?.resolveSelectionMarkdown?.invoke()
-                            ?: controller.selectedPlainText()
-                        if (source.isNotEmpty()) {
-                            MarkdownClipboard.copyMarkdown(context, source)
-                            toast(toastCopiedAsMarkdown)
+                    // [T-android-selection-copy-full-submenu] The three
+                    // whole-message copies live under one "Copy Full Text"
+                    // parent rather than sitting loose beside plain "Copy",
+                    // mirroring iOS's grouped edit menu.
+                    //
+                    // Grouping is what makes the labels honest. These actions
+                    // copy the ENTIRE message (resolveSelectionMarkdown returns
+                    // the owning message's source), while the bar they appear on
+                    // was raised BY a selection and sits inches from "Copy". Flat
+                    // entries reading "Copy Markdown" let a user who highlighted
+                    // one sentence walk away with the whole reply and nothing in
+                    // the UI explaining the gap. Under a parent that says "Full
+                    // Text", the scope is stated once and inherited by all three.
+                    add(
+                        SelectionAction(
+                            label = labelCopyFullText,
+                            children = listOf(
+                                SelectionAction(labelCopyAsMarkdown) {
+                                    val source = actions?.resolveSelectionMarkdown?.invoke()
+                                        ?: controller.selectedPlainText()
+                                    if (source.isNotEmpty()) {
+                                        MarkdownClipboard.copyMarkdown(context, source)
+                                        toast(toastCopiedAsMarkdown)
+                                    }
+                                    controller.clearSelection()
+                                },
+                                SelectionAction(labelCopyAsRichText) {
+                                    val source = actions?.resolveSelectionMarkdown?.invoke()
+                                        ?: controller.selectedPlainText()
+                                    if (source.isNotEmpty()) {
+                                        MarkdownClipboard.copyRichText(context, source)
+                                        toast(toastCopiedAsRichText)
+                                    }
+                                    controller.clearSelection()
+                                },
+                                // Plain Text copies the RENDERED text — headings,
+                                // lists and quotes as the user sees them, with no
+                                // `#`/`-`/`**`/`>` left behind. This bar never
+                                // offered it; the other selection toolbar
+                                // (MinisMarkdownTextToolbar) already did, so the
+                                // same long-press could yield two different menus
+                                // depending on which path raised it.
+                                SelectionAction(labelCopyAsPlainText) {
+                                    val source = actions?.resolveSelectionMarkdown?.invoke()
+                                        ?: controller.selectedPlainText()
+                                    if (source.isNotEmpty()) {
+                                        MarkdownClipboard.copyPlain(context, source)
+                                        toast(toastCopiedAsPlainText)
+                                    }
+                                    controller.clearSelection()
+                                },
+                            ),
+                        ),
+                    )
+                    // [T-android-readaloud-selection-vs-reply] The read-aloud
+                    // PAIR, mirroring iOS: "Read Selection" speaks the
+                    // highlighted range, "Read from Start" replays the whole
+                    // reply. Grouped under one parent rather than sitting as
+                    // two loose entries.
+                    //
+                    // Grouped for the same reason "Copy Full Text" is: the two
+                    // differ only in SCOPE, and a flat pair puts a
+                    // whole-message action inches from a selection-scoped one
+                    // with nothing but the label to separate them. The parent
+                    // also costs one bar slot instead of two — which is what
+                    // lets read-aloud sit inline at all, instead of being
+                    // stranded in the overflow where it was.
+                    //
+                    // A single child collapses to a flat entry (see below), so
+                    // a user message — no whole-reply action — still gets a
+                    // direct "Read Selection" button rather than a submenu
+                    // wrapping one item.
+                    run {
+                        val readChildren = buildList {
+                            if (actions?.onReadAloud != null) {
+                                add(SelectionAction(labelReadSelection) {
+                                    val text = controller.selectedPlainText()
+                                    if (text.isNotEmpty()) actions.onReadAloud.invoke(text)
+                                    controller.clearSelection()
+                                })
+                            }
+                            if (actions?.onReadFromStart != null) {
+                                add(SelectionAction(labelReadFromStart) {
+                                    // The message's own source, NOT the
+                                    // selection — that is the whole point of
+                                    // this entry. Falls back to the selected
+                                    // text when the owning message cannot be
+                                    // resolved (a cross-message selection), so
+                                    // the button still does something honest
+                                    // rather than silently nothing.
+                                    val source = actions.resolveSelectionMarkdown()
+                                        ?: controller.selectedPlainText()
+                                    if (source.isNotEmpty()) actions.onReadFromStart.invoke(source)
+                                    controller.clearSelection()
+                                })
+                            }
                         }
-                        controller.clearSelection()
-                    })
-                    add(SelectionAction(labelCopyRichText) {
-                        val source = actions?.resolveSelectionMarkdown?.invoke()
-                            ?: controller.selectedPlainText()
-                        if (source.isNotEmpty()) {
-                            MarkdownClipboard.copyRichText(context, source)
-                            toast(toastCopiedAsRichText)
+                        when (readChildren.size) {
+                            0 -> Unit
+                            1 -> add(readChildren.single())
+                            else -> add(
+                                SelectionAction(labelReadAloud, children = readChildren),
+                            )
                         }
-                        controller.clearSelection()
-                    })
+                    }
+                    // Ordered AFTER read-aloud on purpose. Only three actions
+                    // stay on the bar; read-aloud used to be fourth and so was
+                    // permanently stranded in the overflow, which is what the
+                    // user hit ("把朗读也放出来吧"). Both are secondary to Copy,
+                    // but a narration the user cannot find is worse than one
+                    // extra tap for Add to Input, which is also discoverable
+                    // from the composer itself.
+                    if (actions?.onAddToInput != null) {
+                        add(SelectionAction(labelAddToInput) {
+                            val text = controller.selectedPlainText()
+                            if (text.isNotEmpty()) actions.onAddToInput.invoke(text)
+                            controller.clearSelection()
+                        })
+                    }
                     if (tableActions != null) {
                         add(SelectionAction(labelCopyTable) {
                             tableActions.copyTableMarkdown()
@@ -907,30 +1260,242 @@ fun MinisSelectionToolbarHost(
                 // action reachable only by swiping a 40dp bar is an action most
                 // users never find.
                 val inlineCount = MAX_INLINE_SELECTION_ACTIONS
+                // [T-android-selection-copy-full-inline] Submenu parents may now
+                // sit inline: tapping one opens the same expandable menu the
+                // overflow uses, anchored to its own button.
+                //
+                // Previously a parent was force-moved into the overflow, because
+                // the bar rendered a flat button whose (empty) onClick would
+                // silently do nothing. That constraint made "Copy Full Text"
+                // reachable only behind the "⋯" — a whole-message copy hidden
+                // one level deeper than the single-sentence copy beside it,
+                // which is the wrong way round for how often it is wanted.
+                //
+                // Rather than flattening the group (which would put three
+                // "Copy …" entries loose next to plain "Copy" and re-create the
+                // scope confusion the grouping exists to prevent), the parent
+                // keeps its children and the BAR learns to expand it. The
+                // overflow keeps working unchanged, so the folding capability is
+                // preserved for whatever actions get added later.
                 val inlineItems = items.take(inlineCount)
                 val overflowItems = items.drop(inlineCount)
 
                 inlineItems.forEachIndexed { index, item ->
                     if (index > 0) MinisToolbarDivider()
-                    MinisToolbarButton(label = item.label, onClick = item.onClick)
+                    if (item.children.isEmpty()) {
+                        MinisToolbarButton(label = item.label, onClick = item.onClick)
+                    } else {
+                        // [T-android-selection-copy-full-inline] An inline
+                        // parent opens its children in a menu anchored to its
+                        // OWN button, reusing the overflow's position provider —
+                        // the bar is a Popup, so a nested DropdownMenu would
+                        // resolve its anchor against the real window and land in
+                        // the screen corner (see the overflow anchor note).
+                        var childOpen by remember(items.size, item.label) {
+                            mutableStateOf(false)
+                        }
+                        var childAnchor by remember { mutableStateOf(Offset.Zero) }
+                        MinisToolbarButton(
+                            label = item.label + "  ›",
+                            modifier = Modifier.onGloballyPositioned { coords ->
+                                val pos = coords.positionOnScreen()
+                                childAnchor = Offset(
+                                    pos.x + coords.size.width / 2f,
+                                    pos.y + coords.size.height,
+                                )
+                            },
+                        ) { childOpen = true }
+                        if (childOpen) {
+                            val childProvider = remember(childAnchor) {
+                                SelectionOverflowPositionProvider(anchorWindow = childAnchor)
+                            }
+                            Popup(
+                                popupPositionProvider = childProvider,
+                                onDismissRequest = { childOpen = false },
+                                properties = PopupProperties(focusable = false),
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    tonalElevation = 3.dp,
+                                    shadowElevation = 8.dp,
+                                    border = BorderStroke(
+                                        0.5.dp,
+                                        MaterialTheme.colorScheme.outlineVariant
+                                            .copy(alpha = 0.6f),
+                                    ),
+                                ) {
+                                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                                        for (child in item.children) {
+                                            Text(
+                                                child.label,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier
+                                                    .clickable {
+                                                        childOpen = false
+                                                        child.onClick()
+                                                    }
+                                                    .padding(
+                                                        horizontal = 16.dp,
+                                                        vertical = 10.dp,
+                                                    ),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if (overflowItems.isNotEmpty()) {
                     MinisToolbarDivider()
                     var overflowOpen by remember(items.size) { mutableStateOf(false) }
-                    Box {
-                        MinisToolbarButton(label = "⋯") { overflowOpen = true }
-                        androidx.compose.material3.DropdownMenu(
-                            expanded = overflowOpen,
+                    // [T-android-selection-overflow-anchor] Window coordinates of
+                    // the "⋯" button, captured so the overflow menu can anchor to
+                    // it explicitly.
+                    //
+                    // This bar is itself a Popup, i.e. its own window. A
+                    // DropdownMenu nested inside it is ALSO a Popup, and it
+                    // resolves its anchor against the real window rather than the
+                    // parent Popup's coordinate space — so the menu ignored the
+                    // "⋯" button entirely and got clamped into the screen corner,
+                    // far from the selection it belongs to (user-reported: the
+                    // submenu jumped to the top-right while the bar stayed by the
+                    // text). Nesting is the bug; no amount of offset on the
+                    // DropdownMenu fixes an anchor measured in the wrong window.
+                    //
+                    // Fix: track the button in SCREEN space and drive a sibling
+                    // Popup from those absolute coordinates.
+                    //
+                    // positionOnScreen(), NOT positionInWindow(): the button lives
+                    // inside the toolbar's Popup, so "window" means that Popup and
+                    // the coordinates come back near zero — which is what kept the
+                    // menu pinned to the top of the display even after it was
+                    // un-nested. Screen coordinates are the only frame both windows
+                    // agree on; the provider subtracts the new Popup's own screen
+                    // origin to get back to its local space.
+                    var overflowAnchor by remember { mutableStateOf(Offset.Zero) }
+                    MinisToolbarButton(
+                        label = "⋯",
+                        modifier = Modifier.onGloballyPositioned { coords ->
+                            val pos = coords.positionOnScreen()
+                            overflowAnchor = Offset(
+                                pos.x + coords.size.width / 2f,
+                                pos.y + coords.size.height,
+                            )
+                        },
+                    ) { overflowOpen = true }
+                    if (overflowOpen) {
+                        // The anchor is already in SCREEN space and is used as-is.
+                        //
+                        // An earlier attempt rebased it by `view.rootView`'s screen
+                        // location, on the assumption that rootView meant the
+                        // Activity's decor view. Measured on-device, it does not:
+                        // inside a Popup, rootView is THAT POPUP's root, which here
+                        // reported (44, 1409) — the toolbar's own origin. Subtracting
+                        // it mapped a correct y of 1519 down to 110 and pinned the
+                        // menu to the top of the display, which is exactly the
+                        // symptom this fix was meant to remove.
+                        //
+                        // A new Popup with default flags is laid out against the
+                        // full display, so screen coordinates are already the right
+                        // frame for calculatePosition().
+                        val overflowProvider = remember(overflowAnchor) {
+                            SelectionOverflowPositionProvider(anchorWindow = overflowAnchor)
+                        }
+                        Popup(
+                            popupPositionProvider = overflowProvider,
                             onDismissRequest = { overflowOpen = false },
+                            properties = PopupProperties(
+                                focusable = true,
+                                dismissOnBackPress = true,
+                                dismissOnClickOutside = true,
+                            ),
                         ) {
-                            for (item in overflowItems) {
-                                androidx.compose.material3.DropdownMenuItem(
-                                    text = { Text(item.label) },
-                                    onClick = {
-                                        overflowOpen = false
-                                        item.onClick()
-                                    },
-                                )
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                tonalElevation = 3.dp,
+                                shadowElevation = 8.dp,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    0.5.dp,
+                                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
+                                ),
+                            ) {
+                                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                                    // [T-android-selection-copy-full-submenu]
+                                    // Which parent is expanded, or null. Reset
+                                    // whenever the menu reopens so it never
+                                    // reappears already-expanded.
+                                    var expandedParent by remember(overflowOpen) {
+                                        mutableStateOf<String?>(null)
+                                    }
+                                    for (item in overflowItems) {
+                                        val isParent = item.children.isNotEmpty()
+                                        val isExpanded = isParent && expandedParent == item.label
+                                        Text(
+                                            // A parent shows a chevron so it
+                                            // reads as "opens more" rather than
+                                            // as an action that copies nothing.
+                                            if (isParent) {
+                                                item.label + if (isExpanded) "  ⌄" else "  ›"
+                                            } else {
+                                                item.label
+                                            },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            modifier = Modifier
+                                                .clickable {
+                                                    if (isParent) {
+                                                        // Expand in place; the
+                                                        // menu stays open.
+                                                        expandedParent =
+                                                            if (isExpanded) null else item.label
+                                                    } else {
+                                                        overflowOpen = false
+                                                        item.onClick()
+                                                    }
+                                                }
+                                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                                        )
+                                        if (isExpanded) {
+                                            for (child in item.children) {
+                                                Text(
+                                                    child.label,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                    maxLines = 1,
+                                                    softWrap = false,
+                                                    modifier = Modifier
+                                                        .clickable {
+                                                            overflowOpen = false
+                                                            child.onClick()
+                                                        }
+                                                        // Indented so the
+                                                        // nesting is visible
+                                                        // without a second
+                                                        // popup — which this
+                                                        // bar cannot host
+                                                        // reliably, being a
+                                                        // Popup inside a Popup
+                                                        // already (see the
+                                                        // anchor note above).
+                                                        .padding(
+                                                            start = 32.dp,
+                                                            end = 16.dp,
+                                                            top = 10.dp,
+                                                            bottom = 10.dp,
+                                                        ),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -941,7 +1506,18 @@ fun MinisSelectionToolbarHost(
 }
 
 /** One entry in the selection toolbar — inline button or overflow menu row. */
-private class SelectionAction(val label: String, val onClick: () -> Unit)
+/**
+ * One entry in the selection bar / overflow menu.
+ *
+ * [children] turns the entry into a SUBMENU: tapping it expands the nested
+ * actions in place instead of firing [onClick]. Used for "Copy Full Text",
+ * which groups the three whole-message copy formats — see the item list.
+ */
+private class SelectionAction(
+    val label: String,
+    val children: List<SelectionAction> = emptyList(),
+    val onClick: () -> Unit = {},
+)
 
 /**
  * How many actions stay on the bar before the rest move into the overflow menu.
@@ -964,23 +1540,72 @@ private fun MinisToolbarDivider() {
 }
 
 @Composable
-private fun MinisToolbarButton(label: String, onClick: () -> Unit) {
+private fun MinisToolbarButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurface,
         maxLines = 1,
         softWrap = false,
-        modifier = Modifier
+        modifier = modifier
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 10.dp),
     )
+}
+
+/**
+ * [T-android-selection-overflow-anchor] Positions the selection toolbar's
+ * overflow menu directly under the "⋯" button.
+ *
+ * [anchorWindow] is the button's bottom-center in WINDOW coordinates, captured by
+ * the caller — the menu is a sibling Popup of the toolbar, not a child, so it
+ * cannot rely on `anchorBounds` (which would be measured against the wrong
+ * window and is what pinned the menu to the screen corner).
+ *
+ * Horizontally the body is centered on the button and clamped to the screen;
+ * vertically it opens downward, flipping above the button when there isn't room
+ * below so it never runs off the bottom edge.
+ */
+private class SelectionOverflowPositionProvider(
+    private val anchorWindow: Offset,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val gap = 4
+        val x = (anchorWindow.x - popupContentSize.width / 2f).toInt()
+        val below = (anchorWindow.y + gap).toInt()
+        // Flip above the button when the menu would overflow the bottom.
+        val y = if (below + popupContentSize.height > windowSize.height) {
+            (anchorWindow.y - popupContentSize.height - gap).toInt()
+        } else {
+            below
+        }
+        return IntOffset(
+            x = x.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0)),
+            y = y.coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0)),
+        )
+    }
 }
 
 private class FloatingSelectionToolbarPositionProvider(
     private val anchor: IntRect,
     private val viewport: androidx.compose.ui.geometry.Rect?,
     private val preferredCenterX: Float?,
+    /**
+     * [T-android-mouse-text-selection] True when [anchor] is a right-click
+     * cursor point rather than a selection rect. Suppresses the handle-dot
+     * clearance gap, and disables the "(0,0,0,0) means off-screen" sentinel —
+     * a cursor at the window origin is a real position, not a missing one.
+     */
+    private val atCursor: Boolean = false,
 ) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
@@ -1002,7 +1627,9 @@ private class FloatingSelectionToolbarPositionProvider(
 
         // Empty anchor (0,0,0,0): selection completely off-screen — pin to
         // top center of the viewport.
-        if (anchor.left == 0 && anchor.top == 0 && anchor.right == 0 && anchor.bottom == 0) {
+        if (!atCursor &&
+            anchor.left == 0 && anchor.top == 0 && anchor.right == 0 && anchor.bottom == 0
+        ) {
             val centerX = (viewLeft + viewRight) / 2
             val x = (centerX - popupContentSize.width / 2).coerceIn(viewLeft, maxX)
             val y = (viewTop + 12).coerceIn(viewTop, maxY)
@@ -1011,19 +1638,27 @@ private class FloatingSelectionToolbarPositionProvider(
         // Gap above the anchor — large enough to clear the selection
         // handle dot (HANDLE_DOT_SIZE_DP = 14dp ≈ 37px on Pixel 4a) plus
         // a bit of breathing room so the menu doesn't crowd the text.
-        val gap = 48
+        val gap = if (atCursor) 8 else 48
         // Prefer the explicit "midpoint between handles" when supplied —
         // otherwise the anchor's own horizontal center.
         val centerX = preferredCenterX?.toInt() ?: (anchor.left + anchor.width / 2)
         val x = (centerX - popupContentSize.width / 2).coerceIn(viewLeft, maxX)
-        // Prefer placing the menu ABOVE the anchor; if no room there, drop
-        // BELOW (with the same gap). In both branches clamp to
-        // [viewTop, maxY] so the menu can't escape the chat content area.
+        // Vertical placement. The two anchor kinds want OPPOSITE defaults:
+        //
+        //  - A selection rect prefers ABOVE, because the text it describes is
+        //    below and a menu over it would hide the thing being acted on.
+        //  - A right-click cursor prefers BELOW, the desktop convention — and
+        //    there is nothing to hide, the cursor occupies no area.
+        //
+        // Each falls back to the other side when its preferred side has no
+        // room, and both clamp to [viewTop, maxY] so the menu cannot escape
+        // the chat content area.
         val aboveY = anchor.top - popupContentSize.height - gap
-        val y = if (aboveY >= viewTop) {
-            aboveY
+        val belowY = anchor.bottom + gap
+        val y = if (atCursor) {
+            if (belowY + popupContentSize.height <= viewBottom) belowY else aboveY
         } else {
-            (anchor.bottom + gap).coerceIn(viewTop, maxY)
+            if (aboveY >= viewTop) aboveY else belowY
         }
         return IntOffset(x, y.coerceIn(viewTop, maxY))
     }

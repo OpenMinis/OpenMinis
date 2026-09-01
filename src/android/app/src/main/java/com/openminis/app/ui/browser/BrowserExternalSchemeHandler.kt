@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.core.net.toUri
+import com.openminis.app.R
 import com.openminis.app.logging.AppLogger
 
 /**
@@ -48,11 +49,85 @@ object BrowserExternalSchemeHandler {
      * `ACTION_VIEW` (the system will resolve to dialer / mail / maps /
      * Play Store etc.). `intent`/`android-app` are NOT in this list —
      * they need `parseUri`.
+     *
+     * [T-android-user-initiated-scheme-dispatch] This list now only gates the
+     * [Origin.AGENT_BACKGROUND] path. A user-initiated tap dispatches ANY
+     * scheme, so the list never has to grow to keep up with new apps.
      */
     private val EXTERNAL_VIEW_SCHEMES = setOf(
         "tel", "mailto", "sms", "smsto", "mms", "mmsto",
         "geo", "market", "whatsapp", "tg", "weixin",
     )
+
+    /**
+     * [T-android-user-initiated-scheme-dispatch] Who asked for this navigation.
+     *
+     * T318 blocked unrecognized app schemes because the agent driving a
+     * headless browser could silently hurl the user into Taobao/Weibo/etc.
+     * mid-task. That reasoning holds ONLY for navigation the user did not ask
+     * for. The same handler is also wired to deliberate taps in chat, and
+     * there the block is simply wrong: the user pointed at a map link and got
+     * a Toast.
+     *
+     * The distinction is the ORIGIN of the navigation, not the scheme — an
+     * allowlist can never keep pace with new apps, which is the actual defect.
+     */
+    enum class Origin {
+        /**
+         * The user tapped something they can see: a chat-message link, or a
+         * link inside a visible in-app browser / preview WebView. Their intent
+         * is explicit, so every scheme dispatches normally.
+         */
+        USER_INITIATED,
+
+        /**
+         * The agent is driving a background/headless WebView
+         * ([com.openminis.app.browser.BrowserUseManager]) and the PAGE chose
+         * to navigate. The user is not watching and did not ask, so unknown
+         * app schemes stay blocked — this is T318's original case.
+         */
+        AGENT_BACKGROUND,
+    }
+
+    /**
+     * [T-android-user-initiated-scheme-dispatch] What [handle] will do with a
+     * scheme. Split out from [handle] so the routing decision is pure and can
+     * be unit-tested on the JVM — [handle] itself needs a `Context` and fires
+     * Toasts / `startActivity`, none of which exist in a plain JVM test.
+     */
+    internal enum class Route {
+        /** `http`/`https`/`about`/`file` — let the WebView load it. */
+        LOAD_IN_WEBVIEW,
+
+        /** `intent:` / `android-app:` — needs `Intent.parseUri`. */
+        PARSE_URI,
+
+        /** Dispatch as a plain `ACTION_VIEW`. */
+        VIEW_INTENT,
+
+        /** Swallow it and tell the user (agent-background only). */
+        BLOCK,
+    }
+
+    /**
+     * [T-android-user-initiated-scheme-dispatch] Decide how [scheme] should be
+     * routed given who asked for it.
+     *
+     * The only asymmetry between the two origins is the final fallback: a
+     * scheme nobody recognizes dispatches for [Origin.USER_INITIATED] (they
+     * tapped it on purpose) and is blocked for [Origin.AGENT_BACKGROUND] (the
+     * page decided, and the user is not even looking at it).
+     */
+    internal fun route(scheme: String?, origin: Origin): Route {
+        val s = scheme?.lowercase() ?: return Route.LOAD_IN_WEBVIEW
+        return when {
+            s in INTERNAL_SCHEMES -> Route.LOAD_IN_WEBVIEW
+            s == INTENT_SCHEME || s == ANDROID_APP_SCHEME -> Route.PARSE_URI
+            s in EXTERNAL_VIEW_SCHEMES -> Route.VIEW_INTENT
+            origin == Origin.USER_INITIATED -> Route.VIEW_INTENT
+            else -> Route.BLOCK
+        }
+    }
 
     /**
      * Whether [url] is an external scheme that this handler would route
@@ -75,31 +150,40 @@ object BrowserExternalSchemeHandler {
      * an external Activity. Returns `true` when the WebView should NOT
      * load the URL itself.
      */
-    fun handle(context: Context, url: String?): Boolean {
+    fun handle(
+        context: Context,
+        url: String?,
+        origin: Origin = Origin.USER_INITIATED,
+    ): Boolean {
         if (url.isNullOrBlank()) return false
         val uri = runCatching { url.toUri() }.getOrNull() ?: return false
-        return handle(context, uri)
+        return handle(context, uri, origin)
     }
 
-    fun handle(context: Context, uri: Uri?): Boolean {
+    fun handle(
+        context: Context,
+        uri: Uri?,
+        origin: Origin = Origin.USER_INITIATED,
+    ): Boolean {
         if (uri == null) return false
         val scheme = uri.scheme?.lowercase() ?: return false
         if (scheme in INTERNAL_SCHEMES) return false
 
-        return when (scheme) {
-            INTENT_SCHEME, ANDROID_APP_SCHEME -> handleIntentScheme(context, uri.toString())
-            in EXTERNAL_VIEW_SCHEMES -> handleViewIntent(context, uri)
-            else -> {
-                // T318: Unknown app schemes (e.g. `toutiao://`, `snssdk141://`,
-                // `weibo://`) used to fall through to ACTION_VIEW, which jumps
-                // the user out into the matching app and breaks the agent's
-                // browsing context (and surprises users who tapped a link
-                // inside our in-app browser). Block them: swallow the load
-                // and surface a Toast so the page still feels handled.
-                AppLogger.info(TAG, "blocked unknown scheme: $scheme (uri=$uri)")
+        return when (route(scheme, origin)) {
+            Route.PARSE_URI -> handleIntentScheme(context, uri.toString())
+            Route.VIEW_INTENT -> handleViewIntent(context, uri)
+            Route.LOAD_IN_WEBVIEW -> false
+            Route.BLOCK -> {
+                // T318: the agent is driving a background WebView and the PAGE
+                // decided to navigate (`toutiao://`, `snssdk141://`, `weibo://`
+                // and friends). Firing ACTION_VIEW here would throw the user
+                // out of Minis into another app mid-task, for something they
+                // never asked for, and would destroy the agent's browsing
+                // context. Swallow it.
+                AppLogger.info(TAG, "blocked unknown scheme: $scheme (uri=$uri, origin=$origin)")
                 Toast.makeText(
                     context,
-                    "Blocked link to external app ($scheme)",
+                    context.getString(R.string.external_link_blocked, scheme),
                     Toast.LENGTH_SHORT,
                 ).show()
                 true
@@ -148,7 +232,7 @@ object BrowserExternalSchemeHandler {
 
         Toast.makeText(
             context,
-            "No app available to open this link.",
+            context.getString(R.string.external_link_no_app),
             Toast.LENGTH_SHORT,
         ).show()
         return true
@@ -163,7 +247,7 @@ object BrowserExternalSchemeHandler {
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(
                 context,
-                "No app available to open this link.",
+                context.getString(R.string.external_link_no_app),
                 Toast.LENGTH_SHORT,
             ).show()
         } catch (e: Exception) {

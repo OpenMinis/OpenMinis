@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.data.repository.MCPRepository
 import com.openminis.app.ui.settings.SettingsRow
@@ -87,7 +88,7 @@ fun SessionMcpsSheet(
                             showChevron = false,
                             showDivider = index < servers.size - 1,
                             trailing = {
-                                Switch(
+                                SettingsSwitch(
                                     checked = overrides[server.id] ?: server.enabled,
                                     onCheckedChange = { enabled ->
                                         overrides[server.id] = enabled

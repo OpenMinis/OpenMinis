@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
  * Shared primitives for settings pages. Grouped-card layout (iOS/ChatGPT style).
@@ -138,6 +141,61 @@ fun SettingsScaffold(
     }
 }
 
+// ─── Switch ────────────────────────────────────────────────────────────────────
+
+/**
+ * [T-android-switch-row-height] A [Switch] that does not inflate the row it
+ * sits in. Use this instead of Material's `Switch` inside any settings row.
+ *
+ * ## The problem it solves
+ *
+ * Compose applies `LocalMinimumInteractiveComponentSize` (48dp) to Switch, so
+ * although the control DRAWS at 32dp it MEASURES at 48. Inside a row whose
+ * height is `heightIn(min = 56.dp)` + 12dp vertical padding, that produced:
+ *
+ *     with a switch:  48 + 12 + 12  = 72dp   (heightIn never applies)
+ *     without one:    30 + 12 + 12  = 54dp   -> clamped to 56dp
+ *
+ * Measured on a Pixel 6: switch rows rendered 190px and plain rows 147px, a
+ * visible 16dp step between neighbouring rows of the same card. It read as
+ * "the Encryption section has odd spacing" when in fact every switch row in
+ * the app was taller than every non-switch row.
+ *
+ * iOS has no equivalent problem — SwiftUI's List sizes all its rows alike and
+ * a Toggle does not stretch one — so this was an Android-only artefact rather
+ * than an intentional difference.
+ *
+ * ## Why waiving the minimum is safe here
+ *
+ * The 48dp floor exists so a small control is still easy to hit. In these rows
+ * the WHOLE ROW is clickable and at least 56dp tall, and tapping anywhere on it
+ * toggles the same state, so the effective touch target grows rather than
+ * shrinks. Material's own guidance allows waiving the minimum exactly when a
+ * control is embedded in a larger interactive surface.
+ *
+ * Do NOT use this for a standalone switch that is the only touch target.
+ */
+@Composable
+fun SettingsSwitch(
+    checked: Boolean,
+    onCheckedChange: ((Boolean) -> Unit)?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    colors: androidx.compose.material3.SwitchColors = SwitchDefaults.colors(),
+) {
+    CompositionLocalProvider(
+        LocalMinimumInteractiveComponentSize provides Dp.Unspecified,
+    ) {
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = modifier,
+            enabled = enabled,
+            colors = colors,
+        )
+    }
+}
+
 // ─── Section ───────────────────────────────────────────────────────────────────
 
 /**
@@ -162,7 +220,7 @@ fun SettingsSection(
     ) {
         if (header != null) {
             Text(
-                text = header.uppercase(),
+                text = header.uppercaseForDisplay(),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.Medium,
@@ -336,7 +394,7 @@ fun SettingsSwitchRow(
         showChevron = false,
         showDivider = showDivider,
         trailing = {
-            Switch(
+            SettingsSwitch(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
                 enabled = enabled,

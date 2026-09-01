@@ -17,7 +17,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -57,7 +59,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.MinisApp
@@ -81,9 +85,28 @@ import kotlinx.coroutines.delay
  * utterance actually speaking collapses it to compact; 10 s idle while
  * expanded collapses it; tapping outside collapses it.
  *
- * Deliberately NOT ported in this pass: drag-to-reposition and the
- * obstacle-avoidance lift machinery (iOS lines ~150-450) — the Android capsule
- * sits at a fixed bottom-end slot above the composer. Noted as a follow-up.
+ * [T-android-tts-capsule-drag] Drag-to-reposition is now ported: the capsule
+ * can be dragged and remembers where it was left (persisted in dp, relative to
+ * the resting corner, like iOS).
+ *
+ * [T-android-tts-capsule-drag-vertical] Movement is VERTICAL ONLY — the capsule
+ * slides up and down one fixed edge line and never moves horizontally. This is
+ * narrower than iOS, which allows free 2D dragging; it is a deliberate product
+ * choice, not a porting gap.
+ *
+ * The clamp is deliberately simpler than iOS's. iOS computes bounds from window
+ * geometry and safe-area insets because its control is mounted at APP ROOT,
+ * where nothing else constrains it. The Android capsule is mounted inside
+ * ChatScreen's `Box(Modifier.weight(1f))`, which already ends above the composer
+ * and lives under `.imePadding()` — so "never cover the input bar" and "never
+ * fight the keyboard" fall out of the layout, and the clamp only has to keep the
+ * capsule inside that box. Same guarantees, expressed through layout instead of
+ * inset arithmetic.
+ *
+ * Still not ported: iOS's asymmetric rise/settle ratchet over an oscillating
+ * obstacle set (its `recompute`/`descentTask`). Android's one obstacle — the
+ * floating tool bar — has a stable measured height within a turn, so the plain
+ * animated lift below suffices.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -156,7 +179,16 @@ fun SpeechPlayerCapsule(
     }
     fun bumpIdle() { idleToken++ }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // [T-android-tts-capsule-drag] BoxWithConstraints so the clamp has real
+    // bounds to work against. maxWidth/maxHeight are THIS box's, and the host
+    // (ChatScreen's `Box(Modifier.weight(1f))`) already ends above the composer
+    // and sits inside a Column with `.imePadding()`. So the two hard
+    // requirements — never cover the input bar, never fight the keyboard — are
+    // satisfied by construction: the box itself shrinks when the IME opens, and
+    // the clamp below simply keeps the capsule inside it. That is the Android
+    // equivalent of iOS computing `lowestTop = screen.maxY - bottomReserve`,
+    // reached through layout rather than arithmetic over window insets.
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         // Tap-outside-to-collapse scrim, only while expanded (iOS tap-catcher).
         if (expanded) {
             Box(
@@ -185,10 +217,122 @@ fun SpeechPlayerCapsule(
             targetValue = maxOf(toolbarLift, fabLift, 0.dp),
             label = "capsuleLift",
         )
+        // ── Drag state ───────────────────────────────────────────────────────
+        // [T-android-tts-capsule-drag-vertical] VERTICAL ONLY: the capsule
+        // slides along one vertical line and never moves horizontally, so the
+        // gesture's dx is discarded and only dy accumulates. There is
+        // deliberately no `dragX` state — pinning x to the resting edge is
+        // stronger than storing a value we always set to 0, because it makes a
+        // horizontal drift impossible by construction rather than by
+        // convention.
+        //
+        // Offset in PX from the resting bottom-end corner; y<0 moves up. Kept
+        // in px (not dp) so the gesture's own px deltas add without a
+        // conversion per pointer event.
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        var dragY by remember { mutableStateOf(0f) }
+        var isDragging by remember { mutableStateOf(false) }
+        // The capsule's measured HEIGHT — needed by the vertical clamp, and it
+        // changes between compact (40dp circle) and expanded, so a fixed
+        // constant would let one of the two forms overshoot the box edge.
+        // Width is no longer measured: with x pinned, nothing consumes it.
+        var capsuleH by remember { mutableStateOf(0) }
+
+        val edgeMarginPx = with(density) { 16.dp.toPx() }
+        val restBottomPx = with(density) { (12.dp + animatedLift).toPx() }
+        val maxHPx = with(density) { maxHeight.toPx() }
+
+        // Clamp a proposed VERTICAL offset so the capsule stays fully inside
+        // the host box, `edgeMargin` away from its top and bottom. Mirrors iOS
+        // `clampedOffset`, but expressed against this box instead of the
+        // window: the box's own bounds already encode the composer and IME
+        // exclusions, so "can't be dragged into the input bar" is inherited.
+        //
+        // `coerceIn` requires min <= max; when the box is shorter than the
+        // capsule plus its margins (a very short box mid-IME animation) the
+        // range inverts, so it is guarded rather than allowed to throw.
+        fun clampY(py: Float): Float {
+            if (capsuleH <= 0 || maxHPx <= 0f) return py
+            // Resting top of the capsule inside this box.
+            val restTop = maxHPx - restBottomPx - capsuleH
+            val minY = edgeMarginPx - restTop
+            val maxY = (maxHPx - edgeMarginPx - capsuleH) - restTop
+            return if (minY <= maxY) py.coerceIn(minY, maxY) else 0f
+        }
+
+        // Restore the persisted position once the capsule has been measured
+        // (the clamp is a no-op before that). Re-runs when the box or capsule
+        // size changes — rotation, IME, compact↔expanded — so a saved offset
+        // that is now out of bounds is pulled back in rather than stranding the
+        // capsule off-screen. Skipped while dragging so it can't fight the
+        // finger.
+        // [T-android-tts-capsule-drag-vertical] Only the Y component is read
+        // back. A previously-saved X (from the two-axis build) is ignored
+        // rather than migrated: the capsule simply returns to the resting edge,
+        // which is where vertical-only mode always puts it. That is the
+        // gentlest upgrade — the position shifts horizontally at most once, to
+        // the edge the user can now never leave — and it needs no migration
+        // code. The stale X stays on disk harmlessly and is overwritten as 0
+        // on the next drag release.
+        val savedOffset by VoiceOutputState.dragOffsetDp.collectAsState()
+        LaunchedEffect(savedOffset, capsuleH, maxHPx, isDragging) {
+            if (isDragging || capsuleH <= 0) return@LaunchedEffect
+            val targetY = savedOffset?.let { (_, yDp) ->
+                with(density) { yDp.dp.toPx() }
+            } ?: 0f
+            dragY = clampY(targetY)
+        }
+
         Box(
             Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 12.dp + animatedLift),
+                .padding(end = 16.dp, bottom = 12.dp + animatedLift)
+                // x is always 0: the capsule stays pinned to the resting edge.
+                .offset { IntOffset(0, dragY.toInt()) }
+                .onGloballyPositioned { capsuleH = it.size.height }
+                // [T-android-tts-capsule-drag] Drag lives on the OUTER box, not
+                // on the inner AnimatedContent children: those are swapped on
+                // every compact↔expanded transition, which would cancel an
+                // in-flight gesture.
+                //
+                // [T-android-tts-capsule-drag-vertical] `detectVerticalDragGestures`
+                // rather than `detectDragGestures` with the dx thrown away: it
+                // discards the horizontal component at the source AND uses a
+                // vertical-only touch slop, so a mostly-sideways swipe never
+                // starts a drag at all instead of starting one that then
+                // refuses to move. The capsule cannot drift horizontally
+                // because no code path can write an x offset.
+                //
+                // Keyed on `expanded` so the handler is re-installed when the
+                // content swaps — without the key the pointerInput would keep a
+                // stale closure over the old size.
+                .pointerInput(expanded) {
+                    detectVerticalDragGestures(
+                        onDragStart = { isDragging = true },
+                        onDragEnd = {
+                            isDragging = false
+                            bumpIdle()
+                            // Persist ONCE per gesture, in dp so the value
+                            // survives a density change (iOS saves on release
+                            // for the same reason). x is written as 0 — the
+                            // capsule has no horizontal freedom any more, so
+                            // that is its true offset, and it also clears a
+                            // stale x left by the earlier two-axis build.
+                            with(density) {
+                                VoiceOutputState.setCapsuleDragOffsetDp(
+                                    0f,
+                                    dragY.toDp().value,
+                                )
+                            }
+                        },
+                        onDragCancel = { isDragging = false },
+                    ) { change, dragAmountY ->
+                        // Consume so the parent list can't also scroll from the
+                        // same pointer stream.
+                        change.consume()
+                        dragY = clampY(dragY + dragAmountY)
+                    }
+                },
         ) {
             AnimatedContent(
                 targetState = expanded,

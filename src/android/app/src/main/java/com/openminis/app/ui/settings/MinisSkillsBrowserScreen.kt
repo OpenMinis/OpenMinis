@@ -171,9 +171,17 @@ fun MinisSkillsBrowserScreen(
                                 // T134: hand off intent:// / market:// /
                                 // tel: / mailto: links to the system so the
                                 // user doesn't see ERR_UNKNOWN_URL_SCHEME.
+                                // [T-android-user-initiated-scheme-dispatch]
+                                // Visible skills browser; user-tapped link.
                                 return com.openminis.app.ui.browser
                                     .BrowserExternalSchemeHandler
-                                    .handle(ctx, request?.url)
+                                    .handle(
+                                        ctx,
+                                        request?.url,
+                                        com.openminis.app.ui.browser
+                                            .BrowserExternalSchemeHandler
+                                            .Origin.USER_INITIATED,
+                                    )
                             }
                         }
 

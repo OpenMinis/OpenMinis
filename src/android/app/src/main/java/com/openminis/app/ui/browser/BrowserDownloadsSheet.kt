@@ -27,7 +27,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +41,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.browser.BrowserTabPool
 
 /**
@@ -89,7 +89,7 @@ fun BrowserDownloadsSheet(
                     modifier = Modifier.weight(1f),
                 )
                 if (downloads.any { it.state != BrowserTabPool.DownloadState.DOWNLOADING }) {
-                    TextButton(onClick = { tabPool.clearFinishedDownloads() }) {
+                    MinisTextButton(onClick = { tabPool.clearFinishedDownloads() }) {
                         Text(stringResource(R.string.browser_downloads_clear))
                     }
                 }

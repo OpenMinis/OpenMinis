@@ -22,7 +22,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +38,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisTextButton
 
 /**
  * [T-kimi-oauth] Device-code login dialog for Kimi Code (RFC 8628): shows the
@@ -152,7 +152,7 @@ fun KimiDeviceLoginDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onCancel) {
+            MinisTextButton(onClick = onCancel) {
                 Text(stringResource(R.string.common_cancel))
             }
         },

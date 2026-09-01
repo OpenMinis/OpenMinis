@@ -16,7 +16,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +27,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.thinking.ThinkingRule
 import com.openminis.app.provider.thinking.ThinkingResolveContext
@@ -128,7 +128,7 @@ fun ThinkingRuleEditorDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(stringResource(R.string.thinking_rules_all_models))
-                    Switch(checked = allModels, onCheckedChange = { allModels = it })
+                    SettingsSwitch(checked = allModels, onCheckedChange = { allModels = it })
                 }
                 if (!allModels) {
                     OutlinedTextField(
@@ -153,7 +153,7 @@ fun ThinkingRuleEditorDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Column {
-                    TextButton(onClick = { formatMenuOpen = true }) {
+                    MinisTextButton(onClick = { formatMenuOpen = true }) {
                         Text(stringResource(choice.titleRes))
                     }
                     DropdownMenu(expanded = formatMenuOpen, onDismissRequest = { formatMenuOpen = false }) {
@@ -180,7 +180,7 @@ fun ThinkingRuleEditorDialog(
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(stringResource(R.string.thinking_rules_send_off_value))
-                            Switch(checked = sendOffValue, onCheckedChange = { sendOffValue = it })
+                            SettingsSwitch(checked = sendOffValue, onCheckedChange = { sendOffValue = it })
                         }
                         if (sendOffValue) {
                             OutlinedTextField(
@@ -236,12 +236,12 @@ fun ThinkingRuleEditorDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (isValid) onSave(buildRule()) }, enabled = isValid) {
+            MinisTextButton(onClick = { if (isValid) onSave(buildRule()) }, enabled = isValid) {
                 Text(stringResource(R.string.common_save))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+            MinisTextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
         },
     )
 }

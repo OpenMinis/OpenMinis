@@ -194,6 +194,25 @@ class SessionListViewModel(
         uiPrefs.edit().putStringSet("collapsedFolderIds", ids).apply()
     }
 
+    /**
+     * [T-android-group-accordion] Expand exactly [folderId] and collapse every
+     * other group.
+     *
+     * Groups are an accordion (iOS `ContentView.toggleFolder`): at most one is
+     * open at a time. `collapsedFolderIds` stores the INVERSE — the ids that
+     * are shut — so "expand only this" means "collapse all, minus this one".
+     * Removing a single id from the set, which the callers used to do, expands
+     * the target while leaving whatever else was already open still open, and
+     * that is how several groups ended up unfolded at once.
+     *
+     * The mini-bar depends on this invariant: it resolves the floating header
+     * with `firstOrNull { !isCollapsed }`, which only names the right group
+     * while there is just one.
+     */
+    private fun expandOnly(folderId: String) {
+        setCollapsedFolders(folders.value.map { it.id }.toSet() - folderId)
+    }
+
     /** Non-null while the group picker is open. */
     val groupPickerRequest = MutableStateFlow<GroupPickerRequest?>(null)
 
@@ -574,7 +593,10 @@ class SessionListViewModel(
         var lastError: Exception? = null
         for (entry in candidates) {
             val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
-            var apiKey = providerRepository.loadApiKey(instance.id) ?: continue
+            // [T-android-keyless-provider-selection] usableApiKey: a keyless
+            // self-hosted provider is a valid candidate, and `loadApiKey`
+            // silently skipped it here. See QuickTestSheet for the rationale.
+            var apiKey = providerRepository.usableApiKey(instance) ?: continue
             if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
                 try {
                     val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
@@ -650,8 +672,9 @@ class SessionListViewModel(
                     )
                     chatRepository.setFolderForSessions(folder.id, request.sessionIds)
                     // A brand-new group starts expanded so the sessions the
-                    // user just filed are visible immediately.
-                    setCollapsedFolders(collapsedFolderIds.value - folder.id)
+                    // user just filed are visible immediately — and, being an
+                    // accordion, that closes whatever was open before.
+                    expandOnly(folder.id)
                 }
                 GroupChoice.RemoveFromGroup ->
                     chatRepository.setFolderForSessions(null, request.sessionIds)
@@ -697,6 +720,10 @@ class SessionListViewModel(
                 com.openminis.app.service.SessionBadgeStore.clear(id)
             }
             chatRepository.dissolveFolder(folderId)
+            // Just drop the dead id — do NOT use expandOnly here. The folder no
+            // longer exists, so there is nothing to expand; re-deriving the set
+            // from the surviving folders would leave one of them open purely
+            // because another was deleted.
             setCollapsedFolders(collapsedFolderIds.value - folderId)
             AppLogger.info(
                 TAG,
@@ -721,6 +748,7 @@ class SessionListViewModel(
     fun dissolveFolder(folderId: String) {
         viewModelScope.launch {
             val freed = chatRepository.dissolveFolder(folderId)
+            // Stale-id cleanup only — see deleteFolderWithSessions.
             setCollapsedFolders(collapsedFolderIds.value - folderId)
             AppLogger.info(TAG, "[Group] dissolved ${folderId.take(8)}, freed ${freed.size} session(s)")
         }
@@ -847,7 +875,9 @@ class SessionListViewModel(
                 var lastError: Exception? = null
                 for (entry in candidates) {
                     val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
-                    var apiKey = providerRepository.loadApiKey(instance.id) ?: continue
+                    // [T-android-keyless-provider-selection] usableApiKey —
+                    // see the note in runGroupSuggestion above.
+                    var apiKey = providerRepository.usableApiKey(instance) ?: continue
 
                     // Refresh OAuth token if needed
                     if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {

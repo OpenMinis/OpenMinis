@@ -94,7 +94,7 @@ fun SkillRowItem(
             }
 
             Spacer(modifier = Modifier.width(12.dp))
-            Switch(
+            SettingsSwitch(
                 checked = isEnabled,
                 onCheckedChange = onToggle,
             )

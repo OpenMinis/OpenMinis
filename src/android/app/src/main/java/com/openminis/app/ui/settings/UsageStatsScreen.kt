@@ -33,15 +33,47 @@ import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderConfig
+import com.openminis.app.data.model.ProviderType
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * [T-token-attribution-snapshot] How trustworthy a row's model attribution is.
+ *
+ * These must stay visually distinct. Lumping them together is what made the
+ * original bug invisible: an estimated row looked exactly like a measured one,
+ * so nobody could tell that a session's history had been re-attributed to
+ * whichever model it currently pointed at.
+ */
+internal enum class Attribution {
+    /** A. Per-message snapshot — the model that actually served the request. */
+    MEASURED,
+
+    /**
+     * B. Written before the snapshot columns existed. Attributed to the
+     * session's CURRENT model, which may be wrong if the model was ever
+     * switched. Shown, but labelled as an estimate.
+     */
+    ESTIMATED,
+
+    /** C. Orphaned row: no snapshot AND no session to guess from. */
+    UNKNOWN_SESSION,
+
+    /**
+     * D. Snapshot present, but the model is no longer in the live config
+     * (provider deleted / model removed). Renders normally from the snapshot —
+     * this is the case that used to collapse into "Unknown".
+     */
+    MEASURED_REMOVED,
+}
+
 private data class ModelStats(
     val modelId: String,
     val displayName: String,
     val provider: String,
+    val attribution: Attribution,
     var inputTokens: Long = 0,
     var outputTokens: Long = 0,
     var cacheCreationTokens: Long = 0,
@@ -71,6 +103,46 @@ private data class GrandTotal(
  * ChatDao.allUsageRecords.
  */
 private const val UNKNOWN_MODEL_KEY = "(unknown model)"
+
+private const val UNKNOWN_PROVIDER = "Unknown"
+
+/**
+ * [T-token-attribution-snapshot] Map a stored `ProviderType` rawValue back to
+ * its display name.
+ *
+ * Snapshots store the rawValue (`openAI`) rather than the display name
+ * (`OpenAI`) precisely so grouping is stable: display names are localized and
+ * historically inconsistent — iOS ended up with `Google`, `Gemini` and
+ * `Google Gemini` as three separate sections for one provider. An unrecognised
+ * rawValue (a provider type removed in a later build) degrades to the raw
+ * string rather than vanishing.
+ */
+internal fun providerDisplayName(rawValue: String): String =
+    runCatching { ProviderType.valueOf(rawValue).displayName }.getOrDefault(rawValue)
+
+/**
+ * [T-token-attribution-snapshot] Decide how trustworthy a usage row's model
+ * attribution is.
+ *
+ * Extracted from the Composable so it can be unit-tested on the JVM: this is
+ * the rule that decides whether a number is presented as fact or as a guess,
+ * and getting it wrong in either direction is invisible in a screenshot.
+ *
+ * @param modelId resolved id (snapshot, else the session's current model),
+ *   or null for an orphaned row with no session to fall back to.
+ * @param hasSnapshot whether the row carries a per-message snapshot.
+ * @param resolvesInConfig whether that id still exists in the live config.
+ */
+internal fun classifyAttribution(
+    modelId: String?,
+    hasSnapshot: Boolean,
+    resolvesInConfig: Boolean,
+): Attribution = when {
+    modelId == null -> Attribution.UNKNOWN_SESSION
+    !hasSnapshot -> Attribution.ESTIMATED
+    !resolvesInConfig -> Attribution.MEASURED_REMOVED
+    else -> Attribution.MEASURED
+}
 
 @Composable
 fun UsageStatsScreen(
@@ -113,11 +185,30 @@ fun UsageStatsScreen(
             // instead of being dropped — matching iOS, where an unresolvable id
             // falls back to the raw id and the "Other" provider group.
             val modelKey = record.modelId ?: UNKNOWN_MODEL_KEY
-            val (displayName, provider) = modelLookup[modelKey]
-                ?: (modelKey to "Unknown")
+            val resolved = modelLookup[modelKey]
 
-            val stats = statsMap.getOrPut(modelKey) {
-                ModelStats(modelKey, displayName, provider)
+            // [T-token-attribution-snapshot] Four distinct states — see
+            // [Attribution]. Bucket key includes the state so an estimated row
+            // never merges into a measured one and quietly inherits its
+            // credibility.
+            val attribution = classifyAttribution(
+                modelId = record.modelId,
+                hasSnapshot = record.hasSnapshot,
+                resolvesInConfig = resolved != null,
+            )
+
+            // Prefer the snapshot's own strings: for a removed provider they
+            // are the ONLY remaining source of a human-readable name.
+            val displayName = record.modelDisplayName?.takeIf { it.isNotBlank() }
+                ?: resolved?.first
+                ?: modelKey
+            val provider = record.providerType?.takeIf { it.isNotBlank() }
+                ?.let { raw -> providerDisplayName(raw) }
+                ?: resolved?.second
+                ?: UNKNOWN_PROVIDER
+
+            val stats = statsMap.getOrPut("$modelKey#${attribution.name}") {
+                ModelStats(modelKey, displayName, provider, attribution)
             }
             stats.inputTokens += input
             stats.outputTokens += output
@@ -198,11 +289,34 @@ private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                model.displayName,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.weight(1f),
-            )
+            // [T-token-attribution-snapshot] Name plus, for the two states a
+            // user can act on, one short line saying why.
+            //
+            // ESTIMATED deliberately shows NOTHING. It was explained at first,
+            // but it is by far the most common state (every row predating the
+            // per-message columns) and repeating the same sentence under
+            // almost every row was pure noise — reported as such. The
+            // distinction still matters internally: estimated rows stay in
+            // their own bucket and never merge into a measured one, so the
+            // numbers remain honest even though the label is gone.
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    model.displayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                val caveat = when (model.attribution) {
+                    Attribution.MEASURED, Attribution.ESTIMATED -> null
+                    Attribution.UNKNOWN_SESSION -> stringResource(R.string.usage_attr_unknown_session)
+                    Attribution.MEASURED_REMOVED -> stringResource(R.string.usage_attr_removed)
+                }
+                if (caveat != null) {
+                    Text(
+                        caveat,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     summary,

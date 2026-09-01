@@ -18,7 +18,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,6 +87,67 @@ internal fun StreamingDotsText() {
                 modifier = Modifier.offset(y = offset.dp),
             )
         }
+    }
+}
+
+// ─── Compaction progress ──────────────────────────────────────────────────────
+
+/**
+ * [T-android-compact-progress] Live status while a compaction runs, with a
+ * Cancel affordance.
+ *
+ * Compaction used to present as a single unchanging flag for however long it
+ * took — which on a slow or rate-limited model could be many minutes, and is
+ * indistinguishable from a hang. This ticks once a second so the elapsed count
+ * visibly moves, and names the split segment when the run had to fall back to
+ * summarising halves, so "still working" is legible rather than inferred.
+ */
+@Composable
+internal fun CompactProgressIndicator(
+    progress: ChatViewModel.CompactProgress,
+    onCancel: () -> Unit,
+) {
+    // Re-reads the clock every second; the changing value is what makes the
+    // row demonstrably alive.
+    var elapsedSec by remember(progress.startedAtMs) { mutableStateOf(0) }
+    LaunchedEffect(progress.startedAtMs) {
+        while (true) {
+            elapsedSec = ((System.currentTimeMillis() - progress.startedAtMs) / 1000L).toInt()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+
+    Row(
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = if (progress.depth > 0) {
+                // Only surfaced once a split actually happened — saying
+                // "segment 1" on the common single-call path would imply a
+                // complexity that isn't there.
+                stringResource(
+                    R.string.compact_progress_split,
+                    elapsedSec,
+                    progress.callsIssued,
+                    progress.callBudget,
+                )
+            } else {
+                stringResource(R.string.compact_progress, elapsedSec)
+            },
+            fontSize = 14.sp,
+            color = ChatColors.tertiaryText,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = stringResource(R.string.cancel),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier
+                .clickable(onClick = onCancel)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+        )
     }
 }
 

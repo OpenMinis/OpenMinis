@@ -5,8 +5,10 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -75,6 +77,21 @@ internal class MinisMarkdownTextToolbar(
      */
     private val onReadAloud: ((String) -> Unit)? = null,
     /**
+     * [T-android-readaloud-selection-vs-reply] Invoked when the user taps
+     * **Read from Start**. Receives the owning message's markdown source (not
+     * the selection); the host speaks it through the same reader. Null hides
+     * the action — the caller passes null while the reply is still streaming,
+     * matching iOS.
+     */
+    private val onReadFromStart: ((String) -> Unit)? = null,
+    /**
+     * [T-android-readaloud-selection-vs-reply] Whether a reply is streaming
+     * right now. A lambda, not a Boolean: this toolbar is constructed once
+     * inside `remember`, so a captured value would freeze at construction time
+     * and the gate would answer for the wrong moment.
+     */
+    private val isStreamingNow: () -> Boolean = { false },
+    /**
      * [T-android-markdown-table-copy-actions] The MinisTextKit selection
      * controller. This toolbar is the one Compose's SelectionContainer shows
      * (via LocalTextToolbar), and a table-cell long-press also sets the
@@ -135,6 +152,32 @@ internal class MinisMarkdownTextToolbar(
     internal val canReadAloud: Boolean get() = onReadAloud != null
 
     /**
+     * [T-android-readaloud-selection-vs-reply] Speak the WHOLE message that
+     * owns the current selection, from its start — iOS's "Read from Start".
+     *
+     * Unlike [readAloudSelection] this needs no clipboard round-trip: the
+     * message's markdown source is already resolved into
+     * [ToolbarState.originatingMarkdown] when the bar is shown, and that is
+     * exactly the text to read. It is also why the action can only be offered
+     * when that field is non-null — a selection whose owning message we cannot
+     * identify has no "whole reply" to restart.
+     */
+    internal fun readFromStart() {
+        val sink = onReadFromStart ?: return
+        val source = state.originatingMarkdown ?: return
+        if (source.isNotBlank()) sink(source)
+    }
+
+    internal val canReadFromStart: Boolean
+        get() = onReadFromStart != null &&
+            state.originatingMarkdown != null &&
+            // Suppressed mid-stream, matching iOS: restarting a reply that is
+            // still arriving would narrate a text that keeps growing under the
+            // narration. Read Selection stays available — a range the user
+            // could select already exists.
+            !isStreamingNow()
+
+    /**
      * Resolve the current selection and hand it to [sink].
      *
      * Compose's [TextToolbar] interface only exposes the selection indirectly
@@ -179,13 +222,29 @@ internal class MinisMarkdownTextToolbar(
     internal fun copyMarkdown() {
         val md = state.originatingMarkdown ?: return
         MarkdownClipboard.copyMarkdown(context, md)
-        Toast.makeText(context, "Copied as Markdown", Toast.LENGTH_SHORT).show()
+        toast(R.string.selection_copied_as_markdown_toast)
     }
 
     internal fun copyRichText() {
         val md = state.originatingMarkdown ?: return
         MarkdownClipboard.copyRichText(context, md)
-        Toast.makeText(context, "Copied as Rich Text", Toast.LENGTH_SHORT).show()
+        toast(R.string.selection_copied_as_rich_text_toast)
+    }
+
+    /**
+     * [T-android-copy-full-plain-text] Copy the message as RENDERED plain
+     * text: markdown markers resolved to what the user sees, but table cells
+     * and math expressions still expanded — dropping those would lose content
+     * rather than formatting. Mirrors iOS `1b4353367`.
+     */
+    internal fun copyPlainText() {
+        val md = state.originatingMarkdown ?: return
+        MarkdownClipboard.copyPlain(context, md)
+        toast(R.string.selection_copied_as_plain_text_toast)
+    }
+
+    private fun toast(resId: Int) {
+        Toast.makeText(context, context.getString(resId), Toast.LENGTH_SHORT).show()
     }
 
     internal data class ToolbarState(
@@ -245,14 +304,24 @@ internal fun MinisMarkdownTextToolbarHost(toolbar: MinisMarkdownTextToolbar) {
                 MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f),
             ),
         ) {
+            // [T-android-copy-full-reply-scope] Make the action row
+            // horizontally scrollable, matching the MinisTextKit selection bar.
+            // Buttons never wrap (ToolbarButton is maxLines=1/softWrap=false to
+            // avoid the truncation documented there), so without a scroll the
+            // trailing actions simply fall off the screen edge and become
+            // unreachable. With Copy + Add to Input + Read Aloud + three
+            // full-message copies + two table actions this row reaches eight
+            // items, and the "Copy Full …" labels are the longest yet.
+            val toolbarScroll = rememberScrollState()
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(barColor)
-                    .height(40.dp),
+                    .height(40.dp)
+                    .horizontalScroll(toolbarScroll),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ToolbarButton(label = "Copy") {
+                ToolbarButton(label = stringResource(R.string.selection_copy)) {
                     state.onCopyRequested?.invoke()
                     toolbar.hide()
                 }
@@ -285,18 +354,49 @@ internal fun MinisMarkdownTextToolbarHost(toolbar: MinisMarkdownTextToolbar) {
                         toolbar.hide()
                     }
                 }
-                // Markdown / Rich Text only appear when the selection sits
-                // inside a single known message — otherwise it's ambiguous
-                // which message's source to copy.
+                // [T-android-readaloud-selection-vs-reply] "Read from Start"
+                // beside "Read Selection", mirroring iOS's pair. Flat here
+                // rather than grouped: this bar is already a flat scrolling row
+                // with no submenu machinery, and the two labels state their own
+                // scope.
+                if (toolbar.canReadFromStart) {
+                    ToolbarDivider()
+                    ToolbarButton(
+                        label = stringResource(R.string.selection_read_from_start),
+                    ) {
+                        toolbar.readFromStart()
+                        toolbar.hide()
+                    }
+                }
+                // [T-android-copy-full-reply-scope] The full-message copies
+                // only appear when the selection sits inside a single known
+                // message — otherwise it's ambiguous which message's source to
+                // copy.
+                //
+                // Every label says "Full", because this toolbar is raised BY a
+                // selection and sits inches from plain "Copy": without the
+                // word, a user who highlighted one sentence and tapped "Copy
+                // Markdown" silently got the entire message, with nothing in
+                // the UI explaining the gap. Naming the scope is the fix
+                // itself (iOS a7b3e5bef).
                 if (state.originatingMarkdown != null) {
                     ToolbarDivider()
-                    ToolbarButton(label = "Copy Markdown") {
+                    ToolbarButton(label = stringResource(R.string.selection_copy_full_markdown)) {
                         toolbar.copyMarkdown()
                         toolbar.hide()
                     }
                     ToolbarDivider()
-                    ToolbarButton(label = "Copy Rich Text") {
+                    ToolbarButton(label = stringResource(R.string.selection_copy_full_rich_text)) {
                         toolbar.copyRichText()
+                        toolbar.hide()
+                    }
+                    // Plain Text copies the RENDERED text — headings, lists and
+                    // quotes as the user sees them, with no `#`/`-`/`**`/`>`
+                    // left behind. Tables and math still expand: dropping those
+                    // would lose content, not formatting (iOS 1b4353367).
+                    ToolbarDivider()
+                    ToolbarButton(label = stringResource(R.string.selection_copy_full_plain_text)) {
+                        toolbar.copyPlainText()
                         toolbar.hide()
                     }
                 }

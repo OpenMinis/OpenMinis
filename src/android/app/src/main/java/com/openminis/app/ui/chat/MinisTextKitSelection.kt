@@ -122,6 +122,22 @@ class SelectionController {
     val selection = mutableStateOf<TextSelection?>(null)
 
     /**
+     * [T-android-mouse-text-selection] True when the active selection was made
+     * with a mouse, which suppresses the draggable handle dots.
+     *
+     * The dots exist to solve a touch-only problem: a fingertip cannot re-grab
+     * a selection edge precisely, so the edges are given large hit targets that
+     * hang below the text. A mouse re-adjusts by shift-clicking or simply
+     * dragging again, so the dots would be decoration that covers the very
+     * text the user is reading — and, worse, sit under the cursor as
+     * click-targets that steal presses meant for the text.
+     *
+     * Set per selection rather than globally, so a 2-in-1 that switches from
+     * trackpad to finger gets the handles back on the next touch selection.
+     */
+    val selectionFromMouse = mutableStateOf(false)
+
+    /**
      * Message-level markdown snapshots captured at selection time so the
      * "Copy Markdown / Copy Rich Text" actions stay available even after
      * the originating shard scrolls out of viewport (the
@@ -420,6 +436,59 @@ class SelectionController {
     fun clearSelection() {
         selection.value = null
         messageMarkdownCache.clear()
+        contextMenuRequest.value = null
+    }
+
+    /**
+     * [T-android-mouse-text-selection] Window point at which a right-click
+     * asked for the action menu, or null when no such request is pending.
+     *
+     * The touch path has no equivalent: there, the menu follows the selection
+     * handles, because a finger that just long-pressed is still covering the
+     * text and the menu has to get out of its way. A mouse cursor occludes
+     * nothing, and the desktop convention users arrive with is that the menu
+     * appears exactly where they clicked. So the anchor is carried separately
+     * rather than derived from the selection rect.
+     *
+     * Cleared by [clearSelection] and whenever an action runs, so the menu
+     * never outlives the selection it acts on.
+     */
+    val contextMenuRequest = mutableStateOf<Offset?>(null)
+
+    fun requestContextMenu(windowPoint: Offset) {
+        contextMenuRequest.value = windowPoint
+    }
+
+    fun dismissContextMenu() {
+        contextMenuRequest.value = null
+    }
+
+    /**
+     * Whether [pos] falls inside the active selection. Used by the right-click
+     * handler to decide between "act on what is already highlighted" and
+     * "select the word under the cursor first".
+     *
+     * Reuses [orderedEndpoints] and [isShardBetween] rather than comparing
+     * offsets directly, so a selection spanning several shards or messages is
+     * judged by the same document ordering the rest of the controller uses.
+     * Returns false when ordering cannot be established (an endpoint shard has
+     * recycled off-screen) — the caller then re-selects the word under the
+     * cursor, which is the safe outcome: the menu still has a subject, and the
+     * subject is one the user can see.
+     */
+    fun selectionContains(pos: TextPosition): Boolean {
+        val sel = selection.value ?: return false
+        val (first, last) = orderedEndpoints(sel) ?: return false
+        if (first.shard == last.shard) {
+            return pos.shard == first.shard &&
+                pos.charOffset >= first.charOffset &&
+                pos.charOffset <= last.charOffset
+        }
+        return when (pos.shard) {
+            first.shard -> pos.charOffset >= first.charOffset
+            last.shard -> pos.charOffset <= last.charOffset
+            else -> isShardBetween(first.shard, last.shard, pos.shard)
+        }
     }
 
     /**

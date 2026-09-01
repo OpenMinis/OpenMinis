@@ -86,6 +86,7 @@ class DebugRPCHandler(private val context: Context) {
             "debug.tap" -> handleTap(params)
             "debug.scroll" -> handleScroll(params)
             "debug.inputText" -> handleInputText(params)
+            "debug.setClipboard" -> handleSetClipboard(params)
             "debug.llmRequests" -> handleLLMRequests(params)
             "debug.llmRequests.clear" -> { LLMRequestLog.clear(); JSONObject().put("cleared", true) }
             "debug.agentTrace" -> handleAgentTrace(params)
@@ -644,6 +645,54 @@ class DebugRPCHandler(private val context: Context) {
         return JSONObject().apply {
             put("ok", true)
             put("length", text.length)
+        }
+    }
+
+    /**
+     * [T-android-debug-setclipboard] Put [text] on the system clipboard, from
+     * inside the app's own process.
+     *
+     * Exists because there is no way to stage a clipboard from outside on a
+     * modern device: API 33 has no `cmd clipboard`, `service call clipboard`
+     * needs an undocumented parcel layout, and since Android 10 only the
+     * foreground app may write the clipboard at all — which is precisely what
+     * this handler is.
+     *
+     * It is the missing half of a real paste test. [handleInputText] types
+     * character by character, so it can never exercise a paste: the composer's
+     * fold logic keys on ONE large insertion, and per-character input looks
+     * exactly like ordinary typing. With the clipboard staged here, a plain
+     * `input keyevent PASTE` produces a genuine single-shot insertion — the
+     * same event a user's long-press → Paste generates.
+     *
+     * Debug-only by construction: DebugServer is started under
+     * `if (BuildConfig.DEBUG)` in MinisApp, so no release build carries this.
+     */
+    private suspend fun handleSetClipboard(params: JSONObject): JSONObject {
+        val text = params.optString("text")
+        if (text.isEmpty()) throw RPCException(-32602, "Invalid params: 'text' is required")
+        val label = params.optString("label", "minis-debug")
+
+        // ClipboardManager.setPrimaryClip must run on a Looper thread, and the
+        // write is only honoured while this app holds focus.
+        withContext(Dispatchers.Main) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+        }
+
+        // Read it straight back: a silent no-op here (focus lost, OEM policy)
+        // would otherwise show up much later as a paste that pasted nothing.
+        val readBack = withContext(Dispatchers.Main) {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                as android.content.ClipboardManager
+            cm.primaryClip?.getItemAt(0)?.text?.length ?: -1
+        }
+
+        return JSONObject().apply {
+            put("ok", readBack == text.length)
+            put("length", text.length)
+            put("clipboardLength", readBack)
         }
     }
 

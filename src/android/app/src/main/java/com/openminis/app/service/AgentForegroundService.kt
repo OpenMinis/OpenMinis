@@ -33,6 +33,23 @@ import kotlinx.coroutines.launch
 class AgentForegroundService : Service() {
 
     companion object {
+        /**
+         * [T-STALL-DIAG] How many times onStartCommand has run in THIS process.
+         * A START_STICKY revival lands in a fresh process, so a value of 1 with
+         * `revival=true` proves the system re-created the service after the
+         * process died — distinguishing that from an ordinary in-process
+         * restart (which would show an increasing count).
+         */
+        private val onStartCommandCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
+         * [T-STALL-DIAG] Process-start reference so every diagnostic line can
+         * report how long THIS process has been alive. Pairs with the pid to
+         * tell "same dirty process the user failed to kill" apart from "clean
+         * cold start" when comparing against `adb shell ps`.
+         */
+        private val processStartElapsedMs = android.os.SystemClock.elapsedRealtime()
+
         private const val TAG = "AgentForegroundService"
         private const val CHANNEL_ID = "agent_status"
         private const val CHANNEL_NAME = "Agent Status"
@@ -146,6 +163,24 @@ class AgentForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // [T-STALL-DIAG] Revival probe. `intent == null` means the SYSTEM
+        // re-created this service under START_STICKY after the process died —
+        // the suspected "dirty shell" path behind "killing the app doesn't
+        // help". Log the call ordinal, whether this is a revival, and the
+        // in-memory tracker state, which is what a revived process CANNOT have
+        // restored (SessionActivityTracker is a plain object + StateFlow).
+        //
+        // Reading `activeSessions` empty on a revival is the smoking gun: the
+        // service is being kept alive for streams that no longer exist.
+        val call = onStartCommandCalls.incrementAndGet()
+        val active = SessionActivityTracker.activeSessions.value
+        println(
+            "[T-STALL-DIAG] FGS onStartCommand#$call pid=${android.os.Process.myPid()} " +
+                "revival=${intent == null} flags=$flags startId=$startId " +
+                "activeSessions=${active.size}[${active.joinToString(",")}] " +
+                "processAliveMs=${android.os.SystemClock.elapsedRealtime() - processStartElapsedMs} " +
+                "slots=${SessionConcurrencyManager.diagSnapshot()}",
+        )
         // Safe-mode: system restarted us under START_STICKY (intent==null)
         // after a crash. Satisfy the 5-second startForeground deadline
         // with a stub notification, then unwind. The crash share dialog
@@ -225,6 +260,16 @@ class AgentForegroundService : Service() {
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
+        // [T-STALL-DIAG] Record the FULL keep-alive decision. The branch taken
+        // here decides whether a swipe-away leaves a service behind that the
+        // system will later revive with START_STICKY.
+        val activeAtRemoval = SessionActivityTracker.activeSessions.value
+        println(
+            "[T-STALL-DIAG] FGS onTaskRemoved pid=${android.os.Process.myPid()} " +
+                "activeSessions=${activeAtRemoval.size}[${activeAtRemoval.joinToString(",")}] " +
+                "decision=${if (activeAtRemoval.isEmpty()) "stopSelf" else "KEEP-ALIVE"} " +
+                "slots=${SessionConcurrencyManager.diagSnapshot()}",
+        )
         // T166: swiping from recents kills the Activity but the FG
         // service should survive iff a stream is still running. Pure
         // presence (user was reading a chat, then swiped away) is no

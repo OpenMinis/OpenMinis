@@ -240,7 +240,12 @@ object ScheduledAgentRunner {
                             ?.let { eid -> app.providerRepository.config.value.modelEntries.firstOrNull { it.id == eid }?.model?.id }
                             ?: groupIdForSeed
                                 ?.let { gid -> app.providerRepository.group(gid) }
-                                ?.let { g -> app.providerRepository.enabledMemberEntries(g).firstOrNull()?.model?.id }
+                                // [T-android-group-resolve-skip-uncredentialed]
+                                // Credential-aware filter — a scheduled run
+                                // seeded with an uncredentialed member would
+                                // fail unattended, with no user around to see
+                                // the auth error.
+                                ?.let { g -> app.providerRepository.availableMemberEntries(g).firstOrNull()?.model?.id }
                     }
                     ?: app.providerRepository.allVisibleEntries().firstOrNull()?.baseModel?.id
                     ?: run {

@@ -52,6 +52,12 @@ import androidx.compose.runtime.key
 import sh.calvin.reorderable.ReorderableColumn
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.ProviderRepository
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Delete
+import com.openminis.app.ui.components.MinisAlertDialog
+import com.openminis.app.ui.components.SwipeRowAction
+import com.openminis.app.ui.components.SwipeRowActions
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.R
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +75,12 @@ fun ProviderListScreen(
     val context = LocalContext.current
 
     var showMenu by remember { mutableStateOf(false) }
+    // [T-android-swipe-row-actions] Pending swipe-delete target. Held here
+    // rather than per-row so the confirmation survives the row being
+    // recomposed/reordered underneath it.
+    var instanceToDelete by remember {
+        mutableStateOf<com.openminis.app.data.model.ProviderInstance?>(null)
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -214,13 +226,43 @@ fun ProviderListScreen(
                                 color = Color.Transparent,
                                 modifier = Modifier.longPressDraggableHandle(),
                             ) {
-                                ProviderInstanceRow(
-                                    instance = instance,
-                                    modelCount = modelCount,
-                                    apiKey = apiKey,
-                                    isConfigured = isConfigured,
-                                    onClick = { onProviderClick(instance.id) },
-                                )
+                                // [T-android-swipe-row-actions] Swipe left for
+                                // Edit / Delete. Edit reuses the same
+                                // onProviderClick the tap already uses, and
+                                // Delete routes through the SAME confirmation +
+                                // removeInstance() the detail screen's "Delete
+                                // Provider" button uses — no second delete path.
+                                //
+                                // Sits INSIDE longPressDraggableHandle, not
+                                // around it: the handle needs to stay attached
+                                // to the row the user presses, and the two
+                                // gestures separate by axis (see SwipeRowActions).
+                                SwipeRowActions(
+                                    actions = listOf(
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_edit),
+                                            icon = Icons.Filled.Edit,
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            onClick = { onProviderClick(instance.id) },
+                                        ),
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_delete),
+                                            icon = Icons.Filled.Delete,
+                                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                            onClick = { instanceToDelete = instance },
+                                        ),
+                                    ),
+                                ) {
+                                    ProviderInstanceRow(
+                                        instance = instance,
+                                        modelCount = modelCount,
+                                        apiKey = apiKey,
+                                        isConfigured = isConfigured,
+                                        onClick = { onProviderClick(instance.id) },
+                                    )
+                                }
                             }
                             if (index < localOrder.size - 1) {
                                 val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
@@ -316,6 +358,30 @@ fun ProviderListScreen(
                 }
             }
         }
+    }
+
+    // [T-android-swipe-row-actions] Same dialog copy and same repository call as
+    // ProviderDetailScreen's "Delete Provider" button, so swipe-delete and
+    // detail-delete cannot drift apart.
+    instanceToDelete?.let { target ->
+        MinisAlertDialog(
+            onDismissRequest = { instanceToDelete = null },
+            title = stringResource(R.string.provider_detail_delete_provider),
+            text = stringResource(
+                R.string.provider_detail_delete_provider_confirm,
+                target.label,
+            ),
+            confirmText = stringResource(R.string.common_delete),
+            isDestructive = true,
+            onConfirm = {
+                providerRepository.removeInstance(target.id)
+                AppLogger.info(
+                    "ProviderList",
+                    "Deleted provider instance ${target.id} (${target.label}) via swipe",
+                )
+                instanceToDelete = null
+            },
+        )
     }
 }
 

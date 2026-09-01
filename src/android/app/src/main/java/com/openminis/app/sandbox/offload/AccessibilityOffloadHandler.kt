@@ -11,6 +11,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.openminis.app.accessibility.AccessibilityRecoveryManager
 import com.openminis.app.accessibility.MinisAccessibilityService
 import com.openminis.app.accessibility.NodeRegistry
+import com.openminis.app.accessibility.RestrictedSettingsManager
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
@@ -131,12 +132,28 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 AccessibilityRecoveryManager.ensureGrantOrPrompt(context)
             }
             if (!usable) {
+                // [T-android-restricted-settings] Distinguish the two reasons
+                // the grant can be missing. If the OS has flagged this install
+                // (sideloaded from a downloaded APK), telling the user to
+                // "re-enable it under Settings → Accessibility" sends them to a
+                // toggle that is greyed out and cannot be moved — the actual
+                // blocker is the restricted-settings gate, so name it.
+                val restricted = RestrictedSettingsManager.isRestricted(context)
                 return err(
                     args,
                     "SERVICE_NOT_RUNNING",
-                    "Accessibility permission was revoked (this happens after a force-stop). " +
-                        "Re-enable Minis under Settings → Accessibility, or use Settings → " +
-                        "Permissions → Integrations to repair it with Shizuku.",
+                    if (restricted) {
+                        "Android is blocking the accessibility toggle for this install " +
+                            "(\"Restricted setting\" — applies to apps installed from a " +
+                            "downloaded APK). Allow it via App info → ⋮ → Allow restricted " +
+                            "settings, then enable Minis under Settings → Accessibility. " +
+                            "Settings → Permissions → System Permissions has a one-tap fix " +
+                            "when Shizuku is available."
+                    } else {
+                        "Accessibility permission was revoked (this happens after a force-stop). " +
+                            "Re-enable Minis under Settings → Accessibility, or use Settings → " +
+                            "Permissions → Integrations to repair it with Shizuku."
+                    },
                     exit = 77,
                 )
             }
@@ -193,11 +210,24 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                         put("retrieveWindowContent"); put("performGestures"); put("watchEvents")
                     })
                     .put("androidVersion", android.os.Build.VERSION.SDK_INT)
+                    // [T-android-restricted-settings] `service status` is the
+                    // documented way to diagnose why the service won't start,
+                    // so report the OS-level block explicitly — otherwise the
+                    // only visible fact is running=false, which looks
+                    // identical to "the user never enabled it".
+                    .put("restrictedSettings", RestrictedSettingsManager.isRestricted(context))
                 ok(args, data)
             }
             "ping" -> {
                 if (MinisAccessibilityService.getInstance() != null)
                     NativeOffloadResult(0, "✓ Accessibility service is running\n")
+                else if (RestrictedSettingsManager.isRestricted(context))
+                    NativeOffloadResult(
+                        77,
+                        "✗ Accessibility service is not running — Android has flagged this " +
+                            "install as \"Restricted setting\" and the toggle is greyed out. " +
+                            "Allow it via App info → ⋮ → Allow restricted settings first.\n",
+                    )
                 else
                     NativeOffloadResult(77, "✗ Accessibility service is not running — go to Settings → Accessibility → Minis to enable\n")
             }

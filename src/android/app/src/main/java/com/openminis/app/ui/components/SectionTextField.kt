@@ -24,6 +24,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /**
@@ -70,6 +71,21 @@ fun SectionTextField(
      * look the settings screens have.
      */
     containerColor: Color? = null,
+    /**
+     * [T-android-sheet-textfield-inset] Horizontal inset for the glyphs inside
+     * the field.
+     *
+     * Defaults to 0 because on a SETTINGS screen the field is a full-bleed row
+     * inside a section card whose parent already applies the 16dp inset — any
+     * padding here would double it and break alignment with sibling rows (T352).
+     *
+     * That assumption does not hold in a bottom sheet / dialog, where the field
+     * is a standalone rounded card supplying its own background: with 0 the text
+     * and placeholder sit flush against the card's left edge. Those callers pass
+     * a real inset instead of the component changing its default, so no settings
+     * screen shifts.
+     */
+    contentHorizontalPadding: Dp = 0.dp,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val colors = OutlinedTextFieldDefaults.colors(
@@ -81,10 +97,11 @@ fun SectionTextField(
         unfocusedContainerColor = Color.Transparent,
         disabledContainerColor = Color.Transparent,
     )
-    // Horizontal = 0 so glyphs align with sibling section content (parent
-    // already adds the 16dp horizontal inset). See T352.
+    // Horizontal defaults to 0 so glyphs align with sibling section content
+    // (parent already adds the 16dp horizontal inset). See T352. Sheet/dialog
+    // callers override via [contentHorizontalPadding].
     val contentPadding = PaddingValues(
-        horizontal = 0.dp,
+        horizontal = contentHorizontalPadding,
         vertical = SectionDesign.RowVerticalPadding,
     )
     val mergedTextStyle = LocalTextStyle.current.merge(textStyle)

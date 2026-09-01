@@ -207,20 +207,25 @@ internal object ProviderMutationMethods {
         val baseURL = instance.effectiveBaseURL ?: when (instance.providerType) {
             ProviderType.anthropic -> "https://api.anthropic.com"
             ProviderType.gemini -> "https://generativelanguage.googleapis.com"
-            ProviderType.openAI -> "https://api.openai.com/v1"
+            // [T-android-provider-type-parity] Responses API shares the host.
+            ProviderType.openAI, ProviderType.openAIResponses -> "https://api.openai.com/v1"
             ProviderType.openRouter -> "https://openrouter.ai/api/v1"
             ProviderType.xAI -> "https://api.x.ai/v1"
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+            ProviderType.antigravity, ProviderType.unsupported -> ""
         }
         val probeURL = when (instance.providerType) {
             ProviderType.anthropic -> "$baseURL/v1/models"
             ProviderType.gemini -> "$baseURL/v1beta/models?key=" + (repo.loadApiKey(id) ?: "")
-            ProviderType.openAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            ProviderType.openAI, ProviderType.openAIResponses ->
+                if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             ProviderType.openRouter -> "$baseURL/models"
             // xAI exposes an OpenAI-compatible /models endpoint at the same base.
             ProviderType.xAI -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
             // Kimi Coding: OpenAI-compatible /models under /coding/v1.
             ProviderType.kimiCode -> if (baseURL.endsWith("/v1")) "$baseURL/models" else "$baseURL/v1/models"
+            // No probe endpoint for a type this build cannot drive.
+            ProviderType.antigravity, ProviderType.unsupported -> baseURL
         }
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -231,7 +236,8 @@ internal object ProviderMutationMethods {
         val key = repo.loadApiKey(id)
         when (instance.providerType) {
             ProviderType.anthropic -> if (!key.isNullOrEmpty()) builder.header("x-api-key", key).header("anthropic-version", "2023-06-01")
-            ProviderType.openAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
+            ProviderType.openAI, ProviderType.openAIResponses ->
+                if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             ProviderType.openRouter -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             ProviderType.gemini -> { /* key in URL */ }
             // xAI: OpenAI-compat bearer header. Manual API key OR OAuth
@@ -239,6 +245,9 @@ internal object ProviderMutationMethods {
             ProviderType.xAI -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
             // Kimi Coding: OpenAI-compat bearer (OAuth access token or key).
             ProviderType.kimiCode -> if (!key.isNullOrEmpty()) builder.header("Authorization", "Bearer $key")
+            // [T-android-provider-type-parity] No auth scheme known for a type
+            // this build cannot drive; the probe will simply fail.
+            ProviderType.antigravity, ProviderType.unsupported -> { /* no auth */ }
         }
         val start = System.currentTimeMillis()
         try {

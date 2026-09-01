@@ -45,6 +45,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Share
@@ -77,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.FileProvider
+import androidx.core.graphics.drawable.toBitmap
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.components.rememberIosBounceOverscrollEffect
 import com.openminis.app.ui.markdown.MarkdownText
@@ -237,6 +239,10 @@ fun FilePreviewScreen(
                 item.isPdfFile -> PdfPreview(item)
                 item.isCsvFile -> CsvPreview(item)
                 item.isJsonFile -> JsonPreview(item)
+                // [T-android-apk-preview] BEFORE isArchiveFile — an APK is a
+                // ZIP, and the generic archive branch would win and dump its
+                // entry list.
+                item.isApkFile -> ApkPreview(item)
                 item.isArchiveFile -> ArchivePreview(item)
                 item.isOfficeFile -> OfficeOpenExternal(item)
                 item.isTextFile -> TextPreview(item)
@@ -785,6 +791,169 @@ private fun JsonPreview(item: FileItem) {
                 }
             }
         }
+    }
+}
+
+// ==================== APK ====================
+
+/**
+ * [T-android-apk-preview] Package card for an .apk, instead of the ZIP entry
+ * list the generic archive renderer used to show.
+ *
+ * An APK *is* a ZIP, so it fell into [ArchivePreview] and rendered 282 rows of
+ * `META-INF/androidx.*.version` — accurate and useless. Someone who taps an APK
+ * in a chat wants to know what app it is and then install it, so this shows the
+ * package identity (icon, label, version, package name, min/target SDK) and
+ * puts "Install" front and centre.
+ *
+ * Metadata is read with [PackageManager.getPackageArchiveInfo], which parses the
+ * manifest WITHOUT installing anything. Its `applicationInfo` comes back with
+ * `sourceDir`/`publicSourceDir` unset — they must be pointed at the file by hand
+ * or `loadIcon`/`loadLabel` resolve against the wrong package and return this
+ * app's own icon.
+ *
+ * Parsing can fail (a corrupt download, or an .xapk which is a ZIP OF apks and
+ * has no manifest of its own). That is not an error state worth blocking on:
+ * the file still exists and can still be opened or shared, so the card falls
+ * back to filename + size and keeps the actions live.
+ */
+@Composable
+private fun ApkPreview(item: FileItem) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    data class ApkInfo(
+        val label: String?,
+        val packageName: String?,
+        val versionName: String?,
+        val versionCode: Long?,
+        val minSdk: Int?,
+        val targetSdk: Int?,
+        val icon: android.graphics.drawable.Drawable?,
+    )
+
+    var info by remember(item.file) { mutableStateOf<ApkInfo?>(null) }
+    var parsed by remember(item.file) { mutableStateOf(false) }
+
+    LaunchedEffect(item.file) {
+        withContext(Dispatchers.IO) {
+            val result = try {
+                val pm = context.packageManager
+                val pkg = pm.getPackageArchiveInfo(item.file.absolutePath, 0)
+                if (pkg == null) {
+                    null
+                } else {
+                    // Without these the icon/label lookups resolve against the
+                    // HOST package and silently return Minis' own assets.
+                    pkg.applicationInfo?.let { app ->
+                        app.sourceDir = item.file.absolutePath
+                        app.publicSourceDir = item.file.absolutePath
+                    }
+                    ApkInfo(
+                        label = pkg.applicationInfo?.let { runCatching { pm.getApplicationLabel(it).toString() }.getOrNull() },
+                        packageName = pkg.packageName,
+                        versionName = pkg.versionName,
+                        versionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                            pkg.longVersionCode
+                        } else {
+                            @Suppress("DEPRECATION") pkg.versionCode.toLong()
+                        },
+                        minSdk = pkg.applicationInfo?.minSdkVersion,
+                        targetSdk = pkg.applicationInfo?.targetSdkVersion,
+                        icon = pkg.applicationInfo?.let { runCatching { pm.getApplicationIcon(it) }.getOrNull() },
+                    )
+                }
+            } catch (e: Exception) {
+                AppLogger.warning("FilePreview", "APK parse failed: ${e.message}")
+                null
+            }
+            info = result
+            parsed = true
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 24.dp, vertical = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            val icon = info?.icon
+            if (icon != null) {
+                androidx.compose.foundation.Image(
+                    painter = androidx.compose.ui.graphics.painter.BitmapPainter(
+                        icon.toBitmap().asImageBitmap(),
+                    ),
+                    contentDescription = null,
+                    modifier = Modifier.size(72.dp),
+                )
+            } else {
+                Icon(
+                    Icons.Default.Android,
+                    contentDescription = null,
+                    modifier = Modifier.size(72.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                // Falls back to the filename when the manifest could not be
+                // read — still the most useful thing we can name it.
+                text = info?.label ?: item.name,
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            info?.packageName?.let { pkg ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = pkg,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+            val version = info?.versionName
+            if (version != null) {
+                Spacer(Modifier.height(2.dp))
+                val code = info?.versionCode
+                Text(
+                    text = if (code != null) "$version ($code)" else version,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = item.formattedSize,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (parsed && info == null) {
+                // Say so rather than showing a bare filename and letting the
+                // user wonder whether the file is broken.
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.filepreview_apk_unreadable),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+            // ACTION_VIEW on an application/vnd.android.package-archive URI is
+            // what reaches the system installer. It is offered even when the
+            // manifest failed to parse: the installer does its own, stricter
+            // validation and will report a bad package better than we can.
+            MinisTextButton(onClick = {
+                openExternally(context, item, "application/vnd.android.package-archive")
+            }) {
+                Text(stringResource(R.string.filepreview_apk_install))
+            }
+        }
+        FileMetadataBlock(item)
     }
 }
 

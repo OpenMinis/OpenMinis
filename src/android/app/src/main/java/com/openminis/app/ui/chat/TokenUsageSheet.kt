@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
+import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
  * Session Token Usage bottom sheet — mirrors iOS `TokenUsageSheet` and uses
@@ -116,7 +117,7 @@ fun TokenUsageSheet(
 private fun StatSection(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
-            text = title.uppercase(),
+            text = title.uppercaseForDisplay(),
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

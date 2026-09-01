@@ -34,6 +34,7 @@ import com.openminis.app.R
 import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
  * Stateless detail body composables used by [SessionMemorySheet] when a row
@@ -234,7 +235,7 @@ fun MemoryGetDetailBody(record: MemoryToolRecord) {
 @Composable
 private fun SectionHeader(text: String) {
     Text(
-        text = text.uppercase(),
+        text = text.uppercaseForDisplay(),
         fontSize = 11.sp,
         fontWeight = FontWeight.Medium,
         letterSpacing = 0.5.sp,

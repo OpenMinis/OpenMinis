@@ -35,6 +35,8 @@ import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ModelGroup
+import com.openminis.app.data.model.RoutingStrategy
+import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.R
 import com.openminis.app.data.repository.ChatRepository
@@ -65,6 +67,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,6 +81,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -97,6 +101,130 @@ class ChatViewModel(
 
     companion object {
         internal const val TAG = "ChatViewModel"
+
+        // ── [T-android-compact-runaway] Compaction budgets ──────────────
+        //
+        // Compaction had no ceiling of any kind. Its only time bound was the
+        // provider's OkHttp readTimeout (10 minutes on every provider), and
+        // the split-retry path could issue up to 1+2+4+8 = 15 SEQUENTIAL leaf
+        // calls before depth 3 stopped it. Slow-but-not-timing-out calls (a
+        // rate-limited or queued model at ~80s each) therefore added up to
+        // roughly 20 minutes of apparent hang — which matches the report.
+        //
+        // Three independent ceilings now bound it, because each catches a case
+        // the others miss: the call budget stops fan-out, the wall-clock
+        // timeout stops slow-but-few calls, and the existing depth cap stops
+        // recursion.
+
+        /**
+         * Leaf LLM calls one compaction may issue in total, across every
+         * segment. The depth-3 cap alone permits 15; this cuts the worst case
+         * to a third of that while still allowing a full first split (1+2) plus
+         * one deeper rescue.
+         */
+        internal const val MAX_COMPACT_LLM_CALLS = 6
+
+        /** Floor for the dynamic wall-clock timeout. */
+        internal const val COMPACT_TIMEOUT_BASE_MS = 90_000L
+
+        /**
+         * Added per 10k characters of transcript, so a long first compaction is
+         * not cut off by a limit tuned for a short one.
+         */
+        internal const val COMPACT_TIMEOUT_PER_10K_CHARS_MS = 30_000L
+
+        /**
+         * Hard ceiling. Deliberately under the providers' 10-minute
+         * readTimeout: past this point the run is aborted by us — with the lock
+         * released and a clear message — rather than sitting on a socket that
+         * may never answer.
+         */
+        internal const val COMPACT_TIMEOUT_MAX_MS = 300_000L
+
+        /**
+         * Wall-clock budget for compacting a transcript of [transcriptChars].
+         * Grows with input so long histories get room, capped so nothing can
+         * hang indefinitely.
+         */
+        internal fun compactTimeoutMsFor(transcriptChars: Int): Long {
+            val growth = (transcriptChars / 10_000L) * COMPACT_TIMEOUT_PER_10K_CHARS_MS
+            return (COMPACT_TIMEOUT_BASE_MS + growth).coerceAtMost(COMPACT_TIMEOUT_MAX_MS)
+        }
+
+        /**
+         * Should a failed summary attempt be retried by splitting the input in
+         * half? Pure predicate, in the companion so it is testable without an
+         * Android-bound ViewModel; [isSegmentRetryableError] delegates here.
+         *
+         * Splitting only helps when the failure was caused by the SIZE of the
+         * request. Unclassified errors still split — an over-length refusal
+         * arrives as an untyped ProviderError on most providers, and a summary
+         * built from halves beats no summary — but the classes known to be
+         * size-independent are excluded, because for those a split turns one
+         * failure into up to 15 sequential slow calls. That amplification is
+         * what produced the 15-20 minute apparent hang.
+         */
+        internal fun shouldSplitOnError(error: Throwable): Boolean {
+            if (error is CancellationException) return false
+            if (error is LLMError) {
+                return when (error) {
+                    // Never worth a smaller payload:
+                    //  - Cancelled: the user stopped it; retrying fights that.
+                    //  - NetworkError: never reached a model, size is irrelevant.
+                    //  - RateLimited (429): refusing on quota, not length —
+                    //    halving just doubles the rejected calls under backoff.
+                    //  - TransientError (5xx): server-side fault, payload
+                    //    independent; retrying smaller multiplies the outage.
+                    //  - InvalidApiKey: auth, not size.
+                    is LLMError.Cancelled,
+                    is LLMError.NetworkError,
+                    is LLMError.RateLimited,
+                    is LLMError.TransientError,
+                    is LLMError.InvalidApiKey,
+                    -> false
+                    // ProviderError / DecodingError / Unknown stay retryable:
+                    // an over-length refusal arrives as a ProviderError on most
+                    // providers, and that is the case splitting exists for.
+                    else -> true
+                }
+            }
+            // Raw OkHttp/socket failures are the Android equivalent of iOS's
+            // NSURLErrorDomain bail-out: offline / DNS / TLS / timeout, all
+            // payload-size independent.
+            if (error is java.io.IOException) return false
+            return true
+        }
+
+        /**
+         * [T-android-append-to-input-eats-draft] Join the composer's current
+         * [draft] with an appended [snippet]. Returns null when there is
+         * nothing to append (the caller then leaves the draft untouched).
+         *
+         * Trims the incoming SNIPPET only. The old code called
+         * `draft.trimEnd()` and assigned that trimmed copy back, so "Add to
+         * input" silently rewrote the user's existing draft: a deliberate
+         * trailing newline — a paragraph break they had just typed — was
+         * swallowed and replaced by the separator space. The draft is the
+         * user's own text and must come back byte-for-byte.
+         *
+         * The emptiness test still runs on a trimmed VIEW of the draft (a
+         * whitespace-only draft counts as empty, rather than producing a
+         * leading blank run), but that trimmed value drives the DECISION
+         * only — it is never assigned back. Mirrors iOS `e6c0ace6a`.
+         *
+         * Pure and side-effect free so it can be unit-tested without an
+         * Android runtime; see `AppendToInputTest`.
+         */
+        internal fun joinDraftWithSnippet(draft: String, snippet: String): String? {
+            val cleaned = snippet.trim()
+            if (cleaned.isEmpty()) return null
+            if (draft.isBlank()) return "$cleaned "
+            // Preserve the draft verbatim; only add a separator when it does
+            // not already end in whitespace. A trailing newline is already a
+            // separator, and adding a space after it would indent the new line.
+            val separator = if (draft.last().isWhitespace()) "" else " "
+            return draft + separator + cleaned + " "
+        }
 
         /**
          * [T-android-auto-grouping-injection] Strip the characters that would let
@@ -624,21 +752,22 @@ class ChatViewModel(
      * [T-selection-add-to-input] Append [snippet] to the chat composer
      * with a single trailing space:
      *   - composer empty → `"<snippet> "`
-     *   - composer non-empty → `"<existing> <snippet> "`
+     *   - composer non-empty → `"<existing><separator><snippet> "`
      *
-     * Whitespace between [existing] and [snippet] is normalized to a
-     * single space so we never produce `"foo  bar "` when the user's
-     * draft happens to end in a trailing space already.
+     * [T-android-append-to-input-eats-draft] Trim the incoming SNIPPET only.
+     * The old code called `current.trimEnd()` and assigned that trimmed copy
+     * back, so "Add to input" silently rewrote the user's existing draft: a
+     * deliberate trailing newline (a paragraph break they had just typed) was
+     * swallowed and replaced by the separator space. The draft is the user's
+     * own text and must come back byte-for-byte.
+     *
+     * The emptiness test still runs on a trimmed view — a draft of only
+     * whitespace should be treated as empty rather than producing a leading
+     * blank run — but that trimmed value drives the DECISION only, never the
+     * assignment. Mirrors iOS `e6c0ace6a`.
      */
     fun appendToInputText(snippet: String) {
-        val cleaned = snippet.trim()
-        if (cleaned.isEmpty()) return
-        val current = _inputText.value
-        val joined = if (current.isBlank()) {
-            "$cleaned "
-        } else {
-            current.trimEnd() + " " + cleaned + " "
-        }
+        val joined = joinDraftWithSnippet(_inputText.value, snippet) ?: return
         _inputText.value = joined
     }
 
@@ -670,6 +799,58 @@ class ChatViewModel(
      */
     private val _canResume = MutableStateFlow(false)
     val canResume: StateFlow<Boolean> = _canResume.asStateFlow()
+
+    /**
+     * [T-android-group-pause-badge-restamp] Marks the ONE `_canResume = true`
+     * assignment that is a RE-DETECTION of an interruption that already
+     * happened (loadSession finding a still-unfinished DB tail, possibly days
+     * old) rather than a live new interruption. Read by the badge collector to
+     * decide whether the badge's entry timestamp may be overwritten — see the
+     * collector's comment for why the badge must NOT be re-stamped there.
+     *
+     * Why a COUNTER and not a plain boolean set-then-cleared around the
+     * assignment: the collector is an async `collect` on a StateFlow, running
+     * on its own coroutine. A boolean cleared right after the assignment is
+     * very likely already `false` by the time the collector is resumed and
+     * observes the `true`, so the annotation would be lost and the stale badge
+     * re-stamped anyway — the exact bug being fixed. Instead the flag is
+     * STICKY: the detecting site raises it BEFORE assigning and never clears
+     * it; the collector clears it only once it has actually consumed the
+     * emission it annotates. The generation counter makes that consumption
+     * unambiguous even if several loads race — the collector compares the
+     * value it latched against the current one.
+     *
+     * StateFlow conflation is also handled by this shape: if `_canResume` is
+     * already `true`, the re-detection assignment emits nothing at all, so the
+     * collector never runs and never re-stamps — which is the desired outcome
+     * (no push, no stamp change). The pending mark simply stays raised and is
+     * consumed by the next `true` emission, which for this VM instance can
+     * only come from the same load path re-running (every live-interruption
+     * site is preceded by a `false`, i.e. by a real run that clears it — see
+     * `markLiveInterruption`).
+     */
+    @Volatile private var redetectingInterruptedTailGen: Long = 0L
+    @Volatile private var consumedRedetectGen: Long = 0L
+
+    /**
+     * Raise the re-detection mark for the next `_canResume = true` emission.
+     * Mirrors iOS `isRedetectingInterruptedTail = true` at the +Persistence
+     * detection site.
+     */
+    private fun markRedetectingInterruptedTail() {
+        redetectingInterruptedTailGen += 1
+    }
+
+    /**
+     * Cancel any pending re-detection mark. Called by every LIVE interruption
+     * path before it sets `_canResume = true`, so an unconsumed mark left over
+     * from a load (e.g. the load found the tail interrupted while `_canResume`
+     * was already true, so nothing was emitted) can never leak onto a genuine
+     * new interruption and suppress its re-stamp.
+     */
+    private fun markLiveInterruption() {
+        consumedRedetectGen = redetectingInterruptedTailGen
+    }
 
     /**
      * T187: id of a user message currently being re-edited via the
@@ -707,6 +888,94 @@ class ChatViewModel(
     val attachments: StateFlow<List<InputAttachment>> = _attachments.asStateFlow()
 
     /**
+     * [T-android-paste-placeholder] Long pasted blocks folded out of the
+     * composer, keyed by the `[Pasted#N]` marker left in its place.
+     *
+     * Scoped to this ViewModel, so it is per-session by construction: the
+     * store hands each session its own instance, and switching chats cannot
+     * leak an id from one buffer into another's placeholders. Memory-only —
+     * see [PastedText] for why persisting it would be worse than not.
+     */
+    private val _pastedTexts = MutableStateFlow<List<PastedText>>(emptyList())
+    val pastedTexts: StateFlow<List<PastedText>> = _pastedTexts.asStateFlow()
+
+    /**
+     * Next placeholder number. Monotonic for the session's lifetime and never
+     * reused, even after entries are consumed or deleted: a recycled id would
+     * let a stale marker left in the draft ("I pasted, deleted the chip, then
+     * pasted again") silently expand to the WRONG text. Numbers are cheap.
+     */
+    private var nextPasteId: Int = 1
+
+    /**
+     * [T-android-paste-placeholder] Buffer [text], returning the marker to put
+     * in the composer in its place.
+     */
+    fun stashPastedText(text: String): String {
+        val entry = PastedText(id = nextPasteId++, text = text)
+        _pastedTexts.value = _pastedTexts.value + entry
+        AppLogger.info(TAG, "[Paste] stashed #${entry.id} (${text.length} chars)")
+        return entry.placeholder
+    }
+
+    /**
+     * [T-android-paste-oversize] Turn a very large paste into a real `.txt`
+     * document attachment instead of a placeholder.
+     *
+     * Past [PASTE_AS_FILE_THRESHOLD] the user is effectively attaching a
+     * document, and the placeholder path is the wrong shape for it: the block
+     * would sit in memory for the whole draft and then have to be written out
+     * anyway. Routing it through the ordinary attachment pipeline instead means
+     * it inherits preview, removal, the `<user-attached-files>` inventory the
+     * model can `cat`, and the same upload handling as a file the user picked —
+     * none of which the buffer offers.
+     *
+     * The bytes go to `cacheDir/pasted_text`, matching where
+     * [addAttachmentFromStagedShare] puts share-inbound copies: the composer may
+     * hold this for a long time before send, so it must not live anywhere the
+     * system might reclaim mid-draft.
+     *
+     * Returns null if the write fails, and the caller then leaves the paste in
+     * the text field verbatim — worse-looking than a chip, but nothing is lost.
+     */
+    fun stashPastedTextAsFile(text: String): InputAttachment? {
+        val dir = java.io.File(context.cacheDir, "pasted_text").apply { mkdirs() }
+        // Timestamp + short uuid: sorts chronologically in a file listing and
+        // cannot collide when two pastes land in the same millisecond.
+        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+            .format(java.util.Date())
+        val name = "Pasted_$stamp-${java.util.UUID.randomUUID().toString().take(8)}.txt"
+        val file = java.io.File(dir, name)
+        return try {
+            file.writeText(text)
+            val attachment = InputAttachment(
+                fileName = name,
+                uri = android.net.Uri.fromFile(file),
+                mimeType = "text/plain",
+                kind = InputAttachment.Kind.DOCUMENT,
+            )
+            addAttachment(attachment)
+            AppLogger.info(
+                TAG,
+                "[Paste] oversize paste -> file attachment $name (${text.length} chars)",
+            )
+            attachment
+        } catch (e: Exception) {
+            AppLogger.warning(TAG, "[Paste] failed to write oversize paste: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Drop one buffered entry (the chip's delete button). The caller is
+     * responsible for also removing the marker from the composer text — see
+     * ChatScreen, which does both in one edit so the two never disagree.
+     */
+    fun removePastedText(id: Int) {
+        _pastedTexts.value = _pastedTexts.value.filterNot { it.id == id }
+    }
+
+    /**
      * One-shot composer-side image-budget events (T-imgsize). Emitted by
      * [prepareUserAttachments] when [ImageBudget.applyMessageBudget] either
      * re-encodes oversize local attachments or drops images that would push
@@ -742,6 +1011,22 @@ class ChatViewModel(
      */
     private val _forceScrollToBottom = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val forceScrollToBottom: SharedFlow<Unit> = _forceScrollToBottom.asSharedFlow()
+
+    /**
+     * [T-android-readaloud-stop-stale] Emitted on the FIRST text delta of a new
+     * reply, so any Read Aloud still playing from the previous reply is
+     * stopped before the new content starts arriving.
+     *
+     * Deferred to the first delta rather than fired from send(): the old reply
+     * should keep playing while the model is still thinking, and only yield
+     * once there is actually new text to supersede it. Mirrors iOS
+     * `d2fdc784f`, which sets `hasStoppedPreviousTTS` at the same point.
+     *
+     * The player is screen-scoped (ChatScreen owns it), so this is a signal
+     * rather than a direct call — the ViewModel has no reference to it.
+     */
+    private val _stopStaleReadAloud = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val stopStaleReadAloud: SharedFlow<Unit> = _stopStaleReadAloud.asSharedFlow()
 
     private val _availableGroups = MutableStateFlow<List<ModelGroup>>(emptyList())
     val availableGroups: StateFlow<List<ModelGroup>> = _availableGroups.asStateFlow()
@@ -791,6 +1076,54 @@ class ChatViewModel(
     private val _isCompacting = MutableStateFlow(false)
     val isCompacting: StateFlow<Boolean> = _isCompacting.asStateFlow()
 
+    /**
+     * [T-android-compact-progress] Live progress of the in-flight compaction.
+     *
+     * Compaction could previously run for many minutes behind a single
+     * unchanging "compacting" flag, which is indistinguishable from a hang —
+     * the reported symptom was users staring at it for 15-20 minutes with no
+     * way to tell whether it was working or wedged. This carries enough state
+     * for the UI to show real movement: elapsed seconds, which segment of a
+     * split is running, and how deep the split went.
+     */
+    data class CompactProgress(
+        /** When the whole compaction started, for elapsed-time display. */
+        val startedAtMs: Long,
+        /** Recursion depth currently executing (0 = whole history, >0 = a split half). */
+        val depth: Int = 0,
+        /** Leaf LLM calls issued so far, across all segments. */
+        val callsIssued: Int = 0,
+        /** Total leaf calls allowed before the budget aborts the run. */
+        val callBudget: Int = MAX_COMPACT_LLM_CALLS,
+        /** Seconds the whole run is allowed before it is cancelled. */
+        val timeoutSeconds: Int = 0,
+    )
+
+    private val _compactProgress = MutableStateFlow<CompactProgress?>(null)
+    val compactProgress: StateFlow<CompactProgress?> = _compactProgress.asStateFlow()
+
+    /**
+     * Leaf LLM calls issued by the current compaction. Reset at the start of
+     * each run; read/incremented from the split recursion, which can interleave
+     * across suspension points, hence atomic.
+     */
+    private val compactCallsIssued = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * The running compaction's job, so the UI can offer a Cancel affordance.
+     * Cancelling routes through the same `finally` that clears the lock, so a
+     * user-cancelled compaction leaves no state behind.
+     */
+    private var compactJob: Job? = null
+
+    /** Cancel an in-flight compaction. No-op when nothing is running. */
+    fun cancelCompact() {
+        val job = compactJob ?: return
+        if (!job.isActive) return
+        AppLogger.info(TAG, "[Compact] cancelled by user")
+        job.cancel(CancellationException("compact cancelled by user"))
+    }
+
     /** Current auto-retry attempt number (0 = not retrying, 1..MAX = nth retry in flight). */
     private val _autoRetryAttempt = MutableStateFlow(0)
     val autoRetryAttempt: StateFlow<Int> = _autoRetryAttempt.asStateFlow()
@@ -812,6 +1145,62 @@ class ChatViewModel(
     private var currentProvider: LLMProvider? = null
     private var currentModel: LLMModel? = null
 
+    /**
+     * Does the CURRENTLY RESOLVED main model natively consume image pixels?
+     *
+     * Single source of truth for the three decisions that must agree: whether
+     * `read_image` is exposed at all ([agentTools]), whether an attached image
+     * is replaced by a Vision Group placeholder ([visionPlaceholderFor]), and
+     * whether `read_image` returns pixels or routes through the Vision Group
+     * ([executeReadImageTool]).
+     *
+     * [T-android-vision-native-check-misses-image_input] These three each used
+     * to inline `inputModalities.map { it.lowercase() }.contains("image")`,
+     * which only LOWERCASES. Provider APIs disagree on the spelling: OpenAI /
+     * OpenRouter report "image_input", models.dev reports bare "image" (see
+     * [normalizeModalityName]). So a model advertising "image_input" was read
+     * as vision-capable by [hasImageInput] — which normalizes, and is what
+     * `ProviderRepository.resolveVisionCandidates` filters Vision Group members
+     * by — but as text-only here. A model that could see perfectly well would
+     * therefore get its `read_image` result detoured through the Vision Group
+     * and come back as a second-hand text description, exactly the complaint in
+     * the 2026-08-28 report (which turned out to have a different cause).
+     *
+     * Reusing [hasImageInput] keeps this check and the Vision Group's member
+     * filter on one definition, so the two can no longer disagree.
+     */
+    private val currentModelHasNativeVision: Boolean
+        get() = currentModel?.hasImageInput == true
+
+    /**
+     * [T-token-attribution-snapshot] Which model actually served the turn being
+     * persisted, for the message's attribution columns.
+     *
+     * Built from `currentModel` + `_activeEntryId` — the live request context —
+     * and deliberately NOT from the session row. Automatic failover rewrites
+     * `sessions.model_id` mid-turn (see the fallback path that reassigns
+     * `_activeEntryId` / `currentModel` when a candidate fails), so a session
+     * read at persist time can name a model that never produced this message.
+     * Both fields here are updated by that same fallback path, so they always
+     * describe the model that actually responded.
+     */
+    private fun currentModelSnapshot(): com.openminis.app.data.model.ModelAttributionSnapshot? {
+        val model = currentModel ?: return null
+        val entry = _activeEntryId.value?.let { id ->
+            providerRepository.config.value.modelEntries.find { it.id == id }
+        }
+        val instance = entry?.let { providerRepository.instance(it.providerInstanceId) }
+        return com.openminis.app.data.model.ModelAttributionSnapshot(
+            modelId = model.id,
+            displayName = model.displayName,
+            // `.name` is the enum's stable rawValue, never the localized
+            // displayName — grouping on display strings is what produced the
+            // duplicate "Google" / "Gemini" / "Google Gemini" sections.
+            providerTypeRaw = instance?.providerType?.name ?: "",
+            providerInstanceId = entry?.providerInstanceId,
+        )
+    }
+
     /** Structured agent history for the agent loop (contentParts-based). */
     private val agentHistory = mutableListOf<LLMMessage>()
 
@@ -832,9 +1221,7 @@ class ChatViewModel(
             // threading the real flag lets a text-only model without a Vision
             // Group correctly LOSE the tool (iOS parity), while a configured
             // Vision Group keeps it.
-            supportsImageInput = currentModel?.let {
-                it.inputModalities?.map { m -> m.lowercase() }?.contains("image") == true
-            } == true,
+            supportsImageInput = currentModelHasNativeVision,
             visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
                 providerRepository, context,
             ),
@@ -1102,6 +1489,15 @@ class ChatViewModel(
      * oauth credential + no custom base URL). Chat-completions providers stay
      * excluded. Recomputes on entry/config changes like the Enhanced Cache
      * gate above.
+     *
+     * [T-android-xai-priority] xAI is a second, independent branch: xAI's
+     * Priority Processing is the same `service_tier: "priority"` wire field
+     * and the same user-facing promise (lower latency, higher price), so it
+     * reuses this one global toggle rather than adding a competing per-provider
+     * switch. The "gpt" model-id test deliberately does NOT apply — xAI's
+     * models are the grok family — and neither does the Responses-path test,
+     * because xAI serves Priority Processing on its Chat Completions endpoint,
+     * which is the path ProviderFactory always resolves xAI to.
      */
     val showFastModeToggle: StateFlow<Boolean> =
         kotlinx.coroutines.flow.combine(
@@ -1114,9 +1510,15 @@ class ChatViewModel(
                 instance.providerType == com.openminis.app.data.model.ProviderType.openAI &&
                 instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth &&
                 instance.customBaseURL.isNullOrBlank()
+            val isXAI = instance?.providerType == com.openminis.app.data.model.ProviderType.xAI
             entry != null && instance != null &&
-                entry.model.id.contains("gpt", ignoreCase = true) &&
-                (instance.useResponsesAPI || isCodexOAuth)
+                (
+                    isXAI ||
+                        (
+                            entry.model.id.contains("gpt", ignoreCase = true) &&
+                                (instance.useResponsesAPI || isCodexOAuth)
+                            )
+                    )
         }.stateIn(
             viewModelScope,
             kotlinx.coroutines.flow.SharingStarted.Eagerly,
@@ -1776,22 +2178,51 @@ class ChatViewModel(
         // onFinished callback.
         markStarted()
         _isCompacting.value = true
-        viewModelScope.launch(Dispatchers.IO) {
+        // [T-android-compact-runaway] Size the wall-clock budget off the actual
+        // transcript, so a long first compaction is not cut off by a limit
+        // tuned for a short one. Measured on the same truncated transcript the
+        // request will carry, not the raw history.
+        val transcriptChars = buildConversationTextForSummary(toCompact).length
+        val timeoutMs = compactTimeoutMsFor(transcriptChars)
+        compactCallsIssued.set(0)
+        _compactProgress.value = CompactProgress(
+            startedAtMs = System.currentTimeMillis(),
+            depth = 0,
+            callsIssued = 0,
+            callBudget = MAX_COMPACT_LLM_CALLS,
+            timeoutSeconds = (timeoutMs / 1000L).toInt(),
+        )
+        AppLogger.info(
+            TAG,
+            "[Compact] starting: ${toCompact.size} entries, ${transcriptChars} transcript chars, " +
+                "timeout=${timeoutMs / 1000}s, callBudget=$MAX_COMPACT_LLM_CALLS",
+        )
+        compactJob = viewModelScope.launch(Dispatchers.IO) {
             // [T-android-compact-queued-drain] Only a SUCCESSFUL compact kicks
             // the queued-prompt drain below; failure/cancel/empty-summary paths
             // keep today's behavior (queued bubbles stay pending + cancellable).
             var compactSucceeded = false
+            // Distinguishes "we gave up on time" from other failures so the
+            // user-facing message can say so and invite a retry.
+            var timedOut = false
             try {
                 val existing = _compactSummary.value
                 // Mirrors iOS `generateCompactSummaryWithSplitting` — when the
                 // joined transcript exceeds the model's context window, halve
                 // the message list and summarize each half independently, then
                 // merge. depth cap=3 prevents pathological recursion.
-                val summary = generateCompactSummaryWithSplitting(
-                    messages = toCompact,
-                    previousSummary = existing,
-                    depth = 0,
-                ).trim()
+                //
+                // [T-android-compact-runaway] withTimeout bounds the WHOLE run,
+                // including every split segment. Without it the only ceiling was
+                // the provider's 10-minute readTimeout multiplied by however
+                // many sequential segments the split produced.
+                val summary = withTimeout(timeoutMs) {
+                    generateCompactSummaryWithSplitting(
+                        messages = toCompact,
+                        previousSummary = existing,
+                        depth = 0,
+                    )
+                }.trim()
                 if (summary.isEmpty()) {
                     withContext(Dispatchers.Main) {
                         appendSystemInfo("Compaction produced no output — try again later.", "compact")
@@ -1934,7 +2365,34 @@ class ChatViewModel(
                     )
                 }
                 compactSucceeded = true
+            } catch (e: TimeoutCancellationException) {
+                // [T-android-compact-runaway] MUST precede the CancellationException
+                // arm — TimeoutCancellationException extends it, so the generic
+                // re-throw would otherwise swallow our own timeout and surface it
+                // as a silent cancel with no message.
+                timedOut = true
+                val elapsed = (timeoutMs / 1000L).toInt()
+                val calls = compactCallsIssued.get()
+                Log.w(TAG, "[Compact] timed out after ${elapsed}s ($calls model call(s) issued)")
+                withContext(Dispatchers.Main) {
+                    appendSystemInfo(
+                        text = "Compaction timed out after ${elapsed}s " +
+                            "($calls model call(s) attempted). The model may be slow or " +
+                            "rate-limited — you can try compacting again.",
+                        iconKind = "compact",
+                    )
+                }
             } catch (e: CancellationException) {
+                // User-initiated (cancelCompact) or scope teardown. Tell the
+                // user only if they are still around to read it; the `finally`
+                // below releases the lock either way.
+                if (compactJob?.isCancelled == true) {
+                    runCatching {
+                        withContext(NonCancellable + Dispatchers.Main) {
+                            appendSystemInfo("Compaction cancelled.", "compact")
+                        }
+                    }
+                }
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Compact failed", e)
@@ -1946,6 +2404,12 @@ class ChatViewModel(
                 }
             } finally {
                 _isCompacting.value = false
+                _compactProgress.value = null
+                AppLogger.info(
+                    TAG,
+                    "[Compact] finished: success=$compactSucceeded timedOut=$timedOut " +
+                        "calls=${compactCallsIssued.get()}",
+                )
                 // [T-android-auto-compact-inloop] Signal the awaiting in-loop
                 // caller. In `finally` so a thrown/cancelled compaction can
                 // never strand the agent loop waiting on a callback.
@@ -2646,15 +3110,16 @@ class ChatViewModel(
     }
 
     /**
-     * Summarize [messages], recursively halving and merging when the input
-     * exceeds the model's context window. Mirrors iOS
-     * `generateCompactSummaryWithSplitting` (AIChatViewModel+Compaction.swift:820).
+     * Summarize [messages], recursively halving when a whole-input attempt
+     * fails. Mirrors iOS `generateCompactSummaryWithSplitting`.
      *
      * Depth cap = 3 (matches iOS) so a pathologically large conversation
      * still terminates instead of fanning out indefinitely. At each split we
-     * halve by message count, summarize each half independently, then ask the
-     * LLM to merge the two partial summaries into one — prioritizing Part 2
-     * (more recent) when space is tight, again matching iOS behavior.
+     * halve by message count, summarize each half independently, then
+     * concatenate the partial summaries oldest-first. The concatenation is a
+     * plain string join, NOT a further LLM call — see the comment at the join
+     * for why the extra round-trip was removed. Both platforms must keep this
+     * the same, or the summary a session carries differs by device.
      */
     private suspend fun generateCompactSummaryWithSplitting(
         messages: List<LLMMessage>,
@@ -2668,12 +3133,38 @@ class ChatViewModel(
             "Previous context summary:\n$previousSummary\n\n" +
                 "New conversation to merge:\n$transcript"
         }
+        // [T-android-compact-runaway] Spend one unit of the run's call budget.
+        // The depth cap bounds how DEEP the recursion goes; this bounds how
+        // WIDE it gets in total, which is what actually determines wall-clock
+        // time when each call is slow rather than failing fast.
+        val spent = compactCallsIssued.incrementAndGet()
+        if (spent > MAX_COMPACT_LLM_CALLS) {
+            throw IllegalStateException(
+                "compaction exceeded its budget of $MAX_COMPACT_LLM_CALLS model calls"
+            )
+        }
+        // [T-android-compact-progress] Publish before the call so the UI shows
+        // the segment that is actually running, not the one that just finished.
+        _compactProgress.value = _compactProgress.value?.copy(
+            depth = depth,
+            callsIssued = spent,
+        )
         return try {
             generateCompactSummary(conversationText)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             if (!isSegmentRetryableError(e) || messages.size < 2 || depth >= 3) {
+                throw e
+            }
+            // Don't start a split we cannot afford to finish: a half that
+            // immediately throws on budget would discard the sibling's work.
+            if (compactCallsIssued.get() + 2 > MAX_COMPACT_LLM_CALLS) {
+                AppLogger.info(
+                    TAG,
+                    "[Compact] not splitting at depth=$depth — " +
+                        "${compactCallsIssued.get()}/$MAX_COMPACT_LLM_CALLS calls already spent",
+                )
                 throw e
             }
             val mid = messages.size / 2
@@ -2685,23 +3176,29 @@ class ChatViewModel(
             )
             val summary1 = generateCompactSummaryWithSplitting(firstHalf, null, depth + 1)
             val summary2 = generateCompactSummaryWithSplitting(secondHalf, null, depth + 1)
-            val mergeInput = buildString {
-                append("Merge these partial summaries into a single cohesive context summary. ")
-                append("Frame everything as past events (what was asked, what was done) rather than as ")
-                append("ongoing goals or todos — the user's next message will set the current task.\n\n")
-                append("MUST PRESERVE:\n")
-                append("- What was done and what was tried, with outcomes (record as past events)\n")
-                append("- The last thing the user requested in this conversation, and how it was handled\n")
-                append("- All file paths, identifiers, URLs — copy verbatim\n")
-                append("- Decisions made and their rationale\n")
-                append("- Constraints, rules, and user preferences mentioned\n\n")
-                append("Do NOT carry forward \"pending\" or \"todo\" lists that imply standing work — if the user ")
-                append("still wants those, they will say so in their next message.\n\n")
-                append("PRIORITIZE Part 2 (more recent) over Part 1 (older) when space is tight.\n\n")
-                append("Part 1:\n").append(summary1).append("\n\n")
-                append("Part 2:\n").append(summary2)
-            }
-            generateCompactSummary(mergeInput)
+            // Join the partials textually — the caller stores a single summary
+            // string, so segmentation stays invisible downstream.
+            //
+            // This used to be a THIRD LLM call that re-summarised the two
+            // partials. Dropped, because the size premise behind it does not
+            // hold: each segment's output is already hard-capped (see
+            // maxOutputTokens in generateCompactSummary), so two partials are
+            // nowhere near a context boundary and not worth another round-trip
+            // to shrink.
+            //
+            // It was also the one genuinely fragile step: the merge went
+            // through generateCompactSummary directly, with no depth and no
+            // split retry of its own, so a failure there threw away the
+            // segments that had just succeeded. The mechanism that exists to
+            // rescue a failing compaction ended its own happy path on an
+            // unprotected call. A string join cannot fail.
+            //
+            // What is lost is the merge prompt's cross-part editing (prefer the
+            // newer half, de-duplicate shared background). Accepted: the parts
+            // are already ordered oldest-first, which is the same signal in
+            // positional form, and each is internally coherent because it was
+            // summarised under the full system prompt.
+            summary1 + "\n\n" + summary2
         }
     }
 
@@ -2773,25 +3270,27 @@ class ChatViewModel(
      * model` slipped past several variants — and every miss silently disabled
      * splitting, so compaction failed outright instead of retrying smaller.
      *
-     * Splitting on an unclassified error is safe: the worst case is two smaller
-     * calls reaching the same failure, bounded by depth < 3 (≤8 leaf calls). A
-     * summary built from halves is never worse than no summary at all, so the
-     * burden of proof is inverted — retry unless retrying is provably pointless.
+     * Splitting on an unclassified error is still the default, for that reason:
+     * a summary built from halves beats no summary, so the burden of proof is
+     * on NOT retrying.
+     *
+     * [T-android-compact-runaway] What changed is that "unclassified" no longer
+     * means "everything". Splitting only helps when the failure was caused by
+     * the SIZE of the request, and two error classes are known not to be:
+     *
+     *   - [LLMError.RateLimited] (429). The model is refusing on quota, not on
+     *     length. Halving turns one rejected call into two rejected calls, each
+     *     still subject to the provider's backoff — this is the exact shape
+     *     that turned a single failure into ~15 sequential slow calls and the
+     *     15-20 minute apparent hang users reported.
+     *   - [LLMError.TransientError] (5xx / upstream). A server-side fault is
+     *     independent of payload; retrying smaller just multiplies the outage.
+     *
+     * Both are better served by failing fast and letting the user retry the
+     * whole compaction once conditions change.
      */
-    private fun isSegmentRetryableError(error: Throwable): Boolean {
-        if (error is CancellationException) return false
-        if (error is LLMError) {
-            return when (error) {
-                is LLMError.Cancelled, is LLMError.NetworkError -> false
-                else -> true
-            }
-        }
-        // Raw OkHttp/socket failures are the Android equivalent of iOS's
-        // NSURLErrorDomain bail-out: offline / DNS / TLS / timeout, all
-        // payload-size independent.
-        if (error is java.io.IOException) return false
-        return true
-    }
+    private fun isSegmentRetryableError(error: Throwable): Boolean =
+        shouldSplitOnError(error)
 
     /**
      * Match provider error text against the substring set iOS
@@ -3111,9 +3610,25 @@ class ChatViewModel(
         viewModelScope.launch {
             canResume.collect { interrupted ->
                 if (interrupted) {
+                    // [T-android-group-pause-badge-restamp] Only a REAL
+                    // interruption re-stamps the badge's entry time. This
+                    // collector is the single chokepoint over every
+                    // `_canResume` setter, so it ALSO fires when loadSession
+                    // merely RE-DETECTS an old interrupted tail — that is not
+                    // a new entry into the paused state, and re-stamping it
+                    // there is what let a days-old pause keep looking "fresh"
+                    // to the group card's 24h window forever (the more often
+                    // the user opened the chat, the less able it was to
+                    // expire). The detecting site raises a sticky generation
+                    // mark before its assignment; we consume it here, once the
+                    // annotated emission has actually been observed.
+                    val pendingGen = redetectingInterruptedTailGen
+                    val isRedetection = pendingGen != consumedRedetectGen
+                    if (isRedetection) consumedRedetectGen = pendingGen
                     com.openminis.app.service.SessionBadgeStore.push(
                         sessionId,
                         com.openminis.app.service.SessionBadgeStore.SessionBadgeState.PAUSED,
+                        restamp = !isRedetection,
                     )
                 } else {
                     com.openminis.app.service.SessionBadgeStore.remove(
@@ -3509,8 +4024,12 @@ class ChatViewModel(
                     _activeEntryId.value = entry.id
                     val instance = providerRepository.instance(entry.providerInstanceId)
                     if (instance != null) {
-                        val apiKey = providerRepository.usableApiKey(instance)
-                        if (apiKey != null) {
+                        // [T-android-group-resolve-skip-uncredentialed] Gate on
+                        // hasAnyCredential — keying off the API key alone left a
+                        // session whose model lives on an OAuth provider unable
+                        // to restore, despite being signed in.
+                        val apiKey = providerRepository.usableApiKey(instance) ?: ""
+                        if (providerRepository.hasAnyCredential(instance)) {
                             currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
                             _providerName.value = instance.label.ifEmpty { entry.model.provider }
                             resolved = true
@@ -3734,7 +4253,7 @@ class ChatViewModel(
             }
 
             // Cold-start interrupt detection: an agent loop that was killed by
-            // the OS (or app force-quit) leaves agentHistory in one of three
+            // the OS (or app force-quit) leaves agentHistory in one of four
             // tell-tale shapes. Detecting any of them lets the user tap
             // Resume to pick up where the model left off — the in-memory
             // [_canResume] flag set by [handleUserCancelledCleanup] is lost
@@ -3747,8 +4266,16 @@ class ChatViewModel(
             //   Case C: last entry is user with the synthetic "Continue"
             //           reminder text — text-cancel handler committed it
             //           but [resume] never re-entered the agent loop.
+            //   Case D: last entry is a PLAIN-TEXT user turn that never got a
+            //           reply at all — see below (GH#262/#263).
             val lastEntry = agentHistory.lastOrNull()
-            if (lastEntry != null && !_isStreaming.value) {
+            // [T-android-orphan-user-tail GH#262/#263] `isActive` covers the
+            // case this VM cannot see: another VM (or the foreground service)
+            // is driving this very session, so `_isStreaming` is false HERE
+            // while a request is genuinely in flight THERE. Without it, Case D
+            // would light Resume on a turn that is merely still waiting.
+            val trackerActive = SessionActivityTracker.isActive(activeSessionId)
+            if (lastEntry != null && !_isStreaming.value && !trackerActive) {
                 val isInterrupted = when (lastEntry.role) {
                     LLMMessage.Role.USER -> {
                         val parts = lastEntry.contentParts
@@ -3757,7 +4284,46 @@ class ChatViewModel(
                         val isContinueReminder = parts.size == 1 &&
                             (parts.first() as? AgentContentPart.Text)?.text
                                 ?.contains("The user stopped the previous response") == true
-                        allToolResults || isContinueReminder
+                        // Case D — a user turn with NO reply after it at all.
+                        //
+                        // How it is produced: send() persists the user row
+                        // (~5605) BEFORE the reply lands. If the process dies
+                        // in between — Android reclaiming a backgrounded app is
+                        // the reported case — the assistant side never reaches
+                        // the store, and it cannot be reconstructed later
+                        // because persistAssistantTurn() drops any row with no
+                        // parts (~9112, the guard that stops us POSTing a
+                        // content-less assistant message back to the API).
+                        // An in-app first-turn network failure lands here too:
+                        // setInlineError() attaches the error to the last
+                        // ASSISTANT row and is a no-op when none exists (~5789),
+                        // so that tail is equally reply-less and equally stuck.
+                        //
+                        // Before this case, such a tail reported canResume=false
+                        // — no PAUSED badge, no Resume banner, and retryLast()
+                        // bailing at its own `lastAssistantIdx < 0` guard
+                        // (~5906). The session had NO recovery affordance and
+                        // the user could only start a new chat.
+                        //
+                        // Deliberately LAST: A and C describe a turn that was
+                        // mid-flight; D describes one that never started. Order
+                        // keeps their more specific semantics (and logging)
+                        // intact for tails that match both.
+                        //
+                        // False-positive safety — this must never fire on a turn
+                        // that is simply still waiting. Three gates hold:
+                        //   1. `!_isStreaming` (above) — send() sets it true at
+                        //      ~5564, BEFORE persisting the user row at ~5605,
+                        //      and clears it only in the stream epilogue, so the
+                        //      whole in-flight window is excluded in-process.
+                        //   2. `!trackerActive` (above) — the cross-VM case.
+                        //   3. This block runs only from loadSession(), never
+                        //      mid-stream.
+                        // A cold start after a kill satisfies all three exactly
+                        // because the process that was streaming no longer
+                        // exists.
+                        val isUnansweredUserTurn = !allToolResults && !isContinueReminder
+                        allToolResults || isContinueReminder || isUnansweredUserTurn
                     }
                     LLMMessage.Role.ASSISTANT -> {
                         lastEntry.contentParts.any { it is AgentContentPart.ToolUse }
@@ -3765,8 +4331,31 @@ class ChatViewModel(
                     else -> false
                 }
                 if (isInterrupted) {
+                    // [T-android-group-pause-badge-restamp] This is a
+                    // RE-DETECTION of an interruption that already happened
+                    // (possibly days ago) — the persisted tail still looks
+                    // unfinished. It is NOT a new entry into the paused state,
+                    // so the badge must keep its original entry timestamp;
+                    // otherwise merely opening or cold-start scanning an old
+                    // chat resets the group card's 24h freshness window and a
+                    // long-stale pause flags its group forever. Raised BEFORE
+                    // the assignment (the collector runs asynchronously — see
+                    // the field's doc) and consumed by the collector, not here.
+                    markRedetectingInterruptedTail()
                     _canResume.value = true
-                    Log.i(TAG, "loadSession: detected interrupted agent loop, canResume=true (lastRole=${lastEntry.role})")
+                    // Name the shape, not just the role: Case D (reply-less
+                    // user tail) is the one that used to be invisible, so a
+                    // field log has to be able to tell it from A/C.
+                    val shape = when {
+                        lastEntry.role == LLMMessage.Role.ASSISTANT -> "B/assistant-toolUse"
+                        lastEntry.contentParts.isNotEmpty() &&
+                            lastEntry.contentParts.all { it is AgentContentPart.ToolResult } -> "A/toolResult-tail"
+                        lastEntry.contentParts.size == 1 &&
+                            (lastEntry.contentParts.first() as? AgentContentPart.Text)?.text
+                                ?.contains("The user stopped the previous response") == true -> "C/continue-reminder"
+                        else -> "D/unanswered-user-turn"
+                    }
+                    Log.i(TAG, "loadSession: detected interrupted agent loop, canResume=true (lastRole=${lastEntry.role} shape=$shape)")
                 }
             }
             } finally {
@@ -4058,7 +4647,10 @@ class ChatViewModel(
                     val entryId = obj.optString("entryId").takeIf { it.isNotEmpty() } ?: return false
                     val entry = providerRepository.config.value.modelEntries.find { it.id == entryId } ?: return false
                     val instance = providerRepository.instance(entry.providerInstanceId) ?: return false
-                    val apiKey = providerRepository.usableApiKey(instance) ?: return false
+                    // [T-android-group-resolve-skip-uncredentialed] An explicit
+                    // entry pin on an OAuth provider must restore too.
+                    if (!providerRepository.hasAnyCredential(instance)) return false
+                    val apiKey = providerRepository.usableApiKey(instance) ?: ""
                     currentModel = entry.model
                     _modelName.value = entry.model.displayName
                     _providerName.value = instance.label.ifEmpty { entry.model.provider }
@@ -4077,26 +4669,57 @@ class ChatViewModel(
 
     private fun resolveProviderFromGroup(groupId: String, preferredEntryId: String? = null): Boolean {
         val group = providerRepository.group(groupId) ?: return false
-        // [T-disabled-provider-via-group-android] Resolve through
-        // enabledMemberEntries so a member whose provider instance is
-        // currently disabled is silently skipped. Without this, a disabled
-        // provider sitting at the head of memberEntryIds got loaded and
-        // ChatViewModel would attempt to call it — the whole point of
-        // disabling the provider was to stop that.
+        // [T-android-group-resolve-skip-uncredentialed] FILTER FIRST, THEN
+        // PICK — mirroring iOS `ModelGroupRouter.resolve`.
         //
+        // This used to take `enabledMemberEntries.first()` and only THEN check
+        // the credential, bailing out of the whole group with `?: return false`
+        // when that one member had none. So a group whose first member sat on a
+        // provider without a credential resolved to nothing at all, even when
+        // later members were perfectly usable — and the caller fell through to
+        // the new-chat default chain, which picks by "most recently added
+        // provider" and therefore landed on a model that was not in the group
+        // the user had selected (field report: a group of Claude+GPT entries
+        // resolving to an unrelated self-hosted model on every new chat).
+        //
+        // The same repo already got this right one layer down:
+        // buildFallbackProviders skips an uncredentialed member with
+        // `?: continue`. Selection and fallback now agree.
+        //
+        // Note availableMemberEntries also drops HIDDEN entries, matching iOS.
+        // enabledMemberEntries (still used by the settings UI) deliberately
+        // does not — "switched on" is the right question there, "usable right
+        // now" is the right question here.
+        val available = providerRepository.availableMemberEntries(group)
+        if (available.isEmpty()) return false
+
         // preferredEntryId comes from a prior session binding ("user picked
-        // this entry inside the group last time"). Honor it only if the
-        // entry is still enabled; otherwise fall back to the first enabled
-        // member so the session can still proceed on a now-degraded group.
-        val enabledMembers = providerRepository.enabledMemberEntries(group)
-        if (enabledMembers.isEmpty()) return false
-        val targetEntry = if (preferredEntryId != null) {
-            enabledMembers.firstOrNull { it.id == preferredEntryId } ?: enabledMembers.first()
-        } else {
-            enabledMembers.first()
-        }
+        // this entry inside the group last time"). Honor it only if it is
+        // still available; otherwise fall through to the strategy so the
+        // session can still proceed on a now-degraded group.
+        val targetEntry = available.firstOrNull { it.id == preferredEntryId }
+            ?: when (group.strategy) {
+                // [T-android-group-resolve-skip-uncredentialed] Honor the
+                // group's routing strategy, which initial selection previously
+                // ignored entirely — loadBalance silently behaved as fallback.
+                // Hashing the session id keeps the choice STABLE for a given
+                // session (re-entering it must not reshuffle the model) while
+                // spreading distinct sessions across members, matching iOS.
+                RoutingStrategy.loadBalance ->
+                    available[
+                        Math.floorMod(
+                            realSessionId.ifEmpty { sessionId }.hashCode(),
+                            available.size,
+                        ),
+                    ]
+                RoutingStrategy.fallback -> available.first()
+            }
+
         val instance = providerRepository.instance(targetEntry.providerInstanceId) ?: return false
-        val apiKey = providerRepository.usableApiKey(instance) ?: return false
+        // Non-null by construction: availableMemberEntries already required a
+        // credential. An OAuth instance has no API key to pass — the factory
+        // reads its token from storage — so "" is the correct argument there.
+        val apiKey = providerRepository.usableApiKey(instance) ?: ""
 
         currentModel = targetEntry.model
         _modelName.value = targetEntry.model.displayName
@@ -4182,8 +4805,11 @@ class ChatViewModel(
         _modelName.value = entry.model.displayName
         _activeEntryId.value = entry.id
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
-        val apiKey = providerRepository.usableApiKey(instance)
-        if (apiKey != null) {
+        // [T-android-group-resolve-skip-uncredentialed] Build the provider for
+        // an OAuth instance too — otherwise this tier set the model name in the
+        // UI but left currentProvider null, and the first send failed.
+        if (providerRepository.hasAnyCredential(instance)) {
+            val apiKey = providerRepository.usableApiKey(instance) ?: ""
             currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
         }
         return true
@@ -4194,7 +4820,11 @@ class ChatViewModel(
         val config = providerRepository.config.value
         val entry = config.modelEntries.find { it.id == entryId } ?: return
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return
-        val apiKey = providerRepository.usableApiKey(instance) ?: return
+        // [T-android-group-resolve-skip-uncredentialed] The user explicitly
+        // tapped this model; refusing it because the API-key slot is empty
+        // made OAuth models unselectable from the picker.
+        if (!providerRepository.hasAnyCredential(instance)) return
+        val apiKey = providerRepository.usableApiKey(instance) ?: ""
 
         currentModel = entry.model
         _modelName.value = entry.model.displayName
@@ -4267,7 +4897,12 @@ class ChatViewModel(
             val entry = config.modelEntries.find { it.id == entryId } ?: continue
             val instance = config.instances.find { it.id == entry.providerInstanceId } ?: continue
             if (!instance.isEnabled) continue
-            val apiKey = providerRepository.usableApiKey(instance) ?: continue
+            // [T-android-group-resolve-skip-uncredentialed] Credential test via
+            // hasAnyCredential so an OAuth-logged-in provider is kept as a
+            // fallback candidate; usableApiKey alone reads only the API-key
+            // slot and dropped every OAuth member from the chain.
+            if (!providerRepository.hasAnyCredential(instance)) continue
+            val apiKey = providerRepository.usableApiKey(instance) ?: ""
             val p = try {
                 ProviderFactory.create(instance, apiKey, entry.model, context)
             } catch (_: Exception) { continue }
@@ -4296,7 +4931,10 @@ class ChatViewModel(
             val reason = when {
                 entry.isHidden -> "Hidden"
                 !instance.isEnabled -> "Disabled"
-                providerRepository.usableApiKey(instance) == null -> "Not logged in"
+                // [T-android-group-resolve-skip-uncredentialed] Must match the
+                // routing filter, or a provider the user IS signed into gets
+                // reported as "Not logged in".
+                !providerRepository.hasAnyCredential(instance) -> "Not logged in"
                 else -> continue
             }
             result.add("⚠️ ${entry.model.displayName} ($label): $reason")
@@ -4324,7 +4962,11 @@ class ChatViewModel(
             // get picked up. buildFallbackProviders already does this; the
             // single-step variant here had the same bug.
             if (!instance.isEnabled) continue
-            val apiKey = providerRepository.usableApiKey(instance) ?: continue
+            // [T-android-group-resolve-skip-uncredentialed] Same credential
+            // notion as buildFallbackProviders — OAuth members belong in the
+            // single-step chain too.
+            if (!providerRepository.hasAnyCredential(instance)) continue
+            val apiKey = providerRepository.usableApiKey(instance) ?: ""
 
             currentModel = entry.model
             _modelName.value = entry.model.displayName
@@ -4819,6 +5461,147 @@ class ChatViewModel(
     }
 
     /**
+     * [T-android-delete-from-here] Delete [messageId] and every message after
+     * it, leaving the conversation as it stood immediately before that turn.
+     * Mirrors iOS `6717c0ab0`.
+     *
+     * Deliberately close to — but not the same as — [retryFromMessage]. Both
+     * rewind the conversation to a point, so this reuses that method's DB
+     * anchoring: walk the persisted rows counting only user messages that have
+     * VISIBLE text, because the agent loop also persists synthetic
+     * `<system-reminder>` user rows that never rendered a bubble. Counting
+     * those would anchor the cut one turn too early and silently take an extra
+     * exchange with it (the iOS retry-anchor fix, ported here already).
+     *
+     * The one deliberate difference is the cut point: retry keeps the target
+     * user message and re-sends it, so it cuts at `sortOrder + 1`. Delete From
+     * Here removes the target too, so it cuts at `sortOrder`. Off-by-one in
+     * either direction is silent and destructive — one strands the message the
+     * user asked to delete, the other eats the preceding turn.
+     *
+     * No stream is started and `_isStreaming` is never claimed: this is a pure
+     * truncation. It is still refused while a turn is in flight, because
+     * deleting rows out from under a live agent loop would leave
+     * [agentHistory] describing messages that no longer exist.
+     */
+    fun deleteFromMessage(messageId: String) {
+        if (_isStreaming.value) return
+        _canResume.value = false
+        val messages = _messages.value
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index < 0) return
+
+        // Snapshot what's about to go so any memory_write tool blocks inside
+        // can be revoked — otherwise the on-disk daily log keeps entries from
+        // messages the user just deleted.
+        val deletedMessages = messages.subList(index, messages.size).toList()
+
+        // Truncate the UI to everything BEFORE the target message, and drop
+        // any queued prompts that belonged to the deleted range so a later
+        // auto-drain can't resurrect them.
+        val retainedHead = messages.subList(0, index)
+        for (m in deletedMessages) {
+            m.queuedPromptId?.let { pid ->
+                _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
+            }
+        }
+        _messages.value = retainedHead
+
+        // Scrub stream deltas pointing at truncated messages so they can't
+        // resurface into a row that no longer exists.
+        val keptIds = retainedHead.mapTo(mutableSetOf()) { it.id }
+        retainStreamFlushStates(keptIds)
+        if (_streamingById.value.isNotEmpty()) {
+            _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
+        }
+
+        revokeMemoryWritesInDeletedMessages(deletedMessages)
+
+        val sid = activeSessionId ?: return
+        viewModelScope.launch {
+            val target = messages[index]
+            val cutoffSortOrder = resolveDeleteCutoffSortOrder(sid, messages, index, target)
+            if (cutoffSortOrder >= 0) {
+                chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
+            }
+
+            // Rebuild agentHistory from what survived, so the next turn is
+            // built on the truncated conversation rather than a stale list.
+            agentHistory.clear()
+            toolLoopDetector.reset()
+            val remaining = chatRepository.loadMessages(sid)
+            for (entity in remaining) {
+                agentHistory.add(entity.toLLMMessage())
+            }
+            // Refresh the session's last-message preview; otherwise the
+            // session list keeps quoting a message that no longer exists.
+            // An empty remainder clears it rather than leaving the stale text.
+            runCatching {
+                chatRepository.updateSessionPreview(sid, remaining.lastOrNull()?.partsJson ?: "[]")
+            }
+            AppLogger.info(
+                TAG,
+                "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
+                    "${deletedMessages.size} message(s) removed, ${remaining.size} remain",
+            )
+        }
+    }
+
+    /**
+     * [T-android-delete-from-here] Resolve the DB `sort_order` to cut at so
+     * that [index] and everything after it is removed.
+     *
+     * Anchoring is by visible-user-message ordinal rather than by row id
+     * because the UI list and the persisted rows are not 1:1 — see
+     * [deleteFromMessage]'s note on synthetic `<system-reminder>` rows.
+     *
+     * When the target is an ASSISTANT message the cut is anchored to the user
+     * turn it belongs to: we find the last visible user message at or before
+     * [index], cut just after it, and thereby drop the assistant reply and
+     * everything following. Returns -1 when no anchor can be resolved, which
+     * the caller treats as "leave the DB alone".
+     */
+    private suspend fun resolveDeleteCutoffSortOrder(
+        sid: String,
+        messages: List<ChatMessage>,
+        index: Int,
+        target: ChatMessage,
+    ): Int {
+        val dbMessages = chatRepository.loadMessages(sid)
+        // Which visible user message anchors the cut, 0-based.
+        // Both a user target and an assistant target anchor to the same
+        // ordinal — the last visible user message at or before `index`. What
+        // differs is only whether the cut lands on that row or just after it,
+        // resolved at the return below.
+        val visibleUserIndex = messages.subList(0, index + 1).count { it.role == "user" } - 1
+        // No user turn at or before the target (e.g. deleting from a leading
+        // assistant/system row): everything goes.
+        if (visibleUserIndex < 0) return 0
+        var visibleUserCount = 0
+        for (entity in dbMessages) {
+            if (entity.role != "user") continue
+            val hasText = try {
+                val arr = org.json.JSONArray(entity.partsJson)
+                (0 until arr.length()).any { i ->
+                    val o = arr.getJSONObject(i)
+                    val v = o.optString("value", "")
+                    o.optString("type") == "text" && v.isNotBlank() &&
+                        !v.trimStart().startsWith("<system-reminder>")
+                }
+            } catch (_: Exception) { true }
+            if (!hasText) continue
+            if (visibleUserCount == visibleUserIndex) {
+                // Target is that user message → cut AT it (removing it).
+                // Target is a later assistant reply → cut just AFTER it
+                // (keeping the user turn, removing the reply onward).
+                return if (target.role == "user") entity.sortOrder else entity.sortOrder + 1
+            }
+            visibleUserCount++
+        }
+        return -1
+    }
+
+    /**
      * [T-android-rerun-from-tool-block-position] Shared streaming tail used by
      * both [retryFromMessage] and [rerunFromToolBlock]: refresh the OAuth
      * token if needed, build the (OAuth-prefixed) system prompt, and launch
@@ -4960,9 +5743,83 @@ class ChatViewModel(
                 text.substring(0, startIdx).trim()
             }
         }
+        // [T-android-edit-loses-attachments] Restore the message's attachments
+        // into the composer alongside its text.
+        //
+        // Without this, editing a message that carried an image silently
+        // dropped it: the composer showed only the text, and re-sending
+        // produced a turn the model could no longer see the picture in. The
+        // XML strip above is what makes the loss invisible — the
+        // `<user-attached-files>` block naming the files is removed from the
+        // text, so nothing on screen hints that anything was attached.
+        //
+        // iOS has done this since AIChatViewModel.editMessage (L3891-3920);
+        // this side only ever returned the text. Android needs no copy step,
+        // unlike iOS: `imageUris`/`attachmentUris` on a restored message
+        // already point at files inside the app's own media store (see the
+        // `mediaRef` branch of loadSessionMessages, which resolves them
+        // against mediaStore.mediaBaseDir and skips any that no longer
+        // exist), and that is exactly what the send path re-reads.
+        //
+        // Ordering matches ChatMessage's own convention — images first, then
+        // files — so the composer's preview row shows them the same way the
+        // sent bubble did. Names come from `attachmentNames`, which is built
+        // image-first to align with these two lists; it is indexed
+        // defensively anyway, since a row persisted by an older build could
+        // be short.
+        val restored = mutableListOf<InputAttachment>()
+        msg.imageUris.forEachIndexed { i, uri ->
+            val name = msg.attachmentNames.getOrNull(i) ?: uri.lastPathSegment ?: "image"
+            restored.add(
+                InputAttachment(
+                    fileName = name,
+                    uri = uri,
+                    mimeType = guessMimeType(name, fallback = "image/*"),
+                    kind = InputAttachment.Kind.IMAGE,
+                ),
+            )
+        }
+        msg.attachmentUris.forEachIndexed { i, uri ->
+            // The non-image names occupy the suffix of attachmentNames, after
+            // the imageUris-many image entries.
+            val name = msg.attachmentNames.getOrNull(msg.imageUris.size + i)
+                ?: uri.lastPathSegment ?: "file"
+            restored.add(
+                InputAttachment(
+                    fileName = name,
+                    uri = uri,
+                    mimeType = guessMimeType(name, fallback = "application/octet-stream"),
+                    kind = InputAttachment.Kind.DOCUMENT,
+                ),
+            )
+        }
+        // Replace rather than append: edit mode reloads a specific message, so
+        // whatever the composer held was a different draft. Assigning even when
+        // empty keeps that true for a message that genuinely had no files.
+        _attachments.value = restored
+
         _editingMessageId.value = messageId
-        AppLogger.info(TAG_STREAM, "✏️ editMessage id=${messageId.take(8)} text=${text.length}ch")
+        AppLogger.info(
+            TAG_STREAM,
+            "✏️ editMessage id=${messageId.take(8)} text=${text.length}ch " +
+                "attachments=${restored.size}",
+        )
         return text
+    }
+
+    /**
+     * [T-android-edit-attachments] Best-effort MIME for a restored attachment,
+     * derived from its file extension.
+     *
+     * The exact type only has to be good enough for the composer chip and the
+     * send path's image/non-image split; the kind is already decided by which
+     * list the URI came out of, so a miss here cannot misroute an attachment.
+     */
+    private fun guessMimeType(fileName: String, fallback: String): String {
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        if (ext.isEmpty()) return fallback
+        return android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(ext) ?: fallback
     }
 
     /**
@@ -4973,6 +5830,18 @@ class ChatViewModel(
     fun cancelEdit() {
         if (_editingMessageId.value != null) {
             AppLogger.info(TAG_STREAM, "✏️ cancelEdit")
+            // [T-android-edit-loses-attachments] Drop the attachments
+            // editMessage restored, mirroring how the caller clears the text.
+            //
+            // Symmetry with editMessage is the whole point: it REPLACES the
+            // composer's attachments with the edited message's, so leaving
+            // them behind on cancel would strand files the user never picked
+            // in a composer they thought they had backed out of — and the next
+            // ordinary send would silently attach them.
+            //
+            // Guarded by the same non-null check as the log so a stray call
+            // outside edit mode cannot wipe a draft's real attachments.
+            _attachments.value = emptyList()
         }
         _editingMessageId.value = null
     }
@@ -5216,14 +6085,41 @@ class ChatViewModel(
         // Persist the queued user message as its own DB row + append to
         // agentHistory so the next API call carries it.
         val userText = combinedText.toString()
-        val userPartsJson = buildUserPartsJson(userText, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
+        // [T-android-paste-mediaref] Queued prompts carry markers too.
+        //
+        // sendMessage hands off to enqueuePrompt whenever a turn is already
+        // streaming, and it no longer expands markers before doing so — so
+        // without this the queued row would persist a literal `[Pasted#3]` and
+        // the model would receive the marker instead of the text.
+        val queuedPaste = buildPastedParts(userText, sid)
+        if (queuedPaste != null) {
+            _pastedTexts.value = _pastedTexts.value.filterNot { it.id in queuedPaste.consumedIds }
+        }
+        val userPartsJson = buildUserPartsJson(
+            userText,
+            prepared.mediaRefPartsJson,
+            prepared.attachedFilesXml,
+            bodyPartsJson = queuedPaste?.partsJson,
+        )
         val userEntity = chatRepository.appendMessage(sid, "user", userPartsJson)
         agentHistory.add(
             LLMMessage(
                 role = LLMMessage.Role.USER,
-                content = userText,
+                // Expanded for the model; the persisted row above stays small.
+                content = queuedPaste?.modelText ?: userText,
                 imageParts = prepared.imageParts,
-                contentParts = combinedParts,
+                contentParts = queuedPaste?.let { p ->
+                    // Replace the whole LEADING RUN of text parts with the one
+                    // expanded body, then keep everything after it.
+                    //
+                    // Not "index 0": each queued prompt contributes its own text
+                    // part, and combinedText joined them with blank lines —
+                    // p.modelText is the expansion of that join, so it stands
+                    // for all of them. The image and <user-attached-files> parts
+                    // that follow must survive untouched.
+                    val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
+                    listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
+                } ?: combinedParts,
                 dbMessageId = userEntity.id,
             ),
         )
@@ -5337,14 +6233,30 @@ class ChatViewModel(
             prepared.attachedFilesXml?.let { combinedParts.add(AgentContentPart.Text(it)) }
 
             val userText = combinedText.toString()
-            val userPartsJson = buildUserPartsJson(userText, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
+            // [T-android-paste-mediaref] Same marker handling as the mid-loop
+            // inject path above — see the note there for why queued prompts
+            // need it at all.
+            val drainPaste = buildPastedParts(userText, sid)
+            if (drainPaste != null) {
+                _pastedTexts.value =
+                    _pastedTexts.value.filterNot { it.id in drainPaste.consumedIds }
+            }
+            val userPartsJson = buildUserPartsJson(
+                userText,
+                prepared.mediaRefPartsJson,
+                prepared.attachedFilesXml,
+                bodyPartsJson = drainPaste?.partsJson,
+            )
             chatRepository.appendMessage(sid, "user", userPartsJson)
 
             agentHistory.add(LLMMessage(
                 role = LLMMessage.Role.USER,
-                content = userText,
+                content = drainPaste?.modelText ?: userText,
                 imageParts = prepared.imageParts,
-                contentParts = combinedParts,
+                contentParts = drainPaste?.let { p ->
+                    val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
+                    listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
+                } ?: combinedParts,
             ))
 
             try {
@@ -5378,6 +6290,22 @@ class ChatViewModel(
      *   re-entry with `skipCompactCheck`.
      */
     private fun sendMessage(text: String, skipContextCheck: Boolean) {
+        // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
+        // any more.
+        //
+        // They used to be: this funnel substituted the full text inline, so the
+        // persisted message held one enormous `text` part. That is the same
+        // shape that made huge tool results freeze the app — every time the
+        // bubble scrolled into view, TextKit had to lay out the whole block on
+        // the main thread. The markers now survive down to the parts-building
+        // step below, where each becomes its own `text/plain` mediaRef; the full
+        // content is re-attached to the REQUEST from disk (see toLLMMessage and
+        // the fresh-send contentParts), so the model still sees everything while
+        // the bubble stays small.
+        //
+        // The buffer is cleared where the mediaRefs are actually written, not
+        // here — clearing at this point would strip the content out from under
+        // a send that then bails on the context-check paths below.
         val trimmed = text.trim()
         // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
         if (_isStreaming.value) {
@@ -5483,19 +6411,48 @@ class ChatViewModel(
 
             val prepared = prepareUserAttachments(currentAttachments, activeSessionId)
 
+            // [T-android-paste-mediaref] Fold `[Pasted#N]` markers out to disk
+            // BEFORE persisting, so the stored message carries a mediaRef per
+            // paste instead of one huge text part.
+            val pasted = buildPastedParts(trimmed, activeSessionId)
+            if (pasted != null) {
+                // Safe to clear now: the content is on disk and the parts JSON
+                // below references it, so nothing depends on the buffer any more.
+                _pastedTexts.value = _pastedTexts.value.filterNot { it.id in pasted.consumedIds }
+            }
+
             // Save user message — text + persisted mediaRef parts so images survive
             // a session reload (T128). Non-image attachments still only contribute
             // their name (rendered as a file tile) and are not persisted.
-            val userPartsJson = buildUserPartsJson(trimmed, prepared.mediaRefPartsJson, prepared.attachedFilesXml)
+            val userPartsJson = buildUserPartsJson(
+                trimmed,
+                prepared.mediaRefPartsJson,
+                prepared.attachedFilesXml,
+                bodyPartsJson = pasted?.partsJson,
+            )
             val persistedUser = chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
 
             val userMsg = ChatMessage(
                 id = persistedUser.id,
                 role = "user",
-                content = trimmed,
+                // The bubble shows the SHORT body with markers removed; the
+                // pasted blocks appear beside it as file cards (below).
+                // Strip the consumed markers from the visible caption — the
+                // file cards now stand for them. Only ids that actually
+                // resolved are removed, so a literal the user typed for an
+                // unknown id survives as text, matching how it is persisted.
+                content = pasted?.let { p ->
+                    p.consumedIds.fold(trimmed) { acc, id ->
+                        acc.replace(PastedText.placeholderFor(id), "")
+                    }.trim()
+                } ?: trimmed,
                 imageUris = prepared.imageUris,
-                attachmentNames = prepared.attachmentNames,
-                attachmentUris = prepared.nonImageUris,
+                // Pasted blocks render exactly like attached documents: append
+                // them to the non-image suffix, preserving the
+                // images-first/files-after ordering that
+                // ChatMessage.attachmentNames depends on.
+                attachmentNames = prepared.attachmentNames + (pasted?.uiNames ?: emptyList()),
+                attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
             )
             _messages.value = _messages.value + userMsg
             val imageParts = prepared.imageParts
@@ -5508,8 +6465,18 @@ class ChatViewModel(
             // and the agent's read_image tool can resolve the same path back
             // to bytes. Trailing <user-attached-files> XML block lets the
             // model see filenames/sizes without needing tool calls.
+            // [T-android-paste-mediaref] The MODEL gets the fully expanded body
+            // even though the bubble and the DB row do not. This is the whole
+            // point of the split: local rendering stays cheap, the prompt is
+            // unchanged from what it used to be.
+            //
+            // On later turns the same expansion is rebuilt from disk by
+            // toLLMMessage's mediaRef branch, so history replay (retry, rerun,
+            // session reload, compaction) sees the identical text.
+            val modelBody = pasted?.modelText ?: trimmed
+
             val userContentParts = mutableListOf<AgentContentPart>()
-            if (trimmed.isNotEmpty()) userContentParts.add(AgentContentPart.Text(trimmed))
+            if (modelBody.isNotEmpty()) userContentParts.add(AgentContentPart.Text(modelBody))
             imageParts.forEachIndexed { idx, part ->
                 val path = prepared.imageUploadPaths.getOrNull(idx)
                 if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
@@ -5519,7 +6486,7 @@ class ChatViewModel(
 
             agentHistory.add(LLMMessage(
                 role = LLMMessage.Role.USER,
-                content = trimmed,
+                content = modelBody,
                 imageParts = imageParts,
                 contentParts = userContentParts,
                 dbMessageId = persistedUser.id,
@@ -5566,6 +6533,15 @@ class ChatViewModel(
             streamJob = launch(Dispatchers.IO) {
                 AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
                 try {
+                    // [T-STALL-DIAG] Snapshot BEFORE the (possibly blocking)
+                    // acquire. If the log shows this line and then no "slot
+                    // acquired", the turn is parked in acquireSlot — and this
+                    // line already records who was holding the slots, so the
+                    // leak is diagnosable from a single log.
+                    println(
+                        "[T-STALL-DIAG] send PRE-ACQUIRE sid=$activeSessionId " +
+                            SessionConcurrencyManager.diagSnapshot(),
+                    )
                     // Acquire concurrency slot (suspends if at max)
                     SessionConcurrencyManager.acquireSlot(activeSessionId)
                     AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
@@ -6545,6 +7521,12 @@ class ChatViewModel(
         // we surface a real error instead of a silent blank bubble. Mirrors iOS
         // AIChatViewModel.didInjectEmptyToolReminderThisRun.
         var didInjectEmptyToolReminder = false
+        // [T-android-readaloud-stop-stale] One-shot per REPLY (not per turn):
+        // the first text delta stops any Read Aloud still playing from the
+        // previous reply. Scoped outside the turn loop so a tool-loop reply
+        // that emits text across several turns doesn't re-fire it and cut off
+        // its own speech mid-sentence.
+        var didStopStaleReadAloud = false
         for (turn in 0 until MAX_AGENT_TURNS) {
             // Sanitize history before each API call (mirrors iOS pre-API validation)
             sanitizeAgentHistory()
@@ -6590,6 +7572,87 @@ class ChatViewModel(
                     // so a loop that keeps compacting cannot defeat the runaway
                     // backstop.
                     inLoopCompactions++
+
+                    // [T-android-inloop-compact-divider-order / GH#235] Seal the
+                    // bubble this run has been writing into and continue in a
+                    // FRESH one below the divider.
+                    //
+                    // `assistantId` is normally ONE bubble for the whole agent
+                    // loop, appended before the loop starts. compactAll() then
+                    // tail-appends the "N messages compacted" divider, which
+                    // lands AFTER that still-streaming bubble — and the loop
+                    // `continue`s and keeps appending thinking / tool blocks
+                    // into it. So every token produced after the compaction
+                    // rendered ABOVE the divider, reading as if fresh output had
+                    // been filed into already-compacted history. That is the
+                    // reported symptom.
+                    //
+                    // Starting a new bubble rather than moving the divider is
+                    // plan B, matching the iOS fix (e65540b69) so both platforms
+                    // carry the same semantics: output produced BEFORE the
+                    // compaction genuinely is pre-compaction history and belongs
+                    // above the line; output after it belongs below. It also
+                    // leaves compactAll()/appendSystemInfo untouched, so the
+                    // user-initiated `/compact` path — which anchors on a
+                    // finished message and is already correct — takes zero
+                    // regression risk.
+                    //
+                    // Reuses the seal+swap contract the queued-prompt injection
+                    // path already established (see injectQueuedPromptsAsNewTurn
+                    // and its call site): flush the finished bubble, clear the
+                    // per-turn accumulators, and point `assistantId` at a fresh
+                    // placeholder so subsequent writes target it.
+                    val sealedId = assistantId
+                    val freshAssistantId = "assistant_${System.currentTimeMillis()}"
+                    withContext(Dispatchers.Main) {
+                        // Flush whatever the sealed bubble accumulated and stop
+                        // it streaming, so it renders as finished history.
+                        updateAssistantMessage(
+                            sealedId,
+                            accumulatedText,
+                            false,
+                            allToolBlocks,
+                            isAwaitingModelResponse = false,
+                        )
+                        // If compaction fired before the bubble produced
+                        // anything, it would render as an empty row stranded
+                        // above the divider — drop it. Mirrors the iOS branch.
+                        val sealed = _messages.value.firstOrNull { it.id == sealedId }
+                        if (sealed != null &&
+                            sealed.content.isEmpty() &&
+                            sealed.toolBlocks.isEmpty()
+                        ) {
+                            _messages.value = _messages.value.filterNot { it.id == sealedId }
+                            AppLogger.info(
+                                TAG,
+                                "[Compact] in-loop: dropped empty sealed bubble $sealedId",
+                            )
+                        }
+                        _messages.value = _messages.value + ChatMessage(
+                            id = freshAssistantId,
+                            role = "assistant",
+                            content = "",
+                            isStreaming = true,
+                            isAwaitingModelResponse = true,
+                            thinkingLevel = turnThinkingLevel,
+                        )
+                    }
+                    clearStreamFlushState(sealedId)
+                    if (_streamingById.value.containsKey(sealedId)) {
+                        _streamingById.value = _streamingById.value - sealedId
+                    }
+                    // Same loop-scope reset the queued-prompt swap performs, so
+                    // the new bubble starts empty and buildTurnParts slices only
+                    // the new turn's blocks.
+                    assistantId = freshAssistantId
+                    accumulatedText = ""
+                    allToolBlocks.clear()
+                    allToolInputs.clear()
+                    toolInputChunkRings.clear()
+                    AppLogger.info(
+                        TAG,
+                        "[Compact] in-loop: sealed $sealedId, continuing in $freshAssistantId below the divider",
+                    )
                     continue
                 }
                 InLoopContextAction.STOP -> {
@@ -6643,6 +7706,12 @@ class ChatViewModel(
                             "Tap Continue to resume, or start a new chat.",
                         iconKind = "compact",
                     )
+                    // [T-android-group-pause-badge-restamp] A LIVE interruption just
+                    // happened: this is a real entry into the paused state, so the
+                    // badge's 24h freshness stamp must be refreshed. Cancel any
+                    // unconsumed re-detection mark left by a prior load so it cannot
+                    // suppress the re-stamp here.
+                    markLiveInterruption()
                     _canResume.value = true
                     // Android's equivalent of iOS's `hitTurnLimit = false`: this
                     // is a deliberate stop, NOT the runaway-ceiling path, so the
@@ -6763,6 +7832,40 @@ class ChatViewModel(
                     // Non-Anthropic providers ignore it (cast fails silently).
                     (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                         ?.enhancedCache = _enhancedCacheEnabled.value
+                    // [T-STALL-DIAG] First-chunk watchdog. The reported symptom
+                    // is "new session shows thinking… forever, UI empty, stop
+                    // button still armed" — which is indistinguishable, in the
+                    // current logs, between (a) the request never left, (b) it
+                    // left and the provider never answered, and (c) it answered
+                    // and the chunks were routed to the wrong session's UI.
+                    //
+                    // Stamp the request as it goes out, then have a detached
+                    // watchdog report every 10s while NOT ONE chunk has arrived.
+                    // Silence here + no network error = the request is hung
+                    // below the provider (DNS/TCP/TLS/read), which no existing
+                    // log covers. `firstChunkSeen` is flipped in the collector.
+                    val streamStartMs = android.os.SystemClock.elapsedRealtime()
+                    val firstChunkSeen = java.util.concurrent.atomic.AtomicBoolean(false)
+                    val diagSid = activeSessionId
+                    println(
+                        "[T-STALL-DIAG] stream REQUEST-OUT sid=$diagSid turn=$turn " +
+                            "provider=${currentProvider.javaClass.simpleName} " +
+                            "historySize=${agentHistory.size}",
+                    )
+                    val firstChunkWatchdog = viewModelScope.launch(Dispatchers.IO) {
+                        var waited = 0L
+                        while (!firstChunkSeen.get()) {
+                            kotlinx.coroutines.delay(10_000L)
+                            if (firstChunkSeen.get()) break
+                            waited += 10_000L
+                            println(
+                                "[T-STALL-DIAG] stream NO-FIRST-CHUNK sid=$diagSid turn=$turn " +
+                                    "waitedMs=$waited provider=${currentProvider.javaClass.simpleName} " +
+                                    "— request sent, provider has returned NOTHING (not even message_start)",
+                            )
+                        }
+                    }
+                    try {
                     // Route through effectiveAgentHistory() so a populated
                     // [_compactSummary] is prepended as a `<context-summary>`
                     // user message. Falls through to the raw agentHistory when
@@ -6773,6 +7876,15 @@ class ChatViewModel(
                         tools = agentTools,
                         thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
                     ).collect { chunk ->
+                // [T-STALL-DIAG] Mark first byte back from the provider and log
+                // the time-to-first-chunk once per turn.
+                if (firstChunkSeen.compareAndSet(false, true)) {
+                    println(
+                        "[T-STALL-DIAG] stream FIRST-CHUNK sid=$diagSid turn=$turn " +
+                            "ttfbMs=${android.os.SystemClock.elapsedRealtime() - streamStartMs} " +
+                            "kind=${chunk.javaClass.simpleName}",
+                    )
+                }
                 when (chunk) {
                     is LLMStreamChunk.ThinkingDelta -> {
                         turnThinking.append(chunk.text)
@@ -6793,6 +7905,17 @@ class ChatViewModel(
                         }
                     }
                     is LLMStreamChunk.Text -> {
+                        // [T-android-readaloud-stop-stale] First actual text of
+                        // this reply — stop the previous reply's Read Aloud so
+                        // old and new audio don't overlap. Deferred to here
+                        // rather than fired from send() on purpose: while the
+                        // model is still thinking there is nothing to supersede
+                        // the old speech with, so it keeps playing until real
+                        // new text arrives.
+                        if (!didStopStaleReadAloud) {
+                            didStopStaleReadAloud = true
+                            _stopStaleReadAloud.tryEmit(Unit)
+                        }
                         // Mark thinking block as done when text starts flowing
                         val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
                         if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
@@ -7126,6 +8249,18 @@ class ChatViewModel(
                         _autoRetryAttempt.value = 0
                         _autoRetryCountdown.value = 0
                     }
+                    } finally {
+                        // [T-STALL-DIAG] Always stop the first-chunk watchdog —
+                        // success, error, or cancellation — so it can never
+                        // outlive its turn and spam the log.
+                        firstChunkWatchdog.cancel()
+                        if (!firstChunkSeen.get()) {
+                            println(
+                                "[T-STALL-DIAG] stream ENDED-WITHOUT-CHUNK sid=$diagSid turn=$turn " +
+                                    "elapsedMs=${android.os.SystemClock.elapsedRealtime() - streamStartMs}",
+                            )
+                        }
+                    }
                 } catch (e: Exception) {
                     if (e is CancellationException && e.cause == null) throw e  // real job cancellation
                     val actual = unwrapFlowException(e)
@@ -7429,6 +8564,12 @@ class ChatViewModel(
                             context.getString(R.string.chat_error_stream_dropped_partial),
                         )
                     }
+                    // [T-android-group-pause-badge-restamp] A LIVE interruption just
+                    // happened: this is a real entry into the paused state, so the
+                    // badge's 24h freshness stamp must be refreshed. Cancel any
+                    // unconsumed re-detection mark left by a prior load so it cannot
+                    // suppress the re-stamp here.
+                    markLiveInterruption()
                     _canResume.value = true
                     // Deliberate stop, not the runaway ceiling — keep the
                     // post-loop tail from adding a fake turn-limit error.
@@ -7967,6 +9108,12 @@ class ChatViewModel(
             "tool use. The model kept calling tools without finishing — tap " +
             "Resume to continue from here, or send a new message to start over.",
         )
+        // [T-android-group-pause-badge-restamp] A LIVE interruption just
+        // happened: this is a real entry into the paused state, so the
+        // badge's 24h freshness stamp must be refreshed. Cancel any
+        // unconsumed re-detection mark left by a prior load so it cannot
+        // suppress the re-stamp here.
+        markLiveInterruption()
         _canResume.value = true
     }
 
@@ -8044,10 +9191,7 @@ class ChatViewModel(
      * model to call read_image — closing the loop with executeReadImageTool.
      */
     private fun visionPlaceholderFor(path: String?): String? {
-        val nativeVision = currentModel?.let {
-            it.inputModalities?.map { m -> m.lowercase() }?.contains("image") == true
-        } == true
-        if (nativeVision) return null
+        if (currentModelHasNativeVision) return null
         if (!com.openminis.app.tools.VisionGroupResolver.isConfigured(providerRepository, context)) return null
         return com.openminis.app.tools.VisionGroupResolver.noVisionImagePlaceholder(path)
     }
@@ -8077,10 +9221,7 @@ class ChatViewModel(
         } catch (_: Exception) { null }
         // Failed decode / missing file → unchanged.
         if (!base.success || base.imageData == null) return base
-        val nativeVision = currentModel?.let {
-            it.inputModalities?.map { m -> m.lowercase() }?.contains("image") == true
-        } == true
-        if (nativeVision) {
+        if (currentModelHasNativeVision) {
             // The model sees the pixels itself; a prompt adds no routing here, but
             // echo it as context so the tool block reflects the model's intent.
             return if (customPrompt != null) {
@@ -8839,6 +9980,9 @@ class ChatViewModel(
         val entity = chatRepository.appendMessage(
             realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
             reasoningContent = reasoningContent,
+            // [T-token-attribution-snapshot] From the live request context, not
+            // the session row — see currentModelSnapshot().
+            modelSnapshot = currentModelSnapshot(),
         )
         return entity.id
     }
@@ -8884,6 +10028,7 @@ class ChatViewModel(
         chatRepository.appendMessage(
             realSessionId.ifEmpty { sessionId }, "assistant", partsJson, tokenJson,
             reasoningContent = reasoningContent,
+            modelSnapshot = currentModelSnapshot(),
         )
     }
 
@@ -9090,6 +10235,18 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // to the memory feature.
         val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
         val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        // [XSessionDiag] Hypothesis 3: ties the memory-injection sizes to a
+        // SESSION id. MemoryRepository itself has no session context, so its own
+        // `memory/daily-inject` line (which names the source files) cannot say who
+        // received them — this line is the join key between the two. Emitted once
+        // per system-prompt build, not per request iteration.
+        AppLogger.info(
+            "XSessionDiag",
+            "[XSessionDiag] prompt/memory: session=${activeSessionId.take(8)} " +
+                "memoryEnabled=$memoryOn " +
+                "globalChars=${globalMemoryFragment?.length ?: 0} " +
+                "dailyChars=${dailyMemoryFragment?.length ?: 0}",
+        )
 
         return buildString {
             append(base)
@@ -9531,6 +10688,94 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      * `mediaRef` part per persisted image. Mirrors the existing single-part
      * shape when there are no attachments.
      */
+    /**
+     * [T-android-paste-mediaref] What a message's `[Pasted#N]` markers turned
+     * into once each was written to disk.
+     *
+     * @param partsJson the message's parts, in order, with each marker replaced
+     *   by a `text/plain` mediaRef part and the surrounding prose kept as
+     *   separate text parts.
+     * @param modelText the same body with every marker expanded back to its full
+     *   text — what the model must see on THIS turn. (Later turns rebuild it
+     *   from disk via toLLMMessage.)
+     * @param uiNames / [uiUris] the pasted blocks as attachment-style entries so
+     *   the sent bubble shows a file card, exactly like a picked document.
+     * @param consumedIds buffer entries actually referenced, for the caller to
+     *   clear once the send is committed.
+     */
+    private data class PastedParts(
+        val partsJson: List<String>,
+        val modelText: String,
+        val uiNames: List<String>,
+        val uiUris: List<Uri>,
+        val consumedIds: Set<Int>,
+    )
+
+    /**
+     * [T-android-paste-mediaref] Write each `[Pasted#N]` in [text] to its own
+     * `text/plain` media file and return the pieces the send path needs.
+     *
+     * This is the crux of the change. Previously the marker was substituted
+     * inline and the whole block was persisted as one `text` part; now the block
+     * becomes a mediaRef — the same mechanism images and documents already use —
+     * so the stored message and its bubble stay small while the file on disk
+     * holds the content.
+     *
+     * Returns null when [text] contains no live marker, letting every caller
+     * keep its existing straight-line path untouched.
+     */
+    private fun buildPastedParts(text: String, sessionId: String): PastedParts? {
+        val (chunks, consumed) = splitPastePlaceholders(text, _pastedTexts.value)
+        if (consumed.isEmpty()) return null
+        val byId = _pastedTexts.value.associateBy { it.id }
+
+        val parts = mutableListOf<String>()
+        val model = StringBuilder()
+        val names = mutableListOf<String>()
+        val uris = mutableListOf<Uri>()
+        for (chunk in chunks) {
+            when (chunk) {
+                is PasteChunk.Text -> {
+                    parts.add("""{"type":"text","value":${escapeJson(chunk.value)}}""")
+                    model.append(chunk.value)
+                }
+                is PasteChunk.Pasted -> {
+                    val entry = byId[chunk.id] ?: continue
+                    val ref = try {
+                        mediaStore.saveMedia(
+                            data = entry.text.toByteArray(Charsets.UTF_8),
+                            mimeType = PastedMedia.MIME,
+                            sessionId = sessionId,
+                            originalFileName = PastedMedia.fileNameFor(chunk.id),
+                        )
+                    } catch (e: Exception) {
+                        // Disk full / unwritable: fall back to inlining this one
+                        // block as text. The message is then shaped like the old
+                        // behaviour — big, but complete. Losing the paste
+                        // silently would be far worse than a heavy bubble.
+                        AppLogger.warning(
+                            TAG,
+                            "[Paste] saveMedia failed for #${chunk.id}, inlining: ${e.message}",
+                        )
+                        parts.add("""{"type":"text","value":${escapeJson(entry.text)}}""")
+                        model.append(entry.text)
+                        continue
+                    }
+                    parts.add(buildMediaRefPartJson(ref))
+                    model.append(entry.text)
+                    names.add(ref.originalFileName ?: PastedMedia.fileNameFor(chunk.id))
+                    uris.add(Uri.fromFile(java.io.File(mediaStore.mediaBaseDir, ref.relativePath)))
+                }
+            }
+        }
+        AppLogger.info(
+            TAG,
+            "[Paste] ${consumed.size} placeholder(s) -> mediaRef: " +
+                "${text.length} chars in bubble, ${model.length} chars to model",
+        )
+        return PastedParts(parts, model.toString(), names, uris, consumed)
+    }
+
     private fun buildUserPartsJson(
         text: String,
         mediaRefPartsJson: List<String>,
@@ -9544,9 +10789,20 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // Persist it here as a text part (iOS parity); toLLMMessage restores
         // it via the plain "text" case with zero special-casing.
         attachedFilesXml: String? = null,
+        /**
+         * [T-android-paste-mediaref] Pre-split body parts from
+         * [buildPastedParts], used INSTEAD of the single `text` part when the
+         * message contained `[Pasted#N]` markers. Already an interleaved
+         * text/mediaRef sequence, so it is spliced in at the position the plain
+         * text part would have occupied — order is what keeps the pasted block
+         * where the user put it, between the words around it.
+         */
+        bodyPartsJson: List<String>? = null,
     ): String {
         val parts = mutableListOf<String>()
-        if (text.isNotEmpty() || mediaRefPartsJson.isEmpty()) {
+        if (bodyPartsJson != null) {
+            parts.addAll(bodyPartsJson)
+        } else if (text.isNotEmpty() || mediaRefPartsJson.isEmpty()) {
             parts.add("""{"type":"text","value":${escapeJson(text)}}""")
         }
         parts.addAll(mediaRefPartsJson)
@@ -9961,7 +11217,10 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // every member sits behind a disabled provider.
         val entry = providerRepository.resolveTitleSubEntry() ?: return null
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
-        var apiKey = providerRepository.loadApiKey(instance.id) ?: return null
+        // [T-android-keyless-provider-selection] usableApiKey — a keyless
+        // self-hosted sub-model is usable; loadApiKey returned null and made
+        // title generation silently fall back. See QuickTestSheet.
+        var apiKey = providerRepository.usableApiKey(instance) ?: return null
 
         // [T-android-titlegen-oauth-refresh] Refresh the OAuth token before
         // building the provider — matches the manual Regenerate path
@@ -10285,6 +11544,12 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             viewModelScope.launch(Dispatchers.IO) {
                 persistToolResultMessage(parts)
             }
+            // [T-android-group-pause-badge-restamp] A LIVE interruption just
+            // happened: this is a real entry into the paused state, so the
+            // badge's 24h freshness stamp must be refreshed. Cancel any
+            // unconsumed re-detection mark left by a prior load so it cannot
+            // suppress the re-stamp here.
+            markLiveInterruption()
             _canResume.value = true
             return
         }
@@ -10339,10 +11604,22 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 val partsJson = buildAssistantPartsJson(parts)
                 chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
             }
+            // [T-android-group-pause-badge-restamp] A LIVE interruption just
+            // happened: this is a real entry into the paused state, so the
+            // badge's 24h freshness stamp must be refreshed. Cancel any
+            // unconsumed re-detection mark left by a prior load so it cannot
+            // suppress the re-stamp here.
+            markLiveInterruption()
             _canResume.value = true
         } else if (historyEndsWithAssistant) {
             // Already committed (tool cancel path above handled or prior turn
             // wrote an assistant row). Still allow resume.
+            // [T-android-group-pause-badge-restamp] A LIVE interruption just
+            // happened: this is a real entry into the paused state, so the
+            // badge's 24h freshness stamp must be refreshed. Cancel any
+            // unconsumed re-detection mark left by a prior load so it cannot
+            // suppress the re-stamp here.
+            markLiveInterruption()
             _canResume.value = true
         }
     }
@@ -10643,9 +11920,21 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             // their original filenames so UserAttachmentList renders the same
             // tiles after a session reload.
             val restoredImageUris = mutableListOf<Uri>()
-            val restoredAttachmentNames = mutableListOf<String>()
+            // [T-android-paste-mediaref] Names are collected PER COLUMN and
+            // concatenated image-first at the end, instead of appended to one
+            // list in part order.
+            //
+            // UserAttachmentList splits with `allFileNames.drop(imageUris.size)`,
+            // so the names list must be images-then-files regardless of the
+            // order the parts appear in. That used to be automatic: attachment
+            // mediaRefs were always written images-first. A pasted block breaks
+            // it — it lives in the BODY, so it can precede an image part, and a
+            // single in-order list would then start with a file name and shift
+            // every image caption onto the wrong tile.
+            val restoredImageNames = mutableListOf<String>()
+            val restoredFileNames = mutableListOf<String>()
             // T150: file:// URIs of restored non-image attachments, in the
-            // same order as the non-image suffix of restoredAttachmentNames.
+            // same order as the non-image suffix of the joined name list.
             // Powers the user-bubble file chip → FilePreviewScreen tap after
             // a session reload.
             val restoredAttachmentUris = mutableListOf<Uri>()
@@ -10740,12 +12029,24 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                             // T150: branch on mime so non-image mediaRefs land
                             // in the file-chip column instead of polluting
                             // imageUris (which feeds the image gallery).
+                            //
+                            // [T-android-paste-mediaref] A pasted block needs no
+                            // case of its own: it is text/plain, so it takes the
+                            // non-image branch and renders as the same file card
+                            // as an attached document — which is exactly the
+                            // requested behaviour. Note this ALSO relies on
+                            // parts being written images-first; a pasted ref
+                            // sits in the body (possibly before an image part),
+                            // so the names/uris pairing here is positional per
+                            // COLUMN, not per part index, and stays consistent
+                            // because each column is appended in part order.
                             if (mime.startsWith("image/")) {
                                 restoredImageUris.add(Uri.fromFile(file))
+                                restoredImageNames.add(name)
                             } else {
                                 restoredAttachmentUris.add(Uri.fromFile(file))
+                                restoredFileNames.add(name)
                             }
-                            restoredAttachmentNames.add(name)
                         }
                         // toolResult in user messages handled in first pass above
                     }
@@ -10784,7 +12085,9 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 role = entity.role,
                 content = text,
                 imageUris = restoredImageUris,
-                attachmentNames = restoredAttachmentNames,
+                // Image names first, then file names — the invariant
+                // UserAttachmentList's `drop(imageUris.size)` relies on.
+                attachmentNames = restoredImageNames + restoredFileNames,
                 attachmentUris = restoredAttachmentUris,
                 toolBlocks = blocks,
                 sourceDbIds = listOf(entity.id),
@@ -10913,6 +12216,52 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                         val rel = v.optString("relativePath", "")
                         if (rel.isEmpty()) continue
                         val mime = v.optString("mimeType", "image/jpeg")
+                        // [T-android-paste-mediaref] A pasted block is stored as
+                        // a mediaRef but is CONTENT, not an attachment: read it
+                        // back off disk and inline it here, restoring exactly
+                        // the text the original send put in the prompt.
+                        //
+                        // This branch is what makes every history-replay path
+                        // correct at once — session reload, retry, rerun,
+                        // edit-resend and compaction all rebuild through this
+                        // one converter, so none of them needs its own handling.
+                        //
+                        // An unreadable file degrades to skipping the part
+                        // rather than aborting the message: losing one pasted
+                        // block is recoverable, failing to build the request is
+                        // not.
+                        if (PastedMedia.isPastedRef(mime, v.optString("originalFileName", null))) {
+                            val pf = java.io.File(mediaStore.mediaBaseDir, rel)
+                            val body = try {
+                                if (pf.exists()) pf.readText(Charsets.UTF_8) else null
+                            } catch (e: Exception) {
+                                AppLogger.warning(TAG, "[Paste] restore failed for $rel: ${e.message}")
+                                null
+                            }
+                            // [T-android-paste-missing-file] An unreadable
+                            // pasted file degrades to an explicit marker, never
+                            // to silence.
+                            //
+                            // The file can genuinely disappear — the user clears
+                            // app storage, a sync pass prunes it as an orphan,
+                            // the disk fills mid-write. Dropping the part on the
+                            // floor would leave the model reading a sentence
+                            // with a hole in the middle and no way to know
+                            // content was ever there, so it would answer
+                            // confidently about text it never saw. Saying so
+                            // lets it ask, and leaves a searchable trace when a
+                            // user reports a strange reply.
+                            val resolved = body ?: PastedMedia.MISSING_PLACEHOLDER
+                            if (body == null) {
+                                AppLogger.warning(
+                                    TAG,
+                                    "[Paste] missing pasted file for $rel — substituting placeholder",
+                                )
+                            }
+                            textContent += resolved
+                            contentParts.add(AgentContentPart.Text(resolved))
+                            continue
+                        }
                         if (!mime.startsWith("image/")) continue
                         val file = java.io.File(mediaStore.mediaBaseDir, rel)
                         if (!file.exists()) continue

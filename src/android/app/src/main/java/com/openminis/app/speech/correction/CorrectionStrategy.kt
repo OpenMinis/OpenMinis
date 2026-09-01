@@ -61,7 +61,9 @@ class LlmCorrectionStrategy(
 
         val instance = repository.instance(entry.providerInstanceId)
             ?: throw CorrectionError.NoModelAvailable
-        val apiKey = repository.loadApiKey(instance.id) ?: throw CorrectionError.NoModelAvailable
+        // [T-android-keyless-provider-selection] usableApiKey — a keyless
+        // self-hosted correction model is usable. See QuickTestSheet.
+        val apiKey = repository.usableApiKey(instance) ?: throw CorrectionError.NoModelAvailable
         val provider = ProviderFactory.create(instance, apiKey, entry.model, this.context)
 
         // [T-android-voice-correction-diag] Name the resolved model BEFORE the
@@ -109,7 +111,10 @@ class LlmCorrectionStrategy(
         repository.resolveTitleSubEntry()?.let { return it to "sub" }
         val primaryGroupId = repository.defaultPrimaryGroupId
         val group = primaryGroupId?.let { repository.group(it) }
-        val entry = group?.let { repository.firstEnabledMemberEntry(it) }
+        // [T-android-group-resolve-skip-uncredentialed] Credential-aware filter:
+        // picking a member whose provider has no credential would fail the
+        // correction request outright instead of using the next usable member.
+        val entry = group?.let { repository.availableMemberEntries(it).firstOrNull() }
         if (entry != null) return entry to "primary"
         Log.e(TAG, "no correction model available (neither sub nor primary group resolves)")
         return null
