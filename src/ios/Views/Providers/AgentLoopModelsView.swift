@@ -59,7 +59,7 @@ struct AgentLoopModelsSection: View {
             }
         } header: {
             HStack {
-                Text("Available Models in Agent Loop")
+                Text("Models Minis Can Call at Runtime")
                 Spacer()
                 if !currentEntries.isEmpty || !currentGroups.isEmpty {
                     EditButton()
@@ -67,7 +67,7 @@ struct AgentLoopModelsSection: View {
                 }
             }
         } footer: {
-            Text("Models and groups listed here can be invoked from the terminal via minis-model-use. Only these are visible to the agent.")
+            Text("During a Minis task, the agent calls these models for sub-tasks such as generating an image or summarizing text — work its own model can't do. Also callable from the terminal via minis-model-use. Only these are visible to the agent.")
         }
     }
 
@@ -84,7 +84,7 @@ struct AgentLoopModelsSection: View {
                 Text(group.name)
                     .font(.subheadline.weight(.medium))
                 let count = group.memberEntryIds.count
-                Text(String(localized: "\(count) models") + " · \(group.strategy == .fallback ? String(localized: "Fallback") : String(localized: "Load Balance"))")
+                Text(AppLocalized("\(count) models") + " · \(group.strategy == .fallback ? AppLocalized("Fallback") : AppLocalized("Load Balance"))")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

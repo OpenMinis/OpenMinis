@@ -43,14 +43,14 @@ struct MCPIntegrationsView: View {
                         Button {
                             toolsServer = server
                         } label: {
-                            Label(String(localized: "Refresh Tools"), systemImage: "arrow.clockwise")
+                            Label(AppLocalized("Refresh Tools"), systemImage: "arrow.clockwise")
                         }
                     }
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
                         Button {
                             toolsServer = server
                         } label: {
-                            Label(String(localized: "Tools"), systemImage: "arrow.clockwise")
+                            Label(AppLocalized("Tools"), systemImage: "arrow.clockwise")
                         }
                         .tint(.blue)
                     }
@@ -88,12 +88,12 @@ struct MCPIntegrationsView: View {
                     Button {
                         showAddForm = true
                     } label: {
-                        Label(String(localized: "Add Server"), systemImage: "plus")
+                        Label(AppLocalized("Add Server"), systemImage: "plus")
                     }
                     Button {
                         showJSONImport = true
                     } label: {
-                        Label(String(localized: "Import JSON"), systemImage: "doc.text")
+                        Label(AppLocalized("Import JSON"), systemImage: "doc.text")
                     }
                 } label: {
                     Image(systemName: "plus")
@@ -225,7 +225,7 @@ struct MCPToolsSheet: View {
                     .accessibilityLabel(Text("Refresh tools"))
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(String(localized: "Done")) { dismiss() }
+                    Button(AppLocalized("Done")) { dismiss() }
                 }
             }
             .task { await refresh() }

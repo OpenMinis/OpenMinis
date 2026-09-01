@@ -146,7 +146,7 @@ fun MCPIntegrationsScreen(
                                     modifier = Modifier.size(14.dp),
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                Switch(
+                                SettingsSwitch(
                                     checked = server.enabled,
                                     onCheckedChange = { mcpRepository.setEnabled(server.id, it) },
                                 )

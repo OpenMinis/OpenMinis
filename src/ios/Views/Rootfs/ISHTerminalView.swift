@@ -298,7 +298,7 @@ class ISHTerminalViewModel: ObservableObject {
         if ISHKernel.shared.isBooted && RootfsManager.shared.didResetWhileBooted {
             isShellStarted = false
             logger.warning("[StartShell] rootfs was reset this session; refusing to reuse stale kernel mount")
-            let msg = "\r\n" + String(localized: "The Linux environment was reset. Please restart the app to reinstall it before using the terminal.") + "\r\n"
+            let msg = "\r\n" + AppLocalized("The Linux environment was reset. Please restart the app to reinstall it before using the terminal.") + "\r\n"
             if let data = msg.data(using: .utf8) {
                 emulator.feed(data)
             }
@@ -340,21 +340,58 @@ class ISHTerminalViewModel: ObservableObject {
 
         Task { @MainActor in MirrorSpeedTestViewModel.shared.autoDetectOnceIfNeeded() }
 
-        // Mount /var/minis/* for this session BEFORE starting the shell.
-        // We must do this synchronously before executeCommand so the shell sees the mounts.
-        // Use Task.detached to avoid inheriting main actor isolation (which would deadlock
-        // the semaphore since .onAppear runs on the main actor).
+        // Mount /var/minis/* for this session BEFORE starting the shell — the
+        // shell must see the mounts — but do it ASYNCHRONOUSLY.
+        //
+        // [T-terminal-mount-watchdog-crash] This used to block the main thread
+        // on a DispatchSemaphore until the mount finished. `mountForSession` is
+        // isolated to the `ISHExecutionCoordinator` actor and ends up taking
+        // iSH's global `pids_lock`, so any guest process holding that lock
+        // stalls the wait — and this runs from `.onAppear`, inside a
+        // CATransaction commit. Field crash 2026-08-23 20:11: one hung
+        // `ssh` left a parent in `do_wait` re-acquiring `pids_lock` every
+        // second, `startShell` never got past this line, and the scene-update
+        // watchdog killed the app after 10s (0x8BADF00D, 9% CPU — pure block,
+        // not a busy loop).
+        //
+        // Nothing about this needs the main thread to wait. Returning lets the
+        // frame commit; the rest of the startup resumes on the main actor once
+        // the mount lands. If the kernel is wedged the terminal simply does not
+        // open — which is a bad screen, not a terminated app.
         if let sid = sessionId {
-            stepStart = CFAbsoluteTimeGetCurrent()
-            print("[ISHTerminal] Mounting /var/minis for session \(sid) before shell start")
-            let semaphore = DispatchSemaphore(value: 0)
-            Task.detached {
+            let mountStart = CFAbsoluteTimeGetCurrent()
+            logger.info("[StartShell] mountForSession dispatched (async) for \(sid)")
+            Task.detached { [weak self] in
                 await ISHExecutionCoordinator.shared.mountForSession(sid)
-                semaphore.signal()
+                await MainActor.run {
+                    guard let self else { return }
+                    self.logger.info("[StartShell] mountForSession: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - mountStart) * 1000))ms")
+                    self.finishStartShell(totalStart: totalStart,
+                                          sessionId: sessionId,
+                                          initCommand: initCommand)
+                }
             }
-            semaphore.wait()
-            logger.info("[StartShell] mountForSession: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent() - stepStart) * 1000))ms")
+            return
         }
+
+        finishStartShell(totalStart: totalStart, sessionId: sessionId, initCommand: initCommand)
+    }
+
+    /// The half of `startShell` that must run AFTER the session mount is in
+    /// place: env vars, the login shell itself, and the initial input.
+    ///
+    /// [T-terminal-mount-watchdog-crash] Split out so the mount can be awaited
+    /// instead of blocked on.
+    ///
+    /// Callers must be on the main thread: both entry points satisfy that —
+    /// `startShell` runs from `.onAppear`, and the async path hops through
+    /// `MainActor.run` first. Not annotated `@MainActor` because the enclosing
+    /// class is not, and annotating just this method would make the
+    /// synchronous call from `startShell` illegal.
+    private func finishStartShell(totalStart: CFAbsoluteTime,
+                                  sessionId: String?,
+                                  initCommand: String?) {
+        var stepStart = CFAbsoluteTimeGetCurrent()
 
         // Inject user-defined environment variables
         stepStart = CFAbsoluteTimeGetCurrent()

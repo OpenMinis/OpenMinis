@@ -103,6 +103,15 @@ data class FileItem(
     val isJsonFile: Boolean
         get() = file.extension.lowercase() == "json"
 
+    /**
+     * [T-android-apk-preview] An APK is technically a ZIP, but listing its 282
+     * internal entries answers a question nobody asked. What someone who taps
+     * an APK wants is the package it represents — and a way to install or
+     * hand it to another app. Checked BEFORE [isArchiveFile] at the call site.
+     */
+    val isApkFile: Boolean
+        get() = file.extension.lowercase() in setOf("apk", "apks", "xapk")
+
     val isArchiveFile: Boolean
         get() = file.extension.lowercase() in setOf("zip", "jar", "apk", "aar")
 

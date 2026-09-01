@@ -191,7 +191,7 @@ struct MessageImageGallery: View {
 
             Button {
                 guard let img = currentImage else { return }
-                PrintHelper.printImage(img, jobName: String(localized: "Image"))
+                PrintHelper.printImage(img, jobName: AppLocalized("Image"))
             } label: {
                 chromeIcon("printer")
             }

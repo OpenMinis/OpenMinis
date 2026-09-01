@@ -228,9 +228,25 @@ interface ChatDao {
      * This does NOT recover usage from sessions the user deleted outright —
      * deleting a session removes its message rows too. It only stops
      * orphaned-but-present rows from being thrown away.
+     *
+     * [T-token-attribution-snapshot] The model now comes from
+     * `COALESCE(m.model_id, s.model_id)`, preferring the per-message snapshot
+     * written when the turn was persisted.
+     *
+     * `s.model_id` remains only as the fallback for rows written before that
+     * column existed. It is a single MUTABLE column per session, rewritten on
+     * every model switch (including silent failover) with no history, and the
+     * join carries no time dimension — so on its own it re-attributed a
+     * session's entire history to whatever model it currently pointed at.
+     * That is why `hasSnapshot` is selected alongside: the UI must show
+     * fallback rows as ESTIMATED rather than passing them off as measured.
      */
     @Query("""
-        SELECT s.model_id AS modelId, m.token_usage AS tokenUsage, m.created_at AS createdAt, m.session_id AS sessionId
+        SELECT COALESCE(m.model_id, s.model_id) AS modelId,
+               m.model_display_name  AS modelDisplayName,
+               m.provider_type       AS providerType,
+               (m.model_id IS NOT NULL) AS hasSnapshot,
+               m.token_usage AS tokenUsage, m.created_at AS createdAt, m.session_id AS sessionId
         FROM messages m LEFT JOIN sessions s ON m.session_id = s.id
         WHERE m.token_usage IS NOT NULL
     """)

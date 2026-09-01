@@ -7,8 +7,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
@@ -126,7 +124,10 @@ class DebugServer(
         socket.use { s ->
             try {
                 s.soTimeout = 30_000
-                val reader = BufferedReader(InputStreamReader(s.getInputStream()))
+                // Byte-level, so the header parser cannot pull body bytes into a
+                // char decoder's buffer and so the body can be read as the exact
+                // Content-Length byte count (see the body read below).
+                val reader = HttpRequestReader(s.getInputStream())
                 val writer = PrintWriter(s.getOutputStream(), true)
 
                 // Read HTTP request line
@@ -233,15 +234,23 @@ class DebugServer(
                     return
                 }
 
-                // Read body
-                val body = CharArray(contentLength)
+                // Read body.
+                //
+                // Content-Length counts BYTES, so the loop must too. Reading it
+                // as CharArray off the decoding reader counted CHARACTERS, and
+                // any multi-byte UTF-8 in the body made the two disagree: a
+                // 6-byte "你好" decodes to 2 chars, so the loop kept waiting for
+                // 4 more that were never coming and the request stalled until
+                // one side timed out. Callers saw non-ASCII requests hang while
+                // the identical \u-escaped (all-ASCII) body answered in ~25ms.
+                val body = ByteArray(contentLength)
                 var totalRead = 0
                 while (totalRead < contentLength) {
                     val n = reader.read(body, totalRead, contentLength - totalRead)
                     if (n < 0) break
                     totalRead += n
                 }
-                val jsonBody = String(body, 0, totalRead)
+                val jsonBody = String(body, 0, totalRead, Charsets.UTF_8)
 
                 val responseJSON = runBlocking {
                     rpcHandler.handle(jsonBody)
@@ -340,6 +349,37 @@ class DebugServer(
         writer.print("\r\n")
         writer.print(body)
         writer.flush()
+    }
+
+    /**
+     * Minimal byte-level HTTP request reader.
+     *
+     * Exists because the header block and the body need DIFFERENT treatment on
+     * the same socket: headers are ASCII lines, the body is a Content-Length
+     * count of BYTES. A BufferedReader cannot serve both — it decodes to
+     * chars (so the body loop counted the wrong unit for any multi-byte UTF-8)
+     * and it read ahead, so body bytes could already sit in its buffer and be
+     * lost to a byte-level read. This reads one byte at a time for header lines
+     * and hands the still-undrained stream to the body read.
+     */
+    private class HttpRequestReader(private val input: java.io.InputStream) {
+        private val buf = java.io.ByteArrayOutputStream(128)
+
+        /** Reads one CRLF/LF-terminated line as ASCII; null at end of stream. */
+        fun readLine(): String? {
+            buf.reset()
+            var sawAny = false
+            while (true) {
+                val b = input.read()
+                if (b < 0) return if (sawAny) buf.toString("UTF-8") else null
+                sawAny = true
+                if (b == '\n'.code) return buf.toString("UTF-8")
+                if (b != '\r'.code) buf.write(b)
+            }
+        }
+
+        /** Reads exactly [len] BYTES into [dst], returning how many arrived. */
+        fun read(dst: ByteArray, off: Int, len: Int): Int = input.read(dst, off, len)
     }
 
     private fun sendCorsPreflightResponse(writer: PrintWriter) {

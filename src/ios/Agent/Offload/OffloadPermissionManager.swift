@@ -180,12 +180,43 @@ final class OffloadPermissionManager: ObservableObject {
 
     // MARK: - Command Extraction
 
+    /// The offload command a shell invocation will actually run, or nil.
+    ///
+    /// [GH#242] Matched on the first token's BASENAME, because that is what the
+    /// guest kernel dispatches on: `native_offload_lookup()` →
+    /// `offload_find()` takes `strrchr(guest_path, '/')` and compares the
+    /// trailing component against the registry
+    /// (deps/ish/kernel/native_offload.c:186-196).
+    ///
+    /// This function used to compare the raw first token, so
+    /// `/usr/local/bin/apple-healthkit` matched nothing and returned nil — and
+    /// the caller reads nil as "not an offload command" and runs it unchecked
+    /// (AIChatViewModel+ConcurrentTools.swift). The kernel then dispatched it
+    /// anyway on basename, so an absolute path reached HealthKit / HomeKit /
+    /// Photos / Location with no prompt, regardless of Bypass / Ask Once /
+    /// Not Allowed. Verified on device: `/usr/local/bin/apple-clipboard` is a
+    /// ZERO-byte placeholder yet returned real clipboard JSON, which is only
+    /// possible via that native dispatch.
+    ///
+    /// Two matchers over one decision will drift again, so the rule here is
+    /// deliberately the kernel's rule and nothing else. Registered names are
+    /// bare (no slashes), so normalising the caller's side is sufficient.
+    ///
+    /// Scope: this closes path-based spellings (absolute, `./`, `../`, any
+    /// prefix). It does NOT cover indirection where the first token is a
+    /// different program — `sh -c '…'`, `env …`, a script, a subprocess — for
+    /// which the name never appears as argv[0] here. Those need the check to
+    /// move to the dispatch site itself; see the issue.
     static func extractOffloadCommand(from shellCommand: String) -> String? {
         let trimmed = shellCommand.trimmingCharacters(in: .whitespacesAndNewlines)
         let firstToken = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
-        // Check if this token matches a known offload command
-        if allCommands.contains(where: { $0.name == firstToken }) {
-            return firstToken
+        let basename = (firstToken as NSString).lastPathComponent
+        // Return the REGISTERED name, not the caller's spelling: every consumer
+        // (permissionLevel, sessionGrants, the prompt's display label) keys off
+        // the registry, and handing back "/usr/local/bin/apple-healthkit" would
+        // look up nothing and silently degrade to the default level.
+        if allCommands.contains(where: { $0.name == basename }) {
+            return basename
         }
         return nil
     }

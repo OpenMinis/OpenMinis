@@ -14,7 +14,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.text.appendInlineContent
@@ -2046,7 +2045,7 @@ private fun rememberKatexInlineContent(
 @Composable
 private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
     val context = LocalContext.current
-    val isDark = isSystemInDarkTheme()
+    val isDark = ChatColors.isDark
     // T208-5: pass the sp value as CSS px so the rendered glyph height
     // matches the surrounding body text. KaTeX's HTML sets
     // `el.style.fontSize = fontSize + 'px'` and the WebView viewport runs
@@ -2147,7 +2146,7 @@ private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
 @Composable
 private fun RenderMathDisplay(latex: String) {
     val context = LocalContext.current
-    val isDark = isSystemInDarkTheme()
+    val isDark = ChatColors.isDark
     // T208-5: render at sp.value (CSS px = dp) so glyph height matches the
     // surrounding 16-sp body text. See RenderInlineMath comment for the
     // full reasoning. [T-android-math-fontscale] ×fontScale so display math
@@ -3186,7 +3185,8 @@ private object MarkdownParseCaches {
  */
 private const val INCR_TAIL_MARGIN = 256
 
-private fun safeInlineSplitOffset(text: String): Int {
+@androidx.annotation.VisibleForTesting
+internal fun safeInlineSplitOffset(text: String): Int {
     // Track parity of the multi-line-capable delimiters. Single-line
     // constructs (inline code `…`, `$…$`, `\(…\)`, links) reset at every '\n'
     // (their close-scanners stop at newline), so at a line boundary they are
@@ -3210,6 +3210,27 @@ private fun safeInlineSplitOffset(text: String): Int {
         when {
             // Escape — skip the escaped char so `\*`, `\[` etc. don't toggle.
             c == '\\' && i + 1 < text.length -> { i += 2; continue }
+            // [T-android-inline-code-poisons-split] Skip the CONTENTS of a
+            // closed inline-code span. parseInline gives `…` priority over every
+            // emphasis marker, so `**` inside code is a literal, not a toggle.
+            // This scanner did not know that, so one stray backtick-wrapped
+            // `**` (`` `a**b` ``, an `ls **` example, a glob) flipped boldStar
+            // and never flipped it back — from that point on NO newline could be
+            // marked safe, `lastSafeNewlineEnd` stayed 0, and every throttle tick
+            // re-parsed the ENTIRE message instead of just the tail. On a long
+            // reply that full parse is slow enough to be visible: already-styled
+            // text dropped back to raw `**…**` for a frame and re-styled on the
+            // next tick, over and over (user report, 2026-09-02).
+            //
+            // An UNCLOSED backtick deliberately falls through to `i++`: both
+            // findInlineCodeClose and parseInline treat it as a literal
+            // character, so treating it as anything else here would break the
+            // prefix ++ suffix == whole invariant this function must uphold.
+            c == '`' -> {
+                val close = findInlineCodeClose(text, i + 1)
+                i = if (close != -1) close + 1 else i + 1
+                continue
+            }
             text.startsWith("~~", i) -> { strike = !strike; i += 2; continue }
             text.startsWith("**", i) -> { boldStar = !boldStar; i += 2; continue }
             text.startsWith("__", i) -> { boldUnder = !boldUnder; i += 2; continue }
@@ -3220,9 +3241,12 @@ private fun safeInlineSplitOffset(text: String): Int {
             c == ')' && inUrl -> { inUrl = false; i++ }
             c == '\n' -> {
                 // Safe only when every newline-spanning construct is closed.
-                // Inline code / `$…$` / `\(…\)` don't need tracking: their
-                // close-scanners stop at '\n', so an unclosed one renders
-                // literally on both sides of the split — identical either way.
+                // `$…$` / `\(…\)` don't need tracking: their close-scanners stop
+                // at '\n', so an unclosed one renders literally on both sides of
+                // the split — identical either way. Inline code is different and
+                // IS tracked above: it does not span newlines either, but its
+                // CONTENTS must not feed the emphasis counters, because
+                // parseInline resolves a code span before any `**` inside it.
                 if (!boldStar && !boldUnder && !strike && !inLabel && !inUrl) {
                     lastSafeNewlineEnd = i + 1
                 }

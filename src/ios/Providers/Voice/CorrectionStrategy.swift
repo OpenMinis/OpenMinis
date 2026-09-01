@@ -21,12 +21,34 @@ protocol CorrectionStrategy: Sendable {
 // target compiles files individually — keeping the type next to its producer
 // lets the tests build without dragging this file's provider-stack imports in.
 
+/// Collects which evidence terms survived `buildPrompt`'s budget clamping.
+///
+/// A reference type so the builder can fill it in place without changing its return type
+/// (every existing caller keeps working, and the value stays `nil` in Release paths that
+/// don't ask for it). Not `#if DEBUG`: the type is trivial and keeping it unconditional
+/// avoids `#if` noise around the parameter at each call site — only the trace that
+/// consumes it is DEBUG-only.
+final class PromptDiagnosticsSink: @unchecked Sendable {
+    /// Typed-vocabulary terms that fit the 400-char block, in the order presented.
+    var vocabTerms: [String] = []
+    /// Confusion lines ("Linux→minis（用户已手动纠正2次）") that fit the 800-char block.
+    var confusionLines: [String] = []
+    /// Per-block character spend, keyed vocab/confusion/digest/context/transcript/total.
+    var blockChars: [String: Int] = [:]
+    init() {}
+}
+
 struct CorrectionOutcome: Sendable {
     let correctedText: String
     /// The model group we actually reached ("sub" / "primary") — surfaced by
     /// `debug.voiceCorrection.runCorrection` so a bad correction can be traced to a model.
     let modelGroupUsed: String
     let durationMs: Int
+    /// The prompt that was actually sent, plus which evidence terms survived clamping.
+    /// Populated only when the strategy builds a prompt (the LLM one); a future
+    /// rule-based strategy leaves it nil. DEBUG tracing is its only consumer.
+    var prompt: String? = nil
+    var diagnostics: PromptDiagnosticsSink? = nil
 }
 
 enum CorrectionError: Error {
@@ -50,7 +72,9 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
             throw CorrectionError.noModelAvailable
         }
 
-        let prompt = Self.buildPrompt(transcript: transcript, candidates: candidates, context: context)
+        let diagnostics = PromptDiagnosticsSink()
+        let prompt = Self.buildPrompt(transcript: transcript, candidates: candidates,
+                                      context: context, diagnostics: diagnostics)
         let provider = await AIChatViewModel.makeAgentProvider(for: resolved.entry)
 
         // thinkingLevel: .off, exactly like title generation — this is a mechanical
@@ -85,7 +109,9 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
         let ms = Int(Date().timeIntervalSince(started) * 1000)
         return CorrectionOutcome(correctedText: cleaned,
                                  modelGroupUsed: resolved.groupKind,
-                                 durationMs: ms)
+                                 durationMs: ms,
+                                 prompt: prompt,
+                                 diagnostics: diagnostics)
     }
 
     /// Output-token budget for one correction call (user decision 2026-07-17):
@@ -110,9 +136,17 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
     /// the model weighs them against the sentence. The context block is explicitly
     /// labeled "not the text to process", because otherwise models happily
     /// "correct" the quoted previous turn instead of the transcript.
+    ///
+    /// `diagnostics` (DEBUG tracing) receives the terms that actually SURVIVED budget
+    /// clamping. Those were previously unrecoverable after the fact: the `[CorrectionPrompt]`
+    /// log line records only each block's char count, and re-deriving the winners from the
+    /// candidate list would duplicate the clamp logic here and silently drift from it.
+    /// Knowing which terms won the 400-char vocab budget — and, by omission, which were
+    /// pushed out — is the main lever for tuning that budget.
     static func buildPrompt(transcript: String,
                             candidates: [CorrectionCandidate],
-                            context: ConversationContext) -> String {
+                            context: ConversationContext,
+                            diagnostics: PromptDiagnosticsSink? = nil) -> String {
         var blocks: [String] = []
         var vocabChars = 0, confusionChars = 0, digestChars = 0, contextChars = 0
 
@@ -144,6 +178,7 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
             }
             if !kept.isEmpty {
                 vocabChars = used
+                diagnostics?.vocabTerms = kept
                 blocks.append("以下是该用户的常用词汇（来自历史文字输入，仅供参考）：\n\(kept.joined(separator: "、"))")
             }
         }
@@ -160,6 +195,7 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
             }
             if !kept.isEmpty {
                 confusionChars = used
+                diagnostics?.confusionLines = kept
                 blocks.append("以下是该用户过去亲手纠正的语音识别错误（高置信度，ASR 将目标词误识为下方原文，用户主动修改）：\n\(kept.joined(separator: "\n"))")
             }
         }
@@ -210,6 +246,10 @@ struct LLMCorrectionStrategy: CorrectionStrategy {
         原文：\(transcript)
         """
         logger.info("[CorrectionPrompt] blocks vocab=\(vocabChars)/\(CorrectionContextBudget.vocabBlock) confusion=\(confusionChars)/\(CorrectionContextBudget.confusionBlock) digest=\(digestChars)/\(CorrectionContextBudget.rareDigest) context=\(contextChars) msg_ctx=\(digestChars + contextChars)/\(CorrectionContextBudget.messageContextTotal) transcript=\(transcript.count) prompt_total=\(prompt.count)")
+        diagnostics?.blockChars = [
+            "vocab": vocabChars, "confusion": confusionChars, "digest": digestChars,
+            "context": contextChars, "transcript": transcript.count, "total": prompt.count,
+        ]
         return prompt
     }
 

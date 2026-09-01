@@ -35,6 +35,18 @@ import java.io.File
 class BrowserUseManager(
     val webView: WebView,
     profile: UserAgentProfile = UserAgentProfile.MOBILE_CHROME,
+    /**
+     * [T-android-minis-url-session-scope] Which chat session's sandbox a
+     * `minis://` URL should resolve against, or null when unknown.
+     *
+     * A LAMBDA, not a value: tabs are created before `BrowserTabPool.setSession`
+     * runs, so a snapshot taken at construction time would be permanently null
+     * for the first tab. Reading it lazily at intercept time gets whatever the
+     * pool knows when the request actually fires.
+     */
+    private val sessionIdProvider: () -> String? = { null },
+    /** App context for the session-scoped path resolver. Null disables it. */
+    private val appContext: android.content.Context? = null,
 ) {
     companion object {
         private const val TAG = "BrowserUseManager"
@@ -114,6 +126,14 @@ class BrowserUseManager(
 
     private val _currentURL = MutableStateFlow("")
     val currentURL: StateFlow<String> = _currentURL.asStateFlow()
+
+    /**
+     * [T-android-js-dialogs-256] JS dialogs this tab intercepted but did not
+     * show, drained into the next tool result so the model learns the page
+     * tried to open one. Per-tab (the manager is per-tab) and in-memory only,
+     * like the other diagnostics here. See [InterceptedDialogQueue].
+     */
+    private val dialogQueue = InterceptedDialogQueue()
 
     private val _pageTitle = MutableStateFlow("")
     val pageTitle: StateFlow<String> = _pageTitle.asStateFlow()
@@ -340,8 +360,19 @@ class BrowserUseManager(
                 // T134: route intent://, market://, tel:, mailto:, … out
                 // of the WebView so they reach the matching app instead of
                 // surfacing as ERR_UNKNOWN_URL_SCHEME.
+                //
+                // [T-android-user-initiated-scheme-dispatch] AGENT_BACKGROUND:
+                // this WebView is pool-managed and never rendered to the user,
+                // so any navigation here came from the PAGE, not a tap. Keep
+                // T318's block — otherwise a page the agent visits can throw
+                // the user into another app mid-task.
                 return com.openminis.app.ui.browser.BrowserExternalSchemeHandler
-                    .handle(view.context, request.url)
+                    .handle(
+                        view.context,
+                        request.url,
+                        com.openminis.app.ui.browser.BrowserExternalSchemeHandler
+                            .Origin.AGENT_BACKGROUND,
+                    )
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
@@ -402,7 +433,37 @@ class BrowserUseManager(
             val host = uri.host ?: return null
             val path = uri.path ?: ""
             val linuxPath = "/var/minis/$host$path"
-            val localFile = com.openminis.app.sandbox.PRootKernel.resolveHostPath(linuxPath)
+
+            // [T-android-minis-url-session-scope] Resolve against THIS session
+            // first, and only then fall back to the global bind-mount map.
+            //
+            // `workspace`, `attachments`, `offloads` and `browser` live under
+            // `minis-sessions/<sid>/`, but the global map only gains a
+            // `/var/minis/workspace` entry while some session's PRoot shell is
+            // running — and it is last-writer-wins across sessions. So the old
+            // global-only lookup failed in two ordinary situations: the shell
+            // had exited (path fell through to the rootfs copy of
+            // /var/minis/workspace, which is empty), or another session had
+            // booted more recently and the mount pointed at ITS workspace.
+            //
+            // Measured on a GEM-W09: `minis://workspace/jump-jump.html` 404'd
+            // while the file sat intact at 5969 bytes in
+            // minis-sessions/145d6883…/workspace/. The rootfs directory the
+            // resolver actually reached contained nothing but `.` and `..`.
+            // That is also why the failure looked intermittent and looked like
+            // it depended on subdirectory depth — it depends on neither, only
+            // on whether the global mount happens to point at the right
+            // session at that moment.
+            val sessionId = sessionIdProvider()
+            val ctx = appContext
+            val localFile = if (sessionId != null && ctx != null) {
+                com.openminis.app.sandbox.PRootKernel
+                    .resolveSessionHostPath(sessionId, linuxPath, ctx)
+                    ?.takeIf { it.isFile }
+                    ?: com.openminis.app.sandbox.PRootKernel.resolveHostPath(linuxPath)
+            } else {
+                com.openminis.app.sandbox.PRootKernel.resolveHostPath(linuxPath)
+            }
             if (localFile == null || !localFile.exists() || !localFile.isFile) {
                 return android.webkit.WebResourceResponse("text/plain", "UTF-8", 404, "Not Found",
                     emptyMap(), "File not found: $host$path".byteInputStream())
@@ -491,8 +552,101 @@ class BrowserUseManager(
             override fun onCloseWindow(window: WebView) {
                 onCloseWindow?.invoke()
             }
+
+            // [T-android-js-dialogs-256] Answer JS dialogs with a conservative
+            // default INSTEAD of showing them, and record what happened.
+            //
+            // This is unattended automation: showing a modal would block the
+            // page's JS thread on a human who isn't there, wedging the agent
+            // loop until the action dead-timeout fires. So the page is always
+            // answered immediately and never actually blocks — the only change
+            // versus the old silent-swallow behaviour is that the model now
+            // finds out it happened (see drainInterceptedDialogReport).
+            //
+            // confirm() answers false and prompt() answers null deliberately:
+            // the agent must not silently consent on the user's behalf to
+            // whatever was asked. The user-facing web preview does the exact
+            // opposite and shows real dialogs; see WebViewHolder.
+            //
+            // Returning true is what claims the dialog. Returning false (the
+            // WebChromeClient default) would let WebView apply the same default
+            // itself, but with no record — which is exactly the bug.
+
+            override fun onJsAlert(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                result: android.webkit.JsResult?,
+            ): Boolean {
+                recordInterceptedDialog(
+                    kind = "alert",
+                    message = message.orEmpty(),
+                    defaultText = null,
+                    defaultResponse = "(dismissed)",
+                )
+                result?.confirm()
+                return true
+            }
+
+            override fun onJsConfirm(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                result: android.webkit.JsResult?,
+            ): Boolean {
+                recordInterceptedDialog(
+                    kind = "confirm",
+                    message = message.orEmpty(),
+                    defaultText = null,
+                    defaultResponse = "false",
+                )
+                result?.cancel()
+                return true
+            }
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: android.webkit.JsPromptResult?,
+            ): Boolean {
+                recordInterceptedDialog(
+                    kind = "prompt",
+                    message = message.orEmpty(),
+                    defaultText = defaultValue,
+                    defaultResponse = "null",
+                )
+                result?.cancel()
+                return true
+            }
         }
     }
+
+    /** [T-android-js-dialogs-256] Record an intercepted dialog for the model. */
+    private fun recordInterceptedDialog(
+        kind: String,
+        message: String,
+        defaultText: String?,
+        defaultResponse: String,
+    ) {
+        val url = _currentURL.value
+        dialogQueue.record(
+            kind = kind,
+            message = message,
+            defaultText = defaultText,
+            pageURL = url.ifEmpty { null },
+            defaultResponse = defaultResponse,
+        )
+        Log.i(TAG, "[JSDialog] intercepted $kind on $url — answered $defaultResponse")
+    }
+
+    /**
+     * Drain this tab's intercepted-dialog queue into text for the model, or null
+     * when nothing was intercepted. Draining clears it, so each dialog is
+     * reported exactly once. Called by [BrowserTabPool] on the next tool result.
+     */
+    fun drainInterceptedDialogReport(): String? = dialogQueue.drainReport()
 
     // -- Execute Action --
 

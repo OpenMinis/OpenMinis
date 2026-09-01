@@ -16,6 +16,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.data.db.AppDatabase
+import com.openminis.app.data.db.DatabaseVersionGuard
 import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.EnvVarRepository
@@ -75,6 +76,19 @@ class MinisApp : Application(), ImageLoaderFactory {
      */
     @Volatile
     var subsystemsInitialized: Boolean = false
+        private set
+
+    /**
+     * [T-android-downgrade-compat] Why init was skipped, when it was.
+     *
+     * Distinguishes "the database is from a newer build" (recoverable: the
+     * user just needs to reinstall the newer version, and nothing on disk has
+     * been touched) from a genuine init failure, so MainActivity can show
+     * accurate guidance instead of a generic crash-report prompt.
+     */
+    @Volatile
+    var dbVersionDecision: DatabaseVersionGuard.Decision =
+        DatabaseVersionGuard.Decision.PROCEED
         private set
 
     /**
@@ -383,7 +397,29 @@ class MinisApp : Application(), ImageLoaderFactory {
         // show the crash-share dialog. The app still cannot do real work this
         // launch, but it FAILS VISIBLY AND RECOVERABLY instead of dying on the
         // first Compose frame forever.
+        // [T-android-downgrade-compat] Probe the on-disk schema version BEFORE
+        // Room opens the file. If the database was written by a newer build and
+        // no downgrade migration covers the jump, Room would throw at first
+        // access and the app could never start. Deciding here — while the file
+        // is still untouched, read only via SQLiteDatabase.OPEN_READONLY — lets
+        // the UI show recoverable guidance instead of dying, and guarantees
+        // nothing has migrated or dropped a table by the time we choose.
+        dbVersionDecision = DatabaseVersionGuard.evaluate(this)
+
         try {
+        // Guard INSIDE the try, so a newer-schema database takes the very same
+        // degraded-mode path the existing init-failure handling already
+        // provides (subsystemsInitialized stays false and MainActivity shows a
+        // recoverable screen) instead of returning early from onCreate — which
+        // would also skip SoulStore, ConfigRegistry, RootfsManager and the rest
+        // of startup that has nothing to do with the chat database.
+        if (dbVersionDecision == DatabaseVersionGuard.Decision.SHOW_NEWER_DB_GUIDANCE) {
+            error(
+                "on-disk chat schema is newer than this build " +
+                    "(code=${DatabaseVersionGuard.CODE_DB_VERSION}); refusing to open it. " +
+                    "The database file is left completely untouched — upgrading restores everything."
+            )
+        }
         database = AppDatabase.getInstance(this)
         chatRepository = ChatRepository(database.chatDao())
         providerRepository = ProviderRepository(this)

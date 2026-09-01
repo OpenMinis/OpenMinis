@@ -82,6 +82,19 @@ struct SyncedMessage: Syncable {
     var sortOrder: Int
     var createdAt: Date
     var updatedAt: Date
+    /// [T-token-attribution-snapshot] Which model actually produced this
+    /// message. Optional so a device on an older build — which sends none of
+    /// these — still decodes: `optionalString` returns nil for a missing key
+    /// rather than throwing, so no protocol version bump is needed.
+    ///
+    /// A receiver must treat nil as "no information", never as "empty": see the
+    /// COALESCE guards in `ChatStore.mergeRemoteMessage`, without which an
+    /// older device echoing a message back would wipe a newer device's
+    /// correctly-recorded attribution.
+    var modelId: String?
+    var modelDisplayName: String?
+    var providerType: String?
+    var providerInstanceId: String?
 
     static let syncMetadata: SyncTypeMetadata<SyncedMessage> = {
         typealias F = FieldDescriptor<SyncedMessage>
@@ -100,6 +113,10 @@ struct SyncedMessage: Syncable {
                 F.int("sortOrder",                    \SyncedMessage.sortOrder),
                 F.date("createdAt",                   \SyncedMessage.createdAt),
                 F.date("updatedAt",                   \SyncedMessage.updatedAt),
+                F.optionalString("modelId",           \SyncedMessage.modelId),
+                F.optionalString("modelDisplayName",  \SyncedMessage.modelDisplayName),
+                F.optionalString("providerType",      \SyncedMessage.providerType),
+                F.optionalString("providerInstanceId", \SyncedMessage.providerInstanceId),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedMessage.updatedAt),
             version: 1
@@ -124,7 +141,11 @@ struct SyncedMessage: Syncable {
             streamInterruptCount: m.streamInterruptCount,
             sortOrder: m.sortOrder,
             createdAt: m.createdAt,
-            updatedAt: updatedAt
+            updatedAt: updatedAt,
+            modelId: m.modelId,
+            modelDisplayName: m.modelDisplayName,
+            providerType: m.providerType,
+            providerInstanceId: m.providerInstanceId
         )
     }
 }

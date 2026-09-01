@@ -996,32 +996,31 @@ extension AIChatViewModel {
             let summary2 = try await generateCompactSummaryWithSplitting(messages: secondHalf, statusMsg: statusMsg, depth: depth + 1)
             try Task.checkCancellation()
 
-            // Merge the two summaries into ONE message — the caller stores a
-            // single summary string, so segmentation is invisible downstream.
-            statusMsg.content = "Retry segments \(firstHalf.count)+\(secondHalf.count) (merging)..."
-            let mergeInput = """
-            Merge these partial summaries into a single cohesive context summary. \
-            Frame everything as past events (what was asked, what was done) rather than as \
-            ongoing goals or todos — the user's next message will set the current task.
-
-            MUST PRESERVE:
-            - What was done and what was tried, with outcomes (record as past events)
-            - The last thing the user requested in this conversation, and how it was handled
-            - All file paths, identifiers, URLs — copy verbatim
-            - Decisions made and their rationale
-            - Constraints, rules, and user preferences mentioned
-
-            Do NOT carry forward "pending" or "todo" lists that imply standing work — if the user \
-            still wants those, they will say so in their next message.
-
-            PRIORITIZE Part 2 (more recent) over Part 1 (older) when space is tight.
-
-            Part 1:\n\(summary1)
-
-            Part 2:\n\(summary2)
-            """
-            let merged = try await generateCompactSummary(conversationText: mergeInput, statusMsg: statusMsg)
-            return merged
+            // Join the partial summaries textually — the caller stores a single
+            // summary string, so segmentation stays invisible downstream.
+            //
+            // This used to be a THIRD LLM call that re-summarised the two
+            // partials. Dropped, because the size premise behind it does not
+            // hold: each segment's output is already hard-capped at 8192 tokens
+            // (`maxOutputTokens` in generateCompactSummary), so two partials are
+            // at most ~16k — nowhere near a context boundary, and not worth
+            // another round-trip to shrink.
+            //
+            // It was also the one genuinely fragile step. The merge call went
+            // through `generateCompactSummary` directly, with no depth and no
+            // split retry of its own: if it failed, the segments that had just
+            // succeeded were thrown away with it. So the mechanism that exists
+            // to rescue a failing compaction ended its own happy path on an
+            // unprotected call. A string join cannot fail.
+            //
+            // What is lost is the merge prompt's cross-part editing — it asked
+            // the model to prefer the newer half and to de-duplicate shared
+            // background. Accepted: the parts are already ordered oldest-first,
+            // which is the same signal in positional form, and each part is
+            // internally coherent because it was summarised under the full
+            // system prompt. A little repeated background beats losing the
+            // whole summary to a failed merge.
+            return summary1 + "\n\n" + summary2
         }
     }
 

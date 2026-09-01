@@ -223,10 +223,27 @@ struct AddProviderView: View {
     /// Whether the current input is complete enough that "Save & Exit" can
     /// perform a real save (mirrors the enabled conditions of the visible
     /// save buttons for the three credential paths).
+    /// [T-empty-key-compat-endpoints] An empty API key is a valid input when the
+    /// instance targets a third-party OpenAI/Anthropic-compatible endpoint
+    /// (custom base URL filled in): ollama / LM Studio / LiteLLM / private
+    /// relays commonly need no key. Mirrors ProviderInstance.allowsEmptyAPIKey —
+    /// OAuth flows and official endpoints keep requiring a credential.
+    private var emptyKeyAllowedForCurrentInput: Bool {
+        guard selectedCredential == .apiKey,
+              !customBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let type = selectedType else { return false }
+        switch type {
+        case .openAI, .openAIResponses, .anthropic:
+            return true
+        default:
+            return false
+        }
+    }
+
     private var canSaveCurrentInput: Bool {
         if pendingOAuthDone { return true }
         if selectedCredential == .apiKey,
-           !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+           !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || emptyKeyAllowedForCurrentInput { return true }
         if !manualOAuthTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
         return false
     }
@@ -235,7 +252,7 @@ struct AddProviderView: View {
         if pendingOAuthDone {
             saveOAuthInstance()
         } else if selectedCredential == .apiKey,
-                  !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                  !apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || emptyKeyAllowedForCurrentInput {
             saveApiKeyInstance()
         } else if !manualOAuthTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             saveManualOAuthInstance()
@@ -287,19 +304,19 @@ struct AddProviderView: View {
         // then go through requestExit()'s confirmation.
         .interactiveDismissDisabled(hasUnsavedInput)
         .confirmationDialog(
-            String(localized: "You have unsaved provider settings."),
+            AppLocalized("You have unsaved provider settings."),
             isPresented: $showUnsavedExitDialog,
             titleVisibility: .visible
         ) {
             if canSaveCurrentInput {
-                Button(String(localized: "Save & Exit")) {
+                Button(AppLocalized("Save & Exit")) {
                     saveCurrentInputAndExit()
                 }
             }
-            Button(String(localized: "Discard Changes"), role: .destructive) {
+            Button(AppLocalized("Discard Changes"), role: .destructive) {
                 cleanupAndDismiss()
             }
-            Button(String(localized: "Keep Editing"), role: .cancel) {}
+            Button(AppLocalized("Keep Editing"), role: .cancel) {}
         }
         .sheet(isPresented: $showDataSharingConsent) {
             AIDataSharingConsentView(
@@ -327,7 +344,7 @@ struct AddProviderView: View {
         .fileImporter(isPresented: $showImportFile, allowedContentTypes: [.json]) { result in
             handleImport(result)
         }
-        .alert(String(localized: "Import"), isPresented: $showImportResult) {
+        .alert(AppLocalized("Import"), isPresented: $showImportResult) {
             Button("OK") {
                 if importSucceeded { dismiss() }
             }
@@ -346,22 +363,22 @@ struct AddProviderView: View {
         switch result {
         case .success(let url):
             guard url.startAccessingSecurityScopedResource() else {
-                importMessage = String(localized: "Cannot access the selected file.")
+                importMessage = AppLocalized("Cannot access the selected file.")
                 showImportResult = true
                 return
             }
             defer { url.stopAccessingSecurityScopedResource() }
             guard let data = try? Data(contentsOf: url),
                   let json = String(data: data, encoding: .utf8) else {
-                importMessage = String(localized: "Failed to read file.")
+                importMessage = AppLocalized("Failed to read file.")
                 showImportResult = true
                 return
             }
             if let label = store.importInstanceJSON(json) {
-                importMessage = String(localized: "Imported provider \"\(label)\" successfully.")
+                importMessage = AppLocalized("Imported provider \"\(label)\" successfully.")
                 importSucceeded = true
             } else {
-                importMessage = String(localized: "Invalid provider configuration file.")
+                importMessage = AppLocalized("Invalid provider configuration file.")
             }
             showImportResult = true
         case .failure:
@@ -371,11 +388,11 @@ struct AddProviderView: View {
 
     private var navigationTitle: String {
         if let type = selectedType, selectedCredential != nil {
-            return String(localized: "Configure \(type.displayName)")
+            return AppLocalized("Configure \(type.displayName)")
         } else if selectedType != nil {
-            return String(localized: "Auth Method")
+            return AppLocalized("Auth Method")
         }
-        return String(localized: "Add Provider")
+        return AppLocalized("Add Provider")
     }
 
     // MARK: - Step 1: Pick Provider Type
@@ -709,7 +726,7 @@ struct AddProviderView: View {
                         Spacer()
                     }
                 }
-                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSaving)
+                .disabled((apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !emptyKeyAllowedForCurrentInput) || isSaving)
             }
         }
     }
@@ -873,7 +890,9 @@ struct AddProviderView: View {
         let trimmedKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedLabel = labelInput.trimmingCharacters(in: .whitespaces)
         let trimmedBase = customBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedKey.isEmpty else { return }
+        // [T-empty-key-compat-endpoints] Empty key is allowed for third-party
+        // compatible endpoints (see emptyKeyAllowedForCurrentInput).
+        guard !trimmedKey.isEmpty || emptyKeyAllowedForCurrentInput else { return }
 
         // Map OpenAI + Responses API format to .openAIResponses provider type
         let effectiveType: ProviderType = (type == .openAI && useResponsesAPI) ? .openAIResponses : type
@@ -887,7 +906,11 @@ struct AddProviderView: View {
             customBaseURL: base,
             appendV1Suffix: appendV1SuffixInput
         )
-        ProviderKeychainHelper.saveAPIKey(trimmedKey, instanceId: instance.id)
+        // Nothing to store for a keyless endpoint — and never write an empty
+        // string to the Keychain (hasAnyCredential treats empty as absent).
+        if !trimmedKey.isEmpty {
+            ProviderKeychainHelper.saveAPIKey(trimmedKey, instanceId: instance.id)
+        }
         store.addInstance(instance)
         isSaving = false
         dismiss()
@@ -1040,17 +1063,17 @@ struct AddProviderView: View {
     // MARK: - Helpers
 
     private var oauthSignInLabel: String {
-        guard let type = selectedType else { return String(localized: "Sign In") }
+        guard let type = selectedType else { return AppLocalized("Sign In") }
         switch type {
-        case .anthropic: return String(localized: "Sign in with Claude")
-        case .gemini: return String(localized: "Sign in with Google")
-        case .openAI: return String(localized: "Sign in with OpenAI")
-        case .antigravity: return String(localized: "Sign in with Google")
-        case .openRouter: return String(localized: "Sign in with OpenRouter")
-        case .openAIResponses: return String(localized: "Sign In") // Not reachable — API key only
-        case .xAI: return String(localized: "Sign in with xAI")
-        case .kimiCode: return String(localized: "Sign in with Kimi Code")
-        case .unsupported: return String(localized: "Sign In")
+        case .anthropic: return AppLocalized("Sign in with Claude")
+        case .gemini: return AppLocalized("Sign in with Google")
+        case .openAI: return AppLocalized("Sign in with OpenAI")
+        case .antigravity: return AppLocalized("Sign in with Google")
+        case .openRouter: return AppLocalized("Sign in with OpenRouter")
+        case .openAIResponses: return AppLocalized("Sign In") // Not reachable — API key only
+        case .xAI: return AppLocalized("Sign in with xAI")
+        case .kimiCode: return AppLocalized("Sign in with Kimi Code")
+        case .unsupported: return AppLocalized("Sign In")
         }
     }
 
@@ -1071,15 +1094,15 @@ struct AddProviderView: View {
 
     private func providerPickerLabel(_ type: ProviderType) -> String {
         switch type {
-        case .anthropic: return String(localized: "Anthropic / Compatible API")
-        case .openAI:    return String(localized: "OpenAI / Compatible API")
+        case .anthropic: return AppLocalized("Anthropic / Compatible API")
+        case .openAI:    return AppLocalized("OpenAI / Compatible API")
         case .gemini:    return type.displayName
         case .antigravity: return type.displayName
         case .openRouter: return "OpenRouter"
         case .openAIResponses: return "Responses API"
         case .xAI: return "xAI (Grok)"
         case .kimiCode: return "Kimi Code"
-        case .unsupported: return String(localized: "Unsupported")
+        case .unsupported: return AppLocalized("Unsupported")
         }
     }
 
@@ -1105,31 +1128,31 @@ struct AddProviderView: View {
     private func credentialDescription(type: ProviderType, credential: ProviderCredential) -> String {
         switch (type, credential) {
         case (.openAI, .apiKey):
-            return String(localized: "Supports OpenAI official API and third-party services like OpenRouter, MiniMax, etc.")
+            return AppLocalized("Supports OpenAI official API and third-party services like OpenRouter, MiniMax, etc.")
         case (.openAIResponses, .apiKey):
-            return String(localized: "Use an API key for a Responses API endpoint")
+            return AppLocalized("Use an API key for a Responses API endpoint")
         case (_, .apiKey):
-            return String(localized: "Use an API key from your \(type.displayName) account")
+            return AppLocalized("Use an API key from your \(type.displayName) account")
         case (.anthropic, .oauth):
-            return String(localized: "Sign in with your Claude account")
+            return AppLocalized("Sign in with your Claude account")
         case (.gemini, .oauth):
-            return String(localized: "Sign in with Google for Cloud Code Assist")
+            return AppLocalized("Sign in with Google for Cloud Code Assist")
         case (.openAI, .oauth):
-            return String(localized: "Sign in with OpenAI Codex")
+            return AppLocalized("Sign in with OpenAI Codex")
         case (.antigravity, .oauth):
-            return String(localized: "Sign in with Google for Antigravity Cloud Code")
+            return AppLocalized("Sign in with Google for Antigravity Cloud Code")
         case (.openRouter, .oauth):
-            return String(localized: "Sign in with your OpenRouter account")
+            return AppLocalized("Sign in with your OpenRouter account")
         case (.openAIResponses, .oauth):
             return "" // Not reachable — API key only
         case (.xAI, .oauth):
-            return String(localized: "Sign in with your SuperGrok / X Premium+ subscription. xAI may restrict API access on some plans — if you hit HTTP 403, switch to an API key.")
+            return AppLocalized("Sign in with your SuperGrok / X Premium+ subscription. xAI may restrict API access on some plans — if you hit HTTP 403, switch to an API key.")
         case (.kimiCode, .oauth):
-            return String(localized: "Sign in with your Kimi Code / Coding Plan subscription.")
+            return AppLocalized("Sign in with your Kimi Code / Coding Plan subscription.")
         case (.kimiCode, .apiKey):
-            return String(localized: "Use a Kimi Coding API key.")
+            return AppLocalized("Use a Kimi Coding API key.")
         case (.unsupported, _):
-            return String(localized: "This provider isn't supported in this app version.")
+            return AppLocalized("This provider isn't supported in this app version.")
         }
     }
 

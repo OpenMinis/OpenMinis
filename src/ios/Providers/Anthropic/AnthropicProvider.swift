@@ -112,6 +112,33 @@ final class AnthropicProvider: LLMProvider {
         return v.major > 4 || (v.major == 4 && v.minor >= 6)
     }
 
+    /// [T-ios-claude5-thinking-disabled-400] Whether this model accepts an
+    /// explicit `thinking: {"type": "disabled"}` on the wire.
+    ///
+    /// Claude 4.6-4.x adaptive models DO: they think by default when the field
+    /// is absent, so "thinking off" has to be stated, or a small-max_tokens
+    /// call burns its whole budget on thinking and returns empty text (the
+    /// reason `setThinkingDisabled` exists at all).
+    ///
+    /// Claude 5+ does NOT. The API rejects the value outright:
+    ///
+    ///     [invalid_request_error] "thinking.type.disabled" is not supported
+    ///     for this model. Thinking defaults to adaptive mode when not
+    ///     specified; use "thinking.type.enabled" with "budget_tokens" for
+    ///     extended thinking.
+    ///
+    /// So on 5+ the correct encoding of "off" is to send NO thinking field —
+    /// the server's adaptive default handles it. Reported against fable 5
+    /// (Claude Opus 5, official OAuth) where every non-thinking message 400'd.
+    ///
+    /// Deliberately keyed on the version rather than a model allowlist: this is
+    /// a generation-wide API contract change, and an allowlist would 400 again
+    /// on the next Claude 5 variant nobody remembered to add.
+    static func modelAcceptsExplicitThinkingDisabled(_ modelId: String) -> Bool {
+        guard let v = parseClaudeVersion(modelId) else { return false }
+        return v.major == 4 && v.minor >= 6
+    }
+
     /// Applies the per-model temperature policy: returns nil if the model rejects temperature.
     func effectiveTemperature(_ temperature: Double?) -> Double? {
         if Self.modelRejectsTemperature(model.id) { return nil }

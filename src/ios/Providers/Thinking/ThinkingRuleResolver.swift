@@ -46,6 +46,14 @@ struct ThinkingResolveContext {
     var isOpenRouter: Bool
     var usesUnifiedReasoningEffort: Bool
     var isMistral: Bool
+    /// [T-ios-qwen-extra-body-400] Endpoint is Alibaba DashScope itself, not a relay that
+    /// merely serves qwen-named models. Selects the `extra_body` envelope, which is
+    /// DashScope-specific and a hard 400 on strict-schema gateways.
+    ///
+    /// Defaults false so an unknown endpoint gets the root-only shape: omitting the
+    /// envelope costs at most a thinking toggle that doesn't take, while sending it to a
+    /// vendor that doesn't know the field fails the whole request.
+    var isDashScope: Bool = false
     /// The vendor's documented off tier, or nil to omit the field when thinking is off.
     /// Already an ALLOWLIST decision made by `explicitOffEffort` (ff60c818).
     var offEffort: String?
@@ -271,11 +279,23 @@ enum ThinkingRuleResolver {
         // Also ahead of the gateway rule: the old qwen branch carried no unified guard,
         // so a qwen model keeps its native enable_thinking mechanism even when the
         // endpoint is Ark/Azure/Venice.
+        //
+        // [T-ios-qwen-extra-body-400] Split by ENDPOINT, because this scope matches on the
+        // model NAME alone and a qwen-named model is served by plenty of things that are
+        // not DashScope. The `extra_body` envelope is DashScope-specific; a strict-schema
+        // relay answers `400 UNKNOWN_FIELD: 未知请求字段：extra_body` and the whole request
+        // fails (reproduced on tokenrhythm.studio with qwen3.8-max / qwen3.7-max, where
+        // the same endpoint serves deepseek models fine — the trigger is the model name,
+        // not the gateway).
+        //
+        // The gate lives HERE, at registration, and never inside the `.qwenDual` emitter:
+        // that shape is user-selectable in the rule editor, so rewriting it at emit time
+        // would silently contradict a choice the user made explicitly and can see.
         rules.append(ThinkingRule(
             kind: .officialVendor,
             scope: .modelPattern("*qwen*"),
-            wireFormat: .qwenDual,
-            label: "qwen-dashscope"
+            wireFormat: ctx.isDashScope ? .qwenDual : .qwenRootOnly,
+            label: ctx.isDashScope ? "qwen-dashscope" : "qwen-root-only"
         ))
 
         // Unified gateways (Volcengine Ark / Azure / Venice) — ba055121 + 84f5c9e1.
@@ -575,28 +595,22 @@ enum ThinkingRuleResolver {
 
         case .qwenDual:
             let enabled = ctx.level.isEnabled
-            var budget: Int = switch ctx.level {
-            case .off: 0
-            case .low: 4096
-            case .medium: 16384
-            case .high: 32768
-            case .xhigh, .max, .ultra: 65536
-            }
-            if budget > 0 && ctx.maxTokens > 0 {
-                if ctx.maxTokens < 2 {
-                    budget = 0
-                } else {
-                    let margin = max(2048, ctx.maxTokens / 8)
-                    let ceiling = max(1, min(ctx.maxTokens - margin, ctx.maxTokens - 1))
-                    if budget >= ceiling { budget = ceiling }
-                }
-            }
+            let budget = Self.qwenThinkingBudget(for: ctx)
             body["enable_thinking"] = enabled
             if budget > 0 { body["thinking_budget"] = budget }
             body["extra_body"] = [
                 "enable_thinking": enabled,
                 "thinking_budget": budget > 0 ? budget : NSNull(),
             ] as [String: Any]
+            return (nil, nil)
+
+        case .qwenRootOnly:
+            // [T-ios-qwen-extra-body-400] `enable_thinking` ONLY — no `extra_body`
+            // envelope and no `thinking_budget`. Device probing against a real
+            // relay showed it accepts `enable_thinking` but 400s on
+            // `thinking_budget` just as it does on `extra_body`; see the
+            // wire-format doc comment for the per-field measurements.
+            body["enable_thinking"] = ctx.level.isEnabled
             return (nil, nil)
 
         case .booleanToggle(let path):
@@ -653,17 +667,43 @@ enum ThinkingRuleResolver {
 
     /// The `generationConfig.thinkingConfig` dictionary for a Gemini request.
     ///
-    /// Model-family rules, all load-bearing:
+    /// Model-family rules, all load-bearing (checked in this order):
+    ///   • specialized (-tts/-image/-embedding/-vision) — no thinking parameter AT ALL,
+    ///               at any level. Checked FIRST: these ids also match a family pattern
+    ///               (`gemini-3.1-flash-tts-preview` contains "gemini-3"), so anything
+    ///               later in the chain would shadow it (OpenMinis#226).
     ///   • 3.x     — `thinkingLevel` string, not a numeric budget. Pro cannot disable
-    ///               (floor "low"); Flash's "minimal" effectively disables.
+    ///               (floor "low"); Flash's "minimal" effectively disables — EXCEPT
+    ///               3.7+ Flash, which rejects "minimal" with 400 INVALID_ARGUMENT
+    ///               ("Thinking level MINIMAL is not supported for this model.") and
+    ///               floors at "low" like Pro. [T-gemini37-flash-minimal-400]
     ///   • 2.5 Pro — `thinkingBudget`, cannot disable, minimum 128. `thinkingBudget: 0`
     ///               is rejected with 400 INVALID_ARGUMENT (df8a823d).
     ///   • 2.5 Flash — `thinkingBudget: 0` disables.
-    ///   • 2.5 Flash Lite / specialized (-tts/-image/-embedding/-vision) — no thinking.
+    ///   • 2.5 Flash Lite — no thinking.
     ///   • unknown — conservative table with a 128 floor when enabled, so a new model id
     ///               never gets the invalid 0 (the df8a823d fallback).
     static func geminiThinkingConfig(modelId: String, level: ThinkingLevel) -> [String: Any] {
         let id = modelId.lowercased()
+
+        // [T-gemini-tts-thinking-400 / OpenMinis#226] Specialized modalities take
+        // precedence over EVERY family rule and over the requested level.
+        //
+        // This test used to sit at the bottom of the thinking-off branch, where it was
+        // unreachable for the ids that need it most: `gemini-3.1-flash-tts-preview`
+        // matches `contains("gemini-3")` first and returned `thinkingLevel: "minimal"`,
+        // so Gemini answered 400 "Thinking level is not supported for this model." for
+        // every TTS call. Being below the family branches also meant `gemini-2.5-pro-
+        // preview-tts` got `thinkingBudget: 128`.
+        //
+        // It is hoisted ABOVE `level.isEnabled` as well, not just above the family
+        // branches: these models reject the parameter outright, so a user explicitly
+        // choosing a thinking level must not be able to reintroduce the 400 either.
+        // "No thinking support" is a property of the model, not of the request.
+        let noThinkingSuffixes = ["-tts", "-image", "-embedding", "-vision"]
+        if noThinkingSuffixes.contains(where: { id.hasSuffix($0) || id.contains("\($0)-") }) {
+            return [:]
+        }
 
         if level.isEnabled {
             if id.contains("gemini-3") {
@@ -710,15 +750,30 @@ enum ThinkingRuleResolver {
 
         // Thinking off.
         if id.contains("gemini-3") {
-            return id.contains("flash") ? ["thinkingLevel": "minimal"] : ["thinkingLevel": "low"]
+            // [T-gemini37-flash-minimal-400] "minimal" only for Flash variants that
+            // still accept it. gemini-3.7-flash rejects it with 400 INVALID_ARGUMENT
+            // (verified via minis-model-use run), so 3.7+ Flash floors at "low" like
+            // Pro. Unversioned ids ("gemini-3-flash-preview") and 3.0–3.6 keep
+            // "minimal" — that behaviour is byte-pinned by the Gemini/Anthropic
+            // golden snapshot. Version-threshold rule rather than an exact-id
+            // special case so future 3.8/3.9 Flash ids don't regress to the 400.
+            let flashAcceptsMinimal = id.contains("flash")
+                && (Self.geminiDottedMinorVersion(of: id).map { $0 < 7 } ?? true)
+            return flashAcceptsMinimal ? ["thinkingLevel": "minimal"] : ["thinkingLevel": "low"]
         }
         if id.contains("2.5-pro") { return ["thinkingBudget": 128] }
         if id.contains("2.5-flash-lite") { return [:] }
-        let noThinkingSuffixes = ["-tts", "-image", "-embedding", "-vision"]
-        if noThinkingSuffixes.contains(where: { id.hasSuffix($0) || id.contains("\($0)-") }) {
-            return [:]
-        }
+        // (the -tts/-image/-embedding/-vision test now runs at the top of this function)
         return ["thinkingBudget": 0]
+    }
+
+    /// The `<minor>` of the FIRST `gemini-<major>.<minor>` occurrence in a
+    /// lowercased model id, or nil when the id carries no dotted version
+    /// (e.g. "gemini-3-flash-preview"). [T-gemini37-flash-minimal-400]
+    private static func geminiDottedMinorVersion(of id: String) -> Int? {
+        guard let range = id.range(of: #"gemini-\d+\.\d+"#, options: .regularExpression),
+              let dot = id[range].lastIndex(of: ".") else { return nil }
+        return Int(id[id.index(after: dot)..<range.upperBound])
     }
 
     /// The abstract thinking shape for an Anthropic request, as a small dictionary the
@@ -730,9 +785,13 @@ enum ThinkingRuleResolver {
     ///                                 explicitly because those models think by DEFAULT
     ///                                 when no thinking field is present, which burns a
     ///                                 small max_tokens entirely on thinking and returns
-    ///                                 empty text.
-    ///   `[:]`                       → send nothing (legacy model at OFF defaults to no
-    ///                                 thinking, so absence is correct).
+    ///                                 empty text. Claude 4.6-4.x ONLY — see
+    ///                                 `modelAcceptsExplicitThinkingDisabled`.
+    ///   `[:]`                       → send nothing. Correct for legacy models (OFF is
+    ///                                 their default) AND for Claude 5+, which rejects
+    ///                                 `thinking.type.disabled` outright and defaults to
+    ///                                 adaptive when the field is absent.
+    ///                                 [T-ios-claude5-thinking-disabled-400]
     static func anthropicThinkingShape(
         modelId: String,
         supportsReasoning: Bool?,
@@ -751,7 +810,37 @@ enum ThinkingRuleResolver {
             )
             return budget > 0 ? ["budget_tokens": budget] : [:]
         }
-        return adaptive ? ["disabled": true] : [:]
+        // [T-ios-claude5-thinking-disabled-400] Note this is NOT `adaptive`:
+        // that is true for 4.6+ AND 5+, but only 4.6-4.x accepts the explicit
+        // disabled value. Claude 5+ 400s on it and treats an absent field as
+        // adaptive — which is exactly what OFF wants.
+        return AnthropicProvider.modelAcceptsExplicitThinkingDisabled(modelId)
+            ? ["disabled": true]
+            : [:]
+    }
+
+    /// [T-ios-qwen-extra-body-400] The Qwen thinking budget for this level, already
+    /// clamped against `maxTokens`.
+    ///
+    /// Shared by `.qwenDual` and `.qwenRootOnly` so the two shapes cannot drift on the
+    /// inequality rule: the budget must be STRICTLY below `max_completion_tokens` —
+    /// equal values are rejected too ("[16384] must be greater than [16384]",
+    /// issues #35/#641) — and the ceiling varies per model, so it is computed relative
+    /// to maxTokens rather than against a fixed threshold (a5a0de20).
+    private static func qwenThinkingBudget(for ctx: ThinkingResolveContext) -> Int {
+        var budget: Int = switch ctx.level {
+        case .off: 0
+        case .low: 4096
+        case .medium: 16384
+        case .high: 32768
+        case .xhigh, .max, .ultra: 65536
+        }
+        guard budget > 0, ctx.maxTokens > 0 else { return budget }
+        if ctx.maxTokens < 2 { return 0 }
+        let margin = max(2048, ctx.maxTokens / 8)
+        let ceiling = max(1, min(ctx.maxTokens - margin, ctx.maxTokens - 1))
+        if budget >= ceiling { budget = ceiling }
+        return budget
     }
 
     /// Write `value` at a dotted `path` inside `body`, creating intermediate objects.
@@ -838,6 +927,7 @@ enum ThinkingRuleResolver {
             usesUnifiedReasoningEffort: base.contains("volces") || base.contains("ark.")
                 || base.contains("api.venice.ai"),
             isMistral: base.contains("mistral.ai"),
+            isDashScope: base.contains("dashscope"),
             offEffort: nil, userRules: []
         )
         let all = builtInRules(for: ctx)

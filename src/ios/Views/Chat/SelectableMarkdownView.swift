@@ -7,6 +7,8 @@ import UIKit
 
 private let imgLogger = AppLogger(category: "MinisImage")
 private let attachLogger = AppLogger(category: "AttachDebug")
+/// [T-ios-resign-first-responder-graph-reentry] Deferred responder-chain walks.
+private let responderLogger = AppLogger(category: "MarkdownResponder")
 
 // MARK: - minis:// URL encoding [T-minis-url-fullwidth-pipe-ios]
 
@@ -247,6 +249,48 @@ func downsampleImageData(_ data: Data, maxPixelSize: CGFloat = 2048) -> UIImage?
         return UIImage(data: data)
     }
     return UIImage(cgImage: cg)
+}
+
+/// [T-ios-image-single-writer] The `maxPixelSize` for decoding a chat-transcript
+/// image at DISPLAY size, computed from the header dimensions in `data`.
+///
+/// Chat images render at ≤ `ImageAttachment.maxImageWidth` points wide, so the
+/// sharpest bitmap the screen can ever show is `maxWidth × screenScale` pixels
+/// wide. Decoding straight to that target replaces the old two-stage pipeline
+/// (decode at a generic 2048 cap, then re-decode from disk at ~2× display width
+/// from inside `attachmentBounds`) whose second stage was both a memory
+/// double-spend and the placeholder-stuck race described at that call site.
+///
+/// `CGImageSourceThumbnailMaxPixelSize` caps the LONGEST side, so a tall
+/// portrait image capped naively at the width target would come out soft: for
+/// aspect > 1 the cap is scaled up so the WIDTH still lands on the target,
+/// bounded by the old 2048 ceiling so a pathological strip image cannot blow
+/// the decode budget. Wide images cap at the width target directly — strictly
+/// less memory than the old 2048 first stage, and at 3× scale strictly sharper
+/// than the old second stage (which targeted 2× display width).
+///
+/// `screenScale` is passed in (not read from UIScreen here) so callers off the
+/// main thread stay warning-free; capture it before detaching.
+func displayTargetPixels(for data: Data, screenScale: CGFloat) -> CGFloat {
+    let widthTargetPx = 400.0 * max(screenScale, 1)   // ImageAttachment.maxImageWidth
+    let hardCap: CGFloat = 2048
+    let opts = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let src = CGImageSourceCreateWithData(data as CFData, opts),
+          let props = CGImageSourceCopyPropertiesAtIndex(src, 0, opts) as? [CFString: Any],
+          let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+          let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+          w > 0, h > 0 else {
+        // Unreadable header — fall back to the historical generic cap.
+        return hardCap
+    }
+    // EXIF orientations 5-8 swap displayed axes; use the displayed width.
+    var dispW = w, dispH = h
+    if let o = (props[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value, (5...8).contains(o) {
+        swap(&dispW, &dispH)
+    }
+    let aspect = dispH / dispW
+    let longestForSharpWidth = aspect > 1 ? widthTargetPx * aspect : widthTargetPx
+    return min(longestForSharpWidth, hardCap)
 }
 
 // MARK: - SelectableMarkdownTheme
@@ -619,7 +663,7 @@ fileprivate final class MarkdownNSRenderer {
         } else {
             // Content changed or first time — create fresh object so TextKit recalculates bounds.
             // The previous view will be updated in-place by updateAttachmentViews via codeBlockViewCache.
-            attachment = CodeBlockAttachment(code: trimmed, language: language, theme: theme, quoteDepth: quoteDepth)
+            attachment = CodeBlockAttachment(code: trimmed, language: language, theme: theme, quoteDepth: quoteDepth, contentFingerprint: contentHash)
             attachment.blockIndex = idx
             codeBlockAttachmentCache[idx] = attachment
             codeBlockContentHashes[idx] = contentHash
@@ -1128,6 +1172,51 @@ fileprivate final class MarkdownNSRenderer {
         return result
     }
 
+    /// [T-ios-inline-code-long-path-wrap] Insert zero-width spaces after the
+    /// separators inside an inline code span so TextKit can wrap a long token.
+    ///
+    /// Problem: a path like `/tmp/android_backup_tg_feedback_triage_2026.md` is
+    /// a single unbreakable "word" under `.byWordWrapping` except at `/`. On a
+    /// narrow screen TextKit therefore breaks after `/tmp/` — leaving half the
+    /// first line empty and a full-width background pill around four visible
+    /// characters — and then, since the 45-char remainder still overflows, it
+    /// falls back to breaking mid-token, stranding a character or two on a
+    /// third line. That is exactly the reported rendering.
+    ///
+    /// Fix: give TextKit legal break opportunities at the separators a reader
+    /// already perceives as segment boundaries (`/ _ - .`), so a long span
+    /// fills each line and breaks where a human would. U+200B is zero-width, so
+    /// the rendered span is pixel-identical when it does NOT need to wrap —
+    /// verified equal to 3 decimal places against the unmodified string — and
+    /// short spans keep laying out on one line exactly as before.
+    ///
+    /// Copy safety: `plainTextWithTables` (the single choke point for selection
+    /// copy, Read Selection and Add to Chat Input) already strips U+200B and
+    /// U+200A, because the CJK emphasis pre-pass [T-md-cjk-emphasis-pairs]
+    /// injects the same character. Tap-to-copy is unaffected either way — it
+    /// reads the pristine string from `.inlineCodeText`, which is deliberately
+    /// still set from the ORIGINAL `code`, not this padded form.
+    ///
+    /// Scope: body inline code only. Table-cell inline code (`renderCellInline`)
+    /// is left alone — cell width is driven by measured content rather than a
+    /// fixed container, so it has neither the symptom nor the same wrap model.
+    static func breakableInlineCode(_ code: String) -> String {
+        // Nothing to gain on spans that cannot overflow a line; skip the work
+        // and keep the string byte-identical for the overwhelmingly common case.
+        guard code.count > 24 else { return code }
+        var out = ""
+        out.reserveCapacity(code.count * 2)
+        for ch in code {
+            out.append(ch)
+            // Only after a separator, never before: breaking before `/` would
+            // orphan the separator onto the next line, which reads worse.
+            if ch == "/" || ch == "_" || ch == "-" || ch == "." {
+                out.append("\u{200B}")
+            }
+        }
+        return out
+    }
+
     private func renderInline(_ node: InlineNode, attributes attrs: [NSAttributedString.Key: Any]) -> NSAttributedString {
         switch node {
         case .text(let text):
@@ -1143,7 +1232,8 @@ fileprivate final class MarkdownNSRenderer {
             // The actual color is drawn there with rounded corners; this just triggers the callback.
             codeAttrs[.backgroundColor] = theme.inlineCodeBackground
             // Add hair spaces for visual padding inside the background highlight.
-            return NSAttributedString(string: "\u{200A}\(code)\u{200A}", attributes: codeAttrs)
+            return NSAttributedString(string: "\u{200A}\(Self.breakableInlineCode(code))\u{200A}",
+                                      attributes: codeAttrs)
 
         case .emphasis(let children):
             var emphAttrs = attrs
@@ -1302,15 +1392,23 @@ final class CodeBlockAttachment: NSTextAttachment {
     let quoteDepth: Int
     /// Sequential index for view reuse across re-renders (set by MarkdownNSRenderer).
     var blockIndex: Int = 0
+    /// [CodeGenDedup] Hash of (code, language), computed once by the renderer
+    /// at creation. Folded into the invalidateCellSizeIfNeeded dedupe
+    /// fingerprint so in-place code growth during streaming — which changes
+    /// neither textStorage.length nor width — still defeats [SKIP-DEDUPE]
+    /// and re-invalidates the host cell's height (the TableGenDedup
+    /// counterpart for code blocks).
+    let contentFingerprint: Int
 
     /// Left inset for blockquote nesting (matches text indent).
     var leftInset: CGFloat { CGFloat(quoteDepth) * 13 }
 
-    init(code: String, language: String?, theme: SelectableMarkdownTheme, quoteDepth: Int = 0) {
+    init(code: String, language: String?, theme: SelectableMarkdownTheme, quoteDepth: Int = 0, contentFingerprint: Int = 0) {
         self.code = code
         self.language = language
         self.theme = theme
         self.quoteDepth = quoteDepth
+        self.contentFingerprint = contentFingerprint
         super.init(data: nil, ofType: nil)
         // Provide a transparent image so UIKit doesn't draw a default placeholder
         self.image = Self.transparentImage
@@ -1326,17 +1424,23 @@ final class CodeBlockAttachment: NSTextAttachment {
     static let topMargin: CGFloat = 6
     static let bottomMargin: CGFloat = 4
 
-    /// Associated-object key retaining the iOS 16 copy-tap gesture target
+    /// Associated-object key retaining the copy-tap gesture target
     /// for the button's lifetime (see makeView).
     static var copyTapHandlerKey: UInt8 = 0
 
-    /// Target object for the iOS 16 fallback tap gesture on the copy button —
+    /// Target object for the fallback tap gesture on the copy button —
     /// UITapGestureRecognizer needs an @objc target/action pair.
     final class CodeCopyTapHandler: NSObject {
         private let perform: () -> Void
         init(perform: @escaping () -> Void) { self.perform = perform }
         @objc func handleTap() { perform() }
     }
+
+    /// [T-ios17-codeblock-copy-dead] Reference box for the double-fire guard:
+    /// with both the control event AND the fallback gesture bound (see
+    /// makeView), a version where the control path still works would invoke
+    /// the copy twice per tap without it.
+    final class CopyDebounce { var last = Date.distantPast }
 
     /// Cached content height from sizeThatFits, keyed by code hash + width.
     private var cachedContentHeight: (hash: Int, height: CGFloat)?
@@ -1461,7 +1565,15 @@ final class CodeBlockAttachment: NSTextAttachment {
         copyButton.setImage(UIImage(systemName: "doc.on.doc", withConfiguration: iconConfig), for: .normal)
         copyButton.tintColor = .white.withAlphaComponent(0.5)
         copyButton.frame = CGRect(x: contentWidth - 44, y: 0, width: 44, height: 44)
+        let debounce = CopyDebounce()
         let performCopy: () -> Void = { [weak codeTextView, weak copyButton] in
+            // [T-ios17-codeblock-copy-dead] Double-fire guard: on versions
+            // where the control event still works, a single tap now arrives
+            // through BOTH the control path and the fallback gesture below.
+            // The copy itself is idempotent, but guard anyway so the action
+            // runs exactly once per physical tap.
+            guard Date().timeIntervalSince(debounce.last) > 0.3 else { return }
+            debounce.last = Date()
             // Read directly from the UITextView so we always copy the latest
             // content, even after updateExistingView replaced the attributed text.
             UIPasteboard.general.string = codeTextView?.text
@@ -1473,22 +1585,30 @@ final class CodeBlockAttachment: NSTextAttachment {
             }
         }
         copyButton.addAction(UIAction { _ in performCopy() }, for: .touchUpInside)
-        // [T-ios16-codeblock-copy-regression] iOS 16 ONLY: also bind an
-        // independent tap gesture on the button. On iOS 16 the UIControl
-        // .touchUpInside event stopped firing for this button (regressed
-        // between TF26 and TF28; exact toucher unidentified — the host text
-        // view's gesture/interaction graph cancels the control's touches).
-        // A UITapGestureRecognizer attached to the button itself recognizes
-        // through the gesture system rather than the control-event path, so
-        // it survives the cancellation. Gated to <17: iOS 17+ button works,
-        // and double-binding there would just be dead weight.
-        if #unavailable(iOS 17.0) {
-            let tapHandler = CodeCopyTapHandler(perform: performCopy)
-            let tap = UITapGestureRecognizer(target: tapHandler, action: #selector(CodeCopyTapHandler.handleTap))
-            tap.cancelsTouchesInView = false
-            copyButton.addGestureRecognizer(tap)
-            objc_setAssociatedObject(copyButton, &Self.copyTapHandlerKey, tapHandler, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        }
+        // [T-ios16-codeblock-copy-regression] [T-ios17-codeblock-copy-dead]
+        // ALWAYS also bind an independent tap gesture on the button, on every
+        // OS version. History of this line:
+        //   • iOS 16: .touchUpInside stopped firing (regressed between TF26
+        //     and TF28) — the host text view's gesture/interaction graph
+        //     cancels the control's touches. Fallback added, gated <17 on the
+        //     assumption "iOS 17+ button works".
+        //   • iOS 17: field report proved that assumption wrong — same dead
+        //     button. The likely toucher is visible one screen up:
+        //     addInteraction(_:) DROPS UIContextMenuInteraction on iOS 16 but
+        //     KEEPS it on 17+, so 17 is exactly the version where the
+        //     interaction's gesture graph exists AND no fallback was bound
+        //     (18+ reworked the text-interaction stack and doesn't cancel).
+        // A UITapGestureRecognizer attached to the button recognizes through
+        // the gesture system rather than the control-event path, so it
+        // survives the cancellation on every affected version. The version
+        // gate is gone for good: it encoded a per-version guess that has now
+        // been wrong twice, and the debounce in performCopy makes the
+        // double-bind harmless where the control path does work.
+        let tapHandler = CodeCopyTapHandler(perform: performCopy)
+        let tap = UITapGestureRecognizer(target: tapHandler, action: #selector(CodeCopyTapHandler.handleTap))
+        tap.cancelsTouchesInView = false
+        copyButton.addGestureRecognizer(tap)
+        objc_setAssociatedObject(copyButton, &Self.copyTapHandlerKey, tapHandler, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         container.addSubview(copyButton)
 
         container.frame.origin.y = Self.topMargin
@@ -2281,7 +2401,7 @@ final class TableAttachment: NSTextAttachment {
             guard let self else { return }
             UIPasteboard.general.string = self.plainText()
             // [T-toast-feedback] Confirm the copy succeeded.
-            MinisToast.show(String(localized: "Table copied"))
+            MinisToast.show(AppLocalized("Table copied"))
         }
 
         // [T-ios-copy-table-image] Render the FULL table (all rows/cols, not
@@ -2339,7 +2459,7 @@ final class TableAttachment: NSTextAttachment {
             }
             UIPasteboard.general.image = image
             // [T-toast-feedback] Confirm the image copy succeeded.
-            MinisToast.show(String(localized: "Table image copied"))
+            MinisToast.show(AppLocalized("Table image copied"))
         }
 
         var yOffset: CGFloat = 0
@@ -2660,19 +2780,41 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
         super.addInteraction(interaction)
     }
 
+    // [T-ios-preapply-endediting] Responder changes are synchronous again.
+    // The deferred-resign guard that used to live here (c1fd59e1f) returned
+    // `false` mid-batch-update, which violates UIKit's rebase contract and
+    // fired the NSInternalInconsistencyException in
+    // _resignOrRebaseFirstResponderViewWithIndexPathMapping: (TestFlight
+    // 1.13(15)). The invariant is now enforced one level up: applySnapshot
+    // calls endEditing BEFORE the structural apply, so by the time a batch
+    // update runs there is no first responder to resign or rebase — which
+    // also removes the AttributeGraph re-entry the deferral was built for.
+    // `become` registers this view as the tracked responder so that gate
+    // knows when it must act.
     override func becomeFirstResponder() -> Bool {
         let cv = findCollectionView()
         cv?.offsetLocked = true
         let result = super.becomeFirstResponder()
         cv?.offsetLocked = false
+        if result { cv?.trackedTextResponder = self }
         return result
     }
 
     override func resignFirstResponder() -> Bool {
         let cv = findCollectionView()
+        if cv?.isApplyingSnapshot == true {
+            // Should be unreachable: applySnapshot ends editing before the
+            // apply. If some path still gets here, run `super` synchronously —
+            // the pre-c1fd59e1f behavior. In this window a synchronous super
+            // is an OCCASIONAL AttributeGraph crash while returning false is a
+            // GUARANTEED rebase assertion, so synchronous strictly dominates.
+            // WARN so any hit is visible in logs.
+            responderLogger.warning("[Responder] table-cell resignFirstResponder DURING applySnapshot — pre-apply endEditing missed this responder")
+        }
         cv?.offsetLocked = true
         let result = super.resignFirstResponder()
         cv?.offsetLocked = false
+        if cv?.trackedTextResponder === self { cv?.trackedTextResponder = nil }
         onResignFirstResponder?()
         return result
     }
@@ -2787,7 +2929,7 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
         if selectedRange.length > 0 {
             children.append(
                 UICommand(
-                    title: String(localized: "Add to Chat Input"),
+                    title: AppLocalized("Add to Chat Input"),
                     image: UIImage(systemName: "text.insert"),
                     action: #selector(addSelectionToChatInput(_:))
                 )
@@ -2796,7 +2938,7 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
         if copyTableAction != nil {
             children.append(
                 UICommand(
-                    title: String(localized: "Copy Table"),
+                    title: AppLocalized("Copy Table"),
                     image: UIImage(systemName: "tablecells"),
                     action: #selector(copyTable)
                 )
@@ -2805,7 +2947,7 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
             if copyTableImageAction != nil {
                 children.append(
                     UICommand(
-                        title: String(localized: "Copy Table Image"),
+                        title: AppLocalized("Copy Table Image"),
                         image: UIImage(systemName: "tablecells.badge.ellipsis"),
                         action: #selector(copyTableImage)
                     )
@@ -2816,7 +2958,7 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
         if selectedRange.length > 0 {
             children.append(
                 UICommand(
-                    title: String(localized: "Read Selected Aloud"),
+                    title: AppLocalized("Read Selected Aloud"),
                     image: UIImage(systemName: "speaker.wave.2"),
                     action: #selector(readSelectedAloud)
                 )
@@ -2824,7 +2966,7 @@ private final class TableCellTextView: UITextView, UITextViewDelegate {
         }
         children.append(
             UICommand(
-                title: String(localized: "Read All Aloud"),
+                title: AppLocalized("Read All Aloud"),
                 image: UIImage(systemName: "play.circle"),
                 action: #selector(readAllAloud)
             )
@@ -3034,10 +3176,10 @@ private final class TableCellLabel: UILabel, UIGestureRecognizerDelegate, UICont
         // Order matches buildMenu: Add to Chat Input → Copy Table → Copy Table
         // Image. [T-ios-copy-table-menu-order]
         UIMenuController.shared.menuItems = [
-            UIMenuItem(title: String(localized: "Add to Chat Input"), action: #selector(TableCellTextView.addSelectionToChatInput(_:))),
-            UIMenuItem(title: String(localized: "Copy Table"), action: #selector(TableCellTextView.copyTable)),
+            UIMenuItem(title: AppLocalized("Add to Chat Input"), action: #selector(TableCellTextView.addSelectionToChatInput(_:))),
+            UIMenuItem(title: AppLocalized("Copy Table"), action: #selector(TableCellTextView.copyTable)),
             // [T-ios-copy-table-image]
-            UIMenuItem(title: String(localized: "Copy Table Image"), action: #selector(TableCellTextView.copyTableImage)),
+            UIMenuItem(title: AppLocalized("Copy Table Image"), action: #selector(TableCellTextView.copyTableImage)),
         ]
 
         // Select all text after a run-loop turn so TextKit finishes layout.
@@ -3374,6 +3516,45 @@ final class MathAttachment: NSTextAttachment {
     /// dedicated UIImageView overlay built in `updateAttachmentViews`.
     var inlineDrawable: Bool = false
 
+    /// [T-ios-math-invisible-dark-mode] Drop the rendered bitmap so the next
+    /// pass re-renders it in the current interface style.
+    ///
+    /// The image bakes in a concrete text color (it must — see
+    /// `SwiftMathRenderer.interfaceStyle`), which makes it style-specific.
+    /// `SwiftMathRenderer`'s own NSCache is already keyed by style, but THIS
+    /// object holds a rendered image directly, and the Theme picker only flips
+    /// `window.overrideUserInterfaceStyle` (ContentView.swift:6948) — nothing
+    /// re-parses the markdown. Without this reset, formulas already on screen
+    /// when the user switches theme keep their old-color bitmap and go blank.
+    ///
+    /// Deliberately keeps `renderFailed`: a formula SwiftMath cannot parse
+    /// fails identically in both styles, and re-attempting it on every theme
+    /// flip would just re-run the parse to reach the same answer.
+    func invalidateRenderForInterfaceStyleChange() {
+        guard renderedImage != nil else { return }
+        renderedImage = nil
+        renderedSize = .zero
+        renderedBaselineFromBottom = 0
+        didAttemptRender = false
+        didAttemptSyncRender = false
+        if inlineDrawable { self.image = nil }
+        needsViewRebuild = true
+    }
+
+    /// [T-ios-math-invisible-dark-mode] Set when the cached bitmap was dropped
+    /// and the overlay view built from it must be discarded too.
+    ///
+    /// BLOCK formulas don't draw through TextKit — `updateAttachmentViews`
+    /// builds a dedicated `UIImageView` overlay per attachment and reuses it
+    /// while the attachment's object identity is unchanged. That reuse check
+    /// asks "is there a rendered image but no image view?", which a
+    /// just-invalidated attachment fails (its image is nil), so the overlay
+    /// holding the OLD-color bitmap survived and display formulas stayed blank
+    /// after a live theme switch even though inline ones re-rendered correctly.
+    /// Mirrors `ImageAttachment.needsViewRebuild`, which exists for the same
+    /// reason (a file rewritten under a stable attachment identity).
+    var needsViewRebuild: Bool = false
+
     func makeView(width: CGFloat) -> UIView {
         // Attempt render if not yet done (e.g. attachment reappeared after recycle)
         if renderedImage == nil && !didAttemptRender && !isKaTeXPending {
@@ -3439,10 +3620,22 @@ final class ImageAttachment: NSTextAttachment {
     /// its `UIImageView.image` property).
     fileprivate var needsViewRebuild: Bool = false
     private(set) var loadedImage: UIImage?
-    /// Resolved file URL for lazy re-downsampling (no raw Data in memory).
+    /// Resolved file URL of the loaded source (kept for preview/inspection).
     private var resolvedFileURL: URL?
-    /// The maxPixelSize used for the current loadedImage (0 = initial full load).
-    private var downsampledAtPixelSize: CGFloat = 0
+    /// [T-ios-image-single-writer] Monotonic load generation. Every dispatch of
+    /// an async load (and every invalidation) bumps it; an async completion
+    /// whose captured generation no longer matches is STALE and must be
+    /// dropped on the floor instead of writing `loadedImage`.
+    ///
+    /// This is what makes out-of-order completions impossible by construction.
+    /// The predecessor design had up to three concurrent writers racing on
+    /// `loadedImage` (initial load, cache adoption, and N bounds-time
+    /// re-downsample tasks fired by width-bucket oscillation), guarded only by
+    /// a marker that was written BEFORE the async work and never rolled back
+    /// on failure — one silently-dropped task and the attachment was locked on
+    /// a placeholder until the object itself was recreated (the "first open
+    /// shows grey boxes, re-entering fixes it" family).
+    private var loadGeneration: Int = 0
     private var isLoading = false
     /// Set when a minis:// file was not found; allows retry on next render.
     private var fileNotFound = false
@@ -3515,11 +3708,16 @@ final class ImageAttachment: NSTextAttachment {
     func invalidateLoadedImage() {
         loadedImage = nil
         loadedFingerprint = nil
-        downsampledAtPixelSize = 0
         resolvedFileURL = nil
         fileNotFound = false
         retriesRemaining = 15
         needsViewRebuild = true
+        // [T-ios-image-single-writer] Invalidate any in-flight load: its
+        // completion captured the old generation and will now be dropped,
+        // so a stale bitmap can never overwrite the reload this invalidation
+        // is about to trigger.
+        loadGeneration &+= 1
+        isLoading = false
     }
 
     @available(*, unavailable)
@@ -3543,10 +3741,8 @@ final class ImageAttachment: NSTextAttachment {
         // Quantize the line-fragment width to a 4pt bucket. TextKit can call
         // attachmentBounds many times per layout pass with widths that differ
         // by sub-point floats (e.g. 329.83333 vs 330.0) as the container width
-        // flows through cell self-sizing. Without quantization the downstream
-        // `targetPixels` can toggle across the `downsampledAtPixelSize !=` guard
-        // and re-schedule downsample on every call, which mutates loadedImage
-        // and forces TextKit to re-typeset. Bucket is visually imperceptible.
+        // flows through cell self-sizing; quantizing keeps the returned box
+        // geometry stable across those calls. Visually imperceptible.
         let rawWidth = lineFrag.width
         let width = (rawWidth / 4.0).rounded() * 4.0
         attachmentBoundsCallCount &+= 1
@@ -3554,7 +3750,7 @@ final class ImageAttachment: NSTextAttachment {
         // flooding while still proving cadence vs streaming token rate.
         let cnt = attachmentBoundsCallCount
         if cnt <= 5 || cnt % 50 == 0 {
-            AppLogger(category: "AttachHotPath").info("[IMG][BOUNDS] #\(cnt) src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) rawW=\(String(format: "%.1f", rawWidth)) bucketW=\(String(format: "%.0f", width)) hasImg=\(self.loadedImage != nil) sampledAt=\(Int(self.downsampledAtPixelSize))")
+            AppLogger(category: "AttachHotPath").info("[IMG][BOUNDS] #\(cnt) src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) rawW=\(String(format: "%.1f", rawWidth)) bucketW=\(String(format: "%.0f", width)) hasImg=\(self.loadedImage != nil)")
         }
 
         if let img = loadedImage {
@@ -3569,41 +3765,18 @@ final class ImageAttachment: NSTextAttachment {
             let maxH = UIScreen.main.bounds.height / 2
             let h = min(imgWidth * aspect, maxH)
 
-            // Re-downsample if the loaded image is much larger than needed.
-            // Target: 2x the actual display width for retina crispness.
-            // Re-reads from disk (not memory) to avoid holding raw Data in RAM.
-            // Guards:
-            //  - imgWidth >= maxImageWidth * 0.8: only downsample when layout width
-            //    is close to the final display width. TextKit may call attachmentBounds
-            //    with a very small lineFrag during intermediate layout passes; if we
-            //    downsample then, loadedImage is permanently replaced with a tiny
-            //    thumbnail (e.g. 112×200) and never recovers.
-            //  - targetPixels >= 600: absolute minimum to avoid destroying image quality.
-            //  - targetPixels is bucketed to 50pt so sub-point lineFrag jitter
-            //    cannot flip the `downsampledAtPixelSize != targetPixels` guard
-            //    and re-kick downsample on every attachmentBounds call.
-            let rawTargetPixels = imgWidth * 2
-            let targetPixels = (rawTargetPixels / 50.0).rounded() * 50.0
-            if imgWidth >= Self.maxImageWidth * 0.8,
-               targetPixels >= 600,
-               img.size.width > targetPixels * 1.5,
-               downsampledAtPixelSize != targetPixels {
-                AppLogger(category: "AttachHotPath").info("[IMG][BOUNDS][DOWNSAMPLE-FIRE] src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) targetPx=\(Int(targetPixels)) prevPx=\(Int(self.downsampledAtPixelSize)) imgW=\(Int(img.size.width)) bucketW=\(String(format: "%.0f", width))")
-                downsampledAtPixelSize = targetPixels
-                let fileURL = resolvedFileURL
-                Task.detached(priority: .utility) {
-                    guard let url = fileURL, let data = try? Data(contentsOf: url) else { return }
-                    guard let resized = downsampleImageData(data, maxPixelSize: targetPixels) else { return }
-                    await MainActor.run {
-                        AppLogger(category: "AttachHotPath").info("[IMG][BOUNDS][DOWNSAMPLE-APPLY] src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) newSize=\(Int(resized.size.width))x\(Int(resized.size.height)) — ASSIGNS loadedImage on main, will trigger TextKit re-layout")
-                        self.loadedImage = resized
-                        // Do NOT write back to NativeMediaImageCache — the shared
-                        // cache must keep the full-resolution image so that other
-                        // ImageAttachment instances (e.g. after markdown re-parse)
-                        // pick up the crisp original, not a downsampled copy.
-                    }
-                }
-            }
+            // [T-ios-image-single-writer] attachmentBounds is PURE now — it
+            // measures and returns, nothing else. The bounds-time re-downsample
+            // that used to live here (fire a detached decode task from inside a
+            // TextKit measurement callback, replacing `loadedImage` when it
+            // landed) was the root of the placeholder-stuck family: measurement
+            // runs many times per layout pass at oscillating widths, so the
+            // side effect fired repeatedly and concurrently, completions landed
+            // out of order, and a silently-failed task left a
+            // never-rolled-back marker that blocked all retries. Display-size
+            // decoding now happens exactly once, in the load pipeline
+            // (`displayTargetPixels`), where the aspect ratio is known and
+            // there is a single completion path.
 
             // Return the attachment box as `imgWidth` (already clamped by
             // `maxImageWidth` and the image's own intrinsic width), NOT the
@@ -3653,9 +3826,91 @@ final class ImageAttachment: NSTextAttachment {
         return CGRect(x: 0, y: 0, width: placeholderWidth, height: Self.placeholderHeight)
     }
 
+    /// [T-ios-image-squish-probe] Read pixel dimensions from the file HEADER
+    /// only — CGImageSource property lookup decodes no pixel data, so this is
+    /// millisecond-cheap even on multi-MB files. Orientation-aware: EXIF
+    /// orientations 5–8 are 90°-rotated, so displayed width/height swap.
+    private static func probePixelSize(at url: URL) -> CGSize? {
+        let opts = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, opts),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, opts) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue,
+              w > 0, h > 0 else { return nil }
+        if let o = (props[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value, (5...8).contains(o) {
+            return CGSize(width: h, height: w)
+        }
+        return CGSize(width: w, height: h)
+    }
+
+    /// [T-ios-image-squish-probe] Record a header-probed size and kick the
+    /// cell re-measure chain BEFORE the heavyweight decode runs. This is the
+    /// fc6a5bd43 lesson applied to images: a never-seen portrait image (e.g.
+    /// 400×800) used to sit on the fixed 200pt placeholder until the full
+    /// read + ImageIO downsample finished, and that whole window measured the
+    /// cell hundreds of points short — trailing text drew over the image.
+    /// With the probe, attachmentBounds' recorded-size path returns the true
+    /// aspect ratio on the very next layout pass. No-op when the size is
+    /// already recorded (repeat renders, or the decode won the race).
+    private static func probeAndPublishSize(at url: URL, canonicalSrc: String) {
+        guard NativeMediaImageCache.shared.size(forSource: canonicalSrc) == nil else { return }
+        guard let size = probePixelSize(at: url) else { return }
+        NativeMediaImageCache.shared.recordSize(size, forSource: canonicalSrc)
+        imgLogger.info("[MinisImage][Probe] header size=\(Int(size.width))x\(Int(size.height)) src=\(canonicalSrc) — publishing before full decode")
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: canonicalSrc)
+        }
+    }
+
+    /// [T-ios-image-single-writer] The ONLY code path that writes
+    /// `loadedImage`. Every adoption — cache hit, disk decode, HTTP fetch —
+    /// funnels through here on the main thread, and the write is always paired
+    /// with the refresh signal (`onLoad` + the size-changed notification).
+    ///
+    /// The pairing is the whole point. Two generations of placeholder-stuck
+    /// bugs on this class were, at bottom, "state changed but no signal
+    /// followed": first a load completion racing the render pass (the stale
+    /// `loaded=false` window), then a bounds-time re-decode assigning the
+    /// property bare with no refresh behind it. Making the bare assignment
+    /// inexpressible closes the class of bug, not just the two instances.
+    private func adoptLoaded(_ image: UIImage, fingerprint: String, canonicalSrc: String, via: String) {
+        loadedImage = image
+        loadedFingerprint = fingerprint
+        isLoading = false
+        fileNotFound = false
+        imgLogger.info("[MinisImage][Adopt] via=\(via) src=\(canonicalSrc) size=\(Int(image.size.width))x\(Int(image.size.height))")
+        onLoad?()
+        // Adoption grows the cell: placeholder bounds → image bounds. The
+        // cell must re-measure even on the synchronous cache-hit path.
+        NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: canonicalSrc)
+    }
+
     func beginLoadingIfNeeded() {
+        // Canonicalize scheme-less / relative sources to minis://workspace/…
+        // so the rest of the pipeline (cache key, resolve, fingerprint)
+        // treats them uniformly. Agents writing plain markdown like
+        // `![img](foo.png)` or `![img](subdir/foo.png)` land here.
+        let canonicalSrc = Self.canonicalizeMarkdownImageSource(source)
+        if canonicalSrc != source {
+            imgLogger.info("[MinisImage][Load] canonicalized src=\(self.source) → \(canonicalSrc)")
+        }
+
+        // [T-ios-image-single-writer] Cache first, flags second — the shared
+        // cache is the ground truth for "is this bitmap available";
+        // `isLoading` is merely scheduling state. With the guard first (the
+        // old order), a view that arrived while a load was in flight returned
+        // early and never saw the cache, even after that load had populated
+        // it: the exact window every "first open shows grey boxes, re-enter
+        // fixes it" report landed in. Fingerprint-keyed so an in-place rewrite
+        // of the same minis:// path misses and falls through to a fresh decode.
+        let fpKey = minisMediaCacheKey(for: canonicalSrc)
+        if loadedImage == nil, let cached = NativeMediaImageCache.shared.image(for: fpKey) {
+            adoptLoaded(cached, fingerprint: fpKey, canonicalSrc: canonicalSrc, via: "memory-cache")
+            return
+        }
+
         guard loadedImage == nil, !isLoading else {
-            imgLogger.info("[MinisImage][Load] skip src=\(self.source) alreadyLoaded=\(self.loadedImage != nil) isLoading=\(self.isLoading)")
+            imgLogger.info("[MinisImage][Load] skip src=\(self.source) alreadyLoaded=\(self.loadedImage != nil) isLoading=\(self.isLoading) — the in-flight completion or the next render's cache check will adopt")
             return
         }
         // Reset fileNotFound so we don't spin; it will be set again if still missing.
@@ -3666,33 +3921,15 @@ final class ImageAttachment: NSTextAttachment {
         }
         retriesRemaining -= 1
         isLoading = true
-        // Canonicalize scheme-less / relative sources to minis://workspace/…
-        // so the rest of the pipeline (cache key, resolve, fingerprint)
-        // treats them uniformly. Agents writing plain markdown like
-        // `![img](foo.png)` or `![img](subdir/foo.png)` land here.
-        let canonicalSrc = Self.canonicalizeMarkdownImageSource(source)
-        if canonicalSrc != source {
-            imgLogger.info("[MinisImage][Load] canonicalized src=\(self.source) → \(canonicalSrc)")
-        }
+        // [T-ios-image-single-writer] Stamp this dispatch. The completion
+        // re-checks the stamp on main; invalidateLoadedImage or a newer
+        // dispatch bumps it, and the stale completion is dropped instead of
+        // overwriting a newer state. Out-of-order completions become
+        // impossible by construction rather than improbable by guard.
+        loadGeneration &+= 1
+        let gen = loadGeneration
         let parsedURL = URL(string: canonicalSrc)
-        imgLogger.info("[MinisImage][Load] START src=\(canonicalSrc) scheme=\(parsedURL?.scheme ?? "nil") host=\(parsedURL?.host ?? "nil") path=\(parsedURL?.path ?? "nil") ext=\(parsedURL?.pathExtension ?? "nil") retriesRemaining=\(self.retriesRemaining)")
-
-        // Fingerprint-keyed cache so an in-place rewrite of the same
-        // minis:// path produces a different key and falls through to
-        // a fresh decode.
-        let fpKey = minisMediaCacheKey(for: canonicalSrc)
-        if let cached = NativeMediaImageCache.shared.image(for: fpKey) {
-            imgLogger.info("[MinisImage][Load] MEMORY CACHE HIT src=\(canonicalSrc) size=\(cached.size.width)x\(cached.size.height)")
-            loadedImage = cached
-            loadedFingerprint = fpKey
-            isLoading = false
-            onLoad?()
-            // Memory-cache hit still grows the cell: placeholder bounds →
-            // image bounds at the recorded size. Cell needs to re-measure.
-            NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: canonicalSrc)
-            return
-        }
-        imgLogger.info("[MinisImage][Load] MEMORY CACHE MISS src=\(canonicalSrc) — will load from disk/network")
+        imgLogger.info("[MinisImage][Load] START gen=\(gen) src=\(canonicalSrc) scheme=\(parsedURL?.scheme ?? "nil") host=\(parsedURL?.host ?? "nil") path=\(parsedURL?.path ?? "nil") ext=\(parsedURL?.pathExtension ?? "nil") retriesRemaining=\(self.retriesRemaining)")
 
         let src = canonicalSrc
         let isMinisURL = URL(string: src).map { $0.scheme == "minis" } ?? false
@@ -3708,6 +3945,9 @@ final class ImageAttachment: NSTextAttachment {
             return
         }
         imgLogger.info("[MinisImage][Load] dispatching async load src=\(src) isMinisURL=\(isMinisURL)")
+        // [T-ios-image-single-writer] Captured on the caller's (main) thread;
+        // `displayTargetPixels` needs it off-main where UIScreen is off-limits.
+        let screenScale = UIScreen.main.scale
         Task.detached(priority: .userInitiated) {
             var fileURL: URL?
             let img: UIImage?
@@ -3716,9 +3956,14 @@ final class ImageAttachment: NSTextAttachment {
                 if let resolved = resolveMinisFileURLForNativeText(url: url) {
                     imgLogger.info("[MinisImage][Load] minis:// resolved to localPath=\(resolved.path)")
                     fileURL = resolved
+                    // [T-ios-image-squish-probe] Publish the true aspect ratio
+                    // from the file header before paying for the full decode.
+                    Self.probeAndPublishSize(at: resolved, canonicalSrc: src)
                     if let data = try? Data(contentsOf: resolved) {
                         imgLogger.info("[MinisImage][Load] read \(data.count) bytes from localPath=\(resolved.path)")
-                        let downsampled = downsampleImageData(data)
+                        // [T-ios-image-single-writer] Decode straight to display
+                        // size — the one and only decode this image gets.
+                        let downsampled = downsampleImageData(data, maxPixelSize: displayTargetPixels(for: data, screenScale: screenScale))
                         if let downsampled {
                             imgLogger.info("[MinisImage][Load] downsample OK src=\(src) resultSize=\(downsampled.size.width)x\(downsampled.size.height)")
                         } else {
@@ -3736,9 +3981,8 @@ final class ImageAttachment: NSTextAttachment {
             } else if let url = URL(string: src), url.scheme == "http" || url.scheme == "https" {
                 imgLogger.info("[MinisImage][Load] fetching HTTP(S) url=\(src)")
                 if let data = try? Data(contentsOf: url) {
-                    // HTTP images: no local file URL for re-downsample (network-only)
                     imgLogger.info("[MinisImage][Load] HTTP fetched \(data.count) bytes src=\(src)")
-                    img = downsampleImageData(data)
+                    img = downsampleImageData(data, maxPixelSize: displayTargetPixels(for: data, screenScale: screenScale))
                 } else {
                     imgLogger.warning("[MinisImage][Load] HTTP fetch FAILED src=\(src)")
                     img = nil
@@ -3747,9 +3991,14 @@ final class ImageAttachment: NSTextAttachment {
                 // file URL or relative
                 imgLogger.info("[MinisImage][Load] trying file/relative URL scheme=\(url.scheme ?? "nil") path=\(url.path)")
                 fileURL = url
+                // [T-ios-image-squish-probe] Same early header probe as the
+                // minis:// branch. HTTP(S) is deliberately NOT probed — a
+                // range-request header fetch isn't worth the complexity; the
+                // full download records the size as before.
+                Self.probeAndPublishSize(at: url, canonicalSrc: src)
                 if let data = try? Data(contentsOf: url) {
                     imgLogger.info("[MinisImage][Load] file loaded \(data.count) bytes src=\(src)")
-                    img = downsampleImageData(data)
+                    img = downsampleImageData(data, maxPixelSize: displayTargetPixels(for: data, screenScale: screenScale))
                 } else {
                     imgLogger.warning("[MinisImage][Load] file load FAILED src=\(src)")
                     img = nil
@@ -3783,28 +4032,36 @@ final class ImageAttachment: NSTextAttachment {
             }
 
             await MainActor.run {
-                self.loadedImage = img
-                self.loadedFingerprint = img != nil ? postLoadKey : nil
+                // [T-ios-image-single-writer] Stale-completion gate. If the
+                // generation moved on (invalidateLoadedImage ran, or a newer
+                // dispatch superseded this one), this result belongs to a dead
+                // request — drop it. The bitmap is already in the shared cache
+                // above, so the live generation adopts it from there anyway;
+                // nothing is lost, and nothing stale ever lands.
+                guard gen == self.loadGeneration else {
+                    imgLogger.info("[MinisImage][Load] DROP STALE completion gen=\(gen) current=\(self.loadGeneration) src=\(src)")
+                    return
+                }
                 self.resolvedFileURL = fileURL
-                self.isLoading = false
-                if img == nil && isMinisURL && self.retriesRemaining > 0 {
-                    imgLogger.info("[MinisImage][Load] RETRY scheduled src=\(src) retriesRemaining=\(self.retriesRemaining)")
-                    self.fileNotFound = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                        guard let self, self.fileNotFound else { return }
-                        self.beginLoadingIfNeeded()
-                    }
+                if let img {
+                    self.adoptLoaded(img, fingerprint: postLoadKey, canonicalSrc: src, via: "disk-load")
                 } else {
-                    if img == nil && isMinisURL {
-                        imgLogger.error("[MinisImage][Load] GAVE UP src=\(src) — all retries exhausted")
-                    }
-                    self.onLoad?()
-                    if img != nil {
-                        // Cell-side height re-measure after async image load.
-                        // Mirrors the fix in VideoAttachment — without this,
-                        // the cell stays at the 200pt placeholder height
-                        // until an unrelated event triggers a reconfigure.
-                        NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: src)
+                    self.isLoading = false
+                    if isMinisURL && self.retriesRemaining > 0 {
+                        imgLogger.info("[MinisImage][Load] RETRY scheduled src=\(src) retriesRemaining=\(self.retriesRemaining)")
+                        self.fileNotFound = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                            guard let self, self.fileNotFound else { return }
+                            self.beginLoadingIfNeeded()
+                        }
+                    } else {
+                        if isMinisURL {
+                            imgLogger.error("[MinisImage][Load] GAVE UP src=\(src) — all retries exhausted")
+                        }
+                        // Failure still signals: views waiting on this load
+                        // must get a pass to render their file-not-found state
+                        // instead of a placeholder that never resolves.
+                        self.onLoad?()
                     }
                 }
             }
@@ -4001,6 +4258,17 @@ final class VideoAttachment: NSTextAttachment {
             // +24 for filename label below
             return CGRect(x: 0, y: 0, width: lineFrag.width, height: h + 24)
         }
+        // [T-ios-video-squish] No thumbnail yet — use the recorded display
+        // size (track-metadata probe or a previous run's thumbnail) so a
+        // portrait video's placeholder already has the right aspect ratio
+        // instead of the fixed 200pt box. Mirrors ImageAttachment's
+        // recorded-size fallback (8f9ffc437).
+        if let known = NativeMediaImageCache.shared.size(forSource: source),
+           known.width > 0 {
+            let aspect = known.height / known.width
+            let h = min(width * aspect, UIScreen.main.bounds.height / 2)
+            return CGRect(x: 0, y: 0, width: lineFrag.width, height: h + 24)
+        }
         return CGRect(x: 0, y: 0, width: lineFrag.width, height: Self.placeholderHeight)
     }
 
@@ -4043,6 +4311,30 @@ final class VideoAttachment: NSTextAttachment {
             }
 
             let asset = AVAsset(url: fileURL)
+
+            // [T-ios-video-squish] Probe the video track's display size BEFORE
+            // generating the thumbnail. Track metadata (naturalSize +
+            // preferredTransform) is read from the container header — far
+            // lighter than AVAssetImageGenerator, which spins up a decoder for
+            // a real frame. Recording it now lets attachmentBounds return the
+            // true aspect ratio while the (slow) thumbnail is still cooking —
+            // the 8f9ffc437 header-probe idea applied to video. Orientation is
+            // handled by applying preferredTransform (portrait phone captures
+            // store a landscape naturalSize + 90° transform).
+            if NativeMediaImageCache.shared.size(forSource: src) == nil,
+               let track = try? await asset.loadTracks(withMediaType: .video).first,
+               let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform) {
+                let rect = CGRect(origin: .zero, size: natural).applying(transform)
+                let displaySize = CGSize(width: abs(rect.width), height: abs(rect.height))
+                if displaySize.width > 0, displaySize.height > 0 {
+                    NativeMediaImageCache.shared.recordSize(displaySize, forSource: src)
+                    imgLogger.info("[MinisVideo][Probe] track size=\(Int(displaySize.width))x\(Int(displaySize.height)) src=\(src) — publishing before thumbnail generation")
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: src)
+                    }
+                }
+            }
+
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: 400, height: 400)
@@ -4057,6 +4349,10 @@ final class VideoAttachment: NSTextAttachment {
 
             if let thumb {
                 NativeMediaImageCache.shared.set(thumb, for: "thumb:" + cacheKey)
+                // Durable size record (the in-memory thumb cache dies on cold
+                // start; the recorded size persists in UserDefaults). Also
+                // covers assets whose track probe failed.
+                NativeMediaImageCache.shared.recordSize(thumb.size, forSource: src)
             }
 
             await MainActor.run {
@@ -4468,6 +4764,12 @@ private extension Array where Element == InlineNode {
 /// dedicated class so other layout-manager hooks can be added in one place.
 final class MinisLayoutManager: NSLayoutManager {
 
+    /// [T-ios-inline-code-quote-band] Breathing room painted past the last
+    /// visible glyph on a wrapped line. Mirrors the ~0.5-1pt of slack the
+    /// unclamped rect carries on a tight single-line span, so a wrapped line's
+    /// pill doesn't look clipped against its final character.
+    private static let inlineCodeTrailingInset: CGFloat = 2
+
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<CGRect>, count rectCount: Int, forCharacterRange charRange: NSRange, color: UIColor) {
         // Check if this range has inline code background
         guard let textStorage = self.textStorage else {
@@ -4516,6 +4818,10 @@ final class MinisLayoutManager: NSLayoutManager {
             // by value, so we write back corrections through these vars.
             var correctedOriginY: CGFloat = rawRect.minY
             var correctedHeight: CGFloat = rawRect.height
+            // [T-ios-inline-code-quote-band] Trailing edge of the last VISIBLE
+            // glyph on this line. See the clamp below for why rawRect's own
+            // width can't be trusted on a wrapped line.
+            var visibleMaxX: CGFloat = .nan
             enumerateLineFragments(forGlyphRange: glyphRange) { lineFragRect, usedRect, _, lineGlyphRange, _ in
                 guard lineFragRect.midY >= rawRect.minY && lineFragRect.midY <= rawRect.maxY else { return }
                 let overlapStart = max(glyphRange.location, lineGlyphRange.location)
@@ -4526,6 +4832,32 @@ final class MinisLayoutManager: NSLayoutManager {
                 let overlapText = (textStorage.string as NSString).substring(with: overlapCharRange)
                 if !overlapText.trimmingCharacters(in: .whitespaces).isEmpty {
                     hasVisibleText = true
+
+                    // [T-ios-inline-code-quote-band] Measure out to the last
+                    // non-whitespace character of this line's slice. A wrapped
+                    // line keeps the space it broke on inside its used rect, so
+                    // the rect TextKit hands us reaches past the final glyph —
+                    // and in a blockquote (headIndent set, no tailIndent) that
+                    // is the container's full width, which is the right-hand
+                    // band in the report. The last line has no break space and
+                    // is already tight, which is why only the earlier lines
+                    // looked wrong.
+                    let trailingWS = overlapText.count - overlapText
+                        .replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression).count
+                    let visibleCharRange = NSRange(location: overlapCharRange.location,
+                                                   length: max(0, overlapCharRange.length - trailingWS))
+                    if visibleCharRange.length > 0 {
+                        let visibleGlyphRange = self.glyphRange(forCharacterRange: visibleCharRange,
+                                                                actualCharacterRange: nil)
+                        // Bound by the text container so a trailing glyph that
+                        // TextKit lays out past the edge can't re-widen the pill.
+                        if let tc = self.textContainer(forGlyphAt: visibleGlyphRange.location,
+                                                       effectiveRange: nil) {
+                            let box = self.boundingRect(forGlyphRange: visibleGlyphRange, in: tc)
+                            visibleMaxX = visibleMaxX.isNaN ? box.maxX : max(visibleMaxX, box.maxX)
+                        }
+                    }
+
                     // Clamp rect to usedRect (excludes lineSpacing) so the
                     // inline-code background aligns with the text, not the
                     // bloated lineFragRect that includes paragraph spacing.
@@ -4546,6 +4878,26 @@ final class MinisLayoutManager: NSLayoutManager {
 
             // Apply corrected origin and height from the closure above.
             rawRect = CGRect(x: rawRect.minX, y: correctedOriginY, width: rawRect.width, height: correctedHeight)
+
+            // [T-ios-inline-code-quote-band] Shrink (never grow) to the visible
+            // glyph extent. Clamping only downward keeps this inert for spans
+            // TextKit already measured tightly — single-line code, the final
+            // line of a wrapped span — so short inline code and body text are
+            // untouched, and the long-path wrap fix (T-ios-inline-code-long-
+            // path-wrap) still decides WHERE the break happens; this only
+            // decides how far the pill is painted afterwards.
+            //
+            // A small trailing inset keeps the pill from sitting flush against
+            // its last glyph. The `padded < rawRect.maxX` test is what makes
+            // this shrink-only: a line TextKit already measured tightly (a
+            // single-line span, or the last line of a wrapped one, where
+            // visibleMaxX == rawRect.maxX) keeps its original rect untouched.
+            if !visibleMaxX.isNaN, visibleMaxX > rawRect.minX {
+                let padded = visibleMaxX + Self.inlineCodeTrailingInset
+                if padded < rawRect.maxX {
+                    rawRect.size.width = padded - rawRect.minX
+                }
+            }
 
             // Vertically center the background within the line.
             // rawRect height reflects the full usedRect (dominated by the tallest
@@ -4614,6 +4966,36 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
     /// may recover once if attachments are missing/incomplete.
     func resetAttachmentRecoveryState() {
         hasScheduledRecoveryForCurrentContent = false
+    }
+
+    /// [T-ios-math-invisible-dark-mode] Re-render formula bitmaps when the
+    /// light/dark style flips.
+    ///
+    /// Math images bake in a concrete text color, so they are style-specific
+    /// (`SwiftMathRenderer.interfaceStyle` explains why they cannot stay
+    /// dynamic). Text, code and table attachments all keep resolving their
+    /// colors normally through UIKit; only the rasterised formulas are stuck,
+    /// so this drops just those and lets the existing coalesced refresh redraw
+    /// them.
+    ///
+    /// `hasDifferentColorAppearance` rather than a raw style comparison: it is
+    /// the check UIKit intends here, and it filters out the many trait changes
+    /// (size class, dynamic type, layout direction) that must NOT trigger a
+    /// re-render storm across every formula on screen.
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection),
+              let storage = textStorage as? NSTextStorage else { return }
+        var invalidated = 0
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length), options: []) { value, _, _ in
+            if let math = value as? MathAttachment {
+                math.invalidateRenderForInterfaceStyleChange()
+                invalidated += 1
+            }
+        }
+        guard invalidated > 0 else { return }
+        AppLogger(category: "MathSync").info("[MathSync] interface style changed — re-rendering \(invalidated) formula(s)")
+        scheduleCoalescedMathRefresh()
     }
 
     var needsAttachmentRecovery: Bool {
@@ -4963,10 +5345,24 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
     override func becomeFirstResponder() -> Bool {
         // Momentarily lock the collection view's contentOffset during
         // becomeFirstResponder to block UIKit's _adjustContentOffsetIfNecessary.
+        // [T-ios-resign-first-responder-graph-reentry] Deliberately NOT guarded.
+        // The crash walks in through -[UITextView resignFirstResponder] during
+        // UIKit's responder REBASE; the _UIHostingView.canBecomeFirstResponder
+        // frame in that stack is UIKit interrogating a candidate mid-walk, not
+        // an entry into this override. Deferring here bought no crash coverage
+        // and did cost behaviour: the table-cell promotion path at
+        // `promoteTextView` calls becomeFirstResponder() and then immediately
+        // sets a selection and shows the edit menu, so returning false and
+        // completing a turn later left the menu addressing a view that was not
+        // yet first responder.
         let cv = findCollectionView()
         cv?.offsetLocked = true
         let result = super.becomeFirstResponder()
         cv?.offsetLocked = false
+        // [T-ios-preapply-endediting] Register as the tracked responder so
+        // applySnapshot's pre-apply endEditing gate knows a responder exists
+        // inside the list without walking the subview tree.
+        if result { cv?.trackedTextResponder = self }
         return result
     }
 
@@ -4974,9 +5370,43 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
     override func resignFirstResponder() -> Bool {
         // Momentarily lock during resignFirstResponder too.
         let cv = findCollectionView()
+        // [T-ios-preapply-endediting] History, because two TestFlight crash
+        // families met in this method:
+        //
+        //  1. crash C4wXLBpem (1.13(4), 8/17): `super.resignFirstResponder()`
+        //     INSIDE `dataSource.apply`'s batch update walks the responder
+        //     chain → _UIHostingView.canBecomeFirstResponder →
+        //     ViewRendererHost.responderNode → AGGraphGetInputValue — a fresh
+        //     AttributeGraph read mid-transaction → AG::precondition_failure →
+        //     abort() (not catchable).
+        //  2. c1fd59e1f fixed (1) by deferring `super` and returning false.
+        //     That refusal violates UIKit's rebase contract: TestFlight
+        //     1.13(15) then asserted in
+        //     _resignOrRebaseFirstResponderViewWithIndexPathMapping:.
+        //
+        // Both require a live first responder at apply time, so the fix moved
+        // up a level: applySnapshot calls endEditing BEFORE the structural
+        // apply, outside the transaction, where a synchronous `super` is the
+        // ordinary, safe path. This override is synchronous again and never
+        // returns false while actually still responder.
+        if cv?.isApplyingSnapshot == true {
+            // Should be unreachable (see above). Synchronous super here is an
+            // occasional graph crash; returning false was a guaranteed
+            // assertion — synchronous strictly dominates. WARN for visibility.
+            responderLogger.warning("[Responder] resignFirstResponder DURING applySnapshot — pre-apply endEditing missed this responder")
+        }
         cv?.offsetLocked = true
         let result = super.resignFirstResponder()
         cv?.offsetLocked = false
+        if cv?.trackedTextResponder === self { cv?.trackedTextResponder = nil }
+        clearSelectionStateOnResign(cv)
+        return result
+    }
+
+    /// Selection/auto-scroll teardown that must happen whenever this text view
+    /// loses focus, independent of whether `super` ran synchronously or was
+    /// deferred. [T-ios-resign-first-responder-graph-reentry]
+    private func clearSelectionStateOnResign(_ cv: NoAnimationCollectionView?) {
         // Safety net: always clear selection lock when losing focus.
         if hadSelection {
             hadSelection = false
@@ -4987,7 +5417,6 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         prevSelStartOffset = nil
         prevSelEndOffset = nil
         cv?.stopSelectionAutoScroll()
-        return result
     }
 
     /// Walk the superview chain to find the parent NoAnimationCollectionView.
@@ -5244,7 +5673,14 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
     @objc func addSelectionToChatInput(_ sender: Any?) {
         guard selectedRange.length > 0,
               let range = Range(selectedRange, in: text) else { return }
+        // [T-ios-inline-code-long-path-wrap] Strip the invisible spacers before
+        // handing the text to the input bar, the same way `plainTextWithTables`
+        // does for Copy / Read Selection. This path reads `text` directly, so it
+        // would otherwise carry the ZWSPs that inline-code wrapping (and the CJK
+        // emphasis pre-pass) inject into the rendered string.
         let snippet = String(text[range])
+            .replacingOccurrences(of: "\u{200B}", with: "")
+            .replacingOccurrences(of: "\u{200A}", with: "")
         NotificationCenter.default.post(
             name: .chatInputAppendRequested,
             object: nil,
@@ -5355,19 +5791,19 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         // our own Read Selection / Read Reply entries.
         builder.remove(menu: .speech)
         let copyMd = UICommand(
-            title: String(localized: "Copy Markdown"),
+            title: AppLocalized("Copy Markdown"),
             image: UIImage(systemName: "text.quote"),
             action: #selector(copyMarkdown(_:))
         )
         let copyRtf = UICommand(
-            title: String(localized: "Copy Rich Text"),
+            title: AppLocalized("Copy Rich Text"),
             image: UIImage(systemName: "doc.richtext"),
             action: #selector(copyRichText(_:))
         )
         var extras: [UIMenuElement] = [copyMd, copyRtf]
         if onCopyScreenshot != nil {
             extras.append(UICommand(
-                title: String(localized: "Copy Screenshot"),
+                title: AppLocalized("Copy Screenshot"),
                 image: UIImage(systemName: "camera.viewfinder"),
                 action: #selector(copyScreenshotFromMenu(_:))
             ))
@@ -5379,14 +5815,14 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         // one feature: selection = plain speaker, whole reply = speaker+waves.
         if selectedRange.length > 0, onSpeakText != nil {
             extras.append(UICommand(
-                title: String(localized: "Read Selection"),
+                title: AppLocalized("Read Selection"),
                 image: UIImage(systemName: "speaker.wave.1"),
                 action: #selector(readSelectionFromMenu(_:))
             ))
         }
         if onReadAloud != nil {
             extras.append(UICommand(
-                title: String(localized: "Read from Start"),
+                title: AppLocalized("Read from Start"),
                 image: UIImage(systemName: "speaker.wave.2"),
                 action: #selector(readReplyFromMenu(_:))
             ))
@@ -5401,7 +5837,7 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         if selectedRange.length > 0 {
             let addToInput = UIMenu(title: "", options: .displayInline, children: [
                 UICommand(
-                    title: String(localized: "Add to Chat Input"),
+                    title: AppLocalized("Add to Chat Input"),
                     image: UIImage(systemName: "text.insert"),
                     action: #selector(addSelectionToChatInput(_:))
                 )
@@ -5751,11 +6187,21 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
                         stale = !existingView.subviews.contains(where: { $0 is UIImageView || ($0.subviews.contains(where: { $0 is UIImageView })) })
                     }
                 } else if let mathAttach = attachment as? MathAttachment {
+                    // [T-ios-math-invisible-dark-mode] The bitmap was dropped
+                    // for a light/dark flip, so the overlay built from it holds
+                    // the old (now invisible) glyph color. Must be checked
+                    // BEFORE `beginRenderingIfNeeded` re-renders: once the new
+                    // image lands, the `renderedImage != nil` branch below sees
+                    // an existing UIImageView and concludes the view is fine.
+                    if mathAttach.needsViewRebuild {
+                        stale = true
+                        mathAttach.needsViewRebuild = false
+                    }
                     mathAttach.onLoad = { [weak self] in
                         self?.scheduleCoalescedMathRefresh()
                     }
                     mathAttach.beginRenderingIfNeeded()
-                    if mathAttach.renderedImage != nil {
+                    if !stale, mathAttach.renderedImage != nil {
                         stale = !existingView.subviews.contains(where: { $0 is UIImageView || ($0.subviews.contains(where: { $0 is UIImageView })) })
                     }
                 } else if let codeBlock = attachment as? CodeBlockAttachment {
@@ -6464,15 +6910,26 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
     private let cellSizeLogger = AppLogger(category: "CellSize")
 
     /// Sum of `TableAttachment.contentGeneration` over every table attachment
-    /// currently in `textStorage`. Used as part of the cell-size dedup
-    /// fingerprint so in-place table mutations defeat the early-exit even
-    /// when textStorage.length is constant.
+    /// currently in `textStorage`, PLUS every `CodeBlockAttachment`'s
+    /// `contentFingerprint`. Used as part of the cell-size dedup fingerprint
+    /// so in-place attachment mutations defeat the early-exit even when
+    /// textStorage.length is constant.
+    ///
+    /// [CodeGenDedup] Code blocks stream inside a single NSAttachmentCharacter
+    /// exactly like tables: each chunk swaps in a fresh CodeBlockAttachment
+    /// (new content hash) while storage length and width stay fixed, so the
+    /// (storageLen, width, tableGenSum) fingerprint matched on every chunk and
+    /// [SKIP-DEDUPE] pinned the host cell at its pre-stream height — the code
+    /// view kept growing past the cell bounds and overlapped the neighbouring
+    /// cell for the whole stream.
     private func currentTableGenerationSum() -> UInt64 {
         guard let storage = textStorage as? NSTextStorage, storage.length > 0 else { return 0 }
         var sum: UInt64 = 0
         storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length), options: []) { value, _, _ in
             if let table = value as? TableAttachment {
                 sum &+= table.contentGeneration
+            } else if let code = value as? CodeBlockAttachment {
+                sum &+= UInt64(bitPattern: Int64(code.contentFingerprint))
             }
         }
         return sum
@@ -6503,7 +6960,29 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
             if let math = value as? MathAttachment {
                 total += math.renderedSize.height
             } else if let img = value as? ImageAttachment {
-                total += img.bounds.height
+                // [T-ios-image-squish-memo-blind] Use the LOADED bitmap's
+                // intrinsic height, not `img.bounds.height`. `bounds` is
+                // NSTextAttachment's stored property — ImageAttachment only
+                // overrides the attachmentBounds(for:) METHOD and never writes
+                // the property, so it is permanently .zero and every image
+                // contributed 0 here regardless of load state. The memo key
+                // therefore never changed when images finished loading, and
+                // MessageListLayout kept serving the height measured while the
+                // images were still 200pt placeholders — the multi-image
+                // "text overlaps the pictures" squish, the exact analogue of
+                // the math bug this signal was built to fix (22df168cf).
+                // The intrinsic height is 0 until loaded, non-zero and stable
+                // once the bitmap is in (a later re-downsample changes it and
+                // costs one extra re-measure, which is harmless).
+                total += img.loadedImage?.size.height ?? 0
+            } else if let video = value as? VideoAttachment {
+                // [T-ios-video-squish] Same signal contract as images: the
+                // thumbnail's intrinsic height is 0 until AVAssetImageGenerator
+                // finishes, stable non-zero after. Without this branch the memo
+                // key never moved when a video thumbnail landed — the exact
+                // signal blindness 0d34dfa6c fixed for images, and worse here
+                // because thumbnail generation is slower than image decode.
+                total += video.thumbnail?.size.height ?? 0
             }
         }
         return Int(total.rounded())
@@ -6640,10 +7119,16 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         // preserves the existing defer behaviour for streaming text growth.
         // [AttachHang image-attachment defer escape]
         if isDeferred {
-            let cellHasImageAttachment: Bool = {
+            // [T-ios-video-squish] Videos join the escape: a thumbnail landing
+            // mid-scroll produces the same placeholder→real large delta as an
+            // image load, and it used to be swallowed here (image-only check),
+            // leaving the cell pinned short with content overlapping the
+            // thumbnail. Video windows are longer (AVAssetImageGenerator),
+            // so mid-scroll completion is MORE likely, not less.
+            let cellHasGrowableMediaAttachment: Bool = {
                 var found = false
                 textStorage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: textStorage.length), options: []) { value, _, stop in
-                    if value is ImageAttachment {
+                    if value is ImageAttachment || value is VideoAttachment {
                         found = true
                         stop.pointee = true
                     }
@@ -6651,8 +7136,8 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
                 return found
             }()
             let isLargeGrowth = delta > 30
-            if cellHasImageAttachment && isLargeGrowth {
-                cellSizeLogger.info("[AttachHang][CellSize] ALLOW through defer — image attachment placeholder→loaded growth prev=\(String(format: "%.1f", previousHeight))→new=\(String(format: "%.1f", newHeight)) delta=\(String(format: "%+.1f", delta))")
+            if cellHasGrowableMediaAttachment && isLargeGrowth {
+                cellSizeLogger.info("[AttachHang][CellSize] ALLOW through defer — media attachment placeholder→loaded growth prev=\(String(format: "%.1f", previousHeight))→new=\(String(format: "%.1f", newHeight)) delta=\(String(format: "%+.1f", delta))")
                 // Fall through to the normal invalidate path below.
             } else {
                 // [T-ios-lastcell-clip-defer-lost] Return WITHOUT touching the
@@ -8500,10 +8985,10 @@ struct SelectableMarkdownView: UIViewRepresentable {
         func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
             switch textItem.content {
             case .link(let url):
-                let copyAction = UIAction(title: String(localized: "Copy Link"), image: UIImage(systemName: "doc.on.doc")) { _ in
+                let copyAction = UIAction(title: AppLocalized("Copy Link"), image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.string = url.absoluteString
                 }
-                let openAction = UIAction(title: String(localized: "Open in Safari"), image: UIImage(systemName: "safari")) { _ in
+                let openAction = UIAction(title: AppLocalized("Open in Safari"), image: UIImage(systemName: "safari")) { _ in
                     UIApplication.shared.open(url)
                 }
                 let menu = UIMenu(children: [copyAction, openAction])
@@ -8520,7 +9005,7 @@ struct SelectableMarkdownView: UIViewRepresentable {
                     // iOS 19+: no special-casing, use the logic below.
                 } else if let tableAttach = attachment as? TableAttachment {
                     let copyTableAction = UIAction(
-                        title: String(localized: "Copy Table"),
+                        title: AppLocalized("Copy Table"),
                         image: UIImage(systemName: "tablecells")
                     ) { _ in
                         UIPasteboard.general.string = tableAttach.plainText()
@@ -8533,10 +9018,10 @@ struct SelectableMarkdownView: UIViewRepresentable {
                     // 1×1 transparent placeholder) when no real image is loaded.
                     return UITextItem.MenuConfiguration(preview: nil, menu: UIMenu(children: []))
                 }
-                let copyAction = UIAction(title: String(localized: "Copy Image"), image: UIImage(systemName: "doc.on.doc")) { _ in
+                let copyAction = UIAction(title: AppLocalized("Copy Image"), image: UIImage(systemName: "doc.on.doc")) { _ in
                     UIPasteboard.general.image = image
                 }
-                let saveAction = UIAction(title: String(localized: "Save to Camera Roll"), image: UIImage(systemName: "square.and.arrow.down")) { _ in
+                let saveAction = UIAction(title: AppLocalized("Save to Camera Roll"), image: UIImage(systemName: "square.and.arrow.down")) { _ in
                     PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
                         guard status == .authorized || status == .limited else { return }
                         PHPhotoLibrary.shared().performChanges {
@@ -8558,13 +9043,13 @@ struct SelectableMarkdownView: UIViewRepresentable {
         func textView(_ textView: UITextView, shouldInteractWith URL: URL, in characterRange: NSRange, interaction: UITextItemInteraction) -> Bool {
             if interaction == .presentActions {
                 let alert = UIAlertController(title: URL.absoluteString, message: nil, preferredStyle: .actionSheet)
-                alert.addAction(UIAlertAction(title: String(localized: "Copy Link"), style: .default) { _ in
+                alert.addAction(UIAlertAction(title: AppLocalized("Copy Link"), style: .default) { _ in
                     UIPasteboard.general.string = URL.absoluteString
                 })
-                alert.addAction(UIAlertAction(title: String(localized: "Open in Safari"), style: .default) { _ in
+                alert.addAction(UIAlertAction(title: AppLocalized("Open in Safari"), style: .default) { _ in
                     UIApplication.shared.open(URL)
                 })
-                alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+                alert.addAction(UIAlertAction(title: AppLocalized("Cancel"), style: .cancel))
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let root = scene.windows.first?.rootViewController {
                     var presenter = root

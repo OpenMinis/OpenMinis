@@ -5,13 +5,21 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.ModelsDevApi
 
 /**
- * Static catalog of xAI (Grok) models exposed to OAuth users.
+ * Built-in xAI (Grok) catalog: the SEED shown before the network answers,
+ * and the FALLBACK when it does not.
  *
- * Unlike OpenAI/Anthropic, the xAI Console doesn't gate `/v1/models` for
- * OAuth bearer holders, but the spec /tmp/grok-oauth-design.md §6 fixes
- * the user-facing default list to a known-good set so the Add Provider
- * step doesn't depend on a network round-trip. Returned in the exact
- * priority order the UI should display.
+ * [T-provider-dynamic-catalog-reconcile] This is no longer the definitive
+ * list. It used to be — `ProviderRepository.refreshModels` returned it
+ * unconditionally for xAI, on the reasoning (from
+ * /tmp/grok-oauth-design.md §6) that pinning a known-good set keeps Add
+ * Provider off the network path. Seeding does that; pinning REFRESH too
+ * meant a model released after the build could never appear, however many
+ * times the user pressed Refresh (GH#265: grok-4.6 invisible).
+ *
+ * `api.x.ai/v1/models` is in fact live and OpenAI-compatible — an
+ * unauthenticated GET returns 401 `{"code":"invalid-argument"…}`, an auth
+ * challenge rather than a 404 — so refresh now performs a real fetch and
+ * only falls back here when that yields nothing.
  *
  * The same set is the [LLMModel.allXAI] companion list — keep them in
  * sync. Returned through [ModelsDevApi.enrichModels] so context window

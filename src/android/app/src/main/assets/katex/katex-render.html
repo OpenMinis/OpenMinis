@@ -28,6 +28,31 @@
   }
   body.dark #math { color: #fff; }
   body.light #math { color: #000; }
+
+  /* [T-android-latex-tag-overlap] Equation numbers (\tag, \tag*, and the
+     auto-numbering of \begin{align}) render as
+     `.katex-html > .tag { position: absolute; right: 0 }` — see katex.min.css.
+     `right: 0` resolves against the containing block, and #math is
+     `inline-block`, i.e. shrink-to-fit: the container collapses to the width
+     of the formula itself, so "the right edge" IS the end of the formula and
+     the number is painted directly on top of it. On `E = mc^2 \tag{1}` the
+     tag landed at x=46..69 while the body ran to x=69 — 23px of overlap,
+     which is the reported "m(1)c²" mash-up.
+
+     Giving the row a real width fixes it without touching KaTeX: min-width
+     stops the collapse so `right: 0` has somewhere to go, and the
+     padding-right reserves a gutter for the number to sit in. Scoped to
+     `.has-tag`, set by renderMath() only when a tag is actually present, so
+     every untagged formula keeps its existing shrink-to-fit geometry and its
+     cached bitmap size is unchanged.
+
+     A class rather than `:has()`: `:has()` needs a Chromium 105+ WebView, and
+     this must behave identically on older devices — the reporter is on a
+     Xiaomi phone whose WebView version we do not control. */
+  #math.has-tag .katex-display > .katex > .katex-html {
+    min-width: 100%;
+    padding-right: 3.5em;
+  }
 </style>
 </head>
 <body>
@@ -51,6 +76,15 @@ function renderMath(latex, displayMode, fontSize, isDark) {
       trust: true,
       output: 'html'
     });
+    // [T-android-latex-tag-overlap] Flag rows that carry an equation number so
+    // the CSS above can reserve a gutter for it. Done here rather than with a
+    // `:has()` selector for WebView-version independence (see the stylesheet).
+    //
+    // Set BEFORE the measurement below: the class changes the element's width,
+    // and getBoundingClientRect() has to report the post-fix geometry or the
+    // snapshot bitmap would be cropped to the old, narrower box and clip the
+    // number straight back off.
+    el.classList.toggle('has-tag', !!el.querySelector('.katex-html > .tag'));
     document.fonts.ready.then(function() {
       // T208-6: Wait for one paint cycle after the DOM update so the
       // WebView's display list reflects the new formula before Android

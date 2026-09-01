@@ -243,6 +243,27 @@ static int cmd_transcribe(int argc, char **argv, int stdout_fd, BOOL compact, BO
         NSURL *fileURL = [NSURL fileURLWithPath:resolvedFilePath];
         AVURLAsset *asset = [AVURLAsset URLAssetWithURL:fileURL options:nil];
         Float64 fileDuration = CMTimeGetSeconds(asset.duration);
+
+        // [T-ios-speech-no-audio-track] Refuse a file with no decodable audio
+        // track. SFSpeechURLRecognitionRequest hands the track array to
+        // -[AVAssetReaderAudioMixOutput initWithAudioTracks:], which raises
+        // NSInvalidArgumentException when it is empty. That happens on Speech's
+        // own dispatch queue, so it unwinds to _objc_terminate and kills the
+        // process — @try/@catch here would not see it. The path is
+        // user/agent-supplied, so a wrong or truncated file is ordinary input.
+        //
+        // The duration was already computed above for the timeout; it is also
+        // half of what makes a file usable, so it is checked here rather than
+        // merely clamped.
+        NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        if (audioTracks.count == 0 || !isfinite(fileDuration) || fileDuration <= 0.0) {
+            NSDictionary *err = noff_json_error(TOOL_NAME, @"transcribe",
+                                                 NOFF_ERR_NOT_AVAILABLE,
+                                                 @"Audio file contains no decodable audio track.");
+            noff_emit_json(stdout_fd, err, compact, quiet);
+            return NOFF_EXIT_NOT_AVAILABLE;
+        }
+
         NSTimeInterval waitTimeout = 120.0;
         if (isfinite(fileDuration) && fileDuration > 0.0) {
             waitTimeout = fmin(300.0, fmax(30.0, fileDuration + 20.0));

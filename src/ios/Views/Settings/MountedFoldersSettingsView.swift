@@ -159,10 +159,10 @@ struct MountedFoldersSettingsView: View {
                 }
             )
         }
-        .alert(String(localized: "Error"),
+        .alert(AppLocalized("Error"),
                isPresented: Binding(get: { errorText != nil },
                                     set: { if !$0 { errorText = nil } })) {
-            Button(String(localized: "OK"), role: .cancel) { errorText = nil }
+            Button(AppLocalized("OK"), role: .cancel) { errorText = nil }
         } message: {
             Text(errorText ?? "")
         }
@@ -303,11 +303,11 @@ private struct MountedFolderRow: View {
     @ViewBuilder
     private var accessBadge: some View {
         if !entry.isWritable {
-            badgePill(text: String(localized: "Read-only"), color: .orange)
+            badgePill(text: AppLocalized("Read-only"), color: .orange)
         } else if !entry.userAllowWrite {
-            badgePill(text: String(localized: "Locked"), color: .purple)
+            badgePill(text: AppLocalized("Locked"), color: .purple)
         } else {
-            badgePill(text: String(localized: "R/W"), color: .green)
+            badgePill(text: AppLocalized("R/W"), color: .green)
         }
     }
 
@@ -368,8 +368,8 @@ private struct AddMountSheet: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Allow writes")
                             Text(allowWrite
-                                ? String(localized: "AI, shell, and Files browser can modify files in this mount.")
-                                : String(localized: "This mount will be exposed as read-only. Useful for reference vaults you don't want the AI to touch."))
+                                ? AppLocalized("AI, shell, and Files browser can modify files in this mount.")
+                                : AppLocalized("This mount will be exposed as read-only. Useful for reference vaults you don't want the AI to touch."))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -385,10 +385,10 @@ private struct AddMountSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Cancel"), action: onCancel)
+                    Button(AppLocalized("Cancel"), action: onCancel)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(String(localized: "Mount"), action: onConfirm)
+                    Button(AppLocalized("Mount"), action: onConfirm)
                         .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }

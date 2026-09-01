@@ -4,15 +4,62 @@ import SwiftUI
 
 @MainActor
 class UsageStatsViewModel: ObservableObject {
+    /// [T-token-attribution-snapshot] How much to trust a row's model.
+    enum Attribution: String {
+        /// Per-message snapshot: the model that actually served the request.
+        case measured
+        /// Pre-snapshot row, inferred from the session's CURRENT model. Shown,
+        /// but labelled — it may be wrong if the session ever switched models.
+        case estimated
+        /// Orphaned row: no snapshot and no session left to infer from.
+        case unknownSession
+        /// Snapshot present but the model is gone from the live config
+        /// (provider deleted). Renders normally FROM the snapshot — this is the
+        /// case that used to disappear into "Other".
+        case measuredRemoved
+    }
+
     struct ModelStats {
         let modelId: String
         let displayName: String
+        var attribution: Attribution = .measured
+        /// Provider section resolved from the snapshot's ProviderType rawValue,
+        /// which survives the provider being deleted. nil falls back to the
+        /// live-config lookup.
+        var providerGroupOverride: String? = nil
         var inputTokens: Int = 0
         var outputTokens: Int = 0
         var cacheCreationTokens: Int = 0
         var cacheReadTokens: Int = 0
         var distinctDays: Set<String> = []
         var distinctSessions: Set<String> = []
+
+        /// Unique per (model, attribution) — see the ForEach that uses it.
+        var rowKey: String { "\(modelId)#\(attribution.rawValue)" }
+
+        /// One short line for the two states a user can act on, else nil.
+        ///
+        /// `.estimated` deliberately returns nil. It was explained at first,
+        /// but it is by far the most common state — every row predating the
+        /// per-message columns — and repeating the same sentence under almost
+        /// every row read as noise rather than information. The distinction is
+        /// still enforced underneath: estimated rows keep their own bucket and
+        /// never merge into a measured one, so the numbers stay honest even
+        /// with the label gone.
+        var attributionCaveat: String? {
+            switch attribution {
+            case .measured, .estimated:
+                return nil
+            case .unknownSession:
+                return AppLocalized(
+                    "Model unknown — the session record was deleted",
+                    comment: "Usage stats: orphaned row")
+            case .measuredRemoved:
+                return AppLocalized(
+                    "No longer in your configured providers",
+                    comment: "Usage stats: model removed from config")
+            }
+        }
 
         var totalTokens: Int { inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens }
         var dailyAvgTokens: Int {
@@ -79,7 +126,7 @@ class UsageStatsViewModel: ObservableObject {
                 default:          return p   // "Anthropic"/"OpenAI" already canonical
                 }
             }
-            return String(localized: "Other", comment: "Usage stats: unknown provider group")
+            return AppLocalized("Other", comment: "Usage stats: unknown provider group")
         }
         let modelLookup = staticLookup.merging(
             Dictionary(store.modelEntries.map { ($0.model.id, $0.model) }, uniquingKeysWith: { a, _ in a }),
@@ -89,10 +136,38 @@ class UsageStatsViewModel: ObservableObject {
         var statsByModel: [String: ModelStats] = [:]
         for record in records {
             let model = modelLookup[record.modelId]
-            let displayName = model?.displayName ?? record.modelId
 
-            var stats = statsByModel[record.modelId] ?? ModelStats(
-                modelId: record.modelId, displayName: displayName
+            // [T-token-attribution-snapshot] Four distinct states. They must not
+            // share a bucket: an estimated row merged into a measured one
+            // inherits credibility it does not have, which is precisely how the
+            // original mis-attribution stayed invisible.
+            let attribution: Attribution
+            if record.modelId.isEmpty {
+                attribution = .unknownSession
+            } else if !record.hasSnapshot {
+                attribution = .estimated
+            } else if model == nil {
+                attribution = .measuredRemoved
+            } else {
+                attribution = .measured
+            }
+
+            // Prefer the snapshot's own strings — for a model whose provider
+            // has been deleted they are the only surviving human-readable name.
+            let displayName = record.modelDisplayName?.isEmpty == false
+                ? record.modelDisplayName!
+                : (model?.displayName ?? record.modelId)
+
+            let key = "\(record.modelId)#\(attribution.rawValue)"
+            var stats = statsByModel[key] ?? ModelStats(
+                modelId: record.modelId, displayName: displayName,
+                attribution: attribution,
+                // Snapshot rawValue wins; it is stable and locale-independent,
+                // unlike the display strings that produced duplicate
+                // "Google" / "Gemini" / "Google Gemini" sections.
+                providerGroupOverride: record.providerType.flatMap {
+                    ProviderType(rawValue: $0)?.displayName
+                }
             )
             stats.inputTokens += record.usage.inputTokens
             stats.outputTokens += record.usage.outputTokens
@@ -100,13 +175,14 @@ class UsageStatsViewModel: ObservableObject {
             stats.cacheReadTokens += record.usage.cacheReadTokens
             stats.distinctDays.insert(Self.dayFormatter.string(from: record.date))
             stats.distinctSessions.insert(record.sessionId)
-            statsByModel[record.modelId] = stats
+            statsByModel[key] = stats
         }
 
         // Group by PROVIDER TYPE (the Providers-list grouping).
         var providerMap: [String: [ModelStats]] = [:]
-        for (modelId, stats) in statsByModel {
-            providerMap[providerGroup(for: modelId), default: []].append(stats)
+        for (_, stats) in statsByModel {
+            let group = stats.providerGroupOverride ?? providerGroup(for: stats.modelId)
+            providerMap[group, default: []].append(stats)
         }
 
         // Emit every group — a preferred ProviderType order first, then any
@@ -165,12 +241,26 @@ struct UsageStatsView: View {
                 // Per-provider sections
                 ForEach(vm.providers) { provider in
                     Section(provider.id) {
-                        ForEach(provider.models, id: \.modelId) { model in
+                        // [T-token-attribution-snapshot] Keyed by id + state:
+                        // the same model can appear once as measured and once
+                        // as estimated, and a duplicate ForEach id would drop
+                        // one of them silently.
+                        ForEach(provider.models, id: \.rowKey) { model in
                             DisclosureGroup {
                                 modelDetailRows(model)
                             } label: {
                                 HStack {
-                                    Text(model.displayName)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(model.displayName)
+                                        // Say why whenever the number is not a
+                                        // straight measurement. Silence is what
+                                        // let re-attributed totals pass as fact.
+                                        if let caveat = model.attributionCaveat {
+                                            Text(caveat)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
                                     Spacer()
                                     let totalInputLabel = model.inputTokens + model.cacheReadTokens + model.cacheCreationTokens
                                     Text("\(formatCount(totalInputLabel)) / \(formatCount(model.outputTokens))")

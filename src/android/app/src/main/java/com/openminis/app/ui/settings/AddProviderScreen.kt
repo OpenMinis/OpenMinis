@@ -197,6 +197,12 @@ private fun providerIcon(type: ProviderType): Pair<ImageVector, Color> = when (t
     ProviderType.xAI -> Icons.Default.FlashOn to Color(0xFFFF7043)           // orange — Grok visual cue
     // [T-kimi-oauth] Indigo — matches iOS's Kimi accent.
     ProviderType.kimiCode -> Icons.Default.Terminal to Color(0xFF5C6BC0)
+    // [T-android-provider-type-parity] Types that arrive only from an iOS
+    // package / newer build; never offered in addableProviderTypes, but the
+    // icon helper is also used to render an already-restored instance.
+    ProviderType.openAIResponses -> Icons.Default.Hub to Color(0xFF4CAF50)
+    ProviderType.antigravity,
+    ProviderType.unsupported -> Icons.Default.Cloud to Color(0xFF9E9E9E)
 }
 
 /** Returns available credential types per provider. */
@@ -214,6 +220,13 @@ private fun availableCredentials(type: ProviderType): List<ProviderCredential> {
         // [T-kimi-oauth] Primary target is the Coding Plan device-code
         // sign-in; a manual Moonshot API key remains available.
         ProviderType.kimiCode -> listOf(ProviderCredential.oauth, ProviderCredential.apiKey)
+        // [T-android-provider-type-parity] Responses API instances authenticate
+        // exactly like OpenAI ones (API key, or a Codex OAuth login).
+        ProviderType.openAIResponses -> listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
+        // Undrivable types: an API key is the only thing worth showing, and the
+        // screen never offers them for creation anyway.
+        ProviderType.antigravity,
+        ProviderType.unsupported -> listOf(ProviderCredential.apiKey)
     }
 }
 
@@ -242,6 +255,11 @@ private fun ChooseProviderScreen(
                     ProviderType.openRouter -> "OpenRouter"
                     ProviderType.xAI -> "xAI (Grok)"
                     ProviderType.kimiCode -> "Kimi Code"
+                    // [T-android-provider-type-parity] Fall back to the enum's
+                    // own display name for types this screen doesn't curate.
+                    ProviderType.openAIResponses,
+                    ProviderType.antigravity,
+                    ProviderType.unsupported -> type.displayName
                 }
                 // Describe which vendors each protocol supports, rather than a
                 // raw built-in model count.
@@ -252,6 +270,12 @@ private fun ChooseProviderScreen(
                     ProviderType.openRouter -> R.string.add_provider_subtitle_openrouter
                     ProviderType.xAI -> R.string.add_provider_subtitle_xai
                     ProviderType.kimiCode -> R.string.add_provider_subtitle_kimi
+                    // [T-android-provider-type-parity] Not offered for
+                    // creation; reuse the OpenAI copy for the Responses API and
+                    // a generic line for the undrivable types.
+                    ProviderType.openAIResponses -> R.string.add_provider_subtitle_openai
+                    ProviderType.antigravity,
+                    ProviderType.unsupported -> R.string.add_provider_subtitle_openai
                 }
                 val (icon, iconColor) = providerIcon(type)
                 SettingsRow(
@@ -350,6 +374,9 @@ private fun apiKeyDescription(type: ProviderType): String = when (type) {
     ProviderType.openRouter -> "Use an API key from your OpenRouter account"
     ProviderType.xAI -> "Use an API key from your xAI Console (api.x.ai)"
     ProviderType.kimiCode -> "Use an API key from your Moonshot account"
+    ProviderType.openAIResponses -> "Supports the OpenAI Responses API and compatible endpoints"
+    ProviderType.antigravity,
+    ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
 private fun oauthDescription(type: ProviderType): String = when (type) {
@@ -359,6 +386,9 @@ private fun oauthDescription(type: ProviderType): String = when (type) {
     ProviderType.xAI -> "Sign in with xAI (requires SuperGrok or X Premium+)"
     ProviderType.openRouter -> "Sign in with OpenRouter"
     ProviderType.kimiCode -> "Sign in with your Kimi account (Coding Plan)"
+    ProviderType.openAIResponses -> "Sign in with OpenAI Codex"
+    ProviderType.antigravity,
+    ProviderType.unsupported -> "This provider type is not supported on Android"
 }
 
 // -- Step 3: Configure & Save --
@@ -485,6 +515,9 @@ private fun ColumnScope.ApiKeyConfigSection(
         ProviderType.openRouter -> "sk-or-..."
         ProviderType.xAI -> "xai-..."
         ProviderType.kimiCode -> "sk-..."
+        ProviderType.openAIResponses -> "sk-..."
+        ProviderType.antigravity,
+        ProviderType.unsupported -> "API Key..."
     }
     SettingsSection(
         header = stringResource(R.string.add_provider_credential),
@@ -566,9 +599,9 @@ private fun ColumnScope.ApiKeyConfigSection(
         SettingsSection(
             header = stringResource(R.string.provider_detail_api_format),
             footer = if (useResponsesAPI) {
-                "Uses /v1/responses endpoint format. Required for some Responses-API-only services."
+                stringResource(R.string.provider_detail_api_format_footer_responses)
             } else {
-                "Standard /v1/chat/completions format. Compatible with most OpenAI-compatible services."
+                stringResource(R.string.provider_detail_api_format_footer_chat)
             },
         ) {
             SettingsCardBlock {
@@ -657,6 +690,9 @@ private fun ColumnScope.OAuthConfigSection(
         ProviderType.openRouter -> "Sign in with OpenRouter"
         ProviderType.xAI -> "Sign in with xAI"
         ProviderType.kimiCode -> "Sign in with Kimi Code"
+        ProviderType.openAIResponses -> "Sign in with OpenAI"
+        ProviderType.antigravity,
+        ProviderType.unsupported -> "Sign in"
     }
 
     // [T-kimi-oauth] Device-code dialog state: non-null while a Kimi login is
@@ -833,6 +869,9 @@ private fun ColumnScope.OAuthConfigSection(
             ProviderType.xAI -> "https://api.x.ai/v1"
             // [T-kimi-oauth] /v1 is load-bearing (…/coding/… 404s without it).
             ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+            ProviderType.openAIResponses -> "https://api.openai.com"
+            ProviderType.antigravity,
+            ProviderType.unsupported -> ""
         }
         SettingsSection(
             header = stringResource(R.string.add_provider_or_configure_manually),

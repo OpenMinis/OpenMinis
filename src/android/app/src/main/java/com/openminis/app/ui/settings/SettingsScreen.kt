@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Feedback
+import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material.icons.outlined.FrontHand
@@ -67,6 +68,7 @@ import androidx.compose.ui.res.stringResource
 import com.openminis.app.BuildConfig
 import com.openminis.app.R
 import com.openminis.app.ui.components.openExternalUrl
+import com.openminis.app.i18n.uppercaseForDisplay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +77,7 @@ fun SettingsScreen(
     onProvidersClick: () -> Unit,
     onModelGroupsClick: () -> Unit,
     onRootfsClick: () -> Unit = {},
+    onBackupClick: () -> Unit = {},
     onEnvVarsClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
@@ -236,6 +239,13 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_mount_external_folders),
                     subtitle = stringResource(R.string.settings_mount_external_folders_subtitle),
                     onClick = onMountedFoldersClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Backup,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.settings_backup_restore),
+                    subtitle = stringResource(R.string.settings_backup_restore_subtitle),
+                    onClick = onBackupClick,
                     showDivider = false,
                 )
             }
@@ -484,7 +494,7 @@ private fun SettingsSection(
     ) {
         // Section header
         Text(
-            text = title.uppercase(),
+            text = title.uppercaseForDisplay(),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontWeight = FontWeight.Medium,

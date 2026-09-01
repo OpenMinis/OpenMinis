@@ -68,6 +68,25 @@ final class BrowserUseManager: NSObject, ObservableObject {
 
     private static let navigationTimeout: TimeInterval = 30
 
+    /// [T-browser-executejs-unbounded-ios] GH#234. Wall-clock bound on a single
+    /// `execute_js`. Deliberately BELOW BrowserTabPool.serialWaitTimeout (60s):
+    /// the timeout ladder must be innermost-shortest, so a wedged script releases
+    /// the tab's serial slot *before* the next caller's 60s wait expires. With the
+    /// old unbounded call the ordering was inverted (action ∞ / slot 60s / CLI
+    /// 90s), which is what let a single stuck script stall every later call.
+    /// 45s still comfortably clears the slowest legitimate scripts — the in-tree
+    /// bounded JS paths use 10s, and navigation itself only allows 30s.
+    private static let executeJSTimeout: TimeInterval = 45
+
+    /// [T-browser-executejs-unbounded-ios] Bound on the shared read-action JS
+    /// helper (`evaluateAndReturn`: get_page_info and friends). Much shorter
+    /// than `executeJSTimeout` because these are fixed, self-contained,
+    /// synchronous scripts that take milliseconds on a healthy page — the only
+    /// way one runs long is a JS main thread pinned by someone else, and in that
+    /// case failing fast with a clear message beats blocking the caller. Matches
+    /// the 10s already used by the other bounded eval in this file.
+    private static let readActionTimeout: TimeInterval = 10
+
     /// Shared process pool so all tabs share cookies/sessions (needed for OAuth flows).
     static let sharedProcessPool = WKProcessPool()
 
@@ -588,6 +607,50 @@ final class BrowserUseManager: NSObject, ObservableObject {
         }
     }
 
+    /// `callAsyncJavaScript` counterpart of `evaluateJavaScriptBounded`.
+    ///
+    /// [T-browser-executejs-unbounded-ios] Same wall-clock-deadline construction,
+    /// same rationale, same GCD-timer-not-Task.sleep reasoning as the sibling
+    /// above — but wrapping `callAsyncJavaScript`, which `execute_js` needs for
+    /// its `await` / top-level-`return` semantics and its automatic promise
+    /// resolution. The promise resolution is precisely the extra hang mode:
+    /// `evaluateJavaScript` returns as soon as the expression yields (a pending
+    /// promise resolves to an opaque object), whereas `callAsyncJavaScript`
+    /// keeps waiting until the promise settles, which it may never do.
+    ///
+    /// Note the timeout only unblocks OUR await — WebKit keeps running the
+    /// script. That is acceptable and matches `evaluateJavaScriptBounded`: it
+    /// frees the serial slot so unrelated actions proceed, and a genuinely
+    /// wedged WebContent is still caught by the pool's dead-tab ceiling, which
+    /// replaces the whole WKWebView.
+    private func callAsyncJavaScriptBounded(_ js: String, timeout: TimeInterval) async throws -> Any? {
+        let box = ContinuationBox()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(deadline: .now() + timeout)
+        timer.setEventHandler { box.finish(.failure(JSEvalTimeout())) }
+        // The completion-handler overload of `callAsyncJavaScript` requires an
+        // explicit `completionHandler:` label and still collides with the async
+        // one during overload resolution, so drive the async overload from a
+        // detached task and funnel both outcomes through the same one-shot box.
+        // On timeout this task is abandoned (WebKit keeps running the script) —
+        // identical to how `withDeadOnTimeout` abandons its wedged operation,
+        // and for the same reason: a call parked on a WebKit callback that never
+        // fires cannot honour cooperative cancellation.
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Any?, Error>) in
+            box.cont = cont
+            let evalTask = Task { @MainActor in
+                do {
+                    let value = try await self.webView.callAsyncJavaScript(js, arguments: [:], contentWorld: .page)
+                    box.finish(.success(value))
+                } catch {
+                    box.finish(.failure(error))
+                }
+            }
+            box.onFinish = { timer.cancel(); evalTask.cancel() }
+            timer.resume()
+        }
+    }
+
     /// One-shot guard so exactly one of {eval-completion, timeout} resumes the
     /// continuation. `@unchecked Sendable` + a lock because the two racers land
     /// on different threads (WebKit callback thread vs the detached timer).
@@ -697,24 +760,45 @@ final class BrowserUseManager: NSObject, ObservableObject {
         isLoading = true
 
         // Wait for navigation to complete
+        // [T-browser-navigate-timeout-reports-success-ios] GH#234. Track whether
+        // we left the wait via the delegate or via the timeout, so the RESULT can
+        // say so. Previously the timeout resumed and navigate returned a normal
+        // BrowserActionResult (success defaults to true), so a frozen renderer
+        // reported `ok: true` while the DOM never updated — the caller then ran
+        // execute_js against the OLD page with no signal anything was wrong. The
+        // only trace was a log line the CLI user never sees.
+        var timedOut = false
+
+        // [T-browser-navigate-timeout-gcd-ios] GCD wall-clock timer, not
+        // Task.sleep. Same reason documented on evaluateJavaScriptBounded: a
+        // Task timer is stretched several-fold by background CPU throttling
+        // (a 10s bound measured firing at ~42s on device), which would let this
+        // 30s nav bound overrun the pool's 60s serial wait and even the CLI's
+        // 90s ceiling — reintroducing the pile-up this fix exists to prevent.
+        let navTimer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        navTimer.schedule(deadline: .now() + Self.navigationTimeout)
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.navigationContinuation = continuation
 
-            // Timeout
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: UInt64(Self.navigationTimeout * 1_000_000_000))
-                if let cont = self.navigationContinuation {
-                    self.navigationContinuation = nil
-                    self.isLoading = false
-                    cont.resume()  // Don't fail on timeout, page may be partially loaded
-                    // [T-browser-bg-stuck-diag] Distinguish the two ways navigate
-                    // leaves the wait: this WARN = timed out (didFinish/didFail
-                    // never came — network stall or the load never completed);
-                    // absence of it = the delegate fired normally.
-                    logger.warning("[NavTiming] navigate_TIMEOUT after \(Int(Self.navigationTimeout))s — no didFinish/didFail; url=\(url.absoluteString.prefix(80))")
+            navTimer.setEventHandler {
+                Task { @MainActor in
+                    if let cont = self.navigationContinuation {
+                        self.navigationContinuation = nil
+                        self.isLoading = false
+                        timedOut = true
+                        cont.resume()  // Don't fail on timeout, page may be partially loaded
+                        // [T-browser-bg-stuck-diag] Distinguish the two ways navigate
+                        // leaves the wait: this WARN = timed out (didFinish/didFail
+                        // never came — network stall or the load never completed);
+                        // absence of it = the delegate fired normally.
+                        logger.warning("[NavTiming] navigate_TIMEOUT after \(Int(Self.navigationTimeout))s — no didFinish/didFail; url=\(url.absoluteString.prefix(80))")
+                    }
                 }
             }
+            navTimer.resume()
         }
+        navTimer.cancel()
 
         let navDoneMs = Int((CFAbsoluteTimeGetCurrent() - navStart) * 1000)
         logger.info("[NavTiming] wait_returned elapsed=\(navDoneMs)ms url=\(url.absoluteString.prefix(100))")
@@ -726,6 +810,14 @@ final class BrowserUseManager: NSObject, ObservableObject {
         let meta = await navigationMetadata()
         let totalMs = Int((CFAbsoluteTimeGetCurrent() - navStart) * 1000)
         logger.info("[NavTiming] total elapsed=\(totalMs)ms url=\(url.absoluteString.prefix(100))")
+        // [T-browser-navigate-timeout-reports-success-ios] Report the timeout to
+        // the CALLER, not just the log. The page may still be partially usable,
+        // so this stays a non-error result carrying the metadata — but it now
+        // says the load did not complete, so a script can decide whether to
+        // retry or re-read rather than silently operating on a stale DOM.
+        if timedOut {
+            return BrowserActionResult(text: "Navigation did not complete within \(Int(Self.navigationTimeout))s — the page may be partially loaded or the renderer may be stalled. Content below reflects the current (possibly stale) state.\n\n\(meta)")
+        }
         return BrowserActionResult(text: meta)
     }
 
@@ -1341,9 +1433,24 @@ final class BrowserUseManager: NSObject, ObservableObject {
         //   1. Wraps the script body in an async function — `await` is valid
         //   2. Automatically resolves returned Promises before delivering the result
         //   3. Supports top-level `return` without an explicit IIFE wrapper
+        //
+        // [T-browser-executejs-unbounded-ios] GH#234. Point 2 is exactly why this
+        // call MUST be bounded: awaiting the returned promise means a script that
+        // returns a never-settling promise (or whose page pins the JS main thread)
+        // hangs the completion handler FOREVER. This was the single unbounded JS
+        // call site left in this file, and it is the one the CLI drives in tight
+        // loops, so it is where the tab actually wedged. A wedged action here holds
+        // the pool's per-tab serial slot until the 300s dead ceiling, and every
+        // later call — even a trivial get_page_info — then burns the full 60s
+        // serial wait. That queueing is the reported "hangs past 60s, recovers
+        // after 60-90s".
         do {
-            let result = try await webView.callAsyncJavaScript(script, arguments: [:], contentWorld: .page)
+            let result = try await callAsyncJavaScriptBounded(
+                Self.wrapExecuteJSReturn(script), timeout: Self.executeJSTimeout)
             return BrowserActionResult(text: Self.stringifyJSReturn(result))
+        } catch is JSEvalTimeout {
+            logger.warning("[ExecJS] timeout after \(Int(Self.executeJSTimeout))s — script pinned the JS thread or returned a non-settling promise")
+            return .error("JavaScript timed out after \(Int(Self.executeJSTimeout))s. The script may be blocking the page's main thread or awaiting a promise that never settles. Simplify the script, or split long work into smaller calls.")
         } catch {
             let nsError = error as NSError
             let detail = nsError.userInfo["WKJavaScriptExceptionMessage"] as? String
@@ -1513,7 +1620,17 @@ final class BrowserUseManager: NSObject, ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    /// [T-ios-browseruse-sanitize-recursion] Same unbounded-recursion exposure
+    /// as `sanitizeForJSON`, found while auditing this file: the tree walked
+    /// here is parsed straight out of `getBackbone`'s JS return value. The JS
+    /// takes a `maxDepth`, but that cap is enforced *by the page's own
+    /// JavaScript* — a page that returns a deeper tree than it was asked for
+    /// is exactly the input we cannot trust. Cap the native walk too.
     private static func formatBackboneNode(_ node: [String: Any], indent: Int, lines: inout [String]) {
+        if indent > maxSanitizeDepth {
+            lines.append("\(String(repeating: "  ", count: indent))\(sanitizeTruncationMarker)")
+            return
+        }
         let pad = String(repeating: "  ", count: indent)
         let tag = node["tag"] as? String ?? "?"
         let sel = node["sel"] as? String ?? ""
@@ -1856,7 +1973,19 @@ final class BrowserUseManager: NSObject, ObservableObject {
 
     private func evaluateAndReturn(_ js: String) async throws -> BrowserActionResult {
         do {
-            let result = try await webView.evaluateJavaScript(js)
+            // [T-browser-executejs-unbounded-ios] GH#234 follow-up. Bound the
+            // shared read-action helper (get_page_info and friends). These run
+            // self-contained synchronous scripts with no user code and no
+            // promises, so they can only stall when the JS thread is ALREADY
+            // pinned by something else — which device testing confirmed: after
+            // an execute_js wedge was correctly bounded at 45s and released its
+            // serial slot, a following get_page_info still sat 69.6s inside its
+            // OWN unbounded eval waiting for the pinned thread. The slot was
+            // free (manager_execute_start at 0ms), so this is a separate,
+            // narrower gap than the one that caused the reported pile-up.
+            // `readActionTimeout` is short: these scripts are milliseconds on a
+            // healthy page, so a long wait only ever means a pinned thread.
+            let result = try await evaluateJavaScriptBounded(js, timeout: Self.readActionTimeout)
             if let str = result as? String {
                 // Check if the JS returned an error object
                 if let data = str.data(using: .utf8),
@@ -1869,6 +1998,9 @@ final class BrowserUseManager: NSObject, ObservableObject {
                 return BrowserActionResult(text: str)
             }
             return BrowserActionResult(text: String(describing: result ?? "null"))
+        } catch is JSEvalTimeout {
+            logger.warning("[ReadAction] JS timeout after \(Int(Self.readActionTimeout))s — the page's JS main thread appears pinned")
+            return .error("Timed out after \(Int(Self.readActionTimeout))s reading the page: its JavaScript main thread appears to be blocked by a long-running script. Wait for it to finish, reload the page, or open a new tab.")
         } catch {
             // Extract detailed exception message from WKError userInfo.
             // WKError.javaScriptExceptionOccurred only says "A JavaScript
@@ -1914,6 +2046,104 @@ final class BrowserUseManager: NSObject, ObservableObject {
     /// key was a footgun: a script that happened to return
     /// `{error: null, data: ...}` or fetched a response body containing an
     /// `error` field turned into a fake tool failure.
+    /// Wraps an `execute_js` script so its return value is converted to plain
+    /// JSON-able data *inside the page*, before WebKit serializes it across the
+    /// WebContent→UI IPC boundary.
+    ///
+    /// [T-ios-browseruse-domrect-clone] Six crash reports segfault in
+    /// `WebCore::CloneDeserializer::readDOMRect` ← `readTerminal` ←
+    /// `deserialize`, reached from
+    /// `-[WKWebView _evaluateJavaScript:asAsyncFunction:…]`'s completion — i.e.
+    /// while decoding the value a script RETURNED. Only `execute_js` can reach
+    /// it: every in-tree script returns a `JSON.stringify` string, so the
+    /// offending value is always LLM-authored (`return el.getBoundingClientRect()`
+    /// is the obvious way to write it, and the tool schema never said not to).
+    ///
+    /// The fix has to live in JS. The crash is *inside* the deserializer, so it
+    /// happens before any Swift code — `stringifyJSReturn` included — ever sees
+    /// the value; nothing on our side can intercept it.
+    ///
+    /// Measured against a current WebKit (probe, 2026-08-22), a returned
+    /// `DOMRect` does not crash but deserializes to **nil**, and
+    /// `[DOMRect]`/`{r: DOMRect}` to `[null]`/`{}` — so on every device this
+    /// silently drops the data the script was trying to report, while on the
+    /// affected versions it segfaults. `.toJSON()` round-trips correctly. That
+    /// makes this a data-loss fix first and a crash fix second.
+    ///
+    /// Rather than enumerate the DOM types with the bug, normalize structurally:
+    /// anything exposing `toJSON()` is asked for it, and any remaining non-plain
+    /// object is reduced to its own enumerable properties. Plain
+    /// objects/arrays/primitives pass through untouched, so well-behaved scripts
+    /// are unaffected. Cycles are tracked with a `WeakSet`, depth is capped, and
+    /// the whole thing is wrapped in try/catch that falls back to the raw value
+    /// — a normalizer that could itself throw would turn a working script into a
+    /// tool error, which is a worse failure than the one being fixed.
+    static func wrapExecuteJSReturn(_ script: String) -> String {
+        // The user script keeps top-level `return`/`await` by staying the body
+        // of its own async function, which we then await.
+        """
+        const __minisNormalize = (function () {
+            const MAX_DEPTH = 32;
+            function norm(v, depth, seen) {
+                if (v === null || v === undefined) return null;
+                const t = typeof v;
+                if (t === 'number') return isFinite(v) ? v : String(v);
+                if (t === 'string' || t === 'boolean') return v;
+                if (t === 'bigint') return String(v);
+                if (t === 'function' || t === 'symbol') return undefined;
+                if (depth >= MAX_DEPTH) return '[max depth]';
+                if (seen.has(v)) return '[circular]';
+                seen.add(v);
+                try {
+                    if (Array.isArray(v)) {
+                        const out = [];
+                        for (let i = 0; i < v.length; i++) out.push(norm(v[i], depth + 1, seen));
+                        return out;
+                    }
+                    // DOMRect/DOMPoint/DOMMatrix and friends all implement
+                    // toJSON(); so do Date and URL, whose JSON form is the
+                    // useful one anyway.
+                    if (typeof v.toJSON === 'function') {
+                        return norm(v.toJSON(), depth + 1, seen);
+                    }
+                    if (v instanceof Error) {
+                        return { name: v.name, message: v.message, stack: String(v.stack || '') };
+                    }
+                    if (typeof Node !== 'undefined' && v instanceof Node) {
+                        return { nodeName: v.nodeName, id: v.id || null,
+                                 text: String(v.textContent || '').substring(0, 200) };
+                    }
+                    if (typeof v[Symbol.iterator] === 'function' && !(v instanceof String)) {
+                        const out = [];
+                        for (const item of v) {
+                            out.push(norm(item, depth + 1, seen));
+                            if (out.length >= 1000) break;
+                        }
+                        return out;
+                    }
+                    // Plain object, or a host object whose own enumerable
+                    // properties are the best available description.
+                    const out = {};
+                    for (const k in v) {
+                        const got = norm(v[k], depth + 1, seen);
+                        if (got !== undefined) out[k] = got;
+                    }
+                    return out;
+                } finally {
+                    seen.delete(v);
+                }
+            }
+            return function (v) {
+                try { return norm(v, 0, new WeakSet()); } catch (e) { return v; }
+            };
+        })();
+        const __minisResult = await (async () => {
+        \(script)
+        })();
+        return __minisNormalize(__minisResult);
+        """
+    }
+
     static func stringifyJSReturn(_ value: Any?) -> String {
         guard let value else { return "null" }
         if let str = value as? String { return str }
@@ -1941,18 +2171,40 @@ final class BrowserUseManager: NSObject, ObservableObject {
         return String(describing: value)
     }
 
+    /// [T-ios-browseruse-sanitize-recursion] Maximum nesting depth walked by
+    /// `sanitizeForJSON`. The input is a web page's JS return value, i.e.
+    /// attacker-influenceable, and the recursion overflowed the stack in the
+    /// field (crash DPiWjaIX, ~2900 frames). Real return values nest a handful
+    /// of levels; 64 matches the cap `OpenAIProvider.estimateSerializedSize`
+    /// uses for the same class of untrusted-nesting problem.
+    private static let maxSanitizeDepth = 64
+
+    /// Placeholder substituted for a subtree deeper than `maxSanitizeDepth`.
+    /// This value is read by an LLM as a tool result, so it says what happened
+    /// rather than silently becoming null.
+    private static let sanitizeTruncationMarker = "[truncated: nesting deeper than \(maxSanitizeDepth) levels]"
+
     /// Recursively replace non-finite Doubles/Floats (NaN, ±Infinity) with
     /// NSNull so the result is safe to hand to `JSONSerialization`. Other
     /// values pass through unchanged.
-    private static func sanitizeForJSON(_ value: Any) -> Any {
+    ///
+    /// [T-ios-browseruse-sanitize-recursion] Bounded by `maxSanitizeDepth`:
+    /// past the cap the subtree is replaced with a readable marker instead of
+    /// being walked. A stack overflow is a SIGSEGV on the guard page, which no
+    /// `catch` can intercept, so the limit has to live inside the recursion.
+    private static func sanitizeForJSON(_ value: Any, depth: Int = 0) -> Any {
+        if depth > maxSanitizeDepth {
+            logger.warning("[JS] sanitizeForJSON hit the \(maxSanitizeDepth)-level depth cap — truncating the deeper subtree")
+            return sanitizeTruncationMarker
+        }
         if let dict = value as? [String: Any] {
             var out: [String: Any] = [:]
             out.reserveCapacity(dict.count)
-            for (k, v) in dict { out[k] = sanitizeForJSON(v) }
+            for (k, v) in dict { out[k] = sanitizeForJSON(v, depth: depth + 1) }
             return out
         }
         if let array = value as? [Any] {
-            return array.map { sanitizeForJSON($0) }
+            return array.map { sanitizeForJSON($0, depth: depth + 1) }
         }
         if let number = value as? NSNumber {
             // CFNumber represents Bool as a distinct type; leave booleans
@@ -2566,7 +2818,7 @@ final class BrowserDownloadCenter: ObservableObject {
         guard let idx = entries.firstIndex(where: { $0.id == id }),
               entries[idx].state == .downloading else { return }
         entries[idx].onCancel?()
-        entries[idx].state = .failed(reason: String(localized: "Cancelled", comment: "Download cancelled by user"))
+        entries[idx].state = .failed(reason: AppLocalized("Cancelled", comment: "Download cancelled by user"))
         entries[idx].seen = true
         let e = entries[idx]
         queueAgentEvent(sessionId: e.sessionId, filename: e.filename,

@@ -1,5 +1,6 @@
 package com.openminis.app.ui.sandbox
 
+import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 
 import android.content.Context
@@ -651,7 +652,7 @@ fun MirrorCategoryDetailScreen(
             ListItem(
                 headlineContent = { Text(stringResource(R.string.mirror_use_mirror_toggle)) },
                 trailingContent = {
-                    Switch(
+                    SettingsSwitch(
                         checked = vm.useCustomMirror[category] == true,
                         onCheckedChange = { checked ->
                             vm.setUseCustom(context, category, checked)

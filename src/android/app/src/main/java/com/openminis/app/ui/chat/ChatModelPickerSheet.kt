@@ -1293,5 +1293,11 @@ private fun providerDotColor(providerType: ProviderType?): Color = when (provide
     ProviderType.openRouter -> Color(0xFF00BCD4) // cyan
     ProviderType.xAI -> Color(0xFFFF7043)        // orange — Grok brand
     ProviderType.kimiCode -> Color(0xFF5C6BC0)   // indigo — Kimi accent
+    // [T-android-provider-type-parity] Responses API instances are
+    // OpenAI under the hood — same green dot. Undrivable types share
+    // the neutral gray used for "no provider".
+    ProviderType.openAIResponses -> Color(0xFF4CAF50)
+    ProviderType.antigravity,
+    ProviderType.unsupported -> Color(0xFF8E8E93)
     null -> Color(0xFF8E8E93)                    // gray
 }

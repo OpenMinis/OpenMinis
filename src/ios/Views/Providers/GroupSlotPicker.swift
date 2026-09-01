@@ -23,7 +23,7 @@ struct GroupSlotPicker: View {
 
     private var selectedName: String {
         if let id = selection, let g = store.group(for: id) { return g.name }
-        return String(localized: "None", comment: "No group selected")
+        return AppLocalized("None", comment: "No group selected")
     }
 
     var body: some View {
@@ -72,7 +72,7 @@ struct GroupSlotPicker: View {
                 : dir.map { $0 == .input ? [.audioInput] : [.audioOutput] },
             groupScope: .none,
             headerNote: isVision
-                ? String(localized: "Showing models that can read images.", comment: "Vision group picker filter note")
+                ? AppLocalized("Showing models that can read images.", comment: "Vision group picker filter note")
                 : dir?.filterNote,
             onAddMulti: { ids in
                 guard !ids.isEmpty else { return }
@@ -87,12 +87,12 @@ struct GroupSlotPicker: View {
     private static func suggestedName(for dir: VoiceDirection?, isVision: Bool = false, store: ProviderConfigStore) -> String {
         let base: String
         if isVision {
-            base = String(localized: "Vision Input", comment: "Default vision group name")
+            base = AppLocalized("Vision Input", comment: "Default vision group name")
         } else {
             switch dir {
-            case .input:  base = String(localized: "Voice Input", comment: "Default voice input group name")
-            case .output: base = String(localized: "Voice Output", comment: "Default voice output group name")
-            case nil:     base = String(localized: "New Group", comment: "Default group name")
+            case .input:  base = AppLocalized("Voice Input", comment: "Default voice input group name")
+            case .output: base = AppLocalized("Voice Output", comment: "Default voice output group name")
+            case nil:     base = AppLocalized("New Group", comment: "Default group name")
             }
         }
         let existing = Set(store.modelGroups.map(\.name))

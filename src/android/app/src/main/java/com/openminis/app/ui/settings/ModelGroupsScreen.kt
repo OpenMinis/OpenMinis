@@ -51,11 +51,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SwipeToDismissBox
-import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -77,6 +74,10 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Delete
+import com.openminis.app.ui.components.SwipeRowAction
+import com.openminis.app.ui.components.SwipeRowActions
 import com.openminis.app.ui.components.SectionCard
 import com.openminis.app.ui.components.SectionDesign
 import com.openminis.app.ui.components.SectionDivider
@@ -100,6 +101,9 @@ fun ModelGroupsScreen(
     val groups = config.modelGroups
     var showNewGroupDialog by remember { mutableStateOf(false) }
     var newGroupName by remember { mutableStateOf("") }
+    // [T-android-swipe-row-actions] Pending swipe-delete target, hoisted out of
+    // the row so the confirmation survives recomposition/reorder.
+    var groupToDelete by remember { mutableStateOf<ModelGroup?>(null) }
 
     // T186: parent LazyListState shared with rememberReorderableLazyListState
     // so each agent-loop pinned row (rendered as its own LazyColumn item)
@@ -231,12 +235,6 @@ fun ModelGroupsScreen(
                         state = reorderState,
                         key = "group:${group.id}",
                     ) { _ ->
-                        val dismissState = rememberSwipeToDismissBoxState()
-                        LaunchedEffect(dismissState.currentValue) {
-                            if (dismissState.currentValue == SwipeToDismissBoxValue.EndToStart) {
-                                providerRepository.removeGroup(group.id)
-                            }
-                        }
                         Column {
                             if (index != 0) SectionDividerInsetCard()
                             Box(
@@ -245,10 +243,35 @@ fun ModelGroupsScreen(
                                     isLast = index == groups.lastIndex,
                                 ),
                             ) {
-                                SwipeToDismissBox(
-                                    state = dismissState,
-                                    backgroundContent = {},
-                                    enableDismissFromStartToEnd = false,
+                                // [T-android-swipe-row-actions] Swipe left for
+                                // Edit / Delete.
+                                //
+                                // This REPLACES a SwipeToDismissBox that called
+                                // removeGroup() the instant the swipe crossed its
+                                // threshold — no confirmation and no undo, so a
+                                // stray horizontal gesture silently destroyed a
+                                // group (and, via removeGroup, cleared it from
+                                // every default slot that referenced it). Delete
+                                // now routes through the SAME dialog copy and the
+                                // same repository call as ModelGroupDetailScreen's
+                                // "Delete Group" button; Edit opens that screen.
+                                SwipeRowActions(
+                                    actions = listOf(
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_edit),
+                                            icon = Icons.Filled.Edit,
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            onClick = { onGroupClick(group.id) },
+                                        ),
+                                        SwipeRowAction(
+                                            label = stringResource(R.string.common_delete),
+                                            icon = Icons.Filled.Delete,
+                                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                            onClick = { groupToDelete = group },
+                                        ),
+                                    ),
                                 ) {
                                     GroupRow(
                                         group = group,
@@ -392,6 +415,42 @@ fun ModelGroupsScreen(
                     showNewGroupDialog = false
                     newGroupName = ""
                 }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
+    }
+
+    // [T-android-swipe-row-actions] Swipe-delete confirmation. Same title/body
+    // strings and same removeGroup() call as ModelGroupDetailScreen's Delete
+    // Group button — the swipe is a shortcut to that flow, not a second one.
+    groupToDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { groupToDelete = null },
+            title = { Text(stringResource(R.string.model_group_detail_delete_group)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.model_group_detail_delete_named_group_confirm,
+                        target.name,
+                    ),
+                )
+            },
+            confirmButton = {
+                MinisTextButton(
+                    onClick = {
+                        providerRepository.removeGroup(target.id)
+                        groupToDelete = null
+                    },
+                ) {
+                    Text(
+                        stringResource(R.string.common_delete),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { groupToDelete = null }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             },

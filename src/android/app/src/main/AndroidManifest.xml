@@ -151,6 +151,11 @@
         </intent>
     </queries>
 
+    <!-- [T-android-tablet-split] enableOnBackInvokedCallback (on <application>):
+         predictive-back gesture animations, which NavigableListDetailPaneScaffold
+         uses for its list<->detail back transition. Required on Android 13-15;
+         16+ enables it by default, so this is the compatibility switch rather
+         than a new behaviour. -->
     <application
         android:name=".MinisApp"
         android:allowBackup="true"
@@ -164,12 +169,27 @@
         android:label="@string/app_name"
         android:localeConfig="@xml/locales_config"
         android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
         android:theme="@style/Theme.Minis">
 
+        <!-- [T-android-tablet-split] MainActivity resize/rotation handling.
+
+             configChanges + resizeableActivity: without them the Activity is
+             DESTROYED and recreated when the user drags a split-screen divider,
+             resizes a freeform window or rotates — which drops the pane
+             navigator's state and, worse, interrupts an in-flight streaming
+             reply. screenSize + smallestScreenSize + screenLayout cover
+             multi-window resize; orientation covers rotation.
+
+             Safe here because the UI is Compose: layout is driven by
+             currentWindowAdaptiveInfo(), which recomposes on configuration
+             change, so nothing depends on the recreate to re-read resources. -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
             android:exported="true"
             android:launchMode="singleTask"
+            android:resizeableActivity="true"
             android:theme="@style/Theme.Minis"
             android:windowSoftInputMode="adjustResize">
             <!-- T-android-dynamic-app-icon: LAUNCHER intent-filter moved

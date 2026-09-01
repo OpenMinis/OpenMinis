@@ -22,7 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
@@ -33,14 +32,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimeInput
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDatePickerState
@@ -62,6 +59,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.components.MinisOutlinedButton
+import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTargetMode
 import com.openminis.app.scheduled.ScheduledTask
@@ -291,7 +291,7 @@ fun ScheduledTaskEditScreen(
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = { vm.clearRunNowState() }) {
+                        MinisTextButton(onClick = { vm.clearRunNowState() }) {
                             Text(stringResource(R.string.scheduled_task_run_now_dismiss))
                         }
                     },
@@ -305,17 +305,17 @@ fun ScheduledTaskEditScreen(
                     confirmButton = {
                         val sid = state.sessionId
                         if (sid != null) {
-                            TextButton(onClick = { vm.clearRunNowState(); onOpenSession(sid) }) {
+                            MinisTextButton(onClick = { vm.clearRunNowState(); onOpenSession(sid) }) {
                                 Text(stringResource(R.string.scheduled_task_run_now_open_session))
                             }
                         } else {
-                            TextButton(onClick = { vm.clearRunNowState() }) {
+                            MinisTextButton(onClick = { vm.clearRunNowState() }) {
                                 Text(stringResource(R.string.ok))
                             }
                         }
                     },
                     dismissButton = if (state.sessionId != null) {
-                        { TextButton(onClick = { vm.clearRunNowState() }) {
+                        { MinisTextButton(onClick = { vm.clearRunNowState() }) {
                             Text(stringResource(R.string.scheduled_task_run_now_dismiss))
                         } }
                     } else null,
@@ -327,7 +327,7 @@ fun ScheduledTaskEditScreen(
                     title = { Text(stringResource(R.string.scheduled_task_run_now_failed)) },
                     text = { Text(stringResource(R.string.scheduled_task_run_now_failed_body)) },
                     confirmButton = {
-                        TextButton(onClick = { vm.clearRunNowState() }) {
+                        MinisTextButton(onClick = { vm.clearRunNowState() }) {
                             Text(stringResource(R.string.ok))
                         }
                     },
@@ -537,16 +537,16 @@ private fun EditFormBody(
 
         HorizontalDivider()
 
-        OutlinedButton(onClick = onRunNow, enabled = canRunNow, modifier = Modifier.fillMaxWidth()) {
+        MinisOutlinedButton(onClick = onRunNow, enabled = canRunNow, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text(stringResource(R.string.scheduled_task_run_now))
         }
-        Button(onClick = onSave, enabled = canSave, modifier = Modifier.fillMaxWidth()) {
+        MinisButton(onClick = onSave, enabled = canSave, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.scheduled_task_save))
         }
         if (!isNew) {
-            OutlinedButton(
+            MinisOutlinedButton(
                 onClick = onDelete,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 modifier = Modifier.fillMaxWidth(),
@@ -718,7 +718,7 @@ private fun SessionPickerDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+        dismissButton = { MinisTextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -757,7 +757,7 @@ private fun MessagePickerDialog(
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+        dismissButton = { MinisTextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     )
 }
 
@@ -768,11 +768,11 @@ private fun DateDialog(initialMs: Long?, onDismiss: () -> Unit, onPick: (Long) -
     DatePickerDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = {
+            MinisTextButton(onClick = {
                 state.selectedDateMillis?.let { onPick(startOfLocalDay(it)) }
             }) { Text(stringResource(R.string.ok)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
+        dismissButton = { MinisTextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
     ) {
         DatePicker(state = state)
     }

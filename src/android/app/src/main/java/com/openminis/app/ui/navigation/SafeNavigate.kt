@@ -36,6 +36,20 @@ fun NavController.safeNavigate(
     if (builder != null) navigate(route, builder) else navigate(route)
 }
 
+/**
+ * Pop back to [route] under the same lifecycle guard as [safePopBackStack].
+ *
+ * For a screen reachable at more than one depth, "go back to X" is the
+ * intent; counting pops is not. See the RESTORE_BROWSE caller, where the same
+ * screen sits one level below BACKUP on one path and two on another, and a
+ * fixed single pop stranded the user on the intermediate step.
+ */
+fun NavController.safePopBackStack(route: String, inclusive: Boolean = false): Boolean {
+    val state = currentBackStackEntry?.lifecycle?.currentState ?: return false
+    if (!state.isAtLeast(Lifecycle.State.STARTED)) return false
+    return popBackStack(route, inclusive)
+}
+
 fun NavController.safePopBackStack(): Boolean {
     // User-triggered pops (top-bar back button) must not be silently
     // swallowed during transient transitions. RESUMED is too strict —

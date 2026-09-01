@@ -32,6 +32,16 @@ object VoiceOutputState {
     private const val KEY_SYSTEM_VOICE = "readReplies.systemVoice"
     private const val KEY_SYSTEM_VOICE_LABEL = "readReplies.systemVoiceLabel"
 
+    // [T-android-tts-capsule-drag] Dragged position, stored in DP as an offset
+    // RELATIVE to the resting bottom-end corner — never as an absolute screen
+    // coordinate. Same choice as iOS `VoiceOutputPreferences.capsuleAnchorOffset`
+    // and for the same reason: a relative offset stays meaningful after a
+    // rotation, a window resize, or a keyboard-driven height change, whereas an
+    // absolute point would put the capsule off-screen. x is negative moving
+    // LEFT from the right edge, y negative moving UP from the bottom.
+    private const val KEY_DRAG_X_DP = "readReplies.capsuleDragXDp"
+    private const val KEY_DRAG_Y_DP = "readReplies.capsuleDragYDp"
+
     /** Speed cycle, matching iOS `VoiceOutputPreferences.speedSteps`. */
     val SPEED_STEPS = floatArrayOf(1.0f, 1.25f, 1.5f, 2.0f)
 
@@ -49,6 +59,14 @@ object VoiceOutputState {
 
     private val _speed = MutableStateFlow(1.0f)
     val speed: StateFlow<Float> = _speed.asStateFlow()
+
+    /**
+     * [T-android-tts-capsule-drag] Persisted drag offset in DP from the resting
+     * bottom-end corner, or null when the user has never dragged (rest at the
+     * default corner). Exposed as a flow so the capsule restores it on mount.
+     */
+    private val _dragOffsetDp = MutableStateFlow<Pair<Float, Float>?>(null)
+    val dragOffsetDp: StateFlow<Pair<Float, Float>?> = _dragOffsetDp.asStateFlow()
 
     // Live state mirrored from the active ReadAloudPlayer so the capsule can
     // render playback/synthesis without owning the player.
@@ -159,6 +177,28 @@ object VoiceOutputState {
         _speed.value = p.getFloat(KEY_SPEED, 1.0f)
         _systemVoiceName.value = p.getString(KEY_SYSTEM_VOICE, null)
         _systemVoiceLabel.value = p.getString(KEY_SYSTEM_VOICE_LABEL, null)
+        // [T-android-tts-capsule-drag] Both keys must be present: a half-written
+        // pair (or a default sentinel) would silently anchor the capsule to a
+        // bogus corner, so treat anything incomplete as "never dragged".
+        _dragOffsetDp.value =
+            if (p.contains(KEY_DRAG_X_DP) && p.contains(KEY_DRAG_Y_DP)) {
+                p.getFloat(KEY_DRAG_X_DP, 0f) to p.getFloat(KEY_DRAG_Y_DP, 0f)
+            } else {
+                null
+            }
+    }
+
+    /**
+     * [T-android-tts-capsule-drag] Persist the capsule's dragged position.
+     * Called once on drag RELEASE, not per movement frame — a SharedPreferences
+     * write per pointer event would be dozens of disk commits per gesture.
+     */
+    fun setCapsuleDragOffsetDp(xDp: Float, yDp: Float) {
+        _dragOffsetDp.value = xDp to yDp
+        prefs?.edit()
+            ?.putFloat(KEY_DRAG_X_DP, xDp)
+            ?.putFloat(KEY_DRAG_Y_DP, yDp)
+            ?.apply()
     }
 
     fun setEnabled(value: Boolean) {

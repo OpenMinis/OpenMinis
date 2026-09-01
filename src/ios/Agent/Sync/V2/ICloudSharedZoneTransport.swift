@@ -240,6 +240,34 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
     private static func configTypeAnchoredKey(_ type: String) -> String {
         "cloudSync.v2.configAnchored.\(type)"
     }
+    /// [T-provider-anchor-two-run-confirm] Count fetched by the LAST clean
+    /// full-history pull of an un-anchored type. Anchoring requires TWO
+    /// consecutive clean full-history pulls returning the same count: CK
+    /// queries are eventually consistent, and anchoring on a single
+    /// "successful" pull permanently trusted a snapshot that could be a
+    /// subset — observed on device as a peer's Default Model group never
+    /// arriving because the anchor closed the full-history window before the
+    /// record was visible to the query.
+    private static func configTypeAnchorPendingCountKey(_ type: String) -> String {
+        "cloudSync.v2.configAnchorPendingCount.\(type)"
+    }
+
+    /// [T-provider-forcesync-v3] Forget the provider types' "history fully
+    /// pulled" anchors (and any pending confirmation counts) so the next
+    /// fetchRecentV2 re-pulls their FULL history. Called by the Providers
+    /// force-sync button — the manual escape hatch for a device whose anchor
+    /// was set from an incomplete (eventually-consistent) pull and whose
+    /// incremental window can therefore never see older-updatedAt records.
+    static func resetProviderConfigAnchors() {
+        let types = ["ProviderInstanceV3", "ProviderModelEntryV3",
+                     "ProviderModelGroupV3", "ProviderThinkingRuleV3",
+                     "ProviderConfigV2"]
+        for t in types {
+            UserDefaults.standard.removeObject(forKey: configTypeAnchoredKey(t))
+            UserDefaults.standard.removeObject(forKey: configTypeAnchorPendingCountKey(t))
+        }
+        logger.info("[iCloudTrace] provider config anchors reset — next fetchRecentV2 pulls full history for \(types.count) types")
+    }
     /// Consecutive fetchRecentV2 runs that hit at least one CKQuery error.
     /// Drives exponential backoff via `retryAfter`; reset to 0 on a clean run.
     private var consecutiveFetchFailures: Int = 0
@@ -618,9 +646,18 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
         // applied) pulls its FULL history so months-old providers/groups are not
         // missed by the 24h floor. `cutoffFor` returns the right floor per type.
         func cutoffFor(_ type: String) -> Date {
-            if Self.fullHistoryConfigTypes.contains(type),
-               !UserDefaults.standard.bool(forKey: Self.configTypeAnchoredKey(type)) {
-                return .distantPast
+            if Self.fullHistoryConfigTypes.contains(type) {
+                if !UserDefaults.standard.bool(forKey: Self.configTypeAnchoredKey(type)) {
+                    return .distantPast
+                }
+                // [T-provider-anchor-two-run-confirm] Anchored config types get
+                // a 7-DAY overlap instead of the high-volume types' 24h/5min
+                // window. These are low-volume (tens of instances/groups, ~1k
+                // entries at most), so the wide window costs almost nothing —
+                // and it absorbs clock skew, delayed pushes and CK indexing
+                // lag that the tight window turned into permanently-missed
+                // records.
+                return min(defaultCutoff, now.addingTimeInterval(-7 * 24 * 3600))
             }
             return defaultCutoff
         }
@@ -800,8 +837,25 @@ final class ICloudSharedZoneTransport: NSObject, SyncTransport {
                 logger.info("[iCloudTrace] fetchRecentV2 NOT anchoring \(type) — provider DB not open yet, will re-pull full history next run")
                 continue
             }
-            UserDefaults.standard.set(true, forKey: Self.configTypeAnchoredKey(type))
-            logger.info("[iCloudTrace] fetchRecentV2 anchored config type \(type) (full-history pull complete)")
+            // [T-provider-anchor-two-run-confirm] CK queries are eventually
+            // consistent: one clean pull can still return a SUBSET, and
+            // anchoring on it permanently hides the missed records behind the
+            // incremental window. Require two consecutive clean full-history
+            // pulls with the SAME count before trusting the snapshot. Costs
+            // one extra full-history query per type on a fresh device (low
+            // volume, and the second run's applies all hit the updatedAt
+            // guard); the steady-state incremental path is unchanged.
+            let fetchedThisRun = byType[type] ?? 0
+            let pendingKey = Self.configTypeAnchorPendingCountKey(type)
+            if let prev = UserDefaults.standard.object(forKey: pendingKey) as? Int,
+               prev == fetchedThisRun {
+                UserDefaults.standard.set(true, forKey: Self.configTypeAnchoredKey(type))
+                UserDefaults.standard.removeObject(forKey: pendingKey)
+                logger.info("[iCloudTrace] fetchRecentV2 anchored config type \(type) (confirmed: two full-history pulls both fetched=\(fetchedThisRun))")
+            } else {
+                UserDefaults.standard.set(fetchedThisRun, forKey: pendingKey)
+                logger.info("[iCloudTrace] fetchRecentV2 NOT anchoring \(type) yet — first clean full-history pull fetched=\(fetchedThisRun), awaiting a confirming run")
+            }
         }
         let breakdown = byType.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
         logger.info("[iCloudTrace] fetchRecentV2 ok total=\(totalFetched) byType=[\(breakdown)] window=\(Int(Self.recentFetchWindow))s")

@@ -312,13 +312,26 @@ internal object ConfigBuiltins {
         // Default app prefs — Android persists most chat preferences in
         // the default SharedPreferences for the package.
         val prefs = context.getSharedPreferences("minis_settings", Context.MODE_PRIVATE)
+        // [T-android-config-prefs-mismatch] The chat prefs the SETTINGS UI owns
+        // live here, not in `minis_settings`. Hoisted above the registrations
+        // so every field can bind to the same store the UI reads.
+        val appearancePrefs = context.getSharedPreferences(
+            com.openminis.app.ui.settings.PREF_APPEARANCE,
+            Context.MODE_PRIVATE,
+        )
         r.register(
             PrefsIntCodedEnumField(
                 path = "chat.returnKey",
                 displayName = "Return key behavior",
                 description = "What the on-screen Return key does in the chat box.",
-                prefs = prefs,
-                key = "return_key_behavior",
+                // [T-android-config-prefs-mismatch] Must match
+                // AppearanceScreen.returnKeySendsMessage exactly — both the
+                // store AND the key. This field previously wrote
+                // `minis_settings/return_key_behavior`, which nothing reads,
+                // so `minis-config set chat.returnKey send` reported success
+                // while the chat box kept inserting newlines.
+                prefs = appearancePrefs,
+                key = com.openminis.app.ui.settings.KEY_RETURN_KEY_BEHAVIOR,
                 cases = listOf("newline", "send"),
                 defaultIndex = 0,
             )
@@ -328,8 +341,9 @@ internal object ConfigBuiltins {
                 path = "chat.keepScreenAwake",
                 displayName = "Keep screen awake during tasks",
                 description = "Prevents auto-lock while the agent is busy.",
-                prefs = prefs,
-                key = "keep_screen_awake_during_tasks",
+                // Same mismatch as chat.returnKey above — see that comment.
+                prefs = appearancePrefs,
+                key = com.openminis.app.ui.settings.KEY_KEEP_SCREEN_AWAKE,
                 defaultValue = false,
             )
         )
@@ -344,10 +358,6 @@ internal object ConfigBuiltins {
         // (Compose recomposes immediately, no manual cache invalidation
         // needed on Android — there is no analogue to iOS
         // FontSettings.messageBaseScale .Published cache).
-        val appearancePrefs = context.getSharedPreferences(
-            com.openminis.app.ui.settings.PREF_APPEARANCE,
-            Context.MODE_PRIVATE,
-        )
         r.register(
             PrefsBoolField(
                 path = "chat.toolPreview",
@@ -859,6 +869,77 @@ internal object ConfigBuiltins {
     // unrelated fields (incl. the on-disk `emoji` value that survives
     // for round-trip) are preserved when one field changes.
 
+    /**
+     * [T-android-soul-icon-config-images] Resolve a config-supplied image
+     * source to the stored inline data URI.
+     *
+     * Throws [ConfigError.InvalidValue] with actionable text on every failure
+     * path — this runs on behalf of a model, and "invalid value" with no
+     * detail just produces another wrong guess.
+     */
+    private fun resolveSoulIconImage(context: Context, raw: String): String {
+        val icon = com.openminis.app.agent.SoulIcon
+        val bytes: ByteArray = when (val src = icon.classifySource(raw)) {
+            is com.openminis.app.agent.SoulIcon.Source.Unsupported ->
+                throw ConfigError.InvalidValue(src.reason)
+
+            is com.openminis.app.agent.SoulIcon.Source.Bytes -> src.data
+
+            is com.openminis.app.agent.SoulIcon.Source.LinuxPath -> {
+                val root = icon.ALLOWED_LINUX_ROOTS.firstOrNull {
+                    src.path == it || src.path.startsWith("$it/")
+                } ?: throw ConfigError.InvalidValue(
+                    "path must be inside one of ${icon.ALLOWED_LINUX_ROOTS.joinToString(", ")}",
+                )
+                // resolveSessionHostPath, NOT resolveHostPath: the global
+                // bindMounts map is only populated once a shell has booted
+                // this session (and is last-writer-wins across sessions), so
+                // resolving through it fails outright when the user hasn't
+                // run a command yet — which is exactly the state a config
+                // write from the UI arrives in.
+                val sid = ChatViewModelStore.activeSessionId
+                    ?: throw ConfigError.InvalidValue(
+                        "no active session — open a chat first, or pass the image inline as a data URI",
+                    )
+                val kernel = com.openminis.app.sandbox.PRootKernel
+                val hostRoot = kernel.resolveSessionHostPath(sid, root, context)
+                    ?: throw ConfigError.InvalidValue("could not resolve $root on this device")
+                val hostFile = kernel.resolveSessionHostPath(sid, src.path, context)
+                    ?: throw ConfigError.InvalidValue("could not resolve ${src.path}")
+                // Canonicalise BOTH sides before comparing, so a symlink
+                // inside an allowed directory cannot point out of it and a
+                // `..` segment cannot walk out of the sandbox.
+                if (!icon.isContained(hostFile, hostRoot)) {
+                    throw ConfigError.InvalidValue("${src.path} resolves outside $root")
+                }
+                if (!hostFile.isFile) {
+                    throw ConfigError.InvalidValue("${src.path} does not exist")
+                }
+                runCatching { hostFile.readBytes() }.getOrElse {
+                    throw ConfigError.InvalidValue("could not read ${src.path}")
+                }
+            }
+        }
+
+        val bitmap = runCatching {
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }.getOrNull() ?: throw ConfigError.InvalidValue(
+            "that data isn't a decodable image (png / jpeg / webp / gif are supported; svg is not)",
+        )
+
+        // Same encoder the Settings picker uses, so crop / downscale / size
+        // rules are shared by construction rather than by copy.
+        return when (val r = icon.encode(bitmap)) {
+            is com.openminis.app.agent.SoulIcon.EncodeResult.Success -> r.dataUri
+            is com.openminis.app.agent.SoulIcon.EncodeResult.Failure -> when (r.reason) {
+                com.openminis.app.agent.SoulIcon.Rejection.TOO_LARGE ->
+                    throw ConfigError.InvalidValue("that image is too large to store inline")
+                com.openminis.app.agent.SoulIcon.Rejection.UNREADABLE ->
+                    throw ConfigError.InvalidValue("that image could not be processed")
+            }
+        }
+    }
+
     private fun registerSoul(r: ConfigRegistry, context: Context) {
         // Length cap is language-aware now (Chinese ≤ 800 chars OR
         // English ≤ 500 words); see [com.openminis.app.agent.SoulStore.isOverLimit].
@@ -900,6 +981,92 @@ internal object ConfigBuiltins {
                     }
                     val cur = loadCurrent()
                     saveCurrent(cur.copy(metadata = cur.metadata.copy(name = name)))
+                },
+            )
+        )
+
+        // [T-android-soul-custom-icon][T-android-soul-icon-config-images]
+        //
+        // Accepts an emoji OR an image, matching iOS `fe2f3ae8b`. An address
+        // (minis:// or a /var/minis path) is only an import source: it is
+        // resolved, re-encoded through the SAME SoulIcon.encode the Settings
+        // picker uses, and only the RESULT is stored inline — so the source
+        // file can be deleted afterwards and the icon survives attachment
+        // cleanup and syncing to another device.
+        //
+        // Reading is summarized, never dumped: a stored image reports as
+        // "<image>" so `minis-config get` cannot flood the context with
+        // base64. For the same reason the field is NOT revertable — the audit
+        // log holds "<image>" rather than the bytes, so there is nothing to
+        // restore from and offering a revert button would be a lie.
+        r.register(
+            ClosureField(
+                path = "soul.icon",
+                displayName = "Soul icon",
+                // The description IS the API doc — `minis-config topic-help
+                // soul` prints it verbatim. It leads with every word a user
+                // might use for this (icon / avatar / persona image /
+                // 角色形象 / 头像) because they are all this ONE field, and a
+                // model that doesn't match the wording will otherwise report
+                // the capability as missing.
+                description = "The Soul's identity icon — also called its avatar, its persona image, or its " +
+                    "character image (中文：角色形象 / 图标 / 头像). All of those refer to THIS one setting; " +
+                    "there is no separate avatar field. Shown beside the assistant name in the chat header " +
+                    "and on the Soul settings card.\n" +
+                    "\n" +
+                    "EMOJI\n" +
+                    "  A single emoji, e.g. \"⚡\". An empty string \"\" restores the default sparkle.\n" +
+                    "\n" +
+                    "IMAGE — any of these forms:\n" +
+                    "  • data URI: data:image/png;base64,iVBORw0KGgo...\n" +
+                    "  • bare base64 (no data: prefix) — auto-detected\n" +
+                    "  • minis:// resource, e.g. minis://attachments/icon.png\n" +
+                    "  • a path inside the minis directories, e.g. /var/minis/attachments/icon.png\n" +
+                    "  Remote http(s) URLs are NOT supported on Android — download the file first, " +
+                    "then pass its path.\n" +
+                    "\n" +
+                    "TRANSPARENCY — not required. Opaque images (a JPEG, a flattened PNG) are fine; " +
+                    "the icon renders with rounded corners, so it still reads as a normal small avatar. " +
+                    "Transparency is preserved when the source has it.\n" +
+                    "\n" +
+                    "PROCESSING — identical to picking an image in Settings → Soul: centre-cropped to a " +
+                    "square, downscaled to ${com.openminis.app.agent.SoulIcon.STORED_PIXELS}×" +
+                    "${com.openminis.app.agent.SoulIcon.STORED_PIXELS}, re-encoded as PNG and stored inline.\n" +
+                    "\n" +
+                    "READING — `get soul.icon` returns \"<image>\" for an image, never the base64.\n" +
+                    "\n" +
+                    "EXAMPLES (the value is JSON, so the string needs its own quotes)\n" +
+                    "  minis-config set soul.icon '\"⚡\"'\n" +
+                    "  minis-config set soul.icon '\"minis://attachments/icon.png\"'\n" +
+                    "  minis-config set soul.icon '\"\"'   # back to the default sparkle",
+                // No maxLength: an inline data URI is far longer than any cap
+                // that would make sense stated in characters. The real bound
+                // is SoulIcon.MAX_DATA_URI_CHARS, enforced by the encoder.
+                valueSchema = ConfigSchema.Str(),
+                risk = ConfigRisk.SENSITIVE,
+                revertable = false,
+                reader = {
+                    val raw = loadCurrent().metadata.icon
+                    ConfigValue.Str(
+                        if (com.openminis.app.agent.SoulIcon.isDataUri(raw)) "<image>" else raw,
+                    )
+                },
+                writer = { v ->
+                    val raw = (v as? ConfigValue.Str)?.value
+                        ?: throw ConfigError.TypeMismatch("string")
+                    val trimmed = raw.trim()
+                    val cur = loadCurrent()
+                    val next = when {
+                        // Empty clears back to the default sparkle.
+                        trimmed.isEmpty() -> ""
+
+                        // A single emoji stays verbatim.
+                        com.openminis.app.agent.SoulIcon.graphemeClusters(trimmed).size == 1 &&
+                            com.openminis.app.agent.SoulIcon.isEmojiGlyph(trimmed) -> trimmed
+
+                        else -> resolveSoulIconImage(context, trimmed)
+                    }
+                    saveCurrent(cur.copy(metadata = cur.metadata.copy(icon = next)))
                 },
             )
         )

@@ -11,6 +11,14 @@ struct ProviderInstancesView: View {
     @State private var showImportResult = false
     @State private var forceSyncToast: String?
     @AppStorage("cloudSync.v2.enabled") private var iCloudSyncEnabled: Bool = false
+    /// [T-provider-group-swipe-actions] Swipe-to-edit target. Value-driven so
+    /// the swipe opens the SAME detail screen the row's NavigationLink does,
+    /// rather than a second editor that could drift from it.
+    @State private var editingInstanceId: String?
+    /// Swipe-to-delete target. Deletion goes through the existing confirmation
+    /// alert — a provider carries API keys and every model entry under it, so
+    /// it must never be a one-swipe irreversible act.
+    @State private var pendingDeleteInstance: ProviderInstance?
 
     var body: some View {
         List {
@@ -28,6 +36,30 @@ struct ProviderInstancesView: View {
                                 ProviderInstanceDetailView(instanceId: instance.id)
                             } label: {
                                 InstanceRow(instance: instance)
+                            }
+                            // [T-provider-group-swipe-actions] Swipe actions and
+                            // `.onMove` coexist without extra work: UIKit routes a
+                            // horizontal drag to the row's swipe actions and a
+                            // vertical one to the reorder engine, and in edit mode
+                            // the drag handles take over entirely. No custom
+                            // gesture is introduced here precisely so that
+                            // arbitration stays UIKit's.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                // Destructive first = rightmost, the platform's
+                                // position for Delete. `allowsFullSwipe: false`
+                                // so a long swipe cannot delete a provider (and
+                                // its keys) without the confirmation below.
+                                Button(role: .destructive) {
+                                    pendingDeleteInstance = instance
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                Button {
+                                    editingInstanceId = instance.id
+                                } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .tint(.blue)
                             }
                         }
                         .onMove { source, destination in
@@ -96,19 +128,19 @@ struct ProviderInstancesView: View {
                     Button {
                         showAddProvider = true
                     } label: {
-                        Label(String(localized: "Add Provider"), systemImage: "plus")
+                        Label(AppLocalized("Add Provider"), systemImage: "plus")
                     }
                     Button {
                         showImportFile = true
                     } label: {
-                        Label(String(localized: "Import Provider"), systemImage: "square.and.arrow.down")
+                        Label(AppLocalized("Import Provider"), systemImage: "square.and.arrow.down")
                     }
                     if #available(iOS 17.0, *), iCloudSyncEnabled {
                         Divider()
                         Button {
                             Task { await forceSyncProviders() }
                         } label: {
-                            Label(String(localized: "Force iCloud Sync"),
+                            Label(AppLocalized("Force iCloud Sync"),
                                   systemImage: "arrow.triangle.2.circlepath.icloud")
                         }
                     }
@@ -126,28 +158,69 @@ struct ProviderInstancesView: View {
             switch result {
             case .success(let url):
                 guard url.startAccessingSecurityScopedResource() else {
-                    importMessage = String(localized: "Cannot access the selected file.")
+                    importMessage = AppLocalized("Cannot access the selected file.")
                     showImportResult = true
                     return
                 }
                 defer { url.stopAccessingSecurityScopedResource() }
                 guard let data = try? Data(contentsOf: url),
                       let json = String(data: data, encoding: .utf8) else {
-                    importMessage = String(localized: "Failed to read file.")
+                    importMessage = AppLocalized("Failed to read file.")
                     showImportResult = true
                     return
                 }
                 if let label = store.importInstanceJSON(json) {
-                    importMessage = String(localized: "Imported provider \"\(label)\" successfully.")
+                    importMessage = AppLocalized("Imported provider \"\(label)\" successfully.")
                 } else {
-                    importMessage = String(localized: "Invalid provider configuration file.")
+                    importMessage = AppLocalized("Invalid provider configuration file.")
                 }
                 showImportResult = true
             case .failure:
                 break
             }
         }
-        .alert(String(localized: "Import"), isPresented: $showImportResult) {
+        // [T-provider-group-swipe-actions] Swipe-Edit lands on the very screen
+        // the row taps into, so there is one provider editor, not two.
+        //
+        // `NavigationLink(isActive:)` rather than `navigationDestination(item:)`:
+        // this target still deploys to iOS 16 and that modifier is 17+ (same
+        // reason BackupSettingsView uses the hidden-link form). Kept in a
+        // `.background` so it adds no visible row.
+        .background {
+            NavigationLink(isActive: Binding(
+                get: { editingInstanceId != nil },
+                set: { if !$0 { editingInstanceId = nil } }
+            )) {
+                // Resolved at push time: if the provider was deleted while this
+                // was open, show nothing rather than a detail screen bound to a
+                // vanished id.
+                if let id = editingInstanceId,
+                   store.instances.contains(where: { $0.id == id }) {
+                    ProviderInstanceDetailView(instanceId: id)
+                }
+            } label: { EmptyView() }
+            .opacity(0)
+        }
+        // Same wording and same call (`store.removeInstance`) as the Delete
+        // button inside ProviderInstanceDetailView — the swipe is a shortcut to
+        // the existing flow, not a second deletion path with its own semantics.
+        .alert(
+            AppLocalized("Delete Provider"),
+            isPresented: Binding(
+                get: { pendingDeleteInstance != nil },
+                set: { if !$0 { pendingDeleteInstance = nil } }
+            ),
+            presenting: pendingDeleteInstance
+        ) { instance in
+            Button("Delete", role: .destructive) {
+                store.removeInstance(instance.id)
+                pendingDeleteInstance = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteInstance = nil }
+        } message: { _ in
+            Text("This will remove the provider and all its model entries. API keys will be deleted from the Keychain.")
+        }
+        .alert(AppLocalized("Import"), isPresented: $showImportResult) {
             Button("OK") {}
         } message: {
             if let msg = importMessage { Text(msg) }
@@ -169,9 +242,16 @@ struct ProviderInstancesView: View {
 
     @available(iOS 17.0, *)
     private func forceSyncProviders() async {
+        // [T-provider-forcesync-v3] markProvidersDirty now re-marks every v3
+        // instance/entry/group/rule row (not just the v2 whole-file record that
+        // v3 peers drop) and resets the pull-side full-history anchors.
         _ = await ForceSyncHelper.markProvidersDirty()
-        await ForceSyncHelper.bidirectionalSync(recordTypes: ["ProviderConfig", "ProviderConfigV2"])
-        forceSyncToast = String(localized: "Syncing providers via iCloud")
+        await ForceSyncHelper.bidirectionalSync(recordTypes: [
+            "ProviderConfig", "ProviderConfigV2",
+            "ProviderInstanceV3", "ProviderModelEntryV3",
+            "ProviderModelGroupV3", "ProviderThinkingRuleV3",
+        ])
+        forceSyncToast = AppLocalized("Syncing providers via iCloud")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             forceSyncToast = nil
         }
@@ -209,20 +289,118 @@ struct ProviderInstancesView: View {
 
 // MARK: - Instance Row
 
+/// [T-ios-provider-row-keychain-in-body] Per-row credential display state, resolved
+/// ONCE per (instance, authRevision) instead of on every SwiftUI body evaluation.
+///
+/// `isConfigured` and `credentialSummary` were each reading Keychain directly from
+/// `body`. Every `SecItemCopyMatching` is a synchronous XPC round-trip to
+/// `securityd`, so one body pass over N provider rows cost 2N blocking IPCs on the
+/// MAIN THREAD — a real user log shows 110 `caller=isConfigured` +
+/// 110 `caller=credentialSummary` reads in a single session (655 Keychain reads
+/// overall). A crash report from that same session caught the main thread parked
+/// inside `SecItemCopyMatching` under `InstanceRow.body`.
+///
+/// This is the same hazard `ProviderCredentialCache`
+/// ([T-new-session-hang-credential-cache]) already exists for; the row simply
+/// bypassed it. A separate cache is used rather than `hasAnyCredential` because
+/// the row needs strictly more than a Bool — it renders the MASKED KEY, and its
+/// OAuth notion of "authenticated" is per-provider-manager, not the router's
+/// any-credential test. Reusing `hasAnyCredential` here would silently change
+/// what the row displays.
+///
+/// Keying on `authRevision` (bumped by `notifyAuthChanged` on every credential
+/// write/delete) makes invalidation exact: the UI still updates immediately after
+/// the user adds or removes a key. The TTL is only a backstop for credential
+/// changes that happen outside the app (Keychain iCloud sync).
+final class ProviderRowCredentialCache: @unchecked Sendable {
+    static let shared = ProviderRowCredentialCache()
+
+    struct Display {
+        let isConfigured: Bool
+        let summary: String
+    }
+
+    /// Backstop only — `authRevision` is the primary invalidation signal.
+    private static let ttl: TimeInterval = 15
+
+    private let lock = NSLock()
+    private var entries: [String: (value: Display, revision: UInt, at: Date)] = [:]
+
+    private init() {}
+
+    /// Drop everything. Called from the SAME places that clear
+    /// `ProviderCredentialCache`, because those events (Keychain iCloud
+    /// `view-change`, app foreground) change credentials WITHOUT bumping
+    /// `authRevision` — so the revision key alone would not notice them.
+    func invalidateAll() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
+
+    func value(for instanceId: String, revision: UInt, probe: () -> Display) -> Display {
+        let now = Date()
+        lock.lock()
+        if let e = entries[instanceId], e.revision == revision,
+           now.timeIntervalSince(e.at) < Self.ttl {
+            lock.unlock()
+            return e.value
+        }
+        lock.unlock()
+
+        // Probe runs OUTSIDE the lock — it does Keychain XPC and must not
+        // serialize concurrent probes for different instances.
+        let fresh = probe()
+
+        lock.lock()
+        entries[instanceId] = (fresh, revision, now)
+        lock.unlock()
+        return fresh
+    }
+}
+
 private struct InstanceRow: View {
     let instance: ProviderInstance
     @ObservedObject private var store = ProviderConfigStore.shared
 
-    private var isConfigured: Bool {
-        switch instance.credentialType {
-        case .apiKey:
-            return ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) != nil
-        case .oauth:
-            return oauthIsAuthenticated
+    /// Both display properties come from one cached probe, so a body pass costs
+    /// zero Keychain round-trips once warm.
+    private var credentialDisplay: ProviderRowCredentialCache.Display {
+        ProviderRowCredentialCache.shared.value(for: instance.id, revision: store.authRevision) {
+            let configured: Bool
+            let summary: String
+            switch instance.credentialType {
+            case .apiKey:
+                // Single Keychain read serves BOTH the dot and the masked subtitle;
+                // previously these were two independent reads of the same item.
+                let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id)
+                // [T-empty-key-compat-endpoints] A keyless third-party
+                // compatible endpoint is configured-by-definition; say so
+                // instead of the alarming "No API key".
+                if key == nil, instance.allowsEmptyAPIKey {
+                    configured = true
+                    summary = AppLocalized("No key required")
+                } else {
+                    configured = key != nil
+                    summary = key.map(Self.maskKey) ?? AppLocalized("No API key")
+                }
+            case .oauth:
+                let authed = Self.probeOAuthAuthenticated(instance)
+                configured = authed
+                summary = authed ? AppLocalized("Authenticated")
+                                 : AppLocalized("Not authenticated")
+            }
+            return .init(isConfigured: configured, summary: summary)
         }
     }
 
-    private var oauthIsAuthenticated: Bool {
+    private var isConfigured: Bool { credentialDisplay.isConfigured }
+
+    private var credentialSummary: String { credentialDisplay.summary }
+
+    /// The uncached OAuth probe. `static` so the cache closure can call it without
+    /// capturing `self` (the row is a short-lived struct; the cache outlives it).
+    private static func probeOAuthAuthenticated(_ instance: ProviderInstance) -> Bool {
         // Manual OAuth token is always considered authenticated
         if ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") != nil {
             return true
@@ -237,18 +415,6 @@ private struct InstanceRow: View {
         case .xAI: return XAIOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .kimiCode: return KimiOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .unsupported: return false // synced from newer build
-        }
-    }
-
-    private var credentialSummary: String {
-        switch instance.credentialType {
-        case .apiKey:
-            if let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) {
-                return maskKey(key)
-            }
-            return String(localized: "No API key")
-        case .oauth:
-            return oauthIsAuthenticated ? String(localized: "Authenticated") : String(localized: "Not authenticated")
         }
     }
 
@@ -279,7 +445,7 @@ private struct InstanceRow: View {
                         .lineLimit(1)
                 }
                 if modelCount > 0 {
-                    Text(String(localized: "\(modelCount) models"))
+                    Text(AppLocalized("\(modelCount) models"))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -300,7 +466,9 @@ private struct InstanceRow: View {
         .padding(.vertical, 2)
     }
 
-    private func maskKey(_ key: String) -> String {
+    /// `static` (was an instance method) so the credential-cache probe closure can
+    /// call it without capturing `self`. Pure function — no behaviour change.
+    private static func maskKey(_ key: String) -> String {
         guard key.count > 8 else { return "****" }
         return String(key.prefix(6)) + "..." + String(key.suffix(4))
     }
@@ -333,8 +501,8 @@ private struct ShadowVoiceRow: View {
 
     private func voiceSummary(asr: Int, tts: Int) -> String {
         var parts: [String] = []
-        if asr > 0 { parts.append(String(localized: "\(asr) speech-to-text", comment: "ASR model count")) }
-        if tts > 0 { parts.append(String(localized: "\(tts) text-to-speech", comment: "TTS model count")) }
+        if asr > 0 { parts.append(AppLocalized("\(asr) speech-to-text", comment: "ASR model count")) }
+        if tts > 0 { parts.append(AppLocalized("\(tts) text-to-speech", comment: "TTS model count")) }
         return parts.joined(separator: " · ")
     }
 }

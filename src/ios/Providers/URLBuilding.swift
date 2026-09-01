@@ -68,15 +68,26 @@ enum URLBuilding {
 
             // Merge queries: preserve any query on the base, then append the
             // last-segment query (if any) joined by `&`.
+            //
+            // [T-ios-urlbuilding-badkey] Both of these setters take a string that
+            // is asserted to be ALREADY percent-encoded, and they do not fail
+            // softly on bad input: an illegal character raises
+            // NSInvalidArgumentException on iOS 16's ObjC NSURLComponents and
+            // traps as a Swift fatalError on newer Foundation. Neither is
+            // catchable, so the value has to be checked before assignment.
+            // Callers reach here with user-supplied text (e.g. a pasted API key
+            // interpolated into a segment), so bad input is expected, not
+            // exceptional. Anything not already valid gets percent-encoded.
             if let q = trailingQuery, !q.isEmpty {
+                let safeQuery = percentEncodedQueryValue(q)
                 if let existing = components.percentEncodedQuery, !existing.isEmpty {
-                    components.percentEncodedQuery = existing + "&" + q
+                    components.percentEncodedQuery = existing + "&" + safeQuery
                 } else {
-                    components.percentEncodedQuery = q
+                    components.percentEncodedQuery = safeQuery
                 }
             }
             if let f = trailingFragment, !f.isEmpty {
-                components.percentEncodedFragment = f
+                components.percentEncodedFragment = percentEncodedFragmentValue(f)
             }
 
             if let s = components.string {
@@ -103,6 +114,82 @@ enum URLBuilding {
     /// `URL` variant. Returns nil if the assembled string isn't a valid URL.
     static func joinURL(_ base: String, _ segments: String...) -> URL? {
         URL(string: join(base, segments: segments))
+    }
+
+    // MARK: - Percent-encoding validation
+
+    /// True if `s` is already a legal value for `percentEncodedQuery` /
+    /// `percentEncodedFragment`.
+    ///
+    /// The setters accept the characters in `allowed` plus well-formed `%XX`
+    /// escapes. `%` itself is NOT in `.urlQueryAllowed`, so a plain charset test
+    /// would reject a correctly pre-encoded string like `key=a%20b`; the escape
+    /// sequences have to be validated separately, which is what the `%` branch
+    /// below does. Verified against the real setter: `a%20b`, `a+b`, `a/b` and
+    /// `a:b` are accepted; a space, a non-ASCII character, `a%zz` and a trailing
+    /// `%` all abort the process.
+    private static func isAlreadyPercentEncoded(_ s: String, allowed: CharacterSet) -> Bool {
+        let scalars = Array(s.unicodeScalars)
+        var i = 0
+        while i < scalars.count {
+            let c = scalars[i]
+            if c == "%" {
+                // Need exactly two more hex digits.
+                guard i + 2 < scalars.count,
+                      isHexDigit(scalars[i + 1]),
+                      isHexDigit(scalars[i + 2]) else {
+                    return false
+                }
+                i += 3
+                continue
+            }
+            guard allowed.contains(c) else { return false }
+            i += 1
+        }
+        return true
+    }
+
+    private static func isHexDigit(_ c: Unicode.Scalar) -> Bool {
+        (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F")
+    }
+
+    /// Return `q` unchanged when it is already a valid encoded query, otherwise
+    /// percent-encode it so the assignment cannot abort the process.
+    ///
+    /// Returning valid input untouched matters: every currently-working request
+    /// keeps producing byte-identical URLs, so this cannot regress a provider
+    /// that relies on an exact query string. Only malformed input changes, and
+    /// for that the alternative is a crash.
+    private static func percentEncodedQueryValue(_ q: String) -> String {
+        if isAlreadyPercentEncoded(q, allowed: .urlQueryAllowed) {
+            return q
+        }
+        // Keep the query's own structure (`&`, `=`) intact while escaping the
+        // pieces around it, so `key=bad value&x=1` stays two parameters rather
+        // than collapsing into one opaque blob.
+        return q.split(separator: "&", omittingEmptySubsequences: false)
+            .map { pair -> String in
+                let halves = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                return halves.map { encodeComponent(String($0)) }.joined(separator: "=")
+            }
+            .joined(separator: "&")
+    }
+
+    private static func percentEncodedFragmentValue(_ f: String) -> String {
+        if isAlreadyPercentEncoded(f, allowed: .urlFragmentAllowed) {
+            return f
+        }
+        return encodeComponent(f)
+    }
+
+    /// Percent-encode one query key or value. `&`, `=` and `+` are excluded from
+    /// the allowed set so they cannot be mistaken for structure or (in `+`'s
+    /// case) be decoded as a space by a server that follows the form-encoding
+    /// convention.
+    private static func encodeComponent(_ s: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
     }
 
     // MARK: - Helpers

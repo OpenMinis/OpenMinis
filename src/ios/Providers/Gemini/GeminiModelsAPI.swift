@@ -20,10 +20,29 @@ enum GeminiModelsAPI {
             while trimmed.hasSuffix("/") { trimmed.removeLast() }
             return trimmed.hasSuffix("/models") ? trimmed : URLBuilding.join(trimmed, "/models")
         } ?? defaultBaseURL
-        var components = URLComponents(string: modelsURL)!
+        // [T-ios-gemini-baseurl-force-unwrap] `modelsURL` is built from the user's
+        // editable Base URL, so it is untrusted input and MUST NOT be force-unwrapped.
+        // A single space, full-width punctuation, or an invisible bidi character
+        // (all easy to introduce by pasting or via an IME) makes URLComponents
+        // return nil, and the trap crashed the app at LAUNCH, because
+        // autoRefreshModels runs on startup — an unrecoverable boot loop that the
+        // user cannot escape from inside the app.
+        //
+        // Throwing matches what OpenAIModelsAPI/AnthropicModelsAPI already do for
+        // the same input; only this path was still force-unwrapping. The refresh
+        // then fails softly and the existing model list is kept.
+        guard var components = URLComponents(string: modelsURL) else {
+            throw LLMError.providerError(message: "Invalid Gemini base URL: \(modelsURL)")
+        }
         components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
 
-        var request = URLRequest(url: components.url!)
+        // Also guarded: `components.url` is a SECOND failure point. Percent-encoding
+        // rules differ between the parser and the serializer, so a string that parsed
+        // fine can still fail to reassemble once query items are attached.
+        guard let url = components.url else {
+            throw LLMError.providerError(message: "Invalid Gemini base URL: \(modelsURL)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         logger.info("Fetching Gemini models (API key auth)")
         let models = try await performFetch(request)
@@ -43,7 +62,12 @@ enum GeminiModelsAPI {
             while trimmed.hasSuffix("/") { trimmed.removeLast() }
             return trimmed.hasSuffix("/models") ? trimmed : URLBuilding.join(trimmed, "/models")
         } ?? defaultBaseURL
-        var request = URLRequest(url: URL(string: modelsURL)!)
+        // [T-ios-gemini-baseurl-force-unwrap] Same untrusted `customBaseURL` as the
+        // API-key path above — the OAuth variant crashed identically.
+        guard let url = URL(string: modelsURL) else {
+            throw LLMError.providerError(message: "Invalid Gemini base URL: \(modelsURL)")
+        }
+        var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(oauthToken)", forHTTPHeaderField: "Authorization")
         logger.info("Fetching Gemini models (OAuth auth)")

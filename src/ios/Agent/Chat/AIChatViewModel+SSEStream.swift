@@ -4,13 +4,19 @@ import UIKit
 private let logger = AppLogger(category: "AIChatVM")
 
 // MARK: - Stream Stall Timeout
-
-private struct StreamStallError: Error, LocalizedError {
-    let seconds: Int
-    var errorDescription: String? {
-        "No response from the server for \(seconds) seconds. The connection may have been dropped silently. Please try again."
-    }
-}
+//
+// [T-ios-stream-stall-no-retry] The stall watchdog used to throw a PRIVATE
+// `StreamStallError` struct here. That type was invisible to the agent loop's
+// `catch let streamError as LLMError where streamError.isRetryable` gate, so a
+// mid-stream stall skipped the entire existing recovery pipeline (uncommitted-
+// tail cleanup → immediate same-model re-dispatch → group fallback on a second
+// failure) and killed the loop outright. Field case 2026-08-18 22:11: upstream
+// emitted a tool_use header + 2 bytes of arguments, went silent for exactly
+// 120.0s, and the task died with no retry — while the request would almost
+// certainly have succeeded on a re-send (and hit the prompt cache doing it).
+// The watchdog now throws `LLMError.transientError`, which walks straight into
+// that pipeline. Net behavior: one immediate retry on the same model; a second
+// stall falls back to the next model in the group; turn budget untouched.
 
 private final class StreamIteratorBox<T: Sendable>: @unchecked Sendable {
     private var iterator: AsyncThrowingStream<T, Error>.AsyncIterator
@@ -331,7 +337,14 @@ extension AIChatViewModel {
         // Both timestamps below are wall-clock, so comparing the measured gap
         // against `stallTimeoutSeconds` settles (3) on its own.
         let streamDiagSession = await MainActor.run { self.sessionId ?? "nil" }
-        let streamDiagModel = await MainActor.run { self.selectedModel.id }
+        // [T-ios-streamdiag-phantom-model] Read the model from the PROVIDER —
+        // the object this stream actually belongs to. This used to read
+        // `self.selectedModel.id`, which is a never-written legacy property
+        // whose compile-time default is `.claudeHaiku45`: every stream-open and
+        // STALL line therefore claimed "claude-haiku-4-5" regardless of the
+        // model the request was really for, and a stall investigation was
+        // nearly pinned on a model the session never used.
+        let streamDiagModel = provider.model.id
         var lastEventAt = Date()
         var eventSeq = 0
         logger.info("[StreamDiag] stream open session=\(streamDiagSession) provider=\(provider.name) model=\(streamDiagModel) at=\(Self.diagTimestamp(Date()))")
@@ -356,7 +369,10 @@ extension AIChatViewModel {
                         + "sinceLastEvent=\(String(format: "%.1f", sinceLastEvent))s eventsThisStream=\(eventSeq) "
                         + "appState=\(appState) iterStart=\(Self.diagTimestamp(iterationStartedAt)) firedAt=\(Self.diagTimestamp(firedAt))"
                     )
-                    throw StreamStallError(seconds: Int(stallTimeoutSeconds))
+                    // [T-ios-stream-stall-no-retry] An LLMError so the agent
+                    // loop's retryable-error gate catches it — see the header
+                    // comment at the top of this file.
+                    throw LLMError.transientError(message: "No response from the server for \(Int(stallTimeoutSeconds)) seconds — the stream stalled mid-generation")
                 }
                 let result = try await group.next()!
                 group.cancelAll()

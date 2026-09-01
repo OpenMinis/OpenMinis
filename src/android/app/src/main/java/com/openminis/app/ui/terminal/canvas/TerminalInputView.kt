@@ -95,7 +95,12 @@ private fun createHiddenEditText(context: Context): TerminalInputEditText =
         inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-        imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        // [T-android-terminal-enter-keeps-focus] Kept in step with the
+        // onCreateInputConnection override below — see the note there for why
+        // the action must be NONE rather than DONE.
+        imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_ACTION_NONE
         setBackgroundColor(0x00000000)
     }
 
@@ -115,9 +120,24 @@ class TerminalInputEditText @JvmOverloads constructor(
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        // [T-android-terminal-enter-keeps-focus] IME_ACTION_NONE, not
+        // IME_ACTION_DONE.
+        //
+        // "Done" tells the platform this field is FINISHED once the user
+        // commits, and the default handling for it releases focus. In a shell
+        // that is exactly wrong: Enter runs a command and the user keeps
+        // typing, so every command dropped focus and the terminal had to be
+        // tapped again before the next keystroke registered — the reported
+        // symptom, and most obvious with a hardware keyboard, where there is no
+        // IME to re-summon and nothing on screen to explain why typing stopped
+        // working.
+        //
+        // NONE declares "this field has no completion action", so Enter is just
+        // another key: it reaches the key handler below, is translated to CR,
+        // and focus stays put.
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-            EditorInfo.IME_ACTION_DONE
+            EditorInfo.IME_ACTION_NONE
 
         return object : BaseInputConnection(this, false) {
             // Most IME keys are routed through commitText. Forward verbatim

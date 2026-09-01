@@ -2,9 +2,53 @@
 <locale-config xmlns:android="http://schemas.android.com/apk/res/android">
     <locale android:name="en"/>
     <locale android:name="zh"/>
+    <!-- zh-Hant carries a full Traditional Chinese translation in
+         values-zh-rTW but was missing here, so Android never offered it in
+         the per-app language list and LocaleManager could not resolve it. -->
+    <locale android:name="zh-Hant"/>
     <locale android:name="ja"/>
     <locale android:name="ko"/>
     <locale android:name="fr"/>
     <locale android:name="de"/>
     <locale android:name="ru"/>
+    <locale android:name="es"/>
+    <!-- Indonesian. Declared as "id" (the modern ISO code) even though the
+         resources live in values-in: Android's resource resolver normalises
+         Indonesian to the legacy "in" on every API level, so values-id would
+         never be consulted, while this list and the picker want the tag users
+         and the Play Store expect. Verified on Android 13 and 17 that tag "id"
+         resolves to values-in via both LocaleList.forLanguageTags and
+         new Locale(code). -->
+    <locale android:name="id"/>
+    <!-- Malay. Unlike Indonesian this needs no legacy-code handling: values-ms
+         is consulted for both "ms" and "ms-MY", and Indonesian does NOT fall
+         through to it (id/in resolve to English when only values-ms exists) —
+         verified on Android 13 and 17. -->
+    <locale android:name="ms"/>
+    <!-- Filipino. values-fil and values-tl are interchangeable at runtime (each
+         serves fil, tl, fil-PH and tl-PH — verified on Android 13 and 17), so
+         this is a naming choice rather than a functional one: "fil" is the
+         standardised national language and the code Android/CLDR and the Play
+         Store use, while "tl" names the regional base language. -->
+    <locale android:name="fil"/>
+    <!-- Thai. No legacy-code or fall-through caveats; values-th serves both
+         "th" and "th-TH". Verified that Thai survives the aapt2/UTF-8 round
+         trip with its combining vowels and tone marks intact. -->
+    <locale android:name="th"/>
+    <!-- Turkish. No naming caveat, but note the dotted/dotless i: any
+         .uppercase() without a Turkish locale mangles this language's headers
+         (see LocaleAwareCase.kt). -->
+    <locale android:name="tr"/>
+    <!-- Polish. Uses four CLDR plural categories (one/few/many/other), not the
+         two English has — see the REQUIRED table in the validator. -->
+    <locale android:name="pl"/>
+    <!-- Romanian. Three CLDR plural categories (one/few/other), and s/t must
+         use COMMA BELOW (U+0219/U+021B), not the cedilla forms — see the
+         WRONG_DIACRITICS check in the validator. -->
+    <locale android:name="ro"/>
+    <!-- Brazilian Portuguese. Declared as pt-BR; note that with no values-pt
+         or values-pt-rPT present, European Portuguese also falls back to this
+         file (verified on Android 13 and 17), so the wording avoids
+         Brazil-only slang where a neutral choice reads naturally in both. -->
+    <locale android:name="pt-BR"/>
 </locale-config>

@@ -41,8 +41,8 @@ struct SwipeToSendHint: View {
                     .foregroundStyle(chipFg, chipBg)
                     .shadow(color: Color.black.opacity(0.18), radius: 6, y: 2)
                 Text(isEnqueue
-                     ? String(localized: "Release to queue")
-                     : String(localized: "Release to send"))
+                     ? AppLocalized("Release to queue")
+                     : AppLocalized("Release to send"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(chipFg)
                     .padding(.horizontal, 14)
@@ -1228,7 +1228,7 @@ class PastableUITextView: UITextView, UIDropInteractionDelegate {
         super.buildMenu(with: builder)
         if UserDefaults.standard.integer(forKey: "returnKeyBehavior") == 1 {
             let insert = UICommand(
-                title: String(localized: "Insert Line Break"),
+                title: AppLocalized("Insert Line Break"),
                 image: UIImage(systemName: "return"),
                 action: #selector(insertLineBreakFromMenu(_:))
             )

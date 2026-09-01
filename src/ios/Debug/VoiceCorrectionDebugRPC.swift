@@ -137,7 +137,8 @@ enum VoiceCorrectionDebugRPC {
         let s = await VoiceCorrectionEngine.shared.correct(transcript: transcript,
                                                            locale: locale,
                                                            context: context,
-                                                           persistEvent: false)
+                                                           persistEvent: false,
+                                                           trigger: "debug")
         return [
             "original": s.original,
             "corrected": s.corrected,
@@ -149,8 +150,27 @@ enum VoiceCorrectionDebugRPC {
         ]
     }
 
+    /// Two ways to supply context, in priority order:
+    ///
+    /// 1. `messages: [{role:"user"|"assistant", text}]` — runs the REAL
+    ///    `CorrectionContextBuilder`, so the rare-term digest, the rarity scores and the
+    ///    excerpt selection are all produced by the production code path. This is the one
+    ///    to use when tuning the mining algorithm; the legacy form below bypasses the
+    ///    builder entirely and therefore can never exercise it.
+    /// 2. `lastUserMessage` / `lastAgentReply` — the original two-field form, kept so
+    ///    existing scripts and the §10.2b examples keep working unchanged.
     private static func contextFromParams(_ params: [String: Any]) -> ConversationContext {
-        ConversationContext(
+        if let raw = params["messages"] as? [[String: Any]], !raw.isEmpty {
+            let source: [CorrectionSourceMessage] = raw.compactMap { m in
+                guard let text = m["text"] as? String, !text.isEmpty else { return nil }
+                let role: CorrectionSourceMessage.Role =
+                    (m["role"] as? String) == "assistant" ? .assistant : .user
+                return CorrectionSourceMessage(
+                    role: role, text: TypedVocabularyBuilder.stripAttachmentMarkup(text))
+            }
+            return CorrectionContextBuilder.build(messages: source)
+        }
+        return ConversationContext(
             lastUserMessage: (params["lastUserMessage"] as? String).map {
                 ConversationContextTruncator.truncate($0).text
             },
@@ -224,6 +244,190 @@ enum VoiceCorrectionDebugRPC {
                 .map { ["original": $0.variants.first ?? $0.phoneticKey, "corrected": $0.correctedTerm,
                         "frequency": $0.frequency, "confidence": $0.confidence] },
         ]
+    }
+
+    /// Aggregate shape of typed_vocabulary — the health check for the table that fills the
+    /// prompt's largest evidence block.
+    ///
+    /// `vocabularyList` can only show a page of rows, so answering "how much of this table
+    /// is noise?" meant pulling thousands of rows over RPC and bucketing them client-side.
+    /// The frequency histogram and the noise classes below are the numbers that decide
+    /// whether the intake filter needs tightening: `hexLike`/`urlEncoded` are pure
+    /// segmentation garbage, and a large `singleOccurrence` share means the table is mostly
+    /// terms seen once, which can never outrank real vocabulary for a prompt slot anyway.
+    static func vocabularyStats(params: [String: Any]) async throws -> [String: Any] {
+        guard let db = VoiceCorrectionDB.shared else { throw DebugRPCErr(-32603, "db unavailable") }
+        let sample = (params["sample"] as? Int) ?? 5000
+        let rows = await db.allVocabulary(orderBy: "frequency", limit: sample)
+
+        var histogram: [String: Int] = [:]
+        for r in rows {
+            let bucket: String
+            switch r.frequency {
+            case ...1: bucket = "1"
+            case 2...3: bucket = "2-3"
+            case 4...10: bucket = "4-10"
+            case 11...50: bucket = "11-50"
+            case 51...200: bucket = "51-200"
+            default: bucket = "200+"
+            }
+            histogram[bucket, default: 0] += 1
+        }
+
+        // Noise classes, each with examples so a threshold change can be sanity-checked
+        // against the actual terms it would drop.
+        func isHexLike(_ t: String) -> Bool {
+            t.count >= 4 && t.allSatisfy { $0.isHexDigit } && t.contains { $0.isNumber }
+        }
+        func isURLEncoded(_ t: String) -> Bool {
+            let lower = t.lowercased()
+            return t.count <= 12 && (lower.hasPrefix("2f") || lower.hasPrefix("3a")
+                || lower.hasPrefix("3d") || lower.hasPrefix("3f") || lower.hasPrefix("5d"))
+        }
+        // Path fragments repeatedly observed to enter via attachment markup rather than
+        // anything the user typed as prose.
+        let pathish: Set<String> = ["image", "images", "var", "attachments", "uploads",
+                                    "attached", "jpg", "jpeg", "png", "photo", "tmp",
+                                    "documents", "library", "file", "files"]
+        func classify(_ t: String) -> String? {
+            if isHexLike(t) { return "hexLike" }
+            if isURLEncoded(t) { return "urlEncoded" }
+            if pathish.contains(t.lowercased()) { return "pathFragment" }
+            return nil
+        }
+
+        var classCounts: [String: Int] = [:]
+        var examples: [String: [String]] = [:]
+        for r in rows {
+            guard let cls = classify(r.term) else { continue }
+            classCounts[cls, default: 0] += 1
+            if examples[cls, default: []].count < 12 { examples[cls, default: []].append(r.term) }
+        }
+
+        let singleOccurrence = rows.filter { $0.frequency <= 1 }.count
+        let oov = rows.filter { $0.backgroundRank == nil }.count
+        return [
+            "totalRows": await db.rowCount(table: "typed_vocabulary"),
+            "sampled": rows.count,
+            "frequencyHistogram": histogram,
+            "singleOccurrence": singleOccurrence,
+            // OOV against the background list is the signal the rarity scorer leans on —
+            // a very high share means the background list is too small to discriminate.
+            "outOfBackgroundVocabulary": oov,
+            "noiseClasses": classCounts,
+            "noiseExamples": examples,
+            "backgroundListVersion": BackgroundWordFrequency.shared.version,
+        ]
+    }
+
+    // MARK: (e) Run trace [T-voice-correction-debug-capture]
+
+    /// Every REAL correction run, with the full evidence chain that produced it.
+    ///
+    /// This is the method to reach for when tuning the algorithm: unlike `dryRunCorrection`
+    /// (which corrects text you typed, with a context you supply) it reports what actually
+    /// happened on the device — which hotwords were mined out of the conversation, which
+    /// vocabulary rows won the 400-char budget, and what the model did with them.
+    static func traceList(params: [String: Any]) async throws -> [String: Any] {
+        let limit = (params["limit"] as? Int) ?? 10
+        let sinceID = params["sinceID"] as? Int
+        let includePrompt = (params["includePrompt"] as? Bool) ?? false
+        let entries = await VoiceCorrectionTrace.shared.recent(limit: limit, sinceID: sinceID)
+        return [
+            "count": entries.count,
+            "totalRetained": await VoiceCorrectionTrace.shared.count(),
+            "runs": entries.map { traceDict($0, includePrompt: includePrompt) },
+        ]
+    }
+
+    /// Spans the user fixed BY HAND — i.e. the cases the corrector missed.
+    ///
+    /// `admittedOnly:false` is the interesting filter: those are edits `CorrectionAdmission`
+    /// judged to be rewrites rather than ASR errors, so they never reached
+    /// confusion_dictionary. If a genuine fix shows up there, the admission thresholds are
+    /// what needs tuning — and that is invisible from the DB alone, since nothing was written.
+    static func traceManualEdits(params: [String: Any]) async throws -> [String: Any] {
+        let limit = (params["limit"] as? Int) ?? 30
+        let admittedOnly = params["admittedOnly"] as? Bool
+        let edits = await VoiceCorrectionTrace.shared.recentManualEdits(limit: limit,
+                                                                        admittedOnly: admittedOnly)
+        return [
+            "count": edits.count,
+            "edits": edits.map { e in
+                [
+                    "id": e.id, "at": e.at.timeIntervalSince1970, "source": e.source,
+                    "locale": e.locale, "from": e.from, "to": e.to,
+                    "fromPhoneticKey": e.fromPhoneticKey, "toPhoneticKey": e.toPhoneticKey,
+                    "phoneticKeyMatch": e.fromPhoneticKey == e.toPhoneticKey,
+                    "admitted": e.admitted, "reason": e.reason,
+                    "sentenceLen": e.sentenceLen,
+                    "before": e.before, "after": e.after,
+                    "precedingRunID": e.precedingRunID ?? NSNull(),
+                ] as [String: Any]
+            },
+        ]
+    }
+
+    static func traceClear(params: [String: Any]) async throws -> [String: Any] {
+        await VoiceCorrectionTrace.shared.clear()
+        return ["ok": true]
+    }
+
+    private static func traceDict(_ e: VoiceCorrectionTrace.Entry,
+                                  includePrompt: Bool) -> [String: Any] {
+        var out: [String: Any] = [
+            "id": e.id,
+            "at": e.at.timeIntervalSince1970,
+            "trigger": e.trigger,
+            "locale": e.locale,
+            "transcript": e.transcript,
+            "segmentedTokens": e.segmentedTokens,
+            "phoneticKeys": e.phoneticKeys,
+            "retrieval": [
+                "ms": e.retrievalMs, "cacheHit": e.retrievalCacheHit,
+                "candidateCount": e.candidates.count,
+                "candidates": e.candidates.map {
+                    ["token": $0.token, "phoneticKey": $0.phoneticKey, "term": $0.term,
+                     "source": $0.source, "confidence": $0.confidence,
+                     "fusedScore": $0.fusedScore, "evidence": $0.evidence] as [String: Any]
+                },
+            ] as [String: Any],
+            // The conversation-mining half: what got pulled out of the user's messages
+            // and the AI's replies, with the rarity score that earned each term its slot.
+            "contextMining": [
+                "scannedMessages": e.scannedMessageCount,
+                "buildMs": e.contextBuildMs,
+                "digestChars": e.digestChars,
+                "digestTerms": e.digestTerms.map {
+                    ["term": $0.term, "score": $0.score,
+                     "count": $0.count ?? NSNull(),
+                     "backgroundRank": $0.backgroundRank ?? NSNull()] as [String: Any]
+                },
+                "excerptChars": e.excerptChars,
+                "excerpts": e.excerpts.map {
+                    ["role": $0.role, "newestIndex": $0.newestIndex, "kind": $0.kind,
+                     "chars": $0.chars, "text": $0.text] as [String: Any]
+                },
+            ] as [String: Any],
+            // What survived budget clamping into the prompt. Comparing `promptVocabTerms`
+            // against `retrieval.candidates` shows exactly which evidence got squeezed out.
+            "promptEvidence": [
+                "vocabTerms": e.promptVocabTerms,
+                "confusionLines": e.promptConfusionLines,
+                "blockChars": e.blockChars,
+            ] as [String: Any],
+            "verdict": [
+                "corrected": e.corrected ?? NSNull(),
+                "changed": e.changed ?? NSNull(),
+                "appliedPairs": e.appliedPairs ?? [],
+                "rejectedReason": e.rejectedReason ?? NSNull(),
+                "modelGroup": e.modelGroup ?? NSNull(),
+                "totalMs": e.totalMs ?? NSNull(),
+            ] as [String: Any],
+        ]
+        // Off by default: a full prompt is ~2.5k chars and swamps a multi-run listing.
+        if includePrompt { out["prompt"] = e.prompt }
+        return out
     }
 
     // MARK: (c) Admin / test-scaffolding (DESTRUCTIVE — see registry descriptions)

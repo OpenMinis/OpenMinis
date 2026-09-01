@@ -108,6 +108,15 @@ fun ImageGalleryViewer(
     // single-image FullscreenImageViewer — see its comment block (T169)
     // for why we don't touch decorFitsSystemWindows on the activity
     // window.
+    //
+    // [T-android-preview-statusbar-leak] This captures the previous
+    // isAppearanceLight* values, which is safe HERE only because the effect is
+    // keyed on `Unit` and this viewer is never composed alongside another
+    // writer of those flags — it takes over the whole screen. The web preview
+    // pair (sheet ↔ fullscreen) could not make that assumption, overlapped, and
+    // leaked a stale value; both now restore from the theme instead. If this
+    // viewer ever gains a sibling that also writes these flags, do the same
+    // here rather than keeping the capture.
     DisposableEffect(Unit) {
         val window = (view.context as? android.app.Activity)?.window
         val controller = window?.let { WindowInsetsControllerCompat(it, view) }

@@ -15,7 +15,7 @@ extension ModelEntry {
         providerInstanceId: SystemVoiceProvider.builtinProviderId,
         model: LLMModel(
             id: "system-asr-online",
-            displayName: String(localized: "System Recognition (Online)", comment: "Built-in cloud ASR option"),
+            displayName: AppLocalized("System Recognition (Online)", comment: "Built-in cloud ASR option"),
             provider: "system",
             modalityOverride: [.audioInput]
         ),
@@ -30,7 +30,7 @@ extension ModelEntry {
         providerInstanceId: SystemVoiceProvider.builtinProviderId,
         model: LLMModel(
             id: "system-asr-offline",
-            displayName: String(localized: "System Recognition (Offline)", comment: "Built-in on-device ASR option"),
+            displayName: AppLocalized("System Recognition (Offline)", comment: "Built-in on-device ASR option"),
             provider: "system",
             modalityOverride: [.audioInput]
         ),
@@ -43,7 +43,7 @@ extension ModelEntry {
         providerInstanceId: SystemVoiceProvider.builtinProviderId,
         model: LLMModel(
             id: "system-asr",
-            displayName: String(localized: "System Speech Recognition", comment: "Built-in ASR option"),
+            displayName: AppLocalized("System Speech Recognition", comment: "Built-in ASR option"),
             provider: "system",
             modalityOverride: [.audioInput]
         ),
@@ -54,7 +54,7 @@ extension ModelEntry {
         providerInstanceId: SystemVoiceProvider.builtinProviderId,
         model: LLMModel(
             id: "system-tts",
-            displayName: String(localized: "System Voice (Auto)", comment: "Built-in TTS auto-by-language option"),
+            displayName: AppLocalized("System Voice (Auto)", comment: "Built-in TTS auto-by-language option"),
             provider: "system",
             modalityOverride: [.audioOutput]
         ),
@@ -593,9 +593,9 @@ struct UnifiedModelPicker: View {
     private static func uniqueGroupName(for dir: VoiceDirection?, store: ProviderConfigStore) -> String {
         let base: String
         switch dir {
-        case .input:  base = String(localized: "Voice Input", comment: "Default voice input group name")
-        case .output: base = String(localized: "Voice Output", comment: "Default voice output group name")
-        case nil:     base = String(localized: "New Group", comment: "Default group name")
+        case .input:  base = AppLocalized("Voice Input", comment: "Default voice input group name")
+        case .output: base = AppLocalized("Voice Output", comment: "Default voice output group name")
+        case nil:     base = AppLocalized("New Group", comment: "Default group name")
         }
         let existing = Set(store.modelGroups.map(\.name))
         if !existing.contains(base) { return base }
@@ -700,9 +700,9 @@ struct UnifiedModelPicker: View {
         .contextMenu {
             Button {
                 UIPasteboard.general.string = "group:\(group.id)"
-                MinisToast.show(String(localized: "Copied: \(group.name)"))
+                MinisToast.show(AppLocalized("Copied: \(group.name)"))
             } label: {
-                Label(String(localized: "Copy Shortcut Model ID"), systemImage: "link")
+                Label(AppLocalized("Copy Shortcut Model ID"), systemImage: "link")
             }
         }
     }
@@ -714,7 +714,7 @@ struct UnifiedModelPicker: View {
     @ViewBuilder
     private func groupSubtitle(_ group: ModelGroup) -> some View {
         if group.memberEntryIds.isEmpty {
-            Text(String(localized: "No models"))
+            Text(AppLocalized("No models"))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         } else if isGroupSelected(group),
@@ -727,15 +727,15 @@ struct UnifiedModelPicker: View {
             let available = availableMemberEntryIds(group).count
             let total = group.memberEntryIds.count
             if available == total {
-                Text(String(localized: "\(total) models"))
+                Text(AppLocalized("\(total) models"))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if available == 0 {
-                Text(String(localized: "\(total) models · all unavailable"))
+                Text(AppLocalized("\(total) models · all unavailable"))
                     .font(.caption)
                     .foregroundStyle(.red.opacity(0.7))
             } else {
-                Text(String(localized: "\(available)/\(total) available"))
+                Text(AppLocalized("\(available)/\(total) available"))
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -766,15 +766,15 @@ struct UnifiedModelPicker: View {
         // available, so it short-circuits BEFORE the instance/credential checks.
         // This is property-driven: no "is this System?" branch here.
         guard let entry = store.entry(for: entryId) ?? Self.systemEntry(for: entryId) else {
-            return String(localized: "Model not found")
+            return AppLocalized("Model not found")
         }
         if !entry.displayTraits.requiresCredential { return nil }
-        if entry.isHidden { return String(localized: "Hidden") }
+        if entry.isHidden { return AppLocalized("Hidden") }
         guard let instance = store.instance(for: entry.providerInstanceId) else {
-            return String(localized: "Provider not found")
+            return AppLocalized("Provider not found")
         }
-        if !instance.isEnabled { return String(localized: "Provider disabled") }
-        if !instance.hasAnyCredential { return String(localized: "Not signed in") }
+        if !instance.isEnabled { return AppLocalized("Provider disabled") }
+        if !instance.hasAnyCredential { return AppLocalized("Not signed in") }
         return nil
     }
 
@@ -806,7 +806,7 @@ struct UnifiedModelPicker: View {
                 let parts = voiceId.split(separator: ".").map(String.init)
                 let leaf = parts.last ?? voiceId
                 let lang = parts.count >= 2 ? parts[parts.count - 2] : ""
-                let notInstalled = String(localized: "not installed", comment: "voice pack not downloaded")
+                let notInstalled = AppLocalized("not installed", comment: "voice pack not downloaded")
                 name = lang.isEmpty ? "\(leaf) · \(notInstalled)" : "\(leaf) (\(lang)) · \(notInstalled)"
             }
             return ModelEntry(
@@ -937,9 +937,9 @@ struct UnifiedModelPicker: View {
         .contextMenu {
             Button {
                 UIPasteboard.general.string = "entry:\(entry.compositeKey)"
-                MinisToast.show(String(localized: "Copied: \(entry.model.displayName)"))
+                MinisToast.show(AppLocalized("Copied: \(entry.model.displayName)"))
             } label: {
-                Label(String(localized: "Copy Shortcut Model ID"), systemImage: "link")
+                Label(AppLocalized("Copy Shortcut Model ID"), systemImage: "link")
             }
         }
     }
@@ -1024,7 +1024,7 @@ struct UnifiedModelPicker: View {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.down")
                             .font(.system(size: 11, weight: .medium))
-                        Text(String(localized: "Show \(item.entries.count) models"))
+                        Text(AppLocalized("Show \(item.entries.count) models"))
                             .font(.caption)
                     }
                     .foregroundStyle(.tint)
@@ -1152,9 +1152,9 @@ struct UnifiedModelPicker: View {
         .contextMenu {
             Button {
                 UIPasteboard.general.string = "entry:\(entry.compositeKey)"
-                MinisToast.show(String(localized: "Copied: \(entry.model.displayName)"))
+                MinisToast.show(AppLocalized("Copied: \(entry.model.displayName)"))
             } label: {
-                Label(String(localized: "Copy Shortcut Model ID"), systemImage: "link")
+                Label(AppLocalized("Copy Shortcut Model ID"), systemImage: "link")
             }
         }
     }

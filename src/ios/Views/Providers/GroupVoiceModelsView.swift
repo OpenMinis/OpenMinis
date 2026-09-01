@@ -20,8 +20,8 @@ enum VoiceDirection {
     /// merely accept audio don't appear).
     var filterNote: String {
         self == .input
-            ? String(localized: "Only dedicated speech-to-text models are listed — those whose only input is audio (e.g. Whisper). Multimodal chat models that can also hear audio are not shown.", comment: "Voice input filter explanation")
-            : String(localized: "Only dedicated text-to-speech models are listed — those whose only output is audio (e.g. TTS voices). Multimodal chat models are not shown.", comment: "Voice output filter explanation")
+            ? AppLocalized("Only dedicated speech-to-text models are listed — those whose only input is audio (e.g. Whisper). Multimodal chat models that can also hear audio are not shown.", comment: "Voice input filter explanation")
+            : AppLocalized("Only dedicated text-to-speech models are listed — those whose only output is audio (e.g. TTS voices). Multimodal chat models are not shown.", comment: "Voice output filter explanation")
     }
 
     /// Whether `model` is a dedicated voice model for THIS direction.

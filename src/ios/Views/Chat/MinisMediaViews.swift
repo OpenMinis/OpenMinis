@@ -894,11 +894,11 @@ struct MinisTextPreviewView: View {
                         Button {
                             PrintHelper.printText(text, jobName: fileURL.lastPathComponent)
                         } label: {
-                            Label(String(localized: "Print"), systemImage: "printer")
+                            Label(AppLocalized("Print"), systemImage: "printer")
                         }
                         .disabled(text.isEmpty)
                         Button { showShareSheet = true } label: {
-                            Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                            Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -1017,17 +1017,17 @@ struct MinisMarkdownPreviewView: View {
                         Button {
                             PrintHelper.printText(markdownContent, jobName: fileURL.lastPathComponent)
                         } label: {
-                            Label(String(localized: "Print"), systemImage: "printer")
+                            Label(AppLocalized("Print"), systemImage: "printer")
                         }
                         .disabled(markdownContent.isEmpty)
                         Button { showShareSheet = true } label: {
-                            Label(String(localized: "Share"), systemImage: "square.and.arrow.up")
+                            Label(AppLocalized("Share"), systemImage: "square.and.arrow.up")
                         }
                         Button {
                             VoiceOutputPlayer.shared.stopAll()
                             VoiceOutputPlayer.shared.enqueueSegmented(markdownContent, sessionId: VoiceOutputPlayer.manualOwnerId)
                         } label: {
-                            Label(String(localized: "Read Aloud"), systemImage: "speaker.wave.2")
+                            Label(AppLocalized("Read Aloud"), systemImage: "speaker.wave.2")
                         }
                         .disabled(markdownContent.isEmpty)
                     } label: {

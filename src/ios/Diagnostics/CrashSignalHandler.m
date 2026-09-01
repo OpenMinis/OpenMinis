@@ -150,6 +150,26 @@ static NSUncaughtExceptionHandler *g_prevExceptionHandler = nil;
 static void uncaught_exception_handler(NSException *exception) {
     if (__sync_val_compare_and_swap(&g_handlingException, 0, 1) != 0) return;
 
+    // [T-ios-mac-uncaught-nsexception] Emit the name/reason through NSLog FIRST,
+    // before touching the filesystem.
+    //
+    // Two reasons this is not redundant with the crash file below. (1) NSLog is
+    // what LoggingManager captures into the daily log, so the reason survives in
+    // a log the user can export immediately — the crash file is only surfaced on
+    // the NEXT launch, and only if one happens. (2) On macOS the App Store crash
+    // report strips `Application Specific Information`, which is exactly where
+    // the NSException reason would otherwise appear: the report for OpenMinis'
+    // Mac crashes showed only `_crashOnException:` with no reason at all. This
+    // line is the one that makes the next occurrence diagnosable.
+    //
+    // userInfo is included because NSInvalidArgumentException from KVC carries
+    // the offending key there, which usually names the culprit outright.
+    NSLog(@"🛑 [UncaughtException] %@ — %@ | userInfo=%@ | callStack=%@",
+          exception.name,
+          exception.reason ?: @"(no reason)",
+          exception.userInfo ?: @{},
+          exception.callStackSymbols ?: @[]);
+
     if (g_crashStackPath[0] != '\0') {
         int fd = open(g_crashStackPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd >= 0) {
@@ -203,10 +223,20 @@ static void uncaught_exception_handler(NSException *exception) {
 @implementation CrashSignalHandler
 
 + (void)install {
+    // [T-ios-mac-uncaught-nsexception] Idempotent. `install` is now called from
+    // MinisApp.init() as well as CrashReporter.onAppLaunch(), and re-installing
+    // would set g_prevExceptionHandler to OUR OWN handler — every uncaught
+    // exception would then recurse into itself instead of reaching Apple's
+    // reporter. The guard is deliberately not a dispatch_once: a failed first
+    // attempt (no Application Support directory) should be retryable.
+    static BOOL installed = NO;
+    if (installed) return;
+
     // Compute path once
     NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(
         NSApplicationSupportDirectory, NSUserDomainMask, YES);
     if (dirs.count == 0) return;
+    installed = YES;
     NSString *path = [dirs[0] stringByAppendingPathComponent:@"last_crash_stack.txt"];
     strlcpy(g_crashStackPath, path.fileSystemRepresentation, sizeof(g_crashStackPath));
 

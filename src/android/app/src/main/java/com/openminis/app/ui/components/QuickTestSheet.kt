@@ -445,7 +445,21 @@ internal suspend fun performTest(
 
     val instance = providerRepository.instance(entry.providerInstanceId)
         ?: return@withContext failure("Provider instance not found.")
-    val apiKey = providerRepository.loadApiKey(instance.id)
+    // [T-android-keyless-provider-selection] usableApiKey, NOT loadApiKey.
+    //
+    // A self-hosted OpenAI/Anthropic-compatible endpoint (ollama, LM Studio,
+    // LiteLLM, an unauthenticated internal gateway) legitimately stores no key,
+    // so `loadApiKey` returns null and Quick Test refused to run at all —
+    // reporting "No API key configured" for a provider that needs none, before
+    // any request was attempted. That is the same local short-circuit the
+    // refresh path had (f2be9a834); the credential decision belongs to the
+    // server, not to a pre-flight null check.
+    //
+    // `usableApiKey` substitutes "" exactly where an empty key is a valid
+    // configuration (`ProviderInstance.allowsEmptyAPIKey`) and still returns
+    // null for an official endpoint with no key, so providers that genuinely
+    // require one keep failing fast with the same message.
+    val apiKey = providerRepository.usableApiKey(instance)
         ?: return@withContext failure("No API key configured for this provider.")
 
     // [T-android-provider-voice] Speech tests route through the VoiceProvider

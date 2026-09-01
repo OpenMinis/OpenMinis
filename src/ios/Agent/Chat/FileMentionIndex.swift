@@ -102,7 +102,24 @@ final class FileMentionIndex: ObservableObject {
     @Published private(set) var isScanning: Bool = false
 
     /// Cache window — within this interval, repeated `@` triggers reuse results.
-    let cacheTTL: TimeInterval = 600
+    ///
+    /// [T-ios-mention-index-stale-mounts] Was 600s. The mount-set case is now
+    /// handled precisely by `invalidateCache`, but that cannot see the OTHER way
+    /// the roots go stale: files created INSIDE an already-scanned root — by the
+    /// agent itself, by a shell command, or by the user in Files. Those have no
+    /// event to hook, so the TTL is the only thing that recovers them, and ten
+    /// minutes is far too long for a picker whose whole job is "show me what's
+    /// there now" (the reporter described exactly this: newly added files not
+    /// showing up).
+    ///
+    /// 30s keeps the cache doing its real job — absorbing the burst of repeated
+    /// `@` keystrokes within one composing session, where a rescan per character
+    /// would be wasteful — while making staleness self-correct in a timeframe a
+    /// user reads as "immediately" rather than "broken". A rescan is bounded by
+    /// `globalScanBudget` and runs off the main thread, and the menu keeps
+    /// showing the previous entries while it refreshes, so the cost of the
+    /// shorter window is not visible in the UI.
+    let cacheTTL: TimeInterval = 30
 
     /// Depth cap applied when walking mount directories.
     private let mountScanMaxDepth = 3
@@ -122,10 +139,39 @@ final class FileMentionIndex: ObservableObject {
     private var scanQueue = DispatchQueue(label: "com.openminis.filementionindex", qos: .userInitiated)
     /// Monotonic token — cancels stale scans when a new one starts.
     private var currentScanToken: UUID?
+    /// Entries produced by the IN-FLIGHT scan only. Main-thread confined (written
+    /// and read solely inside `publish`'s main-queue block, cleared in
+    /// `forceRefresh` before any layer can publish). See `publish` for why the
+    /// displayed list and the scan's own output have to be tracked separately.
+    private var scanAccumulator: [FileMentionEntry] = []
 
     private init() {}
 
     // MARK: - Public API
+
+    /// Drop the cached scan so the next `@` rebuilds the index from disk.
+    ///
+    /// [T-ios-mention-index-stale-mounts] The TTL+session cache assumed the set of
+    /// scan roots is fixed for the life of a session. Mounting or unmounting an
+    /// external folder changes that set underneath it: the user mounts a folder,
+    /// returns to a chat they already used `@` in, and gets "No matching files"
+    /// for up to 10 minutes — while a NEW session (different `sessionId`, so a
+    /// forced rescan) shows the folder immediately. That asymmetry is exactly
+    /// what the bug report describes.
+    ///
+    /// Invalidating rather than rescanning here is deliberate: mount changes
+    /// happen in Settings, where nobody is waiting on the index, and a mount can
+    /// be added and removed several times in a row. Clearing `lastScanAt` makes
+    /// the next `refreshIfNeeded` — i.e. the next `@` the user actually types —
+    /// do the work, on the session that needs it.
+    ///
+    /// `entries` is intentionally NOT cleared: the current list stays usable
+    /// (and the menu stays populated) until the fresh scan replaces it.
+    func invalidateCache(reason: String) {
+        lastScanAt = nil
+        lastScannedSessionId = nil
+        logger.info("cache invalidated (\(reason)) — next @ will rescan")
+    }
 
     /// Trigger a scan if the cache has expired OR the session has changed.
     /// Safe to call every time the user types `@` — cheap when cached.
@@ -142,16 +188,32 @@ final class FileMentionIndex: ObservableObject {
             #endif
             return
         }
-        forceRefresh(sessionId: sessionId)
+        // Keep the existing rows on screen while this rescan runs — a TTL lapse
+        // during typing must not blank an open menu. `forceRefresh` still clears
+        // them when the session actually changed.
+        forceRefresh(sessionId: sessionId, keepingEntries: true)
     }
 
-    /// Unconditional refresh — wipes state and re-scans all layers.
-    func forceRefresh(sessionId: String?) {
+    /// Unconditional refresh — re-scans all layers.
+    ///
+    /// `keepingEntries: true` leaves the current `entries` in place while the new
+    /// scan runs, so the menu shows the previous (possibly slightly stale) list
+    /// instead of going blank. Callers that are switching to a DIFFERENT session
+    /// pass false, because those entries belong to the old session's roots and
+    /// showing them would be wrong, not merely stale.
+    ///
+    /// [T-ios-mention-index-stale-mounts] This distinction only started to matter
+    /// when the TTL dropped to 30s: with a same-session refresh now happening
+    /// routinely mid-typing, the unconditional `entries = []` would blank the
+    /// open mention menu every time the window lapsed.
+    func forceRefresh(sessionId: String?, keepingEntries: Bool = false) {
         let token = UUID()
         currentScanToken = token
+        let sessionChanged = (lastScannedSessionId != sessionId)
         lastScannedSessionId = sessionId
         lastScanAt = Date()
-        entries = []
+        if !keepingEntries || sessionChanged { entries = [] }
+        scanAccumulator = []
         isScanning = true
 
         logger.info("scan start token=\(token.uuidString.prefix(8)) sid=\(sessionId ?? "nil")")
@@ -528,20 +590,41 @@ final class FileMentionIndex: ObservableObject {
     private func publish(token: UUID, newEntries: [FileMentionEntry], layer: String, done: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.currentScanToken == token else { return }
-            var seen = Set(self.entries.map(\.linuxPath))
-            var merged = self.entries
-            merged.reserveCapacity(merged.count + newEntries.count)
-            var addedCount = 0
-            for e in newEntries where !seen.contains(e.linuxPath) {
+
+            // [T-ios-mention-index-stale-mounts] Accumulate THIS scan's own output
+            // separately from what is on screen.
+            //
+            // Layers publish incrementally and each one only carries its own
+            // roots, so the displayed list must stay a union as the scan
+            // progresses. But a refresh that keeps the previous entries visible
+            // (see `forceRefresh(keepingEntries:)`) would otherwise make deleted
+            // files immortal: they are in `entries`, no layer ever re-reports
+            // them, and nothing removes them. Tracking the fresh set lets the
+            // final layer swap the list wholesale, so deletions land while the
+            // menu still never goes blank mid-scan.
+            self.scanAccumulator.append(contentsOf: newEntries)
+
+            var seen = Set<String>()
+            var merged: [FileMentionEntry] = []
+            merged.reserveCapacity(self.scanAccumulator.count + self.entries.count)
+            // Fresh results win; stale carry-overs only fill gaps until `done`.
+            for e in self.scanAccumulator where !seen.contains(e.linuxPath) {
                 seen.insert(e.linuxPath)
                 merged.append(e)
-                addedCount += 1
+            }
+            let freshCount = merged.count
+            if !done {
+                for e in self.entries where !seen.contains(e.linuxPath) {
+                    seen.insert(e.linuxPath)
+                    merged.append(e)
+                }
             }
             merged.sort(by: Self.defaultOrdering)
             self.entries = merged
-            self.logger.info("scan layer=\(layer) added=\(addedCount) total=\(merged.count) done=\(done)")
+            self.logger.info("scan layer=\(layer) fresh=\(freshCount) shown=\(merged.count) done=\(done)")
             if done {
                 self.isScanning = false
+                self.scanAccumulator = []
             }
         }
     }

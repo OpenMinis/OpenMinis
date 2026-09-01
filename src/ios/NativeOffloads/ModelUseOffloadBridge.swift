@@ -179,6 +179,64 @@ private let logger = AppLogger(category: "ModelUseOffload")
         return result
     }
 
+    // MARK: - Transient-error retry
+
+    /// [T-modeluse-transient-retry] Bounded exponential-backoff retry for
+    /// `LLMError.transientError` — the error providers already throw for
+    /// vendor-side temporary failures (Gemini marks 500/502/503/504/529 as
+    /// transient; other providers use the same case). The CLI previously
+    /// exited 1 on the FIRST 503 ("This model is currently experiencing high
+    /// demand"), forcing the calling agent to re-run the whole command by
+    /// hand — three manual re-runs over 21 minutes in the 8/17 device log.
+    /// Nothing above the CLI retries either: shell_execute just reports the
+    /// exit code, and the agent loop treats it as tool output, not an error.
+    ///
+    /// Only `.transientError` retries — a 400/`providerError` (bad input)
+    /// still fails fast on the first attempt. `canRetry` lets the streaming
+    /// path veto retries once output bytes have already been emitted to the
+    /// caller's fd (a retry there would duplicate visible text; transient
+    /// failures at that point surface immediately instead).
+    ///
+    /// Delays are 2s, 4s, 8s, 16s, 32s (maxRetries=5 → up to 6 attempts,
+    /// ~62s of total waiting). Fixed defaults rather than a --max-retries
+    /// flag: the CLI's contract is "behave like a well-configured client",
+    /// and a knob would push the retry decision back onto the agent this
+    /// exists to relieve.
+    ///
+    /// [T-modeluse-503-budget] The original budget (3 retries, 1s/2s/4s = 7s)
+    /// was too small for the case that actually reaches users: an
+    /// image-bearing request to gemini-3.7-flash. Reproduced OUTSIDE the app
+    /// with plain curl against generativelanguage.googleapis.com — 3 of 5
+    /// image requests answered 503 while 5 of 5 text-only requests in the same
+    /// window answered 200, and one sequence needed a 4th attempt to succeed.
+    /// So the congestion window for large multipart bodies routinely outlives
+    /// 7s. Gemini's 503 carries no `Retry-After` (verified), so the schedule
+    /// is a guess either way; starting at 2s instead of 1s stops the first
+    /// retry from being spent while the vendor is provably still saturated.
+    static func withTransientRetry<T>(
+        label: String,
+        maxRetries: Int = 5,
+        initialDelaySeconds: Double = 2,
+        canRetry: @escaping () -> Bool = { true },
+        sleeper: (UInt64) async -> Void = { try? await Task.sleep(nanoseconds: $0) },
+        operation: () async throws -> T
+    ) async rethrows -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await operation()
+            } catch let error as LLMError {
+                guard case .transientError(let message) = error,
+                      attempt < maxRetries,
+                      canRetry() else { throw error }
+                attempt += 1
+                let delaySeconds = initialDelaySeconds * pow(2.0, Double(attempt - 1))
+                logger.warning("[ModelUseRetry] \(label): transient provider error — retry \(attempt)/\(maxRetries) in \(Int(delaySeconds))s: \(message.prefix(200))")
+                await sleeper(UInt64(delaySeconds * 1_000_000_000))
+            }
+        }
+    }
+
     // MARK: - Run Model
 
     @objc public static func runModel(idOrName modelIdOrName: String,
@@ -363,6 +421,24 @@ private let logger = AppLogger(category: "ModelUseOffload")
                 // [T-log-noise-privacy 2026-07-18] Query stripped (can carry
                 // ?key=... credentials on custom endpoints).
                 logger.info("[ModelUseRoute] CUSTOM-ENDPOINT absolute path=\(customPath.split(separator: "?", maxSplits: 1).first.map(String.init) ?? customPath)")
+            }
+        } else if let data = inputJSON.data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // [T-gemini37-flash-minimal-400 §2] extra_body / extra_headers only
+            // exist on the OpenAI-compatible path above. They used to be dropped
+            // SILENTLY for Gemini/Anthropic, so a caller passing
+            // `extra_body.generationConfig.thinkingConfig` believed it took
+            // effect. Say so, and point Gemini callers at the field that DOES
+            // work (top-level snake_case `generation_config`, applied below via
+            // parseGenerationConfig → GeminiProvider.extraGenerationConfig).
+            if parsed["extra_body"] != nil {
+                let hint = provider is GeminiProvider
+                    ? " For Gemini, use the top-level \"generation_config\" field (snake_case) instead — it is merged into the request's generationConfig."
+                    : ""
+                callWarnings.append("extra_body is only applied to OpenAI-compatible providers; ignored for \(type(of: provider)).\(hint)")
+            }
+            if parsed["extra_headers"] != nil {
+                callWarnings.append("extra_headers is only applied to OpenAI-compatible providers; ignored for \(type(of: provider)).")
             }
         }
 
@@ -644,25 +720,42 @@ private let logger = AppLogger(category: "ModelUseOffload")
 
         if isStreaming {
             var fullText = ""
-            let stream = try await provider.streamMessage(
-                messages: messages,
-                systemPrompt: systemPrompt,
-                maxTokens: maxTokens,
-                temperature: temperature >= 0 ? temperature : nil
-            )
-            for try await chunk in stream {
-                switch chunk {
-                case .text(let t):
-                    fullText += t
-                    let data = Data(t.utf8)
-                    data.withUnsafeBytes { buf in
-                        _ = write(streamFd, buf.baseAddress!, buf.count)
+            // [T-modeluse-transient-retry] Retry covers stream OPEN and any
+            // failure before the first emitted byte (the Gemini 503 fires at
+            // request time, before any chunk). Once text has reached the
+            // caller's fd a retry would duplicate it — canRetry vetoes.
+            var emittedOutput = false
+            try await withTransientRetry(label: "run/stream \(entry.model.id)",
+                                         canRetry: { !emittedOutput }) {
+                // [T-modeluse-503-budget] Reset the accumulator per attempt.
+                // A retry is only permitted while `emittedOutput == false`, so
+                // nothing has reached the caller's fd — but a partial `.text`
+                // chunk could still have landed in `fullText` before the
+                // failure (it is appended one statement before the flag is
+                // set). Without this reset that fragment would be prepended to
+                // the successful attempt's text and written to --output.
+                fullText = ""
+                let stream = try await provider.streamMessage(
+                    messages: messages,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens,
+                    temperature: temperature >= 0 ? temperature : nil
+                )
+                for try await chunk in stream {
+                    switch chunk {
+                    case .text(let t):
+                        fullText += t
+                        emittedOutput = true
+                        let data = Data(t.utf8)
+                        data.withUnsafeBytes { buf in
+                            _ = write(streamFd, buf.baseAddress!, buf.count)
+                        }
+                    case .finished:
+                        // Write newline at end of stream
+                        _ = write(streamFd, "\n", 1)
+                    default:
+                        break
                     }
-                case .finished:
-                    // Write newline at end of stream
-                    _ = write(streamFd, "\n", 1)
-                default:
-                    break
                 }
             }
 
@@ -679,12 +772,17 @@ private let logger = AppLogger(category: "ModelUseOffload")
                 "output_file": outputHostPath.map { Self.toLinuxPath($0) } ?? NSNull(),
             ], warnings: callWarnings, extras: appliedExtras)
         } else {
-            let response = try await provider.sendMessage(
-                messages: messages,
-                systemPrompt: systemPrompt,
-                maxTokens: maxTokens,
-                temperature: temperature >= 0 ? temperature : nil
-            )
+            // [T-modeluse-transient-retry] Non-streaming: nothing has been
+            // surfaced to the caller until sendMessage returns, so the whole
+            // request is always safe to retry.
+            let response = try await withTransientRetry(label: "run/send \(entry.model.id)") {
+                try await provider.sendMessage(
+                    messages: messages,
+                    systemPrompt: systemPrompt,
+                    maxTokens: maxTokens,
+                    temperature: temperature >= 0 ? temperature : nil
+                )
+            }
 
             // Determine output format from --output extension
             let outputExt = outputHostPath.map { ($0 as NSString).pathExtension.lowercased() } ?? ""

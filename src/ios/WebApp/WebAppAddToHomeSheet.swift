@@ -224,7 +224,7 @@ struct WebAppAddToHomeSheet: View {
         guard let url = buildLauncherURL(classification: cls,
                                          title: trimmedTitle,
                                          category: category) else {
-            errorMessage = String(localized: "Couldn't build the launcher URL.")
+            errorMessage = AppLocalized("Couldn't build the launcher URL.")
             opening = false
             return
         }

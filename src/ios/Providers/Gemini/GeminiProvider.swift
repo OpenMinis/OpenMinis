@@ -296,6 +296,19 @@ final class GeminiProvider: LLMProvider {
     /// described in ONE place. Behaviour is byte-for-byte unchanged — pinned by
     /// ThinkingWireGeminiAnthropicSnapshotTests (182 rows generated from the previous
     /// implementation of this method and committed before the migration).
+    /// True for models whose response modality is not text (TTS today; image/embedding
+    /// share the trait). The Gemini API rejects `systemInstruction` on these with
+    /// 400 "Developer instruction is not enabled for this model", exactly as it rejects
+    /// a thinking config.
+    ///
+    /// [T-gemini-tts-thinking-400 / OpenMinis#226] Keyed off the DECLARED MODALITY rather
+    /// than the model id, because that is the property actually responsible: the id-suffix
+    /// list in `ThinkingRuleResolver` exists only because the thinking rules are consulted
+    /// without a capability object in scope. Here we have one, so use it.
+    private var rejectsSystemInstruction: Bool {
+        model.capabilities.supportedModalities.contains(.audioOutput)
+    }
+
     private func minimalThinkingConfig() -> [String: Any] {
         let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: model.id, level: .off)
         thinkingLogger.info("[resolve] provider=gemini model=\(model.id) level=off keys=[\(cfg.keys.sorted().joined(separator: ","))]")
@@ -341,7 +354,10 @@ final class GeminiProvider: LLMProvider {
         }
         body["contents"] = contents
 
-        if let sys = systemPrompt, !sys.isEmpty {
+        // [OpenMinis#226] Audio-output models reject systemInstruction outright. Dropping
+        // it costs nothing here: the sub-agent preamble it carries is guidance for a text
+        // responder, and a TTS model's job is to speak `contents` verbatim.
+        if let sys = systemPrompt, !sys.isEmpty, !rejectsSystemInstruction {
             body["systemInstruction"] = ["parts": [["text": sys]]]
         }
 

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -113,7 +114,12 @@ const val KEY_AUTO_GROUPING = "autoGroupingEnabled"  // Boolean, default true
 const val KEY_FONT_CHAT_INPUT = "font_chat_input"  // Int scale level -2..3
 const val KEY_FONT_MESSAGE = "font_message"        // Int scale level -2..3
 const val KEY_FONT_APP_BASE = "font_app_base"      // Int scale level -2..3
-const val KEY_LANGUAGE = "app_language"             // "" = system, "en", "zh", "ja", "ko", "fr", "de", "ru"
+// "" = system, else a BCP-47 tag: "en", "zh", "zh-Hant", "ja", "ko", "fr",
+// "de", "ru", "es". Region-qualified tags are stored in BCP-47 form so both
+// LocaleList.forLanguageTags (API 33+) and LocaleWrap.parseLocale (pre-33)
+// resolve them; every value here must also appear in res/xml/locales_config.xml
+// or Android will not offer the language in system per-app settings.
+const val KEY_LANGUAGE = "app_language"
 
 /** True when Enter (without Shift) should send the message. iOS calls this
  *  `returnKeyBehavior == 1`. Default 0 = Enter inserts a newline (matches
@@ -139,6 +145,16 @@ fun autoExpandThinkingEnabled(context: Context): Boolean =
     getAppearancePrefs(context).getBoolean(KEY_AUTO_EXPAND_THINKING, true)
 
 /** Font scale levels matching iOS: XS(-2) Small(-1) Default(0) Medium(1) Large(2) XL(3) */
+/**
+ * [T-android-app-icon-tile-max-width] Upper bound for one app-icon preview tile.
+ *
+ * Matches the 192px the preview bitmap is rasterized at — a launcher icon's
+ * native size, and there is no higher-resolution source to draw from — so the
+ * artwork is never asked to scale far past its own resolution. Without a cap the
+ * weight(1f) tiles reached ~380dp on a tablet and the icons visibly blurred.
+ */
+private val APP_ICON_TILE_MAX_WIDTH = 192.dp
+
 private val fontScaleLabels = listOf("XS", "Small", "Default", "Medium", "Large", "XL")
 private val fontScaleValues = listOf(-2, -1, 0, 1, 2, 3)
 private val fontScaleMultipliers = listOf(0.88f, 0.94f, 1.0f, 1.06f, 1.12f, 1.21f)
@@ -151,12 +167,69 @@ private val languageOptions = listOf(
     LanguageOption("", "\uD83C\uDF10", ""),
     LanguageOption("en", "\uD83C\uDDFA\uD83C\uDDF8", "English"),
     LanguageOption("zh", "\uD83C\uDDE8\uD83C\uDDF3", "简体中文"),
+    // zh-Hant: values-zh-rTW has carried a Traditional Chinese translation
+    // all along, but the picker never listed it and locales_config.xml never
+    // declared it, so those users could not select it at all. The tag is
+    // BCP-47 on purpose \u2014 LocaleList.forLanguageTags and
+    // LocaleWrap.parseLocale both resolve it to the zh-rTW resources,
+    // whereas a bare "zh" would land on Simplified.
+    // [T-android-zh-hant-flag] Flag is HK (\uD83C\uDDED\uD83C\uDDF0), matching
+    // iOS ContentView's own zh-Hant entry.
+    //
+    // It was TW (\uD83C\uDDF9\uD83C\uDDFC), which rendered as an EMPTY BOX on a
+    // Huawei MatePad \u2014 Chinese-market ROMs generally ship fonts with that
+    // flag glyph withheld, so the row had no icon at all.
+    //
+    // HK is the same glyph iOS already uses for this row, so it is the smallest
+    // change that also keeps the platforms aligned. If it turns out to be
+    // withheld on the same devices, the answer is to drop the flag for this row
+    // rather than hunt for a third region \u2014 a script is not a country.
+    //
+    // A region flag is a poor label for a script in any case (zh-Hant is used
+    // in TW, HK and MO alike), but keeping the two platforms on the same glyph
+    // beats inventing a third answer here.
+    LanguageOption("zh-Hant", "\uD83C\uDDED\uD83C\uDDF0", "\u7E41\u9AD4\u4E2D\u6587"),
     LanguageOption("ja", "\uD83C\uDDEF\uD83C\uDDF5", "日本語"),
     LanguageOption("ko", "\uD83C\uDDF0\uD83C\uDDF7", "한국어"),
     LanguageOption("fr", "\uD83C\uDDEB\uD83C\uDDF7", "Français"),
     LanguageOption("de", "\uD83C\uDDE9\uD83C\uDDEA", "Deutsch"),
     // ru: flag \uD83C\uDDF7\uD83C\uDDFA (RU), self-name \u0420\u0443\u0441\u0441\u043A\u0438\u0439 (Russkiy)
     LanguageOption("ru", "\uD83C\uDDF7\uD83C\uDDFA", "\u0420\u0443\u0441\u0441\u043A\u0438\u0439"),
+    // es: flag \uD83C\uDDEA\uD83C\uDDF8 (ES), self-name Espanol
+    LanguageOption("es", "\uD83C\uDDEA\uD83C\uDDF8", "Espa\u00F1ol"),
+    // id: flag \uD83C\uDDEE\uD83C\uDDE9 (ID), self-name Bahasa Indonesia.
+    //
+    // The tag is "id", but the resources live in res/values-in. Android's
+    // resource resolver normalises Indonesian to the legacy code "in" at every
+    // API level \u2014 a values-id directory is never consulted and the app would
+    // silently fall back to English. Verified on Android 13 and 17 that "id"
+    // resolves to values-in through both code paths this picker feeds:
+    // LocaleList.forLanguageTags (API 33+, MainActivity) and new Locale(code)
+    // (LocaleWrap, pre-33). Keep the tag modern here and the directory legacy.
+    LanguageOption("id", "\uD83C\uDDEE\uD83C\uDDE9", "Bahasa Indonesia"),
+    // ms: flag \uD83C\uDDF2\uD83C\uDDFE (MY), self-name Bahasa Melayu. No legacy-code caveat \u2014 the
+    // tag and the directory (values-ms) agree, and Indonesian does not resolve
+    // to it, so the two stay separate despite the shared vocabulary.
+    LanguageOption("ms", "\uD83C\uDDF2\uD83C\uDDFE", "Bahasa Melayu"),
+    // fil: flag \uD83C\uDDF5\uD83C\uDDED (PH), self-name Filipino. The tag is "fil", not "tl" \u2014 both
+    // resolve to values-fil at runtime, but fil is the standardised national
+    // language and the code CLDR and the Play Store use.
+    LanguageOption("fil", "\uD83C\uDDF5\uD83C\uDDED", "Filipino"),
+    // th: flag \uD83C\uDDF9\uD83C\uDDED (TH), self-name \u0E44\u0E17\u0E22. No naming caveat \u2014 values-th serves
+    // both "th" and "th-TH".
+    LanguageOption("th", "\uD83C\uDDF9\uD83C\uDDED", "\u0E44\u0E17\u0E22"),
+    // tr: flag \uD83C\uDDF9\uD83C\uDDF7 (TR), self-name T\u00FCrk\u00E7e. Note the
+    // dotted/dotless i \u2014 see LocaleAwareCase.uppercaseForDisplay for why the
+    // section headers must not use a bare .uppercase() in this language.
+    LanguageOption("tr", "\uD83C\uDDF9\uD83C\uDDF7", "T\u00FCrk\u00E7e"),
+    // pl: flag \uD83C\uDDF5\uD83C\uDDF1 (PL), self-name Polski.
+    LanguageOption("pl", "\uD83C\uDDF5\uD83C\uDDF1", "Polski"),
+    // ro: flag \uD83C\uDDF7\uD83C\uDDF4 (RO), self-name Rom\u00E2n\u0103.
+    LanguageOption("ro", "\uD83C\uDDF7\uD83C\uDDF4", "Rom\u00E2n\u0103"),
+    // pt-BR: flag \uD83C\uDDE7\uD83C\uDDF7 (BR), self-name Portugu\u00EAs (Brasil). Region-qualified on
+    // purpose \u2014 the resources live in values-pt-rBR and the wording is
+    // Brazilian, so the tag should say so rather than claim generic "pt".
+    LanguageOption("pt-BR", "\uD83C\uDDE7\uD83C\uDDF7", "Portugu\u00EAs (Brasil)"),
 )
 
 fun getAppearancePrefs(context: Context): SharedPreferences =
@@ -540,11 +613,28 @@ fun AppearanceScreen(
                     R.mipmap.ic_launcher_classic_dark,
                 ),
             )
+            // [T-android-app-icon-tile-max-width] Cap each tile and centre the
+            // row.
+            //
+            // The tiles are weight(1f) + aspectRatio(1f), so on a tablet they
+            // grew to ~380dp each. The preview bitmap is rasterized at 192px
+            // (a launcher icon's native size — there is no larger source), so
+            // at that size it is being upscaled roughly 4.6x on this display
+            // and visibly blurs. The cap keeps the artwork at or under its own
+            // resolution; the row centres so the three stay together as a group
+            // instead of drifting apart across a wide settings pane.
+            //
+            // Phones are unaffected: a third of a phone-width row is already
+            // well under the cap, so widthIn is inert there and the layout is
+            // byte-identical.
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(
+                    12.dp,
+                    Alignment.CenterHorizontally,
+                ),
             ) {
                 for (option in iconOptions) {
                     val isSelected = selectedAppIcon == option.variant
@@ -571,7 +661,13 @@ fun AppearanceScreen(
                     }
                     Column(
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(1f, fill = false)
+                            // 192dp = the preview bitmap's own 192px, so the
+                            // artwork is never scaled past 1:1 at mdpi and only
+                            // mildly at higher densities. `fill = false` on the
+                            // weight is what lets the tile stop growing at the
+                            // cap instead of being forced to its full share.
+                            .widthIn(max = APP_ICON_TILE_MAX_WIDTH)
                             .clickable {
                                 if (selectedAppIcon != option.variant) {
                                     selectedAppIcon = option.variant

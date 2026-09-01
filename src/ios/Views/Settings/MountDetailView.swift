@@ -131,11 +131,11 @@ struct MountDetailView: View {
                 unmountSection
             }
         }
-        .navigationTitle(context.canRename ? String(localized: "Edit Mount") : String(localized: "Folder Details"))
+        .navigationTitle(context.canRename ? AppLocalized("Edit Mount") : AppLocalized("Folder Details"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(String(localized: "Save")) {
+                Button(AppLocalized("Save")) {
                     save()
                 }
                 .disabled(!canSave)
@@ -150,24 +150,24 @@ struct MountDetailView: View {
             }
         }
         .alert(
-            String(localized: "Unmount this folder?"),
+            AppLocalized("Unmount this folder?"),
             isPresented: $showingUnmountConfirm
         ) {
-            Button(String(localized: "Unmount"), role: .destructive) {
+            Button(AppLocalized("Unmount"), role: .destructive) {
                 unmountExternal()
             }
-            Button(String(localized: "Cancel"), role: .cancel) {}
+            Button(AppLocalized("Cancel"), role: .cancel) {}
         } message: {
             Text("The source folder in Files will not be deleted. You can re-mount it later.")
         }
         .alert(
-            String(localized: "Error"),
+            AppLocalized("Error"),
             isPresented: Binding(
                 get: { errorText != nil },
                 set: { if !$0 { errorText = nil } }
             )
         ) {
-            Button(String(localized: "OK"), role: .cancel) { errorText = nil }
+            Button(AppLocalized("OK"), role: .cancel) { errorText = nil }
         } message: {
             Text(errorText ?? "")
         }
@@ -232,8 +232,8 @@ struct MountDetailView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Allow writes")
                     Text(allowWrite
-                         ? String(localized: "AI, shell, and Files browser can modify files in this mount.")
-                         : String(localized: "This mount is exposed as read-only to protect it from accidental edits."))
+                         ? AppLocalized("AI, shell, and Files browser can modify files in this mount.")
+                         : AppLocalized("This mount is exposed as read-only to protect it from accidental edits."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -251,8 +251,8 @@ struct MountDetailView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Show in Files app")
                     Text(visibleInFiles
-                         ? String(localized: "This folder appears in Files → On My iPhone → Minis.")
-                         : String(localized: "This folder is hidden from the iOS Files app."))
+                         ? AppLocalized("This folder appears in Files → On My iPhone → Minis.")
+                         : AppLocalized("This folder is hidden from the iOS Files app."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

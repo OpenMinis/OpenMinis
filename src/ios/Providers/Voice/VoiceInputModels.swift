@@ -106,23 +106,23 @@ enum VoiceProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupported(let msg):
-            return String(localized: "Unsupported: \(msg)", comment: "Voice provider unsupported capability")
+            return AppLocalized("Unsupported: \(msg)", comment: "Voice provider unsupported capability")
         case .httpError(let code, let body):
             // Surface the server's own error message when present (most APIs put
             // the reason in the body, e.g. {"error":{"message":"..."}}).
             if let detail = Self.serverMessage(from: body) {
-                return String(localized: "Request failed (HTTP \(code)): \(detail)", comment: "Voice provider HTTP error with detail")
+                return AppLocalized("Request failed (HTTP \(code)): \(detail)", comment: "Voice provider HTTP error with detail")
             }
             if code == 404 {
-                return String(localized: "Request failed (HTTP 404) — check the provider's Base URL and model name", comment: "Voice provider 404 hint")
+                return AppLocalized("Request failed (HTTP 404) — check the provider's Base URL and model name", comment: "Voice provider 404 hint")
             }
-            return String(localized: "Request failed (HTTP \(code))", comment: "Voice provider HTTP error")
+            return AppLocalized("Request failed (HTTP \(code))", comment: "Voice provider HTTP error")
         case .parseError(let msg):
-            return String(localized: "Parse failed: \(msg)", comment: "Voice provider response parse error")
+            return AppLocalized("Parse failed: \(msg)", comment: "Voice provider response parse error")
         case .authError:
-            return String(localized: "Authentication failed, please check the API key", comment: "Voice provider auth error")
+            return AppLocalized("Authentication failed, please check the API key", comment: "Voice provider auth error")
         case .noAudioData:
-            return String(localized: "No audio data", comment: "Voice provider missing audio")
+            return AppLocalized("No audio data", comment: "Voice provider missing audio")
         }
     }
 

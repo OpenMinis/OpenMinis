@@ -24,7 +24,10 @@ import XCTest
 ///   • Gemini 2.5 Flash  — budget 0 disables
 ///   • Gemini 2.5 Flash Lite — no thinking support at all
 ///   • Gemini 3.x        — `thinkingLevel` string instead of a numeric budget
-///   • Gemini specialized (-tts/-embedding) — no thinking config
+///   • Gemini specialized (-tts/-image/-embedding/-vision) — no thinking config at ANY
+///     level, including ids that also match a family pattern (OpenMinis#226). The
+///     enabled-level rows for these models changed in that fix: they used to receive a
+///     `thinkingBudget`, which Gemini rejects with 400 for TTS models.
 ///   • Gemini unknown id — conservative fallback table, floor 128 when enabled
 ///   • Anthropic 4.6+    — adaptive `effort`, and an explicit disable at OFF
 ///   • Anthropic ≤4.5    — `budget_tokens`, strictly below max_tokens
@@ -49,6 +52,13 @@ final class ThinkingWireGeminiAnthropicSnapshotTests: XCTestCase {
         "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
         "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-flash-latest",
         "gemini-2.5-pro-exp-0827", "gemini-2.0-tts", "gemini-2.5-embedding",
+        // [OpenMinis#226] Specialized ids that ALSO match a family pattern — the exact
+        // shape the old ordering got wrong. `gemini-3.1-flash-tts-preview` contains
+        // "gemini-3", `gemini-2.5-pro-preview-tts` contains "2.5-pro", so both were
+        // answered by the family branch and shipped a thinking parameter the API rejects.
+        // The plain `gemini-2.0-tts` above never caught this: it matches no family.
+        "gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts",
+        "gemini-2.5-pro-preview-tts", "gemini-3-pro-image-preview",
         "unknown-gemini-model",
     ]
 
@@ -97,6 +107,46 @@ final class ThinkingWireGeminiAnthropicSnapshotTests: XCTestCase {
             either restore parity or justify the change explicitly.
             """
         )
+    }
+
+    // MARK: - [T-gemini37-flash-minimal-400] 3.7+ Flash rejects "minimal"
+
+    /// gemini-3.7-flash answers 400 INVALID_ARGUMENT ("Thinking level MINIMAL
+    /// is not supported for this model.") — thinking-off must floor at "low",
+    /// like Pro. Version-threshold rule: every dotted 3.<minor≥7> Flash id
+    /// floors; unversioned and 3.0–3.6 Flash keep "minimal" exactly as the
+    /// golden snapshot above pins.
+    func testGemini37FlashOffFloorsToLowInsteadOfMinimal() {
+        for id in ["gemini-3.7-flash", "gemini-3.7-flash-preview", "gemini-3.9-flash"] {
+            let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: id, level: .off)
+            XCTAssertEqual(cfg["thinkingLevel"] as? String, "low", "id=\(id)")
+            XCTAssertNil(cfg["includeThoughts"], "id=\(id) — off must not request thoughts")
+        }
+    }
+
+    func testPre37FlashOffKeepsMinimal() {
+        for id in ["gemini-3-flash-preview", "gemini-3.1-flash", "gemini-3.6-flash-preview"] {
+            let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: id, level: .off)
+            XCTAssertEqual(cfg["thinkingLevel"] as? String, "minimal", "id=\(id)")
+        }
+    }
+
+    func testGemini37ProOffUnchangedAtLow() {
+        let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: "gemini-3.7-pro", level: .off)
+        XCTAssertEqual(cfg["thinkingLevel"] as? String, "low")
+    }
+
+    func testGemini37FlashEnabledLevelsUnaffected() {
+        let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: "gemini-3.7-flash", level: .low)
+        XCTAssertEqual(cfg["thinkingLevel"] as? String, "low")
+        XCTAssertEqual(cfg["includeThoughts"] as? Bool, true)
+    }
+
+    func testGemini37FlashSpecializedSuffixStillSendsNothing() {
+        // The -tts/-image/-embedding/-vision precedence (OpenMinis#226) must
+        // keep outranking the new version rule.
+        let cfg = ThinkingRuleResolver.geminiThinkingConfig(modelId: "gemini-3.7-flash-tts", level: .off)
+        XCTAssertTrue(cfg.isEmpty)
     }
 
     /// Generated from the PRE-migration implementations
@@ -154,19 +204,47 @@ gemini/gemini-2.5-pro-exp-0827/xhigh -> {includeThoughts:true,thinkingBudget:327
 gemini/gemini-2.5-pro-exp-0827/max -> {includeThoughts:true,thinkingBudget:32768}
 gemini/gemini-2.5-pro-exp-0827/ultra -> {includeThoughts:true,thinkingBudget:32768}
 gemini/gemini-2.0-tts/off -> {}
-gemini/gemini-2.0-tts/low -> {includeThoughts:true,thinkingBudget:1024}
-gemini/gemini-2.0-tts/medium -> {includeThoughts:true,thinkingBudget:4096}
-gemini/gemini-2.0-tts/high -> {includeThoughts:true,thinkingBudget:8192}
-gemini/gemini-2.0-tts/xhigh -> {includeThoughts:true,thinkingBudget:16384}
-gemini/gemini-2.0-tts/max -> {includeThoughts:true,thinkingBudget:16384}
-gemini/gemini-2.0-tts/ultra -> {includeThoughts:true,thinkingBudget:16384}
+gemini/gemini-2.0-tts/low -> {}
+gemini/gemini-2.0-tts/medium -> {}
+gemini/gemini-2.0-tts/high -> {}
+gemini/gemini-2.0-tts/xhigh -> {}
+gemini/gemini-2.0-tts/max -> {}
+gemini/gemini-2.0-tts/ultra -> {}
 gemini/gemini-2.5-embedding/off -> {}
-gemini/gemini-2.5-embedding/low -> {includeThoughts:true,thinkingBudget:1024}
-gemini/gemini-2.5-embedding/medium -> {includeThoughts:true,thinkingBudget:4096}
-gemini/gemini-2.5-embedding/high -> {includeThoughts:true,thinkingBudget:8192}
-gemini/gemini-2.5-embedding/xhigh -> {includeThoughts:true,thinkingBudget:16384}
-gemini/gemini-2.5-embedding/max -> {includeThoughts:true,thinkingBudget:16384}
-gemini/gemini-2.5-embedding/ultra -> {includeThoughts:true,thinkingBudget:16384}
+gemini/gemini-2.5-embedding/low -> {}
+gemini/gemini-2.5-embedding/medium -> {}
+gemini/gemini-2.5-embedding/high -> {}
+gemini/gemini-2.5-embedding/xhigh -> {}
+gemini/gemini-2.5-embedding/max -> {}
+gemini/gemini-2.5-embedding/ultra -> {}
+gemini/gemini-3.1-flash-tts-preview/off -> {}
+gemini/gemini-3.1-flash-tts-preview/low -> {}
+gemini/gemini-3.1-flash-tts-preview/medium -> {}
+gemini/gemini-3.1-flash-tts-preview/high -> {}
+gemini/gemini-3.1-flash-tts-preview/xhigh -> {}
+gemini/gemini-3.1-flash-tts-preview/max -> {}
+gemini/gemini-3.1-flash-tts-preview/ultra -> {}
+gemini/gemini-2.5-flash-preview-tts/off -> {}
+gemini/gemini-2.5-flash-preview-tts/low -> {}
+gemini/gemini-2.5-flash-preview-tts/medium -> {}
+gemini/gemini-2.5-flash-preview-tts/high -> {}
+gemini/gemini-2.5-flash-preview-tts/xhigh -> {}
+gemini/gemini-2.5-flash-preview-tts/max -> {}
+gemini/gemini-2.5-flash-preview-tts/ultra -> {}
+gemini/gemini-2.5-pro-preview-tts/off -> {}
+gemini/gemini-2.5-pro-preview-tts/low -> {}
+gemini/gemini-2.5-pro-preview-tts/medium -> {}
+gemini/gemini-2.5-pro-preview-tts/high -> {}
+gemini/gemini-2.5-pro-preview-tts/xhigh -> {}
+gemini/gemini-2.5-pro-preview-tts/max -> {}
+gemini/gemini-2.5-pro-preview-tts/ultra -> {}
+gemini/gemini-3-pro-image-preview/off -> {}
+gemini/gemini-3-pro-image-preview/low -> {}
+gemini/gemini-3-pro-image-preview/medium -> {}
+gemini/gemini-3-pro-image-preview/high -> {}
+gemini/gemini-3-pro-image-preview/xhigh -> {}
+gemini/gemini-3-pro-image-preview/max -> {}
+gemini/gemini-3-pro-image-preview/ultra -> {}
 gemini/unknown-gemini-model/off -> {thinkingBudget:0}
 gemini/unknown-gemini-model/low -> {includeThoughts:true,thinkingBudget:1024}
 gemini/unknown-gemini-model/medium -> {includeThoughts:true,thinkingBudget:4096}

@@ -35,7 +35,7 @@ struct KimiDeviceLoginSheet: View {
                 switch phase {
                 case .starting:
                     ProgressView()
-                    Text(String(localized: "Contacting Kimi…"))
+                    Text(AppLocalized("Contacting Kimi…"))
                         .foregroundStyle(.secondary)
 
                 case let .awaitingUser(userCode, url):
@@ -45,7 +45,7 @@ struct KimiDeviceLoginSheet: View {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 44))
                         .foregroundStyle(.green)
-                    Text(String(localized: "Signed in to Kimi Code"))
+                    Text(AppLocalized("Signed in to Kimi Code"))
                         .font(.headline)
 
                 case let .failed(message):
@@ -56,17 +56,17 @@ struct KimiDeviceLoginSheet: View {
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
                         .padding(.horizontal)
-                    Button(String(localized: "Try Again")) { start() }
+                    Button(AppLocalized("Try Again")) { start() }
                         .buttonStyle(.borderedProminent)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
-            .navigationTitle(String(localized: "Kimi Code Login"))
+            .navigationTitle(AppLocalized("Kimi Code Login"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "Cancel")) { finish(false) }
+                    Button(AppLocalized("Cancel")) { finish(false) }
                 }
             }
         }
@@ -77,7 +77,7 @@ struct KimiDeviceLoginSheet: View {
 
     @ViewBuilder
     private func awaitingBody(userCode: String, url: String) -> some View {
-        Text(String(localized: "1. Open the verification page\n2. Enter this code to authorize Minis"))
+        Text(AppLocalized("1. Open the verification page\n2. Enter this code to authorize Minis"))
             .font(.subheadline)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
@@ -103,13 +103,13 @@ struct KimiDeviceLoginSheet: View {
         Button {
             if let u = URL(string: url) { presentSafari(u) }
         } label: {
-            Label(String(localized: "Open verification page"), systemImage: "safari")
+            Label(AppLocalized("Open verification page"), systemImage: "safari")
         }
         .buttonStyle(.borderedProminent)
 
         HStack(spacing: 6) {
             ProgressView().controlSize(.small)
-            Text(String(localized: "Waiting for authorization…"))
+            Text(AppLocalized("Waiting for authorization…"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

@@ -8,7 +8,6 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.ui.theme.ChatColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -103,8 +103,16 @@ object KaTeXRendererCache {
         )
     }
 
-    fun cacheKey(latex: String, displayMode: Boolean): String =
-        (if (displayMode) "D:" else "I:") + latex
+    /**
+     * [T-android-inapp-theme-popups #187] `isDark` is part of the key because the
+     * cached value is a rendered BITMAP whose glyphs are baked light-on-dark or
+     * dark-on-light. Keying only on (latex, displayMode) meant flipping the app
+     * theme re-read the colour but still hit the previous theme's bitmap, so a
+     * formula kept its old ink until the entry was evicted. Mirrors the sibling
+     * cache in KatexWebViewPool.cacheKey, which has always included it.
+     */
+    fun cacheKey(latex: String, displayMode: Boolean, isDark: Boolean): String =
+        (if (displayMode) "D:" else "I:") + (if (isDark) "k:" else "l:") + latex
 }
 
 /**
@@ -138,10 +146,13 @@ fun KaTeXRenderView(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    val isDark = isSystemInDarkTheme()
+    val isDark = ChatColors.isDark
     val fontSize = 16f
-    val cacheKey = remember(latex, displayMode) {
-        KaTeXRendererCache.cacheKey(latex, displayMode)
+    // [T-android-inapp-theme-popups #187] `isDark` must be a remember key too, not
+    // just a cacheKey ingredient: without it the memo survives a theme flip and
+    // hands back the previous theme's key, so the new key is never even computed.
+    val cacheKey = remember(latex, displayMode, isDark) {
+        KaTeXRendererCache.cacheKey(latex, displayMode, isDark)
     }
 
     // Check cache first

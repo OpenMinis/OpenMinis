@@ -32,13 +32,13 @@ struct OffloadPermissionSettingsView: View {
             }
 
             Section {
-                Toggle(String(localized: "Collect voice correction data",
+                Toggle(AppLocalized("Collect voice correction data",
                               comment: "Permissions: toggle for voice-correction learning data collection"),
                        isOn: $correctionConsent.isEnabled)
                 Button(role: .destructive) {
                     showClearCorrectionConfirm = true
                 } label: {
-                    Label(String(localized: "Clear Collected Data",
+                    Label(AppLocalized("Clear Collected Data",
                                  comment: "Permissions: wipe voice-correction learning data"),
                           systemImage: "trash")
                 }
@@ -48,12 +48,12 @@ struct OffloadPermissionSettingsView: View {
                 Text("When enabled, your manual fixes to voice transcripts (original → corrected pairs), accepted/rejected AI corrections, and frequently typed terms are stored in a local on-device database to make future voice corrections smarter. Nothing is uploaded. Default is off; existing data stays until you clear it.")
             }
             .confirmationDialog(
-                String(localized: "Clear all collected voice correction data?",
+                AppLocalized("Clear all collected voice correction data?",
                        comment: "Permissions: confirm wipe of correction learning data"),
                 isPresented: $showClearCorrectionConfirm,
                 titleVisibility: .visible
             ) {
-                Button(String(localized: "Clear All", comment: "Confirm clearing correction data"),
+                Button(AppLocalized("Clear All", comment: "Confirm clearing correction data"),
                        role: .destructive) {
                     Task {
                         if let db = VoiceCorrectionDB.shared {
@@ -64,9 +64,9 @@ struct OffloadPermissionSettingsView: View {
                         correctionDataCleared = true
                     }
                 }
-                Button(String(localized: "Cancel", comment: "Cancel"), role: .cancel) {}
+                Button(AppLocalized("Cancel", comment: "Cancel"), role: .cancel) {}
             }
-            .alert(String(localized: "Voice correction data cleared",
+            .alert(AppLocalized("Voice correction data cleared",
                           comment: "Permissions: wipe done confirmation"),
                    isPresented: $correctionDataCleared) {
                 Button("OK") {}

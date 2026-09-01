@@ -87,9 +87,48 @@ enum ForceSyncHelper {
     @MainActor
     @discardableResult
     static func markProvidersDirty() async -> Int {
+        // v2 whole-file record: kept for pre-v3 peers. A v3 receiver drops
+        // inbound v2 by design, so on modern fleets this line alone made the
+        // Providers force-sync button a silent NO-OP — the actual sync surface
+        // (the per-record v3 types below) was never re-marked, and the button
+        // could not repair a diverged peer. [T-provider-forcesync-v3]
         await ChatStore.shared.markDirty(recordType: "ProviderConfig",
                                          recordId: "provider-config")
-        return 1
+        var count = 1
+        // [T-provider-forcesync-v3] Push side: re-mark EVERY v3 provider row so
+        // the next outbound batch re-uploads current local state with a fresh
+        // updatedAt. This is what lets a peer whose incremental window missed
+        // these records (anchored-too-early, see resetProviderConfigAnchors)
+        // finally receive them. Cost is bounded and user-initiated: ~1000 small
+        // records ≈ 3 CK batches, only when the user presses Force Sync.
+        let store = ProviderConfigStore.shared
+        for inst in store.instances {
+            await ChatStore.shared.markDirty(recordType: "ProviderInstanceV3", recordId: inst.id)
+            count += 1
+        }
+        for entry in store.modelEntries {
+            // .uuid, not .id — mirrors the store's own markDirty call sites
+            // (the v3 record is keyed by the row uuid).
+            await ChatStore.shared.markDirty(recordType: "ProviderModelEntryV3", recordId: entry.uuid)
+            count += 1
+        }
+        for group in store.modelGroups {
+            await ChatStore.shared.markDirty(recordType: "ProviderModelGroupV3", recordId: group.id)
+            count += 1
+        }
+        if let db = store.db {
+            for rid in await db.allCustomThinkingRuleIds() {
+                await ChatStore.shared.markDirty(recordType: "ProviderThinkingRuleV3", recordId: rid)
+                count += 1
+            }
+        }
+        // Pull side: forget the per-type "history fully pulled" anchors so the
+        // next fetchRecentV2 re-pulls FULL history for provider types instead
+        // of the incremental window. Without this, records whose cloud
+        // updatedAt predates the window (the observed "Default Model missing"
+        // state) stay invisible forever no matter how often the user syncs.
+        ICloudSharedZoneTransport.resetProviderConfigAnchors()
+        return count
     }
 
     /// Mark SOUL.md dirty for push. Returns 1 when the file exists on

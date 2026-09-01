@@ -99,7 +99,7 @@ fun ShadowVoiceDetailScreen(
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.weight(1f),
                 )
-                Switch(
+                SettingsSwitch(
                     checked = !shadowDisabled,
                     onCheckedChange = { shown ->
                         providerRepository.setVoiceShadowDisabled(instanceId, !shown)

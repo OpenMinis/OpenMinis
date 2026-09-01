@@ -846,8 +846,8 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
     /// degrades to just the count, per spec — no extra time tracking is added.
     private static func privacyNotificationBody(isError: Bool, startedAt: Date?) -> String {
         let base = isError
-            ? String(localized: "1 task failed")
-            : String(localized: "1 task completed")
+            ? AppLocalized("1 task failed")
+            : AppLocalized("1 task completed")
         guard let startedAt else { return base }
         let elapsed = Int(Date().timeIntervalSince(startedAt).rounded())
         guard elapsed > 0 else { return base }
@@ -886,8 +886,8 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
             // title, no reply summary. sessionId stays in userInfo below so the
             // tap-to-open jump keeps working, and the badge logic is untouched.
             content.title = isError
-                ? String(localized: "❌ Task failed")
-                : String(localized: "✅ Task completed")
+                ? AppLocalized("❌ Task failed")
+                : AppLocalized("✅ Task completed")
             content.body = Self.privacyNotificationBody(
                 isError: isError,
                 startedAt: AgentLiveActivityManager.shared.taskStartTime
@@ -1551,7 +1551,7 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
             let displayName = AgentLiveActivityManager.displayName(forTool: toolName)
             let statusText: String
             if toolName.isEmpty {
-                statusText = String(localized: "Working...")
+                statusText = AppLocalized("Working...")
             } else if toolStatus.isEmpty {
                 statusText = displayName
             } else {
@@ -1560,7 +1560,7 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
             logger.info("[LiveActivity][snapshot] sid=\(sid.prefix(8)) toolName=\(toolName) icon=\(icon) status=\(statusText) title=\(title.prefix(20))")
             return LiveSessionSnapshot(
                 sessionId: sid,
-                title: title.isEmpty ? String(localized: "Agent Task") : title,
+                title: title.isEmpty ? AppLocalized("Agent Task") : title,
                 toolIcon: icon,
                 toolStatus: statusText,
                 loopIteration: info?.loopIteration ?? 0

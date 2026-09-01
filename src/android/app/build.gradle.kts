@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.12"
+        versionCode = 25
+        versionName = "1.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -101,6 +101,16 @@ android {
         unitTests.isReturnDefaultValues = true
     }
 
+    // [T-android-downgrade-compat] MigrationTestHelper loads the exported
+    // schema JSON from the TEST APK's assets, not from the project directory —
+    // without this it fails with "Cannot find the schema file in the assets
+    // folder" no matter that the files exist on disk.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDirs("$projectDir/schemas")
+        }
+    }
+
     lint {
         // AGP 8.x ships a NonNullableMutableLiveData detector that throws
         // IncompatibleClassChangeError on Kotlin source during
@@ -114,6 +124,16 @@ android {
         checkReleaseBuilds = false
         disable += "NonNullableMutableLiveData"
     }
+}
+
+// [T-android-downgrade-compat] Room needs an explicit output directory once
+// `exportSchema = true`. The generated JSON is COMMITTED: it is what
+// MigrationTestHelper replays to prove every upgrade — and every no-op
+// downgrade — still produces the schema the entities expect. Without it the
+// migration chain has no automated check and only a real device install can
+// catch a break.
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 // [T-bash-on-demand] Keep the shared bashism rule table / test vectors as a
@@ -161,6 +181,24 @@ dependencies {
     implementation(composeBom)
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+
+    // [T-android-tablet-split] Adaptive list-detail layout for tablets/large
+    // windows. Version pinned explicitly rather than left to the BOM: the
+    // 2025.09.00 BOM does not manage the material3.adaptive group at all, so
+    // an unversioned coordinate fails to resolve.
+    //
+    // 1.2.0, not the newer 1.3.0: 1.3.0 hard-requires compileSdk 37 AND
+    // Android Gradle Plugin 9.1.0, and this module is on compileSdk 36 /
+    // AGP 8.7.3 — it fails at configuration time, not with a warning. Moving
+    // either is a separate, much larger change. 1.2.0 is stable and carries
+    // NavigableListDetailPaneScaffold, which is all this needs.
+    //
+    // The adaptive-navigation3 artifact is NOT used — still alpha, and would
+    // require migrating off classic Navigation Compose.
+    implementation("androidx.compose.material3:material3-window-size-class")
+    implementation("androidx.compose.material3.adaptive:adaptive:1.2.0")
+    implementation("androidx.compose.material3.adaptive:adaptive-layout:1.2.0")
+    implementation("androidx.compose.material3.adaptive:adaptive-navigation:1.2.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
@@ -197,6 +235,12 @@ dependencies {
     // note in `ndk`; we ship arm64-v8a only.
     implementation("com.github.helloooideeeeea:RealTimeCutVADLibraryForAndroid:1.0.5@aar")
 
+    // rclone, via its official gomobile binding, for backup destinations
+    // (SMB / WebDAV / SFTP / S3 / FTP). Build it with
+    // `deps/build_rclone_android.sh` — the .aar is a build artifact under
+    // app/libs/, not a checked-in binary. Backends are decided by
+    // deps/rclone-mobile/backends/backends.go, shared with the iOS build.
+    implementation(group = "", name = "rclone", ext = "aar")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
@@ -257,6 +301,10 @@ dependencies {
     testImplementation("org.json:json:20231013")
 
     // Testing — Instrumented (on-device) tests
+    // [T-android-downgrade-compat] MigrationTestHelper replays the committed
+    // schema json to prove every migration — upgrade AND the no-op downgrade —
+    // still lands on the schema the entities expect.
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test:rules:1.6.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

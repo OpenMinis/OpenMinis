@@ -304,17 +304,63 @@ extension AIChatViewModel {
         }
         var content = selectedLines.joined(separator: "\n")
 
-        // Apply max_length truncation
+        // Apply max_length truncation.
+        //
+        // [T-fileread-truncation-header] The header used to keep reporting the
+        // line range chosen BEFORE this truncation, so a 1324-line file cut at
+        // 80 000 chars still announced "showing lines 1-1324 of 1324" — the
+        // agent read that as "the whole file arrived" and never paged on. The
+        // `(truncated at N chars)` note contradicted the range right next to
+        // it, and offered nothing actionable.
+        //
+        // So the truncated branch now recomputes which lines actually survived
+        // and hands back the offset to resume from. Everything here is inside
+        // `content.count > maxLength`; the untruncated path is byte-identical
+        // to before.
         var wasTruncated = false
+        var effectiveStart = displayStart
+        var effectiveEnd = displayEnd
+        var nextOffset: Int?
         if content.count > maxLength {
-            content = String(content.prefix(maxLength))
             wasTruncated = true
+            if direction == "tail" {
+                // tail means "the end of the file". Taking a prefix here threw
+                // away the very lines that were asked for and returned the
+                // start of the tail window instead.
+                content = String(content.suffix(maxLength))
+                // Drop a leading partial line so the first line is whole.
+                if let firstNewline = content.firstIndex(of: "\n"),
+                   content.distance(from: content.startIndex, to: firstNewline) < content.count - 1 {
+                    content = String(content[content.index(after: firstNewline)...])
+                }
+                effectiveStart = displayEnd - content.components(separatedBy: "\n").count + 1
+                // No next_offset for tail: paging forward from the end of the
+                // file is meaningless, and inventing one would send the agent
+                // somewhere it did not ask to go.
+            } else {
+                content = String(content.prefix(maxLength))
+                // Back off to the last complete line. A half-line would either
+                // be re-read whole on the next page (duplicated) or silently
+                // stitched onto the next chunk (corrupted).
+                if let lastNewline = content.lastIndex(of: "\n") {
+                    content = String(content[content.startIndex..<lastNewline])
+                }
+                effectiveEnd = displayStart + content.components(separatedBy: "\n").count - 1
+                if effectiveEnd < totalLines { nextOffset = effectiveEnd + 1 }
+            }
         }
 
-        let rangeInfo = "showing lines \(displayStart)-\(displayEnd) of \(totalLines)"
+        let rangeInfo = "showing lines \(effectiveStart)-\(effectiveEnd) of \(totalLines)"
         var header = "[\(path) | \(fileData.count) bytes | \(totalLines) lines | \(rangeInfo)"
         if wasTruncated {
-            header += " (truncated at \(maxLength) chars)"
+            header += " | truncated at \(maxLength) chars"
+            if let nextOffset {
+                // Named to match the tool's own `offset` parameter so the model
+                // can copy it straight into the next call.
+                header += ", next_offset=\(nextOffset)"
+            } else {
+                header += ", retry with a smaller lines value"
+            }
         }
         header += "]"
 

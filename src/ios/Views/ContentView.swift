@@ -649,9 +649,59 @@ private struct FolderPickerSheet: View {
                     }
                 }
 
-                if !items.isEmpty {
+                // Rendered when there is anything to put in it: existing groups to
+                // pick from, or a membership the "No Group" row can clear. Both
+                // empty (no folders and the target is unfiled) means no section at
+                // all, rather than a bare "Groups" header over nothing.
+                if !items.isEmpty || anyFiled {
                     Section("Groups") {
-                        ForEach(items) { item in
+                    // "No Group" — the explicit way to end up ungrouped.
+                    //
+                    // FIRST row of the Groups section, not a trailing section, for
+                    // two reasons. (1) Reachability: measured on an iPhone 11, a
+                    // trailing section put this row at y≈940 while the .medium
+                    // detent ends at 896 — the accessibility tree reported
+                    // `hittable: false`, i.e. the option existed but could not be
+                    // tapped without first scrolling or expanding the sheet.
+                    // (2) Semantics: it is a peer choice among "where does this
+                    // chat live", so it belongs with the destinations rather than
+                    // formatted like a destructive afterthought.
+                    //
+                    // Gated on `anyFiled`: for an already-ungrouped session it
+                    // would be a no-op row, which reads as a broken control.
+                    if anyFiled {
+                        Button {
+                            onChoose(.removeFromFolder)
+                        } label: {
+                            HStack(spacing: 8) {
+                                // Sized to match FolderComposedIcon below so the
+                                // row's text baseline lines up with the group rows.
+                                ZStack {
+                                    Circle()
+                                        .fill(Color(UIColor.tertiarySystemFill))
+                                        .frame(width: 40, height: 40)
+                                    Image(systemName: "folder.badge.minus")
+                                        .foregroundStyle(.secondary)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("No Group")
+                                        .foregroundStyle(Color(UIColor.label))
+                                        .lineLimit(1)
+                                    Text("Remove from its current group")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(Color(UIColor.secondaryLabel))
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                            }
+                        }
+                        // VoiceOver reads label + hint as ONE action; without this
+                        // the two stacked Texts are announced as unrelated elements.
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(Text("No Group"))
+                        .accessibilityHint(Text("Remove from its current group"))
+                    }
+                    ForEach(items) { item in
                             Button {
                                 onChoose(.existing(item.folder.id))
                             } label: {
@@ -685,18 +735,15 @@ private struct FolderPickerSheet: View {
                         }
                     }
                 }
-
-                if anyFiled {
-                    Section {
-                        Button {
-                            onChoose(.removeFromFolder)
-                        } label: {
-                            Label("Remove from Group", systemImage: "folder.badge.minus")
-                        }
-                    }
-                }
             }
-            .navigationTitle("Move \(sessionCount) to Group")
+            // Explicitly typed: a bare ternary of two literals infers `String`,
+            // which would pick the non-localizing navigationTitle overload and
+            // ship the English source text to every locale. As
+            // `LocalizedStringKey` both branches keep their `%lld` interpolation
+            // and resolve through Localizable.xcstrings.
+            .navigationTitle(anyFiled
+                             ? LocalizedStringKey("Change Group for \(sessionCount)")
+                             : LocalizedStringKey("Move \(sessionCount) to Group"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1426,6 +1473,15 @@ struct ContentView: View {
                 }
             }
         }
+        // Something else is taking over the screen (an incoming share, a
+        // WebApp deep link, a `.minisbak` opened from Files). iOS will not
+        // present a second sheet from the same root while one is up, so a tool
+        // sheet left open here silently swallows the new presentation — which
+        // is exactly how opening a backup while sitting in Settings did
+        // nothing at all. Clearing it lets the incoming content surface.
+        .onReceive(NotificationCenter.default.publisher(for: .dismissAllImmersivePresentations)) { _ in
+            if activeToolSheet != nil { activeToolSheet = nil }
+        }
         .sheet(item: $sessionToDelete) { session in
             DeleteConfirmSheet(info: $singleDeleteInfo, isLoading: false) {
                 print("[DELETE] onDelete called for session: \(session.id)")
@@ -1548,11 +1604,11 @@ struct ContentView: View {
                         ProgressView()
                             .controlSize(.large)
                         if let p = exportProgress, p.total > 0 {
-                            Text(String(localized: "Exporting… \(p.done) / \(p.total)"))
+                            Text(AppLocalized("Exporting… \(p.done) / \(p.total)"))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         } else {
-                            Text(String(localized: "Exporting…"))
+                            Text(AppLocalized("Exporting…"))
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
@@ -1623,9 +1679,20 @@ struct ContentView: View {
                 shareLog.info("[Share] .task: processing pending share")
                 processPendingShare()
                 shareLog.info("[Share] .task: buffer stored, bufferVersion=\(shareCoordinator.bufferVersion) buffer=\(shareCoordinator.pendingShareBuffer != nil)")
+                // [T-share-routes-to-background-session] Cold launch: nothing is
+                // on screen yet (this branch runs before any launch-screen
+                // navigation), so the "foreground session" the warm path looks
+                // for does not exist and a new session IS the right
+                // destination. It is still stamped onto the buffer, which is
+                // what stops a session restored moments later — e.g. the
+                // Launch-Session default, or a chat resuming an agent loop —
+                // from mounting first and swallowing the share.
+                let target = Self.makeNewSessionId()
+                shareCoordinator.setBufferTarget(target)
+                shareLog.info("[Share] .task: cold launch — opening new session \(target.prefix(16)) for share")
                 var tx = Transaction()
                 tx.disablesAnimations = true
-                withTransaction(tx) { openSession(Self.makeNewSessionId()) }
+                withTransaction(tx) { openSession(target) }
             } else if CrashReporter.shared.shouldBypassSessionRestore {
                 // [T-ios-session-crash-loop] The last two launches both died in
                 // the foreground within a minute of each other — the signature
@@ -1866,11 +1933,39 @@ struct ContentView: View {
                 // carried content. A duplicate raise finds the record already
                 // consumed; opening a second blank session for it would replace
                 // the one the first pass just populated.
-                if hadRecord, navigationPath.isEmpty {
-                    shareLog.info("[Share] onChange: Home screen — opening new session for share")
-                    var tx = Transaction()
-                    tx.disablesAnimations = true
-                    withTransaction(tx) { openSession(Self.makeNewSessionId()) }
+                //
+                // [T-share-routes-to-background-session] Route to the chat the
+                // user is LOOKING AT, and only open a new session when there
+                // isn't one.
+                //
+                // The bug this fixes was never "a share reached an open chat" —
+                // it was a share reaching a chat the user was NOT looking at.
+                // Device log 2026-08-18 23:55:42: the file landed in session
+                // 87B79110, mid-agent-run in the BACKGROUND, purely because
+                // that view happened to be mounted; nothing checked whether the
+                // share was meant for it.
+                //
+                // So the destination is decided here, explicitly, and stamped
+                // onto the buffer — a foreground chat when there is one, a
+                // fresh session otherwise — and only that destination's view is
+                // allowed to consume it (see injectPendingShareIfNeeded).
+                // `navigationPath.isEmpty ? nil : currentStackSessionId` is the
+                // same "what is actually on screen" test the outgoing-session
+                // tracker at line ~1879 uses.
+                if hadRecord {
+                    let foreground: String? = navigationPath.isEmpty ? nil : currentStackSessionId
+                    if let foreground {
+                        // Already on screen — stamp it and navigate nowhere.
+                        shareCoordinator.setBufferTarget(foreground)
+                        shareLog.info("[Share] onChange: routing share into the foreground session \(foreground.prefix(16)) (no navigation needed)")
+                    } else {
+                        let target = Self.makeNewSessionId()
+                        shareCoordinator.setBufferTarget(target)
+                        shareLog.info("[Share] onChange: no session on screen — opening new session \(target.prefix(16)) for share")
+                        var tx = Transaction()
+                        tx.disablesAnimations = true
+                        withTransaction(tx) { openSession(target) }
+                    }
                 }
             }
         }
@@ -2180,6 +2275,34 @@ struct ContentView: View {
             list, unreadIds: unreadIds, freshCornerIds: freshCornerIds, activeIds: activeIds)
         sidebarGroupsMemo.key = key
         sidebarGroupsMemo.groups = groups
+        #if DEBUG
+        // [T-ios-badge-diag] Why the group card decided to light (or not).
+        //
+        // Placed AFTER the memo check on purpose: this is the miss path, which
+        // only runs when something the sidebar actually shows has changed, so
+        // it cannot spam. It is further gated to groups that have at least one
+        // paused member, and to DEBUG — the aggregation itself is a hot
+        // AttributeGraph path and must not pay for logging in Release.
+        //
+        // `paused` vs `fresh` is the whole diagnosis in one line: a group with
+        // paused=3 fresh=0 badge=false is the window working; paused=3 fresh=3
+        // on days-old sessions is the bug returning.
+        // `g.ids` is emptied for a COLLAPSED folder — the very case the badge is
+        // about — so member ids come from the source list by folderId instead.
+        for g in groups {
+            guard let fid = g.folderId else { continue }
+            let members = list.filter { $0.folderId == fid }.map(\.id)
+            let pausedCount = members.filter {
+                sidebarBadgeStore.topCornerBadge(for: $0) == .paused
+            }.count
+            guard pausedCount > 0 else { continue }
+            let freshCount = members.filter { freshCornerIds.contains($0) }.count
+            AppLogger(category: "SessionBadgeStore").debug(
+                "[BadgeGroup] folder=\(fid.prefix(8)) members=\(members.count) " +
+                "paused=\(pausedCount) freshWithin24h=\(freshCount) collapsed=\(g.isCollapsed) " +
+                "badgeLit=\(g.isCollapsed && g.anyPaused)")
+        }
+        #endif
         return groups
     }
 
@@ -2726,7 +2849,7 @@ struct ContentView: View {
                                 // [T-ios-crash-contextmenu-uaf] Value-only menu view,
                                 // no closure captures — see SessionContextMenu.
                                 SessionContextMenu(
-                                    key: MenuKey(sid: session.id, pinned: session.isPinned, title: session.title),
+                                    key: MenuKey(sid: session.id, pinned: session.isPinned, title: session.title, filed: session.isFiled),
                                     actions: menuActions
                                 )
                                 .equatable()
@@ -2878,7 +3001,7 @@ struct ContentView: View {
                                         : session.id
                                     if let menuSid {
                                         SessionContextMenu(
-                                            key: MenuKey(sid: menuSid, pinned: session.isPinned, title: session.title),
+                                            key: MenuKey(sid: menuSid, pinned: session.isPinned, title: session.title, filed: session.isFiled),
                                             actions: menuActions
                                         )
                                         .equatable()
@@ -3455,13 +3578,28 @@ struct ContentView: View {
     /// the `onChange(of: navigationPath)` observer, which simply runs later —
     /// when the deferred path is actually committed.
     private func commitNavigationPath(_ newPath: NavigationPath) {
-        guard UIApplication.shared.applicationState == .active else {
+        // [T-share-first-tap-no-response] `.inactive` is NOT the state this
+        // gate was built for. The watchdog kills it prevents come from a push
+        // running AIChatView's whole first layout while the app is genuinely
+        // BACKGROUNDED (T-ios-bg-nav-push-watchdog); `.inactive` means the app
+        // is on its way to the foreground — the system is about to give it a
+        // full frame budget — and iOS delivers `openURL` in exactly that state.
+        //
+        // Device log 2026-08-18 23:55:31: the share URL arrived at .478 with
+        // the app `.inactive`, the navigation was deferred, and `.active` only
+        // landed 31ms later. The user saw the app open on the home screen with
+        // nothing happening and tapped Share a second time — the reported
+        // "first tap does nothing". Deferring here bought no safety: the flush
+        // performs the identical push moments later, just after the user has
+        // already given up on it.
+        let appState = UIApplication.shared.applicationState
+        if appState == .background {
             // Coalesce: only the newest requested destination matters. An
             // earlier pending push that never became visible has nothing to
             // preserve. Overwriting also restarts the TTL, which is correct —
             // the newest request is the one whose freshness we care about.
             pendingBackgroundNavigation = (newPath, Date())
-            shareLog.info("🔄SESSION deferring nav commit — app not active (count=\(newPath.count))")
+            shareLog.info("🔄SESSION deferring nav commit — app backgrounded (count=\(newPath.count))")
             return
         }
         pendingBackgroundNavigation = nil
@@ -3480,7 +3618,11 @@ struct ContentView: View {
         // run while still backgrounded, and committing there would reinstate
         // exactly the synchronous background push this gate exists to prevent.
         // Keep it pending — a later flush will take it.
-        guard UIApplication.shared.applicationState == .active else { return }
+        // [T-share-first-tap-no-response] Mirrors commitNavigationPath: only a
+        // genuinely BACKGROUNDED app must hold the push back. Blocking on
+        // `.inactive` here too would re-deny the flush during the very
+        // foreground transition that is supposed to release it.
+        guard UIApplication.shared.applicationState != .background else { return }
         // Consume before the staleness check, not after: an expired request is
         // dropped for good. Leaving it parked would let a later foreground —
         // which is even further from the original intent — try again.
@@ -3567,7 +3709,7 @@ struct ContentView: View {
         if cachedLockLabelKey == key, let cached = cachedLockLabel {
             return cached
         }
-        let value = String(localized: "Lock with \(biometry)")
+        let value = AppLocalized("Lock with \(biometry)")
         cachedLockLabel = value
         cachedLockLabelKey = key
         return value
@@ -3601,7 +3743,7 @@ struct ContentView: View {
                 SessionLockStore.shared.lock(sid)
             case .unlockSession(let sid):
                 Task {
-                    let reason = String(localized: "Unlock this session to remove \(BiometricAuth.biometryDisplayName) protection")
+                    let reason = AppLocalized("Unlock this session to remove \(BiometricAuth.biometryDisplayName) protection")
                     let ok = await BiometricAuth.authenticate(reason: reason)
                     if ok { SessionLockStore.shared.unlockPermanently(sid) }
                 }
@@ -3730,6 +3872,21 @@ struct ContentView: View {
 
     private func processPendingShare() {
         shareLog.info("[Share] processPendingShare called")
+
+        // [T-share-vs-shortcut-state] An incoming share is the user's newest
+        // explicit intent. If a Shortcuts / Home-Screen quick-action workflow
+        // is still sitting in a non-idle state from an EARLIER launch (e.g.
+        // `waitingForChatMount` stranded because the app was backgrounded
+        // before the draft view mounted — that state has no timeout of its
+        // own), it keeps steering navigation: its `ensuringHome` timeout or
+        // `pendingDispatch` observer can fire `openSessionForPendingQuickAction`
+        // and REPLACE the share's freshly opened session (and arm a stale
+        // camera/voice cover on it) while the user is already typing. Clear
+        // stale residue before the share takes over navigation. The 10s bar
+        // leaves a genuinely in-flight workflow (cold quick-action launch
+        // racing a persisted share record) untouched — that one still owns
+        // its own checkpoints.
+        QuickActionWorkflow.shared.resetIfStale(olderThan: 10, reason: "incoming share takeover")
 
         guard let pending = SharedContainerStore.loadPendingShare() else {
             // [T-share-double-raise] Reaching here with a buffer already staged
@@ -4240,7 +4397,7 @@ struct ContentView: View {
                     .contextMenu {
                         let groups = Array(ProviderConfigStore.shared.config.modelGroups.prefix(10))
                         if !groups.isEmpty {
-                            Section(String(localized: "New Chat with Group")) {
+                            Section(AppLocalized("New Chat with Group")) {
                                 ForEach(groups) { group in
                                     Button {
                                         openSession(Self.makeNewSessionId(groupId: group.id))
@@ -4875,7 +5032,7 @@ struct ContentView: View {
             }
             await MainActor.run {
                 let sessionCount = ids.count
-                forceSyncToast = String(localized: "Marked \(sessionCount) sessions (\(totalMarked) records) for sync. iCloud is syncing now.")
+                forceSyncToast = AppLocalized("Marked \(sessionCount) sessions (\(totalMarked) records) for sync. iCloud is syncing now.")
                 forceSyncInFlight = false
                 if singleSession == nil {
                     // Multi-select path also exits selection mode for the user.
@@ -4897,7 +5054,7 @@ struct ContentView: View {
     private func runForcePullOnSession(_ sessionId: String) {
         guard !forceSyncInFlight else { return }
         forceSyncInFlight = true
-        forceSyncToast = String(localized: "Pulling from iCloud…")
+        forceSyncToast = AppLocalized("Pulling from iCloud…")
         // [T-ios-sessionrow-destroy-crash] Isolate the whole Task to @MainActor.
         // This is the site 6687cf1a (T-ios-state-publish-offmain-crash) MISSED:
         // a bare `Task {}` started from this non-isolated func inherits a
@@ -4913,11 +5070,11 @@ struct ContentView: View {
             let outcome = await ChatStore.shared.forcePullSession(sessionId: sessionId)
             switch outcome {
             case .applied(let pulled, let deleted):
-                forceSyncToast = String(localized: "Pulled \(pulled) records · removed \(deleted) local")
+                forceSyncToast = AppLocalized("Pulled \(pulled) records · removed \(deleted) local")
             case .cloudEmpty:
-                forceSyncToast = String(localized: "iCloud has no records for this chat — local messages preserved")
+                forceSyncToast = AppLocalized("iCloud has no records for this chat — local messages preserved")
             case .failed(let msg):
-                forceSyncToast = String(localized: "Force Pull failed: \(msg) — local messages preserved")
+                forceSyncToast = AppLocalized("Force Pull failed: \(msg) — local messages preserved")
             }
             forceSyncInFlight = false
             // Refresh sessions so any title/updatedAt that came down from
@@ -5625,7 +5782,7 @@ private struct ExportPreviewSheet: View {
                     // actually read instead, so Copy is offered exactly when there
                     // is something readable to copy.
                     if summary == nil, textSourceURL?.pathExtension.lowercased() != "zip" {
-                        actionButton(icon: "doc.on.doc", label: copied ? String(localized: "Copied") : String(localized: "Copy")) {
+                        actionButton(icon: "doc.on.doc", label: copied ? AppLocalized("Copied") : AppLocalized("Copy")) {
                             if let url = textSourceURL, let content = try? String(contentsOf: url, encoding: .utf8) {
                                 UIPasteboard.general.string = content
                             }
@@ -5633,21 +5790,21 @@ private struct ExportPreviewSheet: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                         }
                     }
-                    actionButton(icon: "square.and.arrow.up", label: String(localized: "Share")) {
+                    actionButton(icon: "square.and.arrow.up", label: AppLocalized("Share")) {
                         showShareSheet = true
                     }
-                    actionButton(icon: "folder", label: String(localized: "Save to Files")) {
+                    actionButton(icon: "folder", label: AppLocalized("Save to Files")) {
                         showFilePicker = true
                     }
                 }
                 .padding(.vertical, 12)
                 .background(Color(UIColor.systemBackground))
             }
-            .navigationTitle(String(localized: "Export Preview"))
+            .navigationTitle(AppLocalized("Export Preview"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(String(localized: "Done")) { dismiss() }
+                    Button(AppLocalized("Done")) { dismiss() }
                 }
             }
             .sheet(isPresented: $showShareSheet) {
@@ -5698,12 +5855,12 @@ private struct ExportPreviewSheet: View {
 
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                summaryRow(String(localized: "Format"), s.format)
-                summaryRow(String(localized: "Sessions"), "\(s.sessionCount)")
-                summaryRow(String(localized: "Messages"), "\(s.totalMessages)")
-                summaryRow(String(localized: "Time range"), timeRange)
-                summaryRow(String(localized: "Attachments"), "\(s.attachmentCount)")
-                summaryRow(String(localized: "Estimated size"), sizeStr)
+                summaryRow(AppLocalized("Format"), s.format)
+                summaryRow(AppLocalized("Sessions"), "\(s.sessionCount)")
+                summaryRow(AppLocalized("Messages"), "\(s.totalMessages)")
+                summaryRow(AppLocalized("Time range"), timeRange)
+                summaryRow(AppLocalized("Attachments"), "\(s.attachmentCount)")
+                summaryRow(AppLocalized("Estimated size"), sizeStr)
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -5968,7 +6125,13 @@ private struct SessionContextMenu: View, Equatable {
         Button {
             actions.send(.moveToFolder(key.sid))
         } label: {
-            Label("Move to Group", systemImage: "folder")
+            // Wording follows membership: a session already in a group is being
+            // MOVED BETWEEN groups, not filed for the first time. Same idiom as
+            // Pin/Unpin above — `LocalizedStringKey` so the chosen key is still
+            // looked up in Localizable.xcstrings (a plain String would bypass
+            // localization entirely).
+            Label(LocalizedStringKey(key.filed ? "Change Group" : "Move to Group"),
+                  systemImage: key.filed ? "folder.badge.gearshape" : "folder")
         }
         if iCloudSyncVisible {
             Button {
@@ -6019,6 +6182,16 @@ private struct MenuKey: Equatable {
     let sid: String
     let pinned: Bool
     let title: String?
+    /// Whether the session currently belongs to a group. Drives the
+    /// "Move to Group" / "Change Group" wording.
+    ///
+    /// Carried in the KEY rather than read from a store inside `body`: the menu
+    /// is `.equatable()` precisely so `body` is skipped while the key is
+    /// unchanged, so a value the label depends on must participate in equality
+    /// or the wording would go stale after a move. It is also a plain `Bool`,
+    /// keeping this a pure value type — see the type comment above about the
+    /// use-after-free that closures/reference captures caused here.
+    let filed: Bool
 }
 
 // MARK: - Session Row
@@ -6480,16 +6653,16 @@ private struct SessionRow: View, Equatable {
         let seconds = Int(now.timeIntervalSince(date))
         if calendar.isDateInToday(date) {
             if seconds < 60 {
-                return String(localized: "Just now")
+                return AppLocalized("Just now")
             } else if seconds < 3600 {
                 let mins = seconds / 60
-                return String(localized: "\(mins) min ago")
+                return AppLocalized("\(mins) min ago")
             } else {
                 let hrs = seconds / 3600
-                return String(localized: "\(hrs) hr ago")
+                return AppLocalized("\(hrs) hr ago")
             }
         } else if calendar.isDateInYesterday(date) {
-            return String(localized: "Yesterday")
+            return AppLocalized("Yesterday")
         } else {
             let diff = calendar.dateComponents([.day], from: date, to: now)
             let formatter = DateFormatter()
@@ -6753,12 +6926,23 @@ private struct LanguageOption: Identifiable {
     let flag: String
 }
 
+// Native names are deliberately NOT localized: a language picker shows each
+// option in its own language so a user who cannot read the current UI language
+// can still find theirs.
+//
+// [T-ios-inapp-language-string-localized] zh-Hant was missing even though the
+// catalog carries a full Traditional Chinese translation, so those users could
+// not select it in-app; es is new. Every id here must have a matching .lproj in
+// the bundle — `Bundle.setLanguage(_:)` looks the directory up by this string
+// and silently falls back to the system language if it is absent.
 private let supportedLanguages: [LanguageOption] = [
     LanguageOption(id: "",       name: "System", flag: ""),
     LanguageOption(id: "en",     name: "English", flag: "🇺🇸"),
     LanguageOption(id: "zh-Hans", name: "简体中文", flag: "🇨🇳"),
+    LanguageOption(id: "zh-Hant", name: "繁體中文", flag: "🇭🇰"),
     LanguageOption(id: "ja",     name: "日本語", flag: "🇯🇵"),
     LanguageOption(id: "ko",     name: "한국어", flag: "🇰🇷"),
+    LanguageOption(id: "es",     name: "Español", flag: "🇪🇸"),
     LanguageOption(id: "fr",     name: "Français", flag: "🇫🇷"),
     LanguageOption(id: "de",     name: "Deutsch", flag: "🇩🇪"),
     LanguageOption(id: "ru",     name: "Русский", flag: "🇷🇺"),
@@ -6977,9 +7161,9 @@ private struct AppearanceSettingsView: View {
             }
 
             Section {
-                Picker(String(localized: "Return Key"), selection: $returnKeyBehavior) {
-                    Text(String(localized: "Newline")).tag(0)
-                    Text(String(localized: "Send")).tag(1)
+                Picker(AppLocalized("Return Key"), selection: $returnKeyBehavior) {
+                    Text(AppLocalized("Newline")).tag(0)
+                    Text(AppLocalized("Send")).tag(1)
                 }
                 .pickerStyle(.segmented)
             } header: {
@@ -6989,7 +7173,7 @@ private struct AppearanceSettingsView: View {
             }
 
             Section {
-                Toggle(String(localized: "Keep Screen Awake"), isOn: $keepScreenAwakeDuringTasks)
+                Toggle(AppLocalized("Keep Screen Awake"), isOn: $keepScreenAwakeDuringTasks)
             } header: {
                 Text("Keep Screen Awake")
             } footer: {
@@ -6997,7 +7181,7 @@ private struct AppearanceSettingsView: View {
             }
 
             Section {
-                Toggle(String(localized: "Auto-Focus Input After Reply"), isOn: $autoFocusAfterReply)
+                Toggle(AppLocalized("Auto-Focus Input After Reply"), isOn: $autoFocusAfterReply)
             } header: {
                 Text("Auto-Focus Input After Reply")
             } footer: {
@@ -7005,7 +7189,7 @@ private struct AppearanceSettingsView: View {
             }
 
             Section {
-                Toggle(String(localized: "Tool Preview Window"), isOn: $toolPreviewEnabled)
+                Toggle(AppLocalized("Tool Preview Window"), isOn: $toolPreviewEnabled)
             } header: {
                 Text("Tool Status Bar")
             } footer: {
@@ -7017,7 +7201,7 @@ private struct AppearanceSettingsView: View {
             // collapsed. Only affects the streaming auto-expand; manual taps
             // always work either way.
             Section {
-                Toggle(String(localized: "Expand Thinking While Streaming"), isOn: $autoExpandThinking)
+                Toggle(AppLocalized("Expand Thinking While Streaming"), isOn: $autoExpandThinking)
             } header: {
                 Text("Deep Thinking")
             } footer: {
@@ -7210,6 +7394,8 @@ private enum SettingsDestination: Hashable {
     case modelGroupDetail(groupId: String)
     case usage
     case skills
+    // [T-ios-assistant-header-open-soul]
+    case soul
     case memory
     case storage
     case mountedFolders
@@ -7405,6 +7591,24 @@ private struct SettingsSheet: View {
                             }
                         }
                     }
+                    NavigationLink {
+                        BackupAndRestoreView()
+                    } label: {
+                        Label {
+                            // Not just "Backup": this screen is both halves of
+                            // the feature, and on a new device restore is the
+                            // only one the user is looking for.
+                            Text("Backup & Restore")
+                        } icon: {
+                            // arrow.triangle.2.circlepath reads as a round trip
+                            // rather than a one-way export.
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white)
+                                .frame(width: 21, height: 21)
+                                .background(.indigo, in: Circle())
+                        }
+                    }
                 }
 
                 Section("Permissions") {
@@ -7531,6 +7735,8 @@ private struct SettingsSheet: View {
                     UsageStatsView()
                 case .skills:
                     SkillsManagementView()
+                case .soul:
+                    SoulSettingsView()
                 case .memory:
                     MemoryManagementView()
                 case .storage:
@@ -7632,6 +7838,8 @@ private struct SettingsSheet: View {
             navPath.append(SettingsDestination.usage)
         case .skills:
             navPath.append(SettingsDestination.skills)
+        case .soul:
+            navPath.append(SettingsDestination.soul)
         case .memory:
             navPath.append(SettingsDestination.memory)
         case .storage:

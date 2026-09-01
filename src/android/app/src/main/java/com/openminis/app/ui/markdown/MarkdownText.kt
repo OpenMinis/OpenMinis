@@ -525,8 +525,15 @@ private fun InlineContent(
     val linkListener = remember(context) {
         LinkInteractionListener { link ->
             val url = (link as? LinkAnnotation.Url)?.url ?: return@LinkInteractionListener
+            // [T-android-user-initiated-scheme-dispatch] User tapped a link
+            // in rendered markdown — dispatch any scheme.
             val handled = com.openminis.app.ui.browser.BrowserExternalSchemeHandler
-                .handle(context, url)
+                .handle(
+                    context,
+                    url,
+                    com.openminis.app.ui.browser.BrowserExternalSchemeHandler
+                        .Origin.USER_INITIATED,
+                )
             if (handled) return@LinkInteractionListener
             runCatching {
                 context.startActivity(

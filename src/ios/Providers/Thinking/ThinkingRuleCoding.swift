@@ -20,6 +20,7 @@ extension ThinkingWireFormat {
         case reasoningEffortNested
         case deepSeekSibling
         case qwenDual
+        case qwenRootOnly
         case anthropicThinking
         case geminiBudget
         case geminiThinkingLevel
@@ -41,6 +42,8 @@ extension ThinkingWireFormat {
             return ["kind": Kind.deepSeekSibling.rawValue]
         case .qwenDual:
             return ["kind": Kind.qwenDual.rawValue]
+        case .qwenRootOnly:
+            return ["kind": Kind.qwenRootOnly.rawValue]
         case .anthropicThinking(let style):
             return ["kind": Kind.anthropicThinking.rawValue,
                     "style": style == .adaptive ? "adaptive" : "budgetTokens"]
@@ -69,6 +72,7 @@ extension ThinkingWireFormat {
         case .reasoningEffortNested: return .reasoningEffortNested(offValue: obj["offValue"] as? String)
         case .deepSeekSibling:       return .deepSeekSibling
         case .qwenDual:              return .qwenDual
+        case .qwenRootOnly:          return .qwenRootOnly
         case .anthropicThinking:
             let style: AnthropicThinkingStyle = (obj["style"] as? String) == "adaptive" ? .adaptive : .budgetTokens
             return .anthropicThinking(style: style)
@@ -97,29 +101,31 @@ extension ThinkingWireFormat {
     var displaySummary: String {
         switch self {
         case .omitEverything:
-            return String(localized: "Send no thinking fields")
+            return AppLocalized("Send no thinking fields")
         case .reasoningEffort(let off):
-            return off == nil ? String(localized: "reasoning_effort · omit when off")
-                              : String(localized: "reasoning_effort · off = \(off!)")
+            return off == nil ? AppLocalized("reasoning_effort · omit when off")
+                              : AppLocalized("reasoning_effort · off = \(off!)")
         case .reasoningEffortNested:
-            return String(localized: "reasoning.effort (nested)")
+            return AppLocalized("reasoning.effort (nested)")
         case .deepSeekSibling:
-            return String(localized: "thinking + reasoning_effort (root siblings)")
+            return AppLocalized("thinking + reasoning_effort (root siblings)")
         case .qwenDual:
-            return String(localized: "enable_thinking + budget (root & extra_body)")
+            return AppLocalized("enable_thinking + budget (root & extra_body)")
+        case .qwenRootOnly:
+            return AppLocalized("enable_thinking only (no budget)")
         case .anthropicThinking(let style):
-            return style == .adaptive ? String(localized: "thinking: adaptive")
-                                      : String(localized: "thinking: budget_tokens")
+            return style == .adaptive ? AppLocalized("thinking: adaptive")
+                                      : AppLocalized("thinking: budget_tokens")
         case .geminiBudget(let floor, _):
-            return String(localized: "thinkingBudget · floor \(floor)")
+            return AppLocalized("thinkingBudget · floor \(floor)")
         case .geminiThinkingLevel:
-            return String(localized: "thinkingLevel (string)")
+            return AppLocalized("thinkingLevel (string)")
         case .booleanToggle(let path):
-            return String(localized: "boolean toggle · \(path)")
+            return AppLocalized("boolean toggle · \(path)")
         case .extraBodyToggle(let path):
-            return String(localized: "extra_body toggle · \(path)")
+            return AppLocalized("extra_body toggle · \(path)")
         case .customPath(let path, _, _):
-            return String(localized: "custom path · \(path)")
+            return AppLocalized("custom path · \(path)")
         }
     }
 }
@@ -147,7 +153,7 @@ extension ThinkingRule.Scope {
     /// Human-readable, for the rule row.
     var displayText: String {
         switch self {
-        case .allModels: return String(localized: "All models")
+        case .allModels: return AppLocalized("All models")
         case .modelPattern(let p): return p
         }
     }

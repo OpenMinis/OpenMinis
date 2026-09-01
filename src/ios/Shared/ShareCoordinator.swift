@@ -107,6 +107,19 @@ final class ShareCoordinator: ObservableObject {
     struct PendingShareBuffer {
         let share: PendingShare
         let bufferedAt: Date
+        /// [T-share-routes-to-background-session] The session this share is
+        /// FOR. Set by ContentView the moment it decides where the share goes
+        /// (always a freshly minted draft id today). `nil` only for a buffer
+        /// stored before any routing decision — the cold-launch path, where
+        /// the launch flow picks the destination.
+        ///
+        /// Without it, `AIChatView.onChange(bufferVersion)` injected into
+        /// whatever chat happened to be mounted: on 2026-08-18 23:55:42 a
+        /// second share landed in session 87B79110, a DIFFERENT conversation
+        /// that was mid-agent-run in the background, because that view was
+        /// simply the one on screen. The attachment appeared in a busy
+        /// session's composer with no way for the user to tell why.
+        var targetSessionId: String?
     }
 
     /// Written by processPendingShare() in ContentView, consumed once by AIChatView.
@@ -132,14 +145,41 @@ final class ShareCoordinator: ObservableObject {
                 merged.append(item)
             }
             let mergedShare = PendingShare(items: merged, timestamp: share.timestamp)
-            pendingShareBuffer = PendingShareBuffer(share: mergedShare, bufferedAt: Date())
+            // Keep the existing target: a merge means the first share's
+            // destination has already been decided (and possibly navigated to).
+            pendingShareBuffer = PendingShareBuffer(share: mergedShare, bufferedAt: Date(),
+                                                    targetSessionId: existing.targetSessionId)
             bufferVersion += 1
-            shareLog.info("[Share] storeBuffer: MERGED \(existing.share.items.count) existing + \(share.items.count) new → \(merged.count) items (v\(bufferVersion))")
+            shareLog.info("[Share] storeBuffer: MERGED \(existing.share.items.count) existing + \(share.items.count) new → \(merged.count) items (v\(bufferVersion)) target=\(existing.targetSessionId ?? "nil")")
             return
         }
-        pendingShareBuffer = PendingShareBuffer(share: share, bufferedAt: Date())
+        pendingShareBuffer = PendingShareBuffer(share: share, bufferedAt: Date(), targetSessionId: nil)
         bufferVersion += 1
         shareLog.info("[Share] storeBuffer: \(share.items.count) items buffered (v\(bufferVersion)) at \(Date())")
+    }
+
+    /// [T-share-routes-to-background-session] Name the session this buffered
+    /// share belongs to. Called by ContentView immediately after it decides
+    /// (and requests navigation to) the destination, so the injector can tell
+    /// "this share is mine" from "this share is for a chat I am not".
+    func setBufferTarget(_ sessionId: String) {
+        guard pendingShareBuffer != nil else { return }
+        pendingShareBuffer?.targetSessionId = sessionId
+        shareLog.info("[Share] setBufferTarget: \(sessionId)")
+    }
+
+    /// Whether the buffered share is addressed to `sessionId` (or to nobody in
+    /// particular, which is the cold-launch case the launch flow owns).
+    func bufferTargets(_ sessionId: String?, draftId: String?) -> Bool {
+        guard let target = pendingShareBuffer?.targetSessionId else { return true }
+        // A draft chat is addressed BOTH ways: the navigation stack (and hence
+        // the recorded target) holds its `__new__…` id, while the view itself
+        // reports `sessionId = nil, draftId = __new__…` before the first send
+        // and `sessionId = <real id>, draftId = __new__…` after it. Matching
+        // either identity keeps a share aimed at the draft the user is looking
+        // at from being refused by that very draft once it acquires a real id
+        // mid-flight — the A231F9 shape in the 2026-08-18 log.
+        return target == sessionId || target == draftId
     }
 
     /// Consume the buffer. Returns nil (and cleans up) if expired or empty.
@@ -157,7 +197,7 @@ final class ShareCoordinator: ObservableObject {
             // explicitly shared content into Minis — tell them it didn't make
             // it instead of letting the screenshot vanish into thin air.
             Task { @MainActor in
-                ShareFeedbackToast.show(String(localized: "Shared content expired. Please share again."))
+                ShareFeedbackToast.show(AppLocalized("Shared content expired. Please share again."))
             }
             return nil
         }

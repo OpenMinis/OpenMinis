@@ -1210,9 +1210,9 @@ struct ToolLiveSheet: View {
                                 // cancelled → "Cancelled".
                                 let (label, labelColor): (String, Color) = {
                                     switch block.toolStatus {
-                                    case .failed:    return (String(localized: "Failed to edit"), .red)
-                                    case .cancelled: return (String(localized: "Cancelled"),     .orange)
-                                    default:         return (String(localized: "Edited"),        Color(UIColor.label))
+                                    case .failed:    return (AppLocalized("Failed to edit"), .red)
+                                    case .cancelled: return (AppLocalized("Cancelled"),     .orange)
+                                    default:         return (AppLocalized("Edited"),        Color(UIColor.label))
                                     }
                                 }()
                                 let isFailure: Bool = {
@@ -2327,17 +2327,17 @@ private struct ToolPreviewThumbnail: View {
         case .shellTool(let cmd): return cmd.isEmpty ? "$ shell" : "$ \(cmd)"
         case .fileReadTool(let p):
             let name = (p as NSString).lastPathComponent
-            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : String(localized: "Read file")
+            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : AppLocalized("Read file")
         case .fileWriteTool(let p):
             let name = (p as NSString).lastPathComponent
-            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : String(localized: "Write file")
+            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : AppLocalized("Write file")
         case .fileEditTool(let p):
             let name = (p as NSString).lastPathComponent
-            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : String(localized: "Edit file")
+            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : AppLocalized("Edit file")
         case .browserTool(let a): return a
         case .readImageTool(let p):
             let name = (p as NSString).lastPathComponent
-            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : String(localized: "Read image")
+            return (!p.isEmpty && name != "/" && name.contains(".")) ? name : AppLocalized("Read image")
         case .memoryTool(let a): return a
         default: return ""
         }

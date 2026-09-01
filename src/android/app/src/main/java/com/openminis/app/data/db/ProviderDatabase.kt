@@ -104,6 +104,7 @@ abstract class ProviderDatabase : RoomDatabase() {
             }
         }
 
+
         fun getInstance(context: Context): ProviderDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(

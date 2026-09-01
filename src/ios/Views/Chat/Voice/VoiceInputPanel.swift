@@ -46,22 +46,22 @@ enum VoiceInputFailure: Equatable {
     var message: String {
         switch self {
         case .tooShort:
-            return String(localized: "Too short — hold on and speak a little longer",
+            return AppLocalized("Too short — hold on and speak a little longer",
                           comment: "Voice input: recording below the minimum length, discarded")
         case .noSpeechRecognized:
-            return String(localized: "No speech recognized — please try again",
+            return AppLocalized("No speech recognized — please try again",
                           comment: "Voice input: ASR succeeded but returned an empty transcript")
         case .droppedWhileEditing:
-            return String(localized: "Speech ignored while editing — finish editing first",
+            return AppLocalized("Speech ignored while editing — finish editing first",
                           comment: "Voice input: result discarded because the user was editing the transcript")
         case .micPermissionDenied:
-            return String(localized: "Microphone access denied — enable it in Settings",
+            return AppLocalized("Microphone access denied — enable it in Settings",
                           comment: "Voice input: microphone permission denied")
         case .speechPermissionDenied:
-            return String(localized: "Speech recognition access denied — enable it in Settings",
+            return AppLocalized("Speech recognition access denied — enable it in Settings",
                           comment: "Voice input: Speech recognition permission denied")
         case .noUsableProvider:
-            return String(localized: "No usable speech-to-text model — check the voice settings",
+            return AppLocalized("No usable speech-to-text model — check the voice settings",
                           comment: "Voice input: no ASR provider could be built (missing key/config)")
         case .transcribeFailed(let detail):
             return detail
@@ -1152,7 +1152,7 @@ extension VoiceInputViewModel: VoiceActivityDelegate {
         cancelIdleTimer()
         backgroundTimer?.invalidate(); backgroundTimer = nil
         VoiceModePreference.shared.isCapturing = false
-        startError = String(localized: "Recording was interrupted — tap the mic to resume", comment: "Voice capture interrupted")
+        startError = AppLocalized("Recording was interrupted — tap the mic to resume", comment: "Voice capture interrupted")
     }
 
     private static func computeWaveformLevels(from pcmData: Data) -> [Float] {

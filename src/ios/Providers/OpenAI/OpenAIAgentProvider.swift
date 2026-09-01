@@ -93,16 +93,25 @@ final class OpenAIAgentProvider: AgentProvider {
             "model": model.id,
             "messages": allMessages,
             "stream": true,
-            // [T-codex-prompt-cache-headers] Same stable per-conversation key the
-            // Responses path sends. OpenAI's prompt-caching guide states that on
-            // GPT-5.6+ you *must* set `prompt_cache_key` to get the more reliable
-            // prefix matching, and this path had no key at all — so any GPT-5.x
-            // model reached over an OpenAI-compatible chat-completions endpoint
-            // was matching on the weaker heuristic. Vendors that don't recognise
-            // the field ignore it (it is an unknown extra key, not a mode
-            // switch), so this is safe for the non-OpenAI providers on this path.
-            "prompt_cache_key": Self.derivePromptCacheKey(from: messages),
         ]
+        // [T-codex-prompt-cache-headers] Same stable per-conversation key the
+        // Responses path sends. OpenAI's prompt-caching guide states that on
+        // GPT-5.6+ you *must* set `prompt_cache_key` to get the more reliable
+        // prefix matching, and this path had no key at all — so any GPT-5.x
+        // model reached over an OpenAI-compatible chat-completions endpoint
+        // was matching on the weaker heuristic.
+        //
+        // [T-ios-prompt-cache-key-400] Gated as of this fix. The original
+        // version sent the key UNCONDITIONALLY on the assumption that vendors
+        // which don't recognise it would ignore it as a harmless extra key.
+        // That assumption is false: strict-schema third-party gateways reject
+        // unknown request fields outright with
+        // `400 UNKNOWN_FIELD: 未知请求字段：prompt_cache_key`, which fails the
+        // whole request rather than degrading to an uncached one. Only the
+        // official OpenAI endpoint gets the key on this path.
+        if Self.shouldSendPromptCacheKey(for: provider) {
+            body["prompt_cache_key"] = Self.derivePromptCacheKey(from: messages)
+        }
         if provider.useOpenRouterCompat {
             body["max_tokens"] = maxTokens
         } else {
@@ -153,7 +162,7 @@ final class OpenAIAgentProvider: AgentProvider {
             // site, and it can no longer be lost when a second injection path is added
             // (which is exactly how the Responses API path ended up ungated, 37bab14c).
             let offEffort = Self.explicitOffEffort(for: provider, model: model, level: thinkingLevel)
-            Self.injectThinkingParams(into: &body, model: model, level: thinkingLevel, isOpenRouter: provider.useOpenRouterCompat, maxTokens: maxTokens, offEffort: offEffort, unifiedReasoningEffort: provider.usesUnifiedReasoningEffort, isMistral: provider.isMistral, isXAI: provider.isXAI, providerInstanceId: provider.providerInstanceId)
+            Self.injectThinkingParams(into: &body, model: model, level: thinkingLevel, isOpenRouter: provider.useOpenRouterCompat, maxTokens: maxTokens, offEffort: offEffort, unifiedReasoningEffort: provider.usesUnifiedReasoningEffort, isMistral: provider.isMistral, isXAI: provider.isXAI, isDashScope: provider.isDashScope, providerInstanceId: provider.providerInstanceId)
         }
 
         let (lineStream, _) = try await provider.streamRaw(body: body, isResponsesAPI: false)
@@ -427,14 +436,23 @@ final class OpenAIAgentProvider: AgentProvider {
             "store": false,
             "parallel_tool_calls": true,
             "input": inputMessages,
-            // Stable per-conversation key so the Responses API can hit prompt cache
-            // across turns. Codex CLI sets this to its conversation_id; we don't have
-            // one at this layer, so we derive a stable hash from the first user
-            // message's text, which is prepended every turn of the same chat.
-            // Required for custom/third-party endpoints (e.g. sub2api) that do not
-            // synthesize a fallback key server-side — see Wei-Shaw/sub2api#1134.
-            "prompt_cache_key": Self.derivePromptCacheKey(from: messages),
         ]
+        // Stable per-conversation key so the Responses API can hit prompt cache
+        // across turns. Codex CLI sets this to its conversation_id; we don't have
+        // one at this layer, so we derive a stable hash from the first user
+        // message's text, which is prepended every turn of the same chat.
+        // Required for custom/third-party endpoints (e.g. sub2api) that do not
+        // synthesize a fallback key server-side — see Wei-Shaw/sub2api#1134.
+        //
+        // [T-ios-prompt-cache-key-400] Now gated. Unlike the chat path this one
+        // deliberately KEEPS the key for `forceResponsesAPI` relays: that flag
+        // is an explicit "this base speaks the Responses API" opt-in, sub2api is
+        // the documented reason the field was added here, and those relays need
+        // it because they synthesize no server-side fallback. What is excluded
+        // is the un-opted-in custom base — the case that produced the 400.
+        if Self.shouldSendPromptCacheKey(for: provider) {
+            body["prompt_cache_key"] = Self.derivePromptCacheKey(from: messages)
+        }
         // Thinking level → Responses API `reasoning.effort`.
         // Applies to every Responses flavor (Codex OAuth + forceResponsesAPI +
         // custom-base). Previously only Codex honored the user's level, so
@@ -820,6 +838,38 @@ final class OpenAIAgentProvider: AgentProvider {
 
     // MARK: - Prompt Cache Key
 
+    /// [T-ios-prompt-cache-key-400] Whether this provider may receive the
+    /// `prompt_cache_key` request field.
+    ///
+    /// ALLOWLIST, not blanket — same shape as `explicitOffEffort`. The field is
+    /// a pure cache-locality hint with no behavioural meaning, so the cost of
+    /// omitting it is a weaker cache hit rate, while the cost of sending it to a
+    /// vendor that doesn't know it can be total request failure: strict-schema
+    /// gateways answer `400 UNKNOWN_FIELD: 未知请求字段：prompt_cache_key`
+    /// (reported against self-hosted deepseek-v4 endpoints) instead of ignoring
+    /// the extra key. That asymmetry is why the default must be "don't send".
+    ///
+    /// Allowed:
+    ///   • official OpenAI base (`customBaseURL == nil`, non-Azure) — the vendor
+    ///     that defines the field; required on GPT-5.6+ for reliable prefix
+    ///     matching.
+    ///   • `forceResponsesAPI` relays — an explicit user opt-in declaring the
+    ///     base speaks the Responses API (sub2api and friends). These need the
+    ///     key because they synthesize no server-side fallback
+    ///     (Wei-Shaw/sub2api#1134), and opting in is the user asserting
+    ///     Responses-API compatibility.
+    ///
+    /// Everyone else — plain custom-base OpenAI-compatible endpoints, Azure —
+    /// gets the field omitted, which is the pre-regression behaviour.
+    ///
+    /// TODO: if a specific non-`forceResponsesAPI` gateway is later confirmed to
+    /// handle the field correctly, add it here by base-URL match rather than
+    /// widening the default.
+    static func shouldSendPromptCacheKey(for provider: OpenAIProvider) -> Bool {
+        if provider.customBaseURL == nil && !provider.isAzure { return true }
+        return provider.forceResponsesAPI
+    }
+
     /// Derives a stable per-conversation `prompt_cache_key` for the Responses API.
     ///
     /// The Responses API hits prompt cache by matching stable prefixes keyed on
@@ -962,7 +1012,7 @@ final class OpenAIAgentProvider: AgentProvider {
     ///
     /// PHASE 1 SCOPE: OpenAI-compatible endpoints only. Gemini and Anthropic keep their
     /// own emitters and are not routed through the resolver yet.
-    static func injectThinkingParams(into body: inout [String: Any], model: LLMModel, level: ThinkingLevel, isOpenRouter: Bool = false, maxTokens: Int = 0, offEffort: String? = nil, unifiedReasoningEffort: Bool = false, isMistral: Bool = false, isXAI: Bool = false, providerInstanceId: String? = nil) {
+    static func injectThinkingParams(into body: inout [String: Any], model: LLMModel, level: ThinkingLevel, isOpenRouter: Bool = false, maxTokens: Int = 0, offEffort: String? = nil, unifiedReasoningEffort: Bool = false, isMistral: Bool = false, isXAI: Bool = false, isDashScope: Bool = false, providerInstanceId: String? = nil) {
         // [T-thinking-rules-phase2] Load this instance's user-authored rules. Absent an
         // instance id (title-gen references, tests) or with no rules stored, this is []
         // and resolution is byte-for-byte the Phase 1 behaviour.
@@ -979,6 +1029,7 @@ final class OpenAIAgentProvider: AgentProvider {
             isOpenRouter: isOpenRouter,
             usesUnifiedReasoningEffort: unifiedReasoningEffort,
             isMistral: isMistral,
+            isDashScope: isDashScope,
             offEffort: offEffort,
             userRules: userRules
         )
@@ -1000,7 +1051,7 @@ final class OpenAIAgentProvider: AgentProvider {
             + " noEffortTiers=\(model.declaresNoEffortTiers.map(String.init(describing:)) ?? "nil")"
             + " offEffort=\(offEffort ?? "nil")"
             + " endpoint=[openrouter=\(isOpenRouter) unified=\(unifiedReasoningEffort)"
-            + " mistral=\(isMistral) xai=\(isXAI)]"
+            + " mistral=\(isMistral) xai=\(isXAI) dashscope=\(isDashScope)]"
             + " userRules=\(userRules.count)"
         )
         let trace = ThinkingRuleResolver.apply(to: &body, ctx: ctx)

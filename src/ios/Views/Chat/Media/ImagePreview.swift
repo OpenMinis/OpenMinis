@@ -474,7 +474,7 @@ struct ImagePreviewView: View {
 
                     // Print button
                     Button {
-                        PrintHelper.printImage(image, jobName: String(localized: "Image"))
+                        PrintHelper.printImage(image, jobName: AppLocalized("Image"))
                     } label: {
                         Image(systemName: "printer")
                             .font(.body.weight(.semibold))

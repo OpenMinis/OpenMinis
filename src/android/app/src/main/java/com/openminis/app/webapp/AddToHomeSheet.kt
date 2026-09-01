@@ -41,11 +41,9 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Web
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -66,6 +64,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
+import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.R
 import com.openminis.app.data.repository.WebAppShortcutRepository
 import kotlinx.coroutines.Dispatchers
@@ -346,17 +346,17 @@ fun AddToHomeSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                OutlinedButton(
+                MinisOutlinedButton(
                     onClick = onDismiss,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(stringResource(android.R.string.cancel))
                 }
-                Button(
+                MinisButton(
                     enabled = copiedFile != null && titleText.isNotBlank(),
                     modifier = Modifier.weight(1f),
                     onClick = {
-                        val target = copiedFile ?: return@Button
+                        val target = copiedFile ?: return@MinisButton
                         val finalTitle = titleText.trim().ifBlank {
                             fileName.removeSuffix(".html").removeSuffix(".htm")
                         }

@@ -42,6 +42,22 @@ data class SoulMetadata(
      * iOS rollback of the emoji-customization field.
      */
     val emoji: String,
+    /**
+     * [T-android-soul-custom-icon] The user-settable identity icon: either a
+     * short emoji literal, or a `data:image/png;base64,…` URI. Empty means the
+     * default sparkle.
+     *
+     * This is a NEW key, deliberately separate from the legacy [emoji] field
+     * above — that one is a round-trip holder for a rolled-back feature and is
+     * never serialized, so reusing it would resurrect the old semantics.
+     *
+     * Stored in frontmatter rather than a sibling file for two reasons:
+     * the system prompt is built from a whitelist (name / style / body) and
+     * never serializes frontmatter wholesale, so even a ~20 KB data URI costs
+     * zero tokens; and SOUL.md is already synced as text and copied by the
+     * memory backup, so a sibling PNG would silently not be backed up.
+     */
+    val icon: String,
     val style: String,
     /** `"auto"`, `"zh"`, `"en"`, or any free-form tag. */
     val lang: String,
@@ -67,6 +83,7 @@ data class SoulMetadata(
             // survives in an old user-authored SOUL.md; the next save drops
             // it on disk too.
             emoji = "",
+            icon = "",
             style = "",
             lang = "auto",
         )
@@ -102,12 +119,17 @@ object SoulMDParser {
 
         var name = SoulMetadata.DEFAULT.name
         var emoji = SoulMetadata.DEFAULT.emoji
+        var icon = SoulMetadata.DEFAULT.icon
         var style = SoulMetadata.DEFAULT.style
         var lang = SoulMetadata.DEFAULT.lang
         for (raw in frontmatter) {
             val line = raw.trim()
             val colon = line.indexOf(':')
             if (colon <= 0) continue
+            // [T-android-soul-custom-icon] FIRST colon only. The `icon` value
+            // can be `data:image/png;base64,…`, which contains further colons —
+            // splitting on all of them would truncate the payload. (indexOf
+            // already gives the first; this comment exists so it stays that way.)
             val key = line.substring(0, colon).trim().lowercase()
             var value = line.substring(colon + 1).trim()
             if (value.length >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
@@ -116,12 +138,13 @@ object SoulMDParser {
             when (key) {
                 "name" -> if (value.isNotEmpty()) name = value
                 "emoji" -> if (value.isNotEmpty()) emoji = value
+                "icon" -> icon = value
                 "style" -> style = value
                 "lang" -> if (value.isNotEmpty()) lang = value
                 else -> Unit
             }
         }
-        return SoulFile(SoulMetadata(name, emoji, style, lang), body)
+        return SoulFile(SoulMetadata(name, emoji, icon, style, lang), body)
     }
 
     /**
@@ -134,11 +157,20 @@ object SoulMDParser {
      * Old files containing `emoji: "..."` still parse cleanly (the value is
      * kept in memory for round-trip safety) but the line is dropped on the
      * next save, naturally migrating disk state to the new schema.
+     *
+     * [T-android-soul-custom-icon] `icon` is the one CONDITIONAL key: it is
+     * written only when non-empty, so a user who never set one keeps the
+     * existing 3-key file shape and clearing the icon removes the line
+     * outright rather than leaving `icon: ""` behind. It is emitted after
+     * `name` so an added icon shows as a clean one-line insert in sync diffs.
      */
     fun serialize(file: SoulFile): String {
         val sb = StringBuilder()
         sb.append("---\n")
         sb.append("name: \"").append(escape(file.metadata.name)).append("\"\n")
+        if (file.metadata.icon.isNotEmpty()) {
+            sb.append("icon: \"").append(escape(file.metadata.icon)).append("\"\n")
+        }
         sb.append("style: \"").append(escape(file.metadata.style)).append("\"\n")
         sb.append("lang: \"").append(escape(file.metadata.lang)).append("\"\n")
         sb.append("---\n\n")
@@ -464,7 +496,7 @@ object SystemPromptBuilder {
         // SOUL body length limit (#356 / 1000 EN words / 1600 CN chars).
         val soulEditHint =
             "---\n" +
-            "SOUL.md fields (name / style / lang / body) can be edited two ways:\n" +
+            "SOUL.md fields (name / icon / style / lang / body) can be edited two ways:\n" +
             "1. Tool: call `minis-config` to propose changes (user must approve).\n" +
             "2. UI: ask the user to go to Settings → Soul to edit directly.\n" +
             "Pick whichever the user finds easier in context. Do not say you cannot change your personality."

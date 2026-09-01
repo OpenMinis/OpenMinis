@@ -277,12 +277,17 @@ import com.openminis.app.ui.components.MinisTextButton
 
 @Composable
 internal fun AssistantHeader() {
-    // [T-soul-md] Identity header = locked ✨ sparkle gradient icon +
-    // SOUL.md-driven `name`. The emoji-customization field was removed,
-    // so we no longer branch on `SoulMetadata.emoji`; the icon stays the
-    // canonical sparkle (iOS: sparkles SF Symbol + gradient). Only the
-    // `name` field is user-customizable — defaults to "Minis" when
-    // SOUL.md is missing the field or set to the default value.
+    // [T-soul-md] Identity header = icon + SOUL.md-driven `name`.
+    //
+    // [T-android-soul-custom-icon] The icon is now the user-settable
+    // `SoulMetadata.icon` (emoji or transparent PNG), falling back to the
+    // canonical sparkle gradient when unset — so a user who never touches it
+    // sees exactly the previous rendering.
+    //
+    // Deliberately the SAME composable the settings card uses. On iOS these
+    // two surfaces were written separately and the chat one silently failed
+    // to pick up image icons; sharing the renderer makes that class of
+    // divergence impossible rather than merely unlikely.
     val soulMeta by com.openminis.app.agent.SoulStore.cachedMetadata.collectAsState()
     val displayName = soulMeta.name.ifBlank { com.openminis.app.agent.SoulMetadata.DEFAULT.name }
     Row(
@@ -297,17 +302,14 @@ internal fun AssistantHeader() {
         val sparkleGradient = Brush.linearGradient(
             colors = listOf(SparkleColor1, SparkleColor2),
         )
-        Icon(
-            imageVector = Icons.Filled.AutoAwesome,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier
-                .size(18.dp)
-                .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    drawRect(brush = sparkleGradient, blendMode = BlendMode.SrcIn)
-                },
+        // 18.dp, matching the previous Icon exactly: the row height feeds a
+        // measured-height estimate in the message list, so the icon stays
+        // square and same-sized whichever branch renders.
+        com.openminis.app.ui.settings.SoulIconGlyph(
+            icon = soulMeta.icon,
+            sizeDp = 18.dp,
+            emojiSp = 15.sp,
+            sparkleTint = sparkleGradient,
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(

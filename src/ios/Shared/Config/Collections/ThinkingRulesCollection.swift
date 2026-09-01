@@ -243,7 +243,7 @@ struct ThinkingRulesCollection: ConfigCollection {
     static let wireFormatKinds = [
         "anthropicThinking", "booleanToggle", "customPath", "deepSeekSibling",
         "extraBodyToggle", "geminiBudget", "geminiThinkingLevel", "omitEverything",
-        "qwenDual", "reasoningEffort", "reasoningEffortNested",
+        "qwenDual", "qwenRootOnly", "reasoningEffort", "reasoningEffortNested",
     ]
 
     /// Shared by `add` and the `wireFormat` field writer so the CLI accepts exactly one
@@ -327,7 +327,7 @@ struct ThinkingRulesCollection: ConfigCollection {
         ClosureField(
             path: "thinkingrules.\(cid).wireFormat",
             displayName: "Wire format",
-            description: "JSON object {\"kind\":…} describing the fields this rule puts on the request.",
+            description: "JSON object {\"kind\":…} describing the fields this rule puts on the request. For qwen models pick by ENDPOINT, not by model name: \"qwenDual\" (enable_thinking + thinking_budget at the root AND inside extra_body) is for Alibaba DashScope itself, while \"qwenRootOnly\" sends a bare root-level enable_thinking with no extra_body and no thinking_budget — use it for self-hosted vLLM/SGLang and any OpenAI-compatible relay, which commonly reject both of those fields with a 400.",
             valueSchema: .json,
             risk: .sensitive, revertable: true,
             reader: { [self] in

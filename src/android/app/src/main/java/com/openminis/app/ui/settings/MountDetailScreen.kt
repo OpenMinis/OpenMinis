@@ -178,7 +178,7 @@ fun MountDetailScreen(
                         )
                     }
                     Spacer(Modifier.width(12.dp))
-                    Switch(
+                    SettingsSwitch(
                         checked = allowWrite,
                         onCheckedChange = { allowWrite = it },
                         // Disable when the OS-level grant itself isn't writable.

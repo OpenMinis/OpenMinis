@@ -21,9 +21,9 @@
     <!-- Session Memory Sheet -->
     <string name="session_memory_title">Memories in Session</string>
     <string name="memory_section_auto_injected">Auto-Injected</string>
-    <string name="memory_section_auto_injected_footer">Loaded into the system prompt at the start of each agent turn.</string>
+    <string name="memory_section_auto_injected_footer">Loaded into the system prompt at the start of each Agent turn.</string>
     <string name="memory_section_tool_activity">Tool Activity</string>
-    <string name="memory_section_tool_activity_footer">Memory reads and writes performed by the agent during this session.</string>
+    <string name="memory_section_tool_activity_footer">Memory reads and writes performed by the Agent during this session.</string>
     <string name="memory_section_written_content">Written Content</string>
     <string name="memory_section_tool_result">Tool Result</string>
     <string name="memory_section_keywords">Keywords</string>
@@ -38,7 +38,7 @@
     <string name="memory_revoke_result_io_error">Error writing file: %1$s</string>
     <string name="memory_save_toast">Saved</string>
     <string name="memory_save_error">Save failed: %1$s</string>
-    <string name="memory_global_footer">Persistent instructions and preferences visible to the agent in every session. The agent cannot modify this file.</string>
+    <string name="memory_global_footer">Persistent instructions and preferences visible to the Agent in every session. The Agent cannot modify this file.</string>
 
     <!-- Check Update -->
     <string name="check_update_section_header">App Update</string>
@@ -97,9 +97,9 @@
     <!-- T50: Background & notifications -->
     <string name="bg_section_header">Background &amp; notifications</string>
     <string name="bg_section_subtitle">Battery optimisation and OEM autostart</string>
-    <string name="bg_section_footer">Long-running agent tasks need permission to keep the CPU awake while the screen is off. Without these settings, the system may pause inference after a few minutes in the background.</string>
+    <string name="bg_section_footer">Long-running Agent tasks need permission to keep the CPU awake while the screen is off. Without these settings, the system may pause inference after a few minutes in the background.</string>
     <string name="bg_service_channel_name">Agent Status</string>
-    <string name="bg_service_channel_description">Shows status of running agent sessions.</string>
+    <string name="bg_service_channel_description">Shows status of running Agent sessions.</string>
     <!-- T-bg-overlay phase 2 fix — permission nudge for the SAW grant -->
     <string name="bg_overlay_nudge_channel_name">Background Overlay Permission</string>
     <string name="bg_overlay_nudge_channel_description">Reminds you to grant the system overlay permission so the background task overlay can appear.</string>
@@ -156,7 +156,7 @@
     <string name="settings_back">Back</string>
     <string name="settings_title">Settings</string>
     <string name="settings_section_llm_providers">LLM Providers</string>
-    <string name="settings_section_llm_providers_footer">Configure which models the agent uses, manage API keys &amp; OAuth for each provider, and create model groups for fallback or load balancing.</string>
+    <string name="settings_section_llm_providers_footer">Configure which models the Agent uses, manage API keys &amp; OAuth for each provider, and create model groups for fallback or load balancing.</string>
     <string name="settings_manage_providers">Manage Providers</string>
     <string name="settings_manage_providers_subtitle">API keys and OAuth sign-in</string>
     <string name="settings_model_groups">Model Groups</string>
@@ -167,7 +167,7 @@
     <string name="settings_appearance_subtitle">Theme, font size, and display</string>
     <string name="settings_section_agent_runtime">Agent Runtime</string>
     <string name="settings_skills">Skills</string>
-    <string name="settings_skills_subtitle">Manage AI agent skills and instructions</string>
+    <string name="settings_skills_subtitle">Manage Minis Agent skills and instructions</string>
     <string name="settings_memory">Memory</string>
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
@@ -177,7 +177,7 @@
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>
     <string name="mcp_section_servers">Servers</string>
-    <string name="mcp_section_footer">MCP servers let the agent call external tools via minis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible).</string>
+    <string name="mcp_section_footer">MCP servers let the Agent call external tools via minis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible).</string>
     <string name="mcp_empty_title">No MCP servers</string>
     <string name="mcp_empty_action">Add a server with the + button.</string>
     <string name="mcp_transport_http">HTTP</string>
@@ -187,7 +187,7 @@
     <string name="mcp_tab_import">Import JSON</string>
     <string name="mcp_form_name">Name</string>
     <string name="mcp_form_name_placeholder">e.g. notion</string>
-    <string name="mcp_form_note">Note (shown to the agent)</string>
+    <string name="mcp_form_note">Note (shown to the Agent)</string>
     <string name="mcp_form_note_placeholder">What this server is for</string>
     <string name="mcp_form_url">Server URL</string>
     <string name="mcp_form_url_placeholder">https://mcp.example.com/mcp</string>
@@ -283,7 +283,7 @@
     <string name="soul_lang_auto">Auto</string>
     <string name="soul_lang_zh">中文</string>
     <string name="soul_lang_en">English</string>
-    <string name="soul_body_placeholder">Describe how the agent should sound, think, and behave…</string>
+    <string name="soul_body_placeholder">Describe how the Agent should sound, think, and behave…</string>
     <string name="soul_length_indicator">%1$d characters</string>
     <string name="soul_count_zero">0 chars</string>
     <string name="soul_count_chars">%1$d / %2$d chars</string>
@@ -294,15 +294,29 @@
     <string name="soul_cancel">Cancel</string>
     <string name="soul_ok">OK</string>
     <string name="soul_restore_default">Restore Default</string>
+    <string name="soul_discard_confirm_title">Discard changes?</string>
+    <string name="soul_discard_confirm_body">Your edits to the persona have not been saved.</string>
+    <string name="soul_discard_confirm">OK, Discard</string>
+    <string name="soul_discard_cancel">Cancel, Keep Editing</string>
     <string name="soul_restore_confirm_title">Restore default SOUL.md?</string>
     <string name="soul_restore_confirm_body">Your current changes will be overwritten with the default personality file. The original is provided as a starting point and can be re-edited at any time.</string>
     <string name="soul_save_error_title">Couldn\'t save</string>
+    <string name="soul_icon_choose_emoji">Choose Emoji</string>
+    <string name="soul_icon_choose_image">Choose Image</string>
+    <string name="soul_icon_image_hint">Cropped to a square and rounded</string>
+    <string name="soul_icon_use_default">Use Default</string>
+    <string name="soul_icon_emoji_title">Identity icon</string>
+    <string name="soul_icon_emoji_field">Or type an emoji</string>
+    <string name="soul_icon_set">Set</string>
+    <string name="soul_icon_error_title">Can\'t use that image</string>
+    <string name="soul_icon_error_unreadable">That image couldn\'t be read. Try a different one.</string>
+    <string name="soul_icon_error_too_large">That image is too large to store. Try a simpler one.</string>
     <string name="settings_env_vars">Environment Variables</string>
     <string name="settings_env_vars_subtitle">Variables injected into the sandbox</string>
     <string name="settings_section_storage">Storage</string>
     <string name="settings_storage_subtitle">Manage Alpine Linux rootfs and browse files</string>
     <string name="settings_section_permissions">Permissions</string>
-    <string name="settings_permissions_subtitle">Control agent access to privacy-sensitive features</string>
+    <string name="settings_permissions_subtitle">Control Agent access to privacy-sensitive features</string>
     <string name="settings_section_logs">Logs</string>
     <string name="settings_logs_subtitle">View and export app logs</string>
     <string name="settings_section_about">About</string>
@@ -331,7 +345,7 @@
     <string name="time_yesterday">Yesterday</string>
     <string name="time_today">Today</string>
     <string name="offload_perm_dialog_title">Permission Request</string>
-    <string name="offload_perm_dialog_intro">The AI agent wants to use:</string>
+    <string name="offload_perm_dialog_intro">The Minis Agent wants to use:</string>
     <string name="offload_perm_dialog_tool_label">Tool: %1$s</string>
     <!-- T338: session-scoped tri-action labels for the ASK_ONCE dialog.
          None of these persist a PermissionLevel — the user goes to
@@ -385,7 +399,7 @@
     <string name="common_skip">Skip</string>
     <string name="common_next">Next</string>
     <string name="onboarding_welcome_title">Welcome to Minis</string>
-    <string name="onboarding_welcome_subtitle">Your AI agent with terminal, browser, and native device access.</string>
+    <string name="onboarding_welcome_subtitle">Your Minis Agent with terminal, browser, and native device access.</string>
     <string name="onboarding_get_started">Get Started</string>
     <string name="onboarding_provider_title">Add a Provider</string>
     <string name="onboarding_provider_subtitle">Enter an API key for at least one provider to get started.</string>
@@ -450,6 +464,9 @@
     <string name="filepreview_loading_archive">Reading archive…</string>
     <string name="filepreview_open_externally">Open externally</string>
     <string name="filepreview_office_subtitle">Office documents preview in an external viewer.</string>
+    <!-- T-android-apk-preview — APK package card -->
+    <string name="filepreview_apk_install">Install</string>
+    <string name="filepreview_apk_unreadable">Package details could not be read.</string>
     <string name="filepreview_pdf_render_failed">Couldn\'t render PDF: %1$s</string>
     <string name="filepreview_pdf_empty">Empty document</string>
     <string name="filepreview_image_decode_error">Unable to decode image</string>
@@ -558,6 +575,10 @@
     <string name="chat_error_stream_dropped_partial">The connection dropped — this reply may be incomplete. Tap Retry to continue.</string>
     <!-- Composer placeholder. %1$s is the Soul-customized assistant name (default "Minis"). The parenthetical is an inline hint reminding the user that typing '@' opens the file-mention picker. T-android-placeholder-single-line collapses the prior two-row (title + hint) layout into a single line, matching iOS 19e1d61f. -->
     <string name="chat_input_placeholder">Message %1$s (@ to mention files)</string>
+    <string name="chat_input_placeholder_hint_1">Try @ to mention files for %1$s to read</string>
+    <string name="chat_input_placeholder_hint_2">Type / for SKILLs and quick commands</string>
+    <string name="chat_input_placeholder_hint_3">Try dragging text into the chat to send it</string>
+    <string name="chat_input_placeholder_hint_4">Long-press anywhere in a reply to select and copy it all</string>
     <string name="browser_takeover">Takeover</string>
     <string name="browser_settings_done">Done</string>
     <string name="browser_settings_user_agent">User Agent</string>
@@ -671,7 +692,7 @@
     <string name="appearance_auto_grouping_subtitle">File new chats into a matching group</string>
     <string name="appearance_auto_grouping_footer">When a chat\'s title is first generated, also file it into a matching existing group. Runs once per chat, only uses groups you already created, and leaves the chat ungrouped when nothing matches.</string>
     <string name="appearance_section_tool_preview">Tool Status Bar</string>
-    <string name="appearance_tool_preview_footer">Show a live preview thumbnail alongside the tool status bar during agent execution.</string>
+    <string name="appearance_tool_preview_footer">Show a live preview thumbnail alongside the tool status bar during Agent execution.</string>
     <string name="appearance_tool_preview_title">Tool Preview Window</string>
     <string name="appearance_section_auto_focus_after_reply">Auto-Focus Input After Reply</string>
     <string name="appearance_auto_focus_after_reply_title">Auto-Focus Input After Reply</string>
@@ -740,9 +761,9 @@
     <string name="settings_memory_global_enabled_title">Memory enabled by default</string>
     <string name="settings_memory_global_enabled_subtitle">When off, new sessions skip GLOBAL.md and daily memory by default</string>
     <string name="memory_empty_title">No Memory Files</string>
-    <string name="memory_empty_description">Memory files store persistent knowledge across sessions. Edit GLOBAL.md to add instructions visible to the agent.</string>
+    <string name="memory_empty_description">Memory files store persistent knowledge across sessions. Edit GLOBAL.md to add instructions visible to the Agent.</string>
     <string name="memory_section_files">Files</string>
-    <string name="memory_section_footer">GLOBAL.md contains persistent instructions visible to the agent. Daily logs are created automatically during conversations.</string>
+    <string name="memory_section_footer">GLOBAL.md contains persistent instructions visible to the Agent. Daily logs are created automatically during conversations.</string>
     <string name="memory_delete_confirm_title">Delete %1$s?</string>
     <string name="memory_delete_confirm_text">This will permanently remove this memory log.</string>
     <string name="memory_editor_placeholder">Enter content…</string>
@@ -767,9 +788,9 @@
     <string name="perm_tool_shizuku_cli">android-shizuku-cli</string>
     <string name="perm_section_a11y">Accessibility</string>
     <string name="perm_section_shizuku">Shizuku</string>
-    <string name="perm_a11y_section_footer">android-a11y-cli lets the agent read on-screen UI structure, perform taps and gestures, and watch system events. Both rows below must be set: pick an Agent permission and enable the Accessibility service in system Settings.</string>
-    <string name="perm_shizuku_section_footer">android-shizuku-cli grants the agent privileged Android APIs (package install, settings put, force-stop, …) via the Shizuku service authorized over wireless ADB or root. Both rows below must be set.</string>
-    <string name="perm_a11y_cli_description">Lets the agent read screen UI, tap, type, and watch events</string>
+    <string name="perm_a11y_section_footer">android-a11y-cli lets the Agent read on-screen UI structure, perform taps and gestures, and watch system events. Both rows below must be set: pick an Agent permission and enable the Accessibility service in system Settings.</string>
+    <string name="perm_shizuku_section_footer">android-shizuku-cli grants the Agent privileged Android APIs (package install, settings put, force-stop, …) via the Shizuku service authorized over wireless ADB or root. Both rows below must be set.</string>
+    <string name="perm_a11y_cli_description">Lets the Agent read screen UI, tap, type, and watch events</string>
     <string name="perm_shizuku_cli_description">Privileged Android APIs via the Shizuku service</string>
     <string name="perm_a11y_open_settings">Open Accessibility Settings</string>
     <string name="perm_system_authorization">System authorization</string>
@@ -777,7 +798,7 @@
     <string name="perm_a11y_system_ready">Service enabled</string>
     <string name="perm_a11y_system_disabled">Service not enabled</string>
     <string name="perm_allow_minis_config">Allow minis-config</string>
-    <string name="perm_minis_config_desc">When disabled, the agent cannot read or modify any settings via minis-config. The change history at Logs → Config Changes remains accessible. The agent will receive a permission_denied error and can guide you via deep links instead.</string>
+    <string name="perm_minis_config_desc">When disabled, the Agent cannot read or modify any settings via minis-config. The change history at Logs → Config Changes remains accessible. The Agent will receive a permission_denied error and can guide you via deep links instead.</string>
     <string name="perm_section_privacy">Privacy</string>
     <string name="perm_section_media">Media</string>
     <string name="perm_section_system">System</string>
@@ -854,12 +875,12 @@
 
     <!-- [T-android-privileged-backend] Privileged backend (Shizuku / AXManager) -->
     <string name="perm_section_privileged_backend">Privileged Backend</string>
-    <string name="perm_privileged_cli_description">Let the agent run ADB-level system commands through a privileged backend (Shizuku or AXManager)</string>
+    <string name="perm_privileged_cli_description">Let the Agent run ADB-level system commands through a privileged backend (Shizuku or AXManager)</string>
 
     <string name="skill_title">Skills</string>
     <string name="skill_add">Add Skill</string>
     <string name="skill_section_installed">Installed</string>
-    <string name="skill_section_footer">Skills extend the AI agent with specialized instructions and workflows. They are loaded into the system prompt when enabled.</string>
+    <string name="skill_section_footer">Skills extend the Minis Agent with specialized instructions and workflows. They are loaded into the system prompt when enabled.</string>
     <string name="skill_empty_title">No Skills Installed</string>
     <string name="skill_empty_action">Tap + to import a SKILL.md, .zip, or .skill file, or browse Minis Skills.</string>
     <string name="skill_import_modal_title">Import Skill</string>
@@ -946,6 +967,12 @@
     <string name="usage_label_cache_creation">Cache Creation</string>
     <string name="usage_label_cache_hit_rate">Cache Hit Rate</string>
     <string name="usage_detail_input">Input</string>
+    <string name="newer_db_title">Your data is from a newer version</string>
+    <string name="newer_db_body">This copy of Minis is older than the one that created your data, so it can\'t open it safely.\n\nNothing has been deleted — your conversations are intact on this device. Reinstall the newer version of Minis and everything will be there.</string>
+    <string name="newer_db_versions">This version supports data format %1$d</string>
+    <string name="newer_db_exit">Close</string>
+    <string name="usage_attr_unknown_session">Model unknown — the session record was deleted</string>
+    <string name="usage_attr_removed">No longer in your configured providers</string>
     <string name="usage_detail_output">Output</string>
     <string name="usage_detail_cache_read">Cache Read</string>
     <string name="usage_detail_cache_creation">Cache Creation</string>
@@ -1021,6 +1048,8 @@
     <string name="provider_detail_custom_user_agent_placeholder">Leave blank for default</string>
     <string name="provider_detail_save_url_settings">Save URL Settings</string>
     <string name="provider_detail_api_format">API Format</string>
+    <string name="provider_detail_api_format_footer_chat">Standard /v1/chat/completions format. Compatible with most OpenAI-compatible services.</string>
+    <string name="provider_detail_api_format_footer_responses">Uses /v1/responses endpoint format. Required for some Responses-API-only services.</string>
     <string name="provider_detail_chat_completions">Chat Completions</string>
     <string name="provider_detail_responses_api">Responses API</string>
     <string name="provider_detail_azure_openai">Azure OpenAI</string>
@@ -1150,7 +1179,7 @@
     <string name="model_groups_new_group">New Group</string>
     <string name="model_groups_no_model_groups">No model groups</string>
     <string name="model_groups_groups_let_you_combine_models_for_fallba">Groups let you combine models for fallback or load balancing.</string>
-    <string name="model_groups_primary_is_used_for_main_agent_tasks_sub">Primary is used for main agent tasks. Sub is used for lightweight tasks like title generation. If Sub is not set, it inherits from Primary.</string>
+    <string name="model_groups_primary_is_used_for_main_agent_tasks_sub">Primary is used for main Agent tasks. Sub is used for lightweight tasks like title generation. If Sub is not set, it inherits from Primary.</string>
     <string name="model_groups_group_name">Group name</string>
     <string name="model_groups_create">Create</string>
     <string name="model_groups_none">None</string>
@@ -1196,12 +1225,12 @@
          EnhancedBackgroundSettingsView + BackgroundKeepAliveManager. -->
     <string name="settings_section_notifications">Notifications</string>
     <string name="settings_task_notifications">Task Notifications</string>
-    <string name="settings_task_notifications_footer">Notify when an agent task finishes while the app is in the background. Shows progress in the notification shade and on the lock screen.</string>
+    <string name="settings_task_notifications_footer">Notify when an Agent task finishes while the app is in the background. Shows progress in the notification shade and on the lock screen.</string>
     <string name="notif_one_task_running">1 task running</string>
     <string name="notif_n_tasks_running">%1$d tasks running</string>
     <string name="notif_in_session">In session</string>
     <string name="notif_task_completed_channel_name">Task Completion</string>
-    <string name="notif_task_completed_channel_description">Notifies when an agent session finishes while the app is backgrounded.</string>
+    <string name="notif_task_completed_channel_description">Notifies when an Agent session finishes while the app is backgrounded.</string>
     <string name="notif_task_completed_default_title">Task completed</string>
     <string name="notif_task_completed_body">Tap to open the chat and read the response.</string>
     <string name="notif_config_confirm_channel_name">Config Approvals</string>
@@ -1213,11 +1242,22 @@
 
     <!-- T-selection-add-to-input — long-press text selection menu action -->
     <string name="selection_add_to_chat_input">Add to Chat Input</string>
-    <string name="selection_read_aloud">Read Aloud</string>
+    <!-- T-android-readaloud-selection-vs-reply — the pair mirrors iOS's
+         "Read Selection" / "Read from Start". Bare "Read Aloud" was ambiguous
+         once a whole-reply action sat beside it. -->
+    <string name="selection_read_aloud">Read Selection</string>
+    <string name="selection_read_from_start">Read from Start</string>
+    <!-- Parent of the two above when both apply; plain wording is correct for
+         a container that holds both scopes. -->
+    <string name="read_aloud_group">Read Aloud</string>
     <!-- T-minis-textkit selection menu actions (Copy / Copy Markdown / Copy Rich Text) -->
     <string name="selection_copy">Copy</string>
     <string name="selection_copy_markdown">Copy Markdown</string>
     <string name="selection_copy_rich_text">Copy Rich Text</string>
+    <string name="selection_copy_full_markdown">Copy Full Markdown</string>
+    <string name="selection_copy_full_rich_text">Copy Full Rich Text</string>
+    <string name="selection_copy_full_plain_text">Copy Full Plain Text</string>
+    <string name="selection_copied_as_plain_text_toast">Copied as Plain Text</string>
     <!-- Toast messages shown after a selection-menu Copy action fires. %1$s = preview of copied text. -->
     <string name="selection_copied_toast">Copied: %1$s</string>
     <string name="selection_copied_as_markdown_toast">Copied as Markdown</string>
@@ -1235,12 +1275,12 @@
     <string name="settings_bg_overlay_permission_needed">Allow drawing over other apps to enable</string>
     <!-- [T-android-dynamic-island] Android 16 Live Updates / dynamic-island toggle. -->
     <string name="settings_dynamic_island">Dynamic Island (Live Updates)</string>
-    <string name="settings_dynamic_island_footer">Show live agent status on the Android 16 status chip. When on, this replaces the floating overlay so you don\'t see two status indicators at once.</string>
+    <string name="settings_dynamic_island_footer">Show live Agent status on the Android 16 status chip. When on, this replaces the floating overlay so you don\'t see two status indicators at once.</string>
     <string name="settings_dynamic_island_unsupported">Your current system version doesn\'t support Live Updates yet (requires Android 16+ with the feature enabled).</string>
 
     <!-- T182 agent loop section i18n -->
-    <string name="agent_loop_section_title">Available Models in Agent Loop</string>
-    <string name="agent_loop_section_footer">Models and groups listed here can be invoked from the terminal via minis-model-use. Only these are visible to the agent.</string>
+    <string name="agent_loop_section_title">Models Minis Can Call at Runtime</string>
+    <string name="agent_loop_section_footer">During a Minis task, the agent calls these models for sub-tasks such as generating an image or summarizing text — work its own model can\'t do. Also callable from the terminal via minis-model-use. Only these are visible to the Agent.</string>
     <string name="agent_loop_section_empty_hint">No models or groups added</string>
     <string name="agent_loop_section_add_models">Add Models</string>
     <string name="agent_loop_section_add_groups">Add Groups</string>
@@ -1249,7 +1289,7 @@
     <string name="agent_loop_section_no_available_models">All eligible models are already added.</string>
     <string name="agent_loop_section_no_available_groups">All groups are already added.</string>
     <string name="agent_loop_section_empty_group_subtitle">(empty group)</string>
-    <string name="agent_loop_section_remove">Remove from agent loop</string>
+    <string name="agent_loop_section_remove">Remove from Agent loop</string>
     <string name="agent_loop_section_group_badge">Group</string>
 
     <!-- T184-chatmenu-i18n — ChatScreen overflow ⋮ menu, longpress, attach -->
@@ -1285,7 +1325,15 @@
 
     <!-- T187 — user-bubble long-press Edit + Exit Edit Mode + Clear Chat dialog -->
     <string name="chat_longpress_edit">Edit</string>
+    <string name="chat_longpress_delete_from_here">Delete From Here</string>
+    <string name="chat_delete_from_here_confirm">Delete</string>
+    <plurals name="chat_delete_from_here_dialog_body">
+        <item quantity="one">This message and everything after it will be deleted. %d message in total. This cannot be undone.</item>
+        <item quantity="other">This message and everything after it will be deleted. %d messages in total. This cannot be undone.</item>
+    </plurals>
     <string name="chat_edit_exit_button">Exit Edit Mode</string>
+    <string name="chat_show_sidebar">Show session list</string>
+    <string name="chat_hide_sidebar">Hide session list</string>
     <string name="chat_clear_dialog_body">Remove all messages from this session? Files in workspace, attachments, and offloads are kept.</string>
     <string name="chat_clear_dialog_confirm">Clear</string>
 
@@ -1293,7 +1341,7 @@
     <string name="settings_shared_folders">Shared Folders</string>
     <string name="settings_shared_folders_subtitle">Browse /var/minis shared, skills, and memory</string>
     <string name="shared_folders_title">Shared Folders</string>
-    <string name="shared_folders_info_banner">These directories are visible inside the Linux sandbox. Skills and Memory are maintained by AI agent tools — do not edit manually.</string>
+    <string name="shared_folders_info_banner">These directories are visible inside the Linux sandbox. Skills and Memory are maintained by Minis Agent tools — do not edit manually.</string>
     <string name="shared_folder_name_shared">Shared</string>
     <string name="shared_folder_name_skills">Skills</string>
     <string name="shared_folder_name_memory">Memory</string>
@@ -1303,6 +1351,198 @@
     <!-- T219-2 — Mount External Folders settings UI -->
     <string name="settings_mount_external_folders">Mount External Folders</string>
     <string name="settings_mount_external_folders_subtitle">Bind picked folders into /var/minis/mounts/</string>
+    <string name="settings_backup_restore">Backup &amp; Restore</string>
+    <string name="settings_backup_restore_subtitle">Export an encrypted backup, or restore from one</string>
+    <!-- [T-android-backup-ui] Backup & Restore screen -->
+    <string name="backup_title">Backup &amp; Restore</string>
+    <string name="backup_tab_backup">Backup</string>
+    <string name="backup_tab_restore">Restore</string>
+    <string name="backup_section_include">Include</string>
+    <string name="backup_include_footer">Choose what this backup contains.</string>
+    <string name="backup_category_chats">Chats</string>
+    <string name="backup_category_shared_files">Shared Files</string>
+    <string name="backup_category_skills">Skills</string>
+    <string name="backup_category_memory">Memory &amp; Soul</string>
+    <string name="backup_category_providers">Providers</string>
+    <string name="backup_category_mcp">MCP Servers</string>
+    <string name="backup_category_env_vars">Environment Variables</string>
+    <string name="backup_category_voice">Voice Corrections</string>
+    <!-- Max Per-File Size picker -->
+    <string name="backup_max_file_size">Max Per-File Size</string>
+    <string name="backup_max_file_no_files">Don\'t back up files</string>
+    <string name="backup_max_file_unlimited">Unlimited</string>
+    <string name="backup_max_file_mb">%1$d MB</string>
+    <string name="backup_file_footer_no_files">Chats includes every file in each conversation, not just the messages. File contents are not being backed up — the backup lists which files existed, but restoring won\'t bring them back.</string>
+    <string name="backup_file_footer_limited">Chats includes every file in each conversation, not just the messages. Files larger than %1$d MB are listed in the backup but not included.</string>
+    <string name="backup_file_footer_unlimited">Chats includes every file in each conversation, not just the messages.</string>
+    <!-- Encryption -->
+    <string name="backup_section_encryption">Encryption</string>
+    <string name="backup_encrypt_backup">Encrypt Backup</string>
+    <string name="backup_passphrase">Passphrase</string>
+    <string name="backup_confirm_passphrase">Confirm passphrase</string>
+    <string name="backup_passphrase_mismatch">Passphrases don\'t match.</string>
+    <string name="backup_encrypt_footer_on">This passphrase encrypts the entire backup, including chats, files, and credentials. There is no way to recover a forgotten passphrase — the backup cannot be opened without it.</string>
+    <string name="backup_encrypt_footer_off_creds">This backup contains your API keys, OAuth tokens and environment variable values, and it is NOT encrypted — anyone with the file can read them. Turn on encryption to protect it.</string>
+    <string name="backup_encrypt_footer_off">Without encryption the backup is not protected — anyone with the file can read its contents.</string>
+    <!-- Actions -->
+    <string name="backup_start">Start Backup</string>
+    <string name="backup_working">Working…</string>
+    <string name="backup_manage_destinations">Manage Destinations…</string>
+    <string name="backup_section_destinations">Destinations</string>
+    <string name="backup_destinations_footer">New backups are sent to every destination listed here.</string>
+    <string name="backup_destinations_empty_footer">A backup with no destination stays inside this app and is lost if the app is removed. Add one to continue.</string>
+    <string name="backup_needs_destination">Add a storage destination to continue.</string>
+    <string name="backup_needs_category">Choose at least one thing to include.</string>
+    <string name="backup_needs_passphrase">Set a passphrase to encrypt this backup.</string>
+    <string name="backup_history">Backup History</string>
+    <string name="backup_history_footer">Runs from the past month. Older ones are removed automatically.</string>
+    <string name="backup_history_show_all">Show all %1$d records</string>
+    <string name="backup_history_running">Running…</string>
+    <string name="backup_history_interrupted">Interrupted before it finished</string>
+    <string name="backup_stop">Stop Backup</string>
+    <string name="backup_history_stopped">Stopped</string>
+    <string name="backup_history_delivered">%1$d of %2$d destinations</string>
+    <string name="backup_history_destinations">DESTINATIONS</string>
+    <string name="backup_history_summary">SUMMARY</string>
+    <string name="backup_history_log">LOG</string>
+    <string name="backup_history_no_log">No log for this run.</string>
+    <string name="backup_history_skipped">%1$d file(s) excluded by the size limit</string>
+    <string name="backup_history_remove">Remove Record</string>
+    <string name="backup_history_status">Status</string>
+    <string name="backup_history_started">Started</string>
+    <string name="backup_history_duration">Duration</string>
+    <string name="backup_history_size">Size</string>
+    <string name="backup_history_encrypted">Encrypted</string>
+    <string name="backup_history_file">File</string>
+    <string name="backup_history_excluded">Files excluded</string>
+    <string name="backup_history_file_count">%1$d file(s)</string>
+    <string name="backup_history_included">Included: %1$s</string>
+    <string name="backup_history_remove_note">This removes the record from this list. The backup files already saved to your destinations are not deleted.</string>
+    <string name="backup_history_remove_title">Delete this backup record?</string>
+    <string name="backup_history_remove_record_only">Delete Record Only</string>
+    <string name="backup_history_remove_with_files">Delete Record and Files</string>
+    <string name="backup_history_remove_choice_note">“Delete Record Only” removes this entry and leaves the backup files on your destinations. “Delete Record and Files” also deletes the package from each destination — that cannot be undone.</string>
+    <string name="backup_status_succeeded">Completed</string>
+    <string name="backup_status_issues">Completed with issues</string>
+    <string name="backup_status_failed">Failed</string>
+    <string name="backup_ready">Backup Ready</string>
+    <string name="backup_result_excluded_too_large">Excluded (too large)</string>
+    <string name="backup_result_files_not_included">Files not included</string>
+    <string name="backup_result_local_only">Saved on this device only.</string>
+    <string name="backup_result_delivered">Saved on this device, and copied to %1$d of %2$d destination(s).</string>
+    <string name="backup_local_removed">Local copy removed — %1$s freed on this device</string>
+    <string name="backup_local_kept">Local copy kept — not every destination was verified</string>
+    <string name="backup_result_delivered_cleaned">Delivered to all %1$d destination(s) and verified. The copy on this device was removed to save space.</string>
+    <string name="backup_ready_footer">Size %1$s.</string>
+    <string name="backup_ready_footer_excluded">Size %1$s · %2$d file(s) excluded by the size limit.</string>
+    <string name="backup_share">Share…</string>
+    <string name="backup_share_chooser">Share backup</string>
+    <string name="backup_save_to_files">Save to Files…</string>
+    <!-- Restore -->
+    <string name="backup_choose_file">Choose Backup File…</string>
+    <string name="backup_choose_file_footer">Pick a .minisbak file from Files, Drive, or any connected storage.</string>
+    <string name="backup_restore_destinations">Backup Destinations</string>
+    <string name="backup_restore_destinations_footer">Tap a destination to browse it and pick a backup.</string>
+    <string name="backup_restore_other_sources">Other Sources</string>
+    <string name="backup_choose_server">Choose from Server…</string>
+    <string name="backup_server_title">Restore from Server</string>
+    <string name="backup_server_empty">No servers configured. Add one under Manage Destinations.</string>
+    <string name="backup_server_no_packages">No backups found on this server.</string>
+    <string name="backup_server_row">%1$s · /%2$s</string>
+    <string name="backup_restore_servers_footer">Pick a server to see the backups stored on it.</string>
+    <string name="backup_pkg_row">%1$s · %2$s</string>
+    <string name="backup_reading">Reading…</string>
+    <string name="backup_section_backup">Backup</string>
+    <string name="backup_info_created">Created</string>
+    <string name="backup_info_snapshot">Snapshot</string>
+    <string name="backup_info_from">From</string>
+    <string name="backup_info_encrypted">Encrypted</string>
+    <string name="backup_info_unknown">Unknown</string>
+    <string name="backup_yes">Yes</string>
+    <string name="backup_no">No</string>
+    <string name="backup_section_restore">Restore</string>
+    <string name="backup_restore_footer">Merge: items are matched by id. Existing items are only replaced when the backup\'s copy is newer. Nothing is deleted.</string>
+    <string name="backup_count_chats">%1$d messages · %2$d files · %3$s</string>
+    <string name="backup_count_items">%1$d items · %2$s</string>
+    <string name="backup_count_skills">%1$d skills · %2$d files · %3$s</string>
+    <string name="backup_count_servers">%1$d servers · %2$s</string>
+    <string name="backup_count_providers">%1$d providers · %2$s</string>
+    <string name="backup_count_providers_rules">%1$d providers · %2$d thinking rules · %3$s</string>
+    <string name="backup_restore_passphrase_footer">This backup is encrypted. Without its passphrase it cannot be opened.</string>
+    <string name="backup_restore">Start Restore</string>
+    <string name="backup_restoring">Restoring…</string>
+    <string name="backup_restoring_counted">Restoring %1$s %2$d/%3$d</string>
+    <string name="backup_restoring_running">Restoring %1$s %2$d</string>
+    <string name="backup_restoring_category">Restoring %1$s…</string>
+    <string name="backup_choose_different">Choose a different file</string>
+    <!-- Restore complete report -->
+    <string name="backup_restore_complete">Restore Complete</string>
+    <string name="backup_report_restored">Restored</string>
+    <string name="backup_report_updated">Updated</string>
+    <string name="backup_report_up_to_date">Already up to date</string>
+    <string name="backup_report_missing_files">Missing files</string>
+    <string name="backup_report_issues">Issues</string>
+    <string name="backup_report_failed">%1$s: %2$s</string>
+    <string name="backup_report_size_skipped">%1$s: %2$d file(s) weren\'t in the backup (size limit)</string>
+    <string name="backup_report_not_downloaded">%1$s: %2$d file(s) weren\'t in the backup (not downloaded on the source device)</string>
+    <string name="backup_report_missing_from_package">%1$s: %2$d file(s) were listed in the backup but missing from it — the backup is incomplete</string>
+    <string name="backup_report_unreadable">%1$s: %2$d item(s) could not be read</string>
+    <string name="backup_creds_restored">API keys were restored for %1$d provider(s) along with their settings. Existing keys on this device were kept. OAuth logins may still need to be renewed if their tokens have expired.</string>
+    <string name="backup_creds_kept">Your existing API keys were kept — the backup\'s keys matched credentials already on this device, so nothing needed to be overwritten.</string>
+    <string name="backup_creds_none">This backup was created without API keys, so restored providers have no credentials — enter each API key or sign in again before use.</string>
+    <string name="backup_done">Done</string>
+    <!-- Rclone destinations -->
+    <string name="backup_dest_title">Backup Destinations</string>
+    <string name="backup_dest_saved">Saved Destinations</string>
+    <string name="backup_dest_saved_confirm">Saved “%1$s”</string>
+    <string name="backup_dest_footer">New backups are delivered to every enabled destination. Passwords are stored in the Android Keystore on this device only — never in the backup file.</string>
+    <string name="backup_dest_none">No destinations yet.</string>
+    <string name="backup_dest_add_server">Add Server…</string>
+    <string name="backup_dest_remove">Remove %1$s</string>
+    <string name="backup_dest_server_type">Server type</string>
+    <string name="backup_dest_display_name">Display name</string>
+    <string name="backup_dest_field_optional">%1$s (optional)</string>
+    <string name="backup_dest_start_path">Start path (optional)</string>
+    <string name="backup_dest_start_path_hint">/ or an absolute path like /volume1/backups</string>
+    <string name="backup_dest_connect">Connect &amp; Choose Folder</string>
+    <string name="backup_dest_connect_and_save">Connect &amp; Save</string>
+    <string name="backup_dest_trust_certificate">Trust this server\'s certificate</string>
+    <string name="backup_dest_trust_certificate_warning">The certificate could not be verified. Only turn this on for a server you control — anyone able to intercept the connection could impersonate it.</string>
+    <string name="backup_dest_cancel">Cancel</string>
+    <string name="restore_browse_header">Backups in This Folder</string>
+    <string name="restore_browse_footer">Listing the .minisbak files in this folder on the server.</string>
+    <string name="restore_browse_footer_empty">This is a live listing of the server, not your backup history.</string>
+    <string name="restore_browse_empty">No folders or backups here.</string>
+    <string name="restore_download_title">Download this backup?</string>
+    <string name="restore_download_note">“%1$s” is %2$s. It will be downloaded to this device before restoring.</string>
+    <string name="restore_download_confirm">Download</string>
+    <string name="restore_downloading">Downloading</string>
+    <string name="restore_time_left">About %1$s left</string>
+    <string name="restore_opening">Opening backup</string>
+    <string name="restore_open_progress">%1$d files · %2$s extracted</string>
+    <string name="restore_stage_reading">Reading the package…</string>
+    <string name="restore_stage_expanding">Expanding files…</string>
+    <string name="restore_stage_checking">Checking contents…</string>
+    <string name="restore_stage_almost">Almost there…</string>
+    <string name="backup_dest_stored_here">Backups Stored Here</string>
+    <string name="backup_dest_browse_footer">Deleted backup files cannot be recovered.</string>
+    <string name="backup_dest_browse_footer_empty">Backups delivered to this destination will appear here.</string>
+    <string name="backup_dest_loading">Loading…</string>
+    <string name="backup_dest_no_packages">No backups found here yet.</string>
+    <string name="backup_dest_delete_title">Delete this backup?</string>
+    <string name="backup_dest_delete_note">“%1$s” will be deleted from this server. This cannot be undone.</string>
+    <string name="backup_dest_delete_confirm">Delete</string>
+    <string name="backup_dest_name_invalid">Use letters, numbers, - or _ for the name.</string>
+    <string name="backup_dest_choose_folder">Choose a destination folder</string>
+    <string name="backup_dest_up">⬆  Up</string>
+    <string name="backup_dest_no_subfolders">This folder has no sub-folders.</string>
+    <string name="backup_dest_new_folder">New Folder…</string>
+    <string name="backup_dest_use_folder">Use This Folder</string>
+    <string name="backup_dest_new_folder_title">New Folder</string>
+    <string name="backup_dest_folder_name">Folder name</string>
+    <string name="backup_dest_create">Create</string>
+    <string name="backup_dest_backend_label">%1$s — %2$s</string>
+    <string name="backup_dest_row_subtitle">%1$s · /%2$s</string>
     <string name="mount_folders_title">Mounted Folders</string>
     <string name="mount_folders_info_banner">Picked folders are bind-mounted at /var/minis/mounts/&lt;name&gt;. Up to 10 folders can be mounted at a time.</string>
     <string name="mount_picker_intro_title">Choose a folder</string>
@@ -1416,7 +1656,7 @@
     <string name="voice_input_picker_group_models">%1$d models</string>
     <string name="voice_input_picker_group_footer">Pick a group whose audio-capable models drive this direction.</string>
     <string name="model_picker_non_text_warning_title">This model may not work as an Agent</string>
-    <string name="model_picker_non_text_warning_body">%1$s outputs %2$s and usually can\'t drive an Agent task. Pick a text-output model for the session, or add this model to an Agent loop as a tool so the agent can call it on demand to generate %3$s.</string>
+    <string name="model_picker_non_text_warning_body">%1$s outputs %2$s and usually can\'t drive an Agent task. Pick a text-output model for the session, or add this model to an Agent loop as a tool so the Agent can call it on demand to generate %3$s.</string>
     <string name="model_picker_non_text_warning_use_anyway">Use anyway</string>
     <string name="model_picker_non_text_warning_choose_other">Choose another model</string>
 
@@ -1456,15 +1696,23 @@
     <string name="system_permissions_a11y_row">Minis Accessibility Service</string>
     <string name="system_permissions_a11y_enabled">Enabled — android-a11y-cli is ready</string>
     <string name="system_permissions_a11y_disabled">Disabled — tap to enable in system Settings</string>
-    <string name="system_permissions_a11y_footer">Required by android-a11y-cli for UI-tree reads, gesture injection, and event monitoring. Without this, AI agents cannot drive other apps. Toggle the switch under Minis on the next screen.</string>
+    <string name="system_permissions_a11y_footer">Required by android-a11y-cli for UI-tree reads, gesture injection, and event monitoring. Without this, Agents cannot drive other apps. Toggle the switch under Minis on the next screen.</string>
     <string name="system_permissions_a11y_oem_header">Service keeps getting killed?</string>
     <string name="system_permissions_a11y_oem_footer">%1$s may show \"this service has failed\" and stop the accessibility service in the background. Whitelist autostart and remove the battery restriction so it stays connected.</string>
     <string name="system_permissions_a11y_oem_autostart">Add to autostart whitelist</string>
     <string name="system_permissions_a11y_oem_autostart_sub">Open the autostart manager and enable Minis</string>
     <string name="system_permissions_a11y_oem_battery">Remove background / battery restriction</string>
     <string name="system_permissions_a11y_oem_battery_sub">Set battery usage to \"No restrictions\"</string>
+    <string name="system_permissions_a11y_restricted_header">Toggle greyed out? (\"Restricted setting\")</string>
+    <string name="system_permissions_a11y_restricted_footer">Android blocks the accessibility toggle for apps installed from a downloaded APK file. This is an OS security policy, not a Minis bug — nothing is wrong with your install. Allowing restricted settings only re-enables the toggle; it grants nothing on its own, and you still choose whether to turn the service on.</string>
+    <string name="system_permissions_a11y_restricted_manual">Allow restricted settings</string>
+    <string name="system_permissions_a11y_restricted_manual_sub">App info → ⋮ menu (top right) → Allow restricted settings</string>
+    <string name="system_permissions_a11y_restricted_shizuku">Allow restricted settings via Shizuku</string>
+    <string name="system_permissions_a11y_restricted_shizuku_sub">One tap — clears the flag without leaving Minis</string>
+    <string name="system_permissions_a11y_restricted_working">Allowing…</string>
+    <string name="system_permissions_a11y_restricted_failed">Failed — use the manual steps below</string>
     <string name="a11y_service_label">Minis Accessibility</string>
-    <string name="a11y_service_description">Lets Minis read on-screen UI structure, perform taps and gestures, and receive system events on behalf of AI agents invoking android-a11y-cli.</string>
+    <string name="a11y_service_description">Lets Minis read on-screen UI structure, perform taps and gestures, and receive system events on behalf of Agents invoking android-a11y-cli.</string>
     <string name="a11y_service_summary">UI-layer automation backend for Minis</string>
     <string name="back">Back</string>
 
@@ -1678,4 +1926,16 @@
     <string name="browser_downloads_failed">Failed</string>
     <string name="browser_downloads_open">Open</string>
     <string name="provider_no_key_required">No key required</string>
+    <string name="split_no_conversation_title">No Conversation Selected</string>
+    <string name="split_no_conversation_subtitle">Select a conversation or start a new one</string>
+    <string name="external_link_blocked">Blocked link to external app (%1$s)</string>
+    <string name="external_link_no_app">No app available to open this link.</string>
+    <string name="selection_copy_full_text">Copy Full Text</string>
+    <string name="selection_copy_as_markdown">Copy as Markdown</string>
+    <string name="selection_copy_as_rich_text">Copy as Rich Text</string>
+    <string name="selection_copy_as_plain_text">Copy as Plain Text</string>
+    <string name="chat_input_placeholder_hint_5">Minis can make the Return key send or insert a newline</string>
+    <!-- [T-android-compact-progress] Live status while a compaction runs. -->
+    <string name="compact_progress">Compacting… %1$d s elapsed</string>
+    <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
 </resources>

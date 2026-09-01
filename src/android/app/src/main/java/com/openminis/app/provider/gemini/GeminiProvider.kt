@@ -4,6 +4,7 @@ import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
+import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -273,6 +274,22 @@ class GeminiProvider(
                                 if (part.isError) responseContent.put("error", true)
                                 responseObj.put("response", responseContent)
                                 parts.put(JSONObject().put("functionResponse", responseObj))
+                                // [T-android-toolresult-image-dropped] functionResponse
+                                // carries only the `result` string, so read_image's
+                                // pixels were dropped here exactly as in the OpenAI
+                                // paths. Gemini takes heterogeneous parts in one turn,
+                                // so the bytes go straight after as inlineData.
+                                val trBytes = part.imageData
+                                if (trBytes != null && trBytes.isNotEmpty()) {
+                                    val safeBytes = ImageBudget.compressUnderBudget(trBytes)
+                                    val safeMime = if (safeBytes === trBytes) {
+                                        part.imageMimeType ?: "image/jpeg"
+                                    } else "image/jpeg"
+                                    parts.put(JSONObject().put("inlineData", JSONObject().apply {
+                                        put("mimeType", safeMime)
+                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
+                                    }))
+                                }
                             }
                         }
                         is AgentContentPart.ImageData -> {

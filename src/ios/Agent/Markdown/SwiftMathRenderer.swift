@@ -10,6 +10,46 @@ enum SwiftMathRenderer {
     private static let cache = NSCache<NSString, SwiftMathRenderResult>()
     private static let cacheSetup: Void = { cache.countLimit = 256 }()
 
+    /// [T-ios-math-invisible-dark-mode] The interface style the formula bitmaps
+    /// must be drawn for.
+    ///
+    /// Both render paths rasterise a DETACHED view / attributed string through
+    /// `UIGraphicsImageRenderer`. Nothing in that pipeline has a window or a
+    /// trait ancestor, so a dynamic `UIColor` (`.label`) resolves against the
+    /// process default — light, i.e. BLACK — and every formula came out as
+    /// black glyphs on the dark transcript: reserved its space, drew nothing.
+    /// Verified on iPhone 8 / iOS 16.1: identical message, dark = blank bands,
+    /// light = renders perfectly, dark again = blank (shots 14/16/17 of the
+    /// 2026-08-14 regression run).
+    ///
+    /// Read from the key window because that is where BOTH inputs land: the
+    /// system appearance, and the in-app Theme override, which
+    /// `ContentView`'s `appearanceMode` picker writes straight onto
+    /// `window.overrideUserInterfaceStyle` (ContentView.swift:6948). Reading
+    /// `UITraitCollection.current` instead would miss the override whenever the
+    /// user's theme disagrees with the system.
+    ///
+    /// Falls back to `.current` off-main or before a window exists — the
+    /// renderers are main-thread-only in practice, and a wrong guess is
+    /// self-correcting because the style is part of the cache key.
+    static var interfaceStyle: UIUserInterfaceStyle {
+        guard Thread.isMainThread else { return UITraitCollection.current.userInterfaceStyle }
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+            .first
+        guard let window else { return UITraitCollection.current.userInterfaceStyle }
+        if window.overrideUserInterfaceStyle != .unspecified {
+            return window.overrideUserInterfaceStyle
+        }
+        return window.traitCollection.userInterfaceStyle
+    }
+
+    /// `UIColor.label` resolved for `interfaceStyle` — a CONCRETE color, so it
+    /// survives rasterisation in a trait-less context.
+    private static func resolvedLabelColor() -> UIColor {
+        UIColor.label.resolvedColor(with: UITraitCollection(userInterfaceStyle: interfaceStyle))
+    }
+
     /// Render a LaTeX formula synchronously. Returns nil on parse error.
     static func render(latex: String, displayMode: Bool, fontSize: CGFloat = 17) -> SwiftMathRenderResult? {
         _ = cacheSetup
@@ -37,7 +77,9 @@ enum SwiftMathRenderer {
         let label = MTMathUILabel()
         label.latex = preprocessed
         label.fontSize = fontSize
-        label.textColor = UIColor.label
+        // [T-ios-math-invisible-dark-mode] MUST be pre-resolved: this label is
+        // never added to a window, so a dynamic color would rasterise black.
+        label.textColor = resolvedLabelColor()
         label.labelMode = displayMode ? .display : .text
         label.textAlignment = displayMode ? .center : .left
         label.backgroundColor = .clear
@@ -132,7 +174,15 @@ enum SwiftMathRenderer {
     // MARK: - Internal
 
     private static func cacheKey(latex: String, displayMode: Bool, fontSize: CGFloat) -> String {
-        (displayMode ? "D:" : "I:") + "\(Int(fontSize)):" + latex
+        // [T-ios-math-invisible-dark-mode] The bitmap now bakes in a CONCRETE
+        // text color, so the interface style is part of its identity. Without
+        // this component, fixing the color alone would still show blank
+        // formulas after a theme switch: the entries rendered before the switch
+        // stay in the cache and get served back with the old (now invisible)
+        // glyph color. Cheap insurance — a style flip is rare, and the worst
+        // case is re-rendering at ~0.6ms per formula into a 256-entry cache.
+        let style = interfaceStyle == .dark ? "dk:" : "lt:"
+        return style + (displayMode ? "D:" : "I:") + "\(Int(fontSize)):" + latex
     }
 
     /// [issue #117-2] True when the formula carries characters SwiftMath 1.7.3
@@ -242,7 +292,9 @@ enum SwiftMathRenderer {
 
     private static func buildAttributedString(_ text: String, textFont: UIFont, mathFont: UIFont, boldFont: UIFont) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        let textColor = UIColor.label
+        // [T-ios-math-invisible-dark-mode] Same trap as the SwiftMath path —
+        // `attributed.draw(in:)` below runs inside a trait-less image renderer.
+        let textColor = resolvedLabelColor()
 
         // [issue #117-2 follow-up] Script state, driven by the sentinels
         // `markScripts` planted. Nested scripts (`x^{a^{b}}`) push a level; the

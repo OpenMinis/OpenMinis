@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -182,26 +183,53 @@ private fun MemoryFileRow(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // [T-android-memory-row-date-wrap] The name+size group flexes and
+                // truncates; the date never wraps.
+                //
+                // Previously neither child had a weight, so the name group claimed
+                // its full intrinsic width and the date was left with the
+                // remainder. A daily-log name is itself a date ("2026-08-16.md"),
+                // which is long enough that the 16-char "yyyy-MM-dd HH:mm" stamp no
+                // longer fit — it wrapped to two lines and made that one row
+                // visibly taller than its neighbours (user-reported).
+                //
+                // Giving the name group weight(1f, fill = false) lets it shrink
+                // only as far as needed, and maxLines/ellipsis on the NAME means
+                // the truncation lands on the element that can afford it. softWrap
+                // = false on the date is the actual guarantee of a uniform row
+                // height — the date is short, fixed-width, and the one thing that
+                // must never reflow. Deliberately NOT solved by shortening the
+                // format: the time is real information, and dropping it would only
+                // move the threshold rather than remove it.
                 Row(
+                    modifier = Modifier.weight(1f, fill = false),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
                         file.name,
                         style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
                     if (file.fileSize.isNotBlank()) {
                         Text(
                             file.fileSize,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            maxLines = 1,
+                            softWrap = false,
                         )
                     }
                 }
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     file.modifiedDate,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
                 )
             }
             if (file.preview.isNotBlank()) {

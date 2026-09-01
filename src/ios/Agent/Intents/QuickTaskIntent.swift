@@ -181,8 +181,8 @@ struct QuickTaskIntent: AppIntent {
         if sendCompletionNotification {
             ShortcutNotification.post(
                 id: "shortcut-start-\(sid)",
-                title: String(localized: "Minis: \(taskName)"),
-                body: String(localized: "\(modelName) is working on it…"),
+                title: AppLocalized("Minis: \(taskName)"),
+                body: AppLocalized("\(modelName) is working on it…"),
                 sessionId: sid
             )
         }
@@ -203,7 +203,7 @@ struct QuickTaskIntent: AppIntent {
             if sendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-done-\(sid)",
-                    title: String(localized: "Minis: \(taskName) Done"),
+                    title: AppLocalized("Minis: \(taskName) Done"),
                     body: "\(modelName): \(String(responseText.prefix(200)))",
                     sessionId: sid
                 )
@@ -239,7 +239,7 @@ struct QuickTaskIntent: AppIntent {
             if capturedSendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-done-\(capturedSid)",
-                    title: String(localized: "Minis: \(capturedTaskName) Done"),
+                    title: AppLocalized("Minis: \(capturedTaskName) Done"),
                     body: "\(capturedModelName): \(summary)",
                     sessionId: capturedSid
                 )
@@ -254,7 +254,7 @@ struct QuickTaskIntent: AppIntent {
             prompt: task.prompt
         )
 
-        return .result(value: result, dialog: IntentDialog(stringLiteral: String(localized: "\(taskName) started with \(modelName).")))
+        return .result(value: result, dialog: IntentDialog(stringLiteral: AppLocalized("\(taskName) started with \(modelName).")))
     }
 
     // This intent previously declared no `parameterSummary`. AppIntents uses the

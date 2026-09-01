@@ -192,6 +192,91 @@ enum DebugMethodRegistry {
             example: [:]
         ),
         MethodSpec(
+            name: "debug.backup.export",
+            description: "Build a .minisbak package (export only; unencrypted, stage 1).",
+            params: [
+                ParamSpec(name: "categories", type: "array", required: false, default: nil,
+                          description: "Category raw values; default = all. Known: chats, shared_files, skills, memory, providers, mcp_servers, voice_corrections"),
+                ParamSpec(name: "maxFileBytes", type: "int", required: false, default: nil,
+                          description: "Per-file size cap; omit for unlimited (the default)"),
+                ParamSpec(name: "keep", type: "boolean", required: false, default: false,
+                          description: "Move the package into Documents so it survives tmp cleanup"),
+                ParamSpec(name: "includeCredentials", type: "boolean", required: false, default: true,
+                          description: "Include Keychain credentials in secrets.json. false = share copy."),
+                ParamSpec(name: "passphrase", type: "string", required: false, default: nil,
+                          description: "Encrypt the package (minisbak-enc/1). REQUIRED when credentials are included."),
+                ParamSpec(name: "deliver", type: "boolean", required: false, default: false,
+                          description: "Move the package into Files-visible shared storage (Minis ▸ Backups), the path the Backup UI uses."),
+            ],
+            returns: "{backupId, path, bytes, durationMs, categories, skippedFiles, skippedBytes, skippedPaths}",
+            example: ["keep": true]
+        ),
+        MethodSpec(
+            name: "debug.backup.restore",
+            description: "Import a .minisbak package (stage 2: Merge mode, unencrypted).",
+            params: [
+                ParamSpec(name: "path", type: "string", required: true, default: nil,
+                          description: "Path to the .minisbak file"),
+                ParamSpec(name: "categories", type: "array", required: false, default: nil,
+                          description: "Category raw values; default = all present in the package"),
+                ParamSpec(name: "skipIntegrityCheck", type: "boolean", required: false, default: false,
+                          description: "Diagnostics only — skip the SHA-256 verification pass"),
+                ParamSpec(name: "passphrase", type: "string", required: false, default: nil,
+                          description: "Required to restore an encrypted package"),
+            ],
+            returns: "{backupId, durationMs, integrityChecked, integrityFailed, rolledBack, totals, categories, warnings}",
+            example: ["path": "/…/backup.minisbak"]
+        ),
+        MethodSpec(
+            name: "debug.backup.cleanup",
+            description: "Delete .minisbak packages left in Documents by export {keep:true}.",
+            params: [],
+            returns: "{removed, count, freedBytes}",
+            example: [:]
+        ),
+        MethodSpec(
+            name: "debug.backup.rescue",
+            description: "Salvage what can be read from a damaged .minisbak: rescue.json, manifest.json, its tail copy, and the surviving member list.",
+            params: [
+                ParamSpec(name: "path", type: "string", required: true, default: nil,
+                          description: "Path to the (possibly damaged) .minisbak file"),
+            ],
+            returns: "{stages, backupId, blobCount, sessionCount, sessions, blobs, categories, missingMembers, notImplemented}",
+            example: [:]
+        ),
+        MethodSpec(
+            name: "debug.backup.destinations",
+            description: "Inspect/set backup destination mounted folders (§6.2 path 2), and optionally deliver a package to them.",
+            params: [
+                ParamSpec(name: "select", type: "array", required: false, default: nil,
+                          description: "Mount ids to set as destinations"),
+                ParamSpec(name: "deliver", type: "string", required: false, default: nil,
+                          description: "Path to a .minisbak to copy to every destination"),
+            ],
+            returns: "{mounts, selectedIds, eligibleCount, packagesInDestinations, delivered?}",
+            example: [:]
+        ),
+        MethodSpec(
+            name: "debug.backup.open",
+            description: "Drive the 'opened a .minisbak from Files' entry point (BackupOpenRouter.handle) and report whether the root restore sheet would present.",
+            params: [
+                ParamSpec(name: "path", type: "string", required: true, default: nil,
+                          description: "Path to the .minisbak file to open"),
+            ],
+            returns: "{recognisedAsPackage, handled, pendingPackage, hasPendingPackage, appIsLocked, sheetWouldPresent}",
+            example: ["path": "/…/backup-20260814-0230.minisbak"]
+        ),
+        MethodSpec(
+            name: "debug.backup.inspect",
+            description: "List a .minisbak package's entries and read back its manifest.",
+            params: [
+                ParamSpec(name: "path", type: "string", required: true, default: nil,
+                          description: "Path to the .minisbak file"),
+            ],
+            returns: "{path, entryCount, entries, manifest, lineCounts}",
+            example: ["path": "/…/backup-20260814-0230.minisbak"]
+        ),
+        MethodSpec(
             name: "debug.auth.list",
             description: "List paired debug-auth tokens (id, client, grant/use times — never the key) and the auth-required switch state.",
             params: [],
@@ -333,6 +418,43 @@ enum DebugMethodRegistry {
             ],
             returns: "{count, voiceInputs:[{id, capturedAt, byteCount, durationSeconds, audioFormat:{container,sampleRate,channels,bitsPerSample}, vad:{segmentCount,endReason,runningDurationSeconds}, model?, language?, onDeviceRecognition?, audioBase64?, sessionId?, fullSession?:{byteCount,durationSeconds,truncated,audioBase64?}}]}. sessionId groups entries from one mic session; fullSession is that session's untrimmed start→stop recording (same for every entry of the session, absent while the session is still recording, truncated=true if it hit the 10-minute cap).",
             example: ["last": 5, "includeAudio": false]
+        ),
+        MethodSpec(
+            name: "debug.voiceCorrection.traceList",
+            description: "Every REAL voice-correction run with its full evidence chain: segmented tokens, retrieved candidates (per source, with fused scores), the hotwords mined from the conversation (rare-term digest WITH per-term rarity scores, plus the message excerpts), which vocab/confusion terms actually survived budget clamping into the prompt, and the model's verdict. This is the tuning view — unlike dryRunCorrection it reports what happened on-device rather than on text you supply. In-memory ring (last 40 runs), DEBUG only.",
+            params: [
+                ParamSpec(name: "limit", type: "int", required: false, default: 10, description: "Most recent N runs."),
+                ParamSpec(name: "sinceID", type: "int", required: false, default: nil, description: "Only runs with id greater than this — poll for new runs without re-reading."),
+                ParamSpec(name: "includePrompt", type: "bool", required: false, default: false, description: "Include the full assembled prompt per run (~2.5k chars each; off by default so a listing stays readable)."),
+            ],
+            returns: "{count, totalRetained, runs:[{id, at, trigger, locale, transcript, segmentedTokens, phoneticKeys, retrieval:{ms,cacheHit,candidateCount,candidates:[{token,phoneticKey,term,source,confidence,fusedScore,evidence}]}, contextMining:{scannedMessages,buildMs,digestChars,digestTerms:[{term,score,count,backgroundRank}],excerptChars,excerpts:[{role,newestIndex,kind,chars,text}]}, promptEvidence:{vocabTerms,confusionLines,blockChars}, verdict:{corrected,changed,appliedPairs,rejectedReason,modelGroup,totalMs}, prompt?}]}",
+            example: ["limit": 5, "includePrompt": false]
+        ),
+        MethodSpec(
+            name: "debug.voiceCorrection.traceManualEdits",
+            description: "Transcript spans the user fixed BY HAND — i.e. the cases the corrector MISSED. Includes spans that CorrectionAdmission rejected as 'rewrite' (admitted:false), which are invisible everywhere else because nothing is written to the DB and the log carries lengths only. A genuine ASR fix appearing with admitted:false means the admission thresholds need tuning. 'precedingRunID' links a miss back to the traceList run whose prompt failed to catch it. DEBUG only.",
+            params: [
+                ParamSpec(name: "limit", type: "int", required: false, default: 30, description: "Most recent N edits."),
+                ParamSpec(name: "admittedOnly", type: "bool", required: false, default: nil, description: "true = only edits learned into confusion_dictionary; false = only rejected ones (the tuning-relevant set); omit for both."),
+            ],
+            returns: "{count, edits:[{id, at, source, locale, from, to, fromPhoneticKey, toPhoneticKey, phoneticKeyMatch, admitted, reason, sentenceLen, before, after, precedingRunID}]}",
+            example: ["limit": 20, "admittedOnly": false]
+        ),
+        MethodSpec(
+            name: "debug.voiceCorrection.vocabularyStats",
+            description: "Aggregate health of typed_vocabulary (the table filling the prompt's largest evidence block): frequency histogram, single-occurrence share, out-of-background-vocabulary share, and noise classes (hexLike UUID fragments / urlEncoded residue / pathFragment terms that entered via attachment markup) with example terms. Answers 'how much of this table is noise?' without paging thousands of rows over RPC. DEBUG only.",
+            params: [
+                ParamSpec(name: "sample", type: "int", required: false, default: 5000, description: "Rows to sample, highest-frequency first."),
+            ],
+            returns: "{totalRows, sampled, frequencyHistogram, singleOccurrence, outOfBackgroundVocabulary, noiseClasses, noiseExamples, backgroundListVersion}",
+            example: ["sample": 5000]
+        ),
+        MethodSpec(
+            name: "debug.voiceCorrection.traceClear",
+            description: "Clear the in-memory correction trace and manual-edit ring. Affects DEBUG capture only — never touches voice-correction.db.",
+            params: [],
+            returns: "{ok}",
+            example: [:]
         ),
         MethodSpec(
             name: "debug.voice.panel",
@@ -1197,6 +1319,26 @@ enum DebugMethodRegistry {
             ],
             returns: "{messageId, sortOrder, totalChars, blockCount, role}",
             example: ["sessionId": "6D0F…", "charCount": 200000, "blockChars": 800]
+        ),
+        MethodSpec(
+            name: "chat.debugRemoveMessages",
+            description: "TEST HOOK [T-msgidx-oob-repro]: remove N UI rows from the FRONT of the live view model's messages array (never the trailing assistant), simulating an external mid-loop mutation (iCloud rebuild / user delete). Mutates only the UI array — agentHistory and the DB are untouched. Time it into a stalled stream to reproduce the stale-msgIdx crash family.",
+            params: [
+                ParamSpec(name: "sessionId", type: "string", required: true, default: nil, description: "Target session ID (must be the live/open one)."),
+                ParamSpec(name: "count", type: "int", required: false, default: 2, description: "Rows to remove from the front. Clamped [1,10]."),
+            ],
+            returns: "{before, removed, after}",
+            example: ["sessionId": "6D0F…", "count": 2]
+        ),
+        MethodSpec(
+            name: "chat.deleteFromMessage",
+            description: "TEST HOOK [T-ios-delete-from-message]: delete the n-th user bubble and everything after it, exercising the same suffix-truncation rule as retry. Reports UI / agentHistory / trailing-entry state so a test can assert the surviving history never ends on a dangling tool_use.",
+            params: [
+                ParamSpec(name: "sessionId", type: "string", required: true, default: nil, description: "Target session ID (must be the live/open one)."),
+                ParamSpec(name: "index", type: "int", required: false, default: 0, description: "Which USER bubble to delete from, 0-based."),
+            ],
+            returns: "{userBubblesBefore, messagesBefore, messagesAfter, historyBefore, historyAfter, trailingHistoryRole, trailingHasToolUse}",
+            example: ["sessionId": "6D0F…", "index": 1]
         ),
         MethodSpec(
             name: "chat.compact.revert",

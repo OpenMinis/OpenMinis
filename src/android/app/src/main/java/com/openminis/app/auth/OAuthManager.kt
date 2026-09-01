@@ -49,6 +49,29 @@ abstract class OAuthManager(
             return if (masked.length <= maxLen) masked else masked.take(maxLen) + "…(${masked.length} chars)"
         }
 
+        /**
+         * [T-android-group-resolve-skip-uncredentialed] Whether ANY OAuth
+         * credential is stored for [instanceId] — either a token bundle from a
+         * completed login or a user-pasted manual bearer.
+         *
+         * Static on purpose. Callers (notably provider routing) need a cheap
+         * synchronous yes/no and must not depend on [forInstance], which
+         * deliberately omits some provider types (gemini) and would report
+         * those as uncredentialed. Token storage is keyed purely by instance
+         * id, so reading the prefs directly is both correct and complete.
+         *
+         * Presence only — this does NOT validate or refresh the token. An
+         * expired token still counts as a credential so routing keeps the
+         * provider and the request path performs the refresh, matching iOS
+         * `hasAnyCredential`.
+         */
+        fun hasStoredCredential(context: Context, instanceId: String): Boolean {
+            val prefs = com.openminis.app.util.EncryptedPrefsFactory
+                .safeCreate(context, "oauth_prefs")
+            if (!prefs.getString("oauth_tokens_$instanceId", null).isNullOrEmpty()) return true
+            return !prefs.getString("oauth_${KEY_MANUAL_BEARER}_$instanceId", null).isNullOrEmpty()
+        }
+
         /** Create the appropriate OAuthManager for a provider instance. */
         fun forInstance(context: Context, instance: com.openminis.app.data.model.ProviderInstance): OAuthManager? {
             return when (instance.providerType) {

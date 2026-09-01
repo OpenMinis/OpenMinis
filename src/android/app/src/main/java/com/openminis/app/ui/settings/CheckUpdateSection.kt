@@ -46,6 +46,7 @@ import com.openminis.app.data.UpdateChecker
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
  * Settings section that talks to [UpdateChecker] to surface a "Check for
@@ -270,7 +271,7 @@ private fun UpdateDialog(
             Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (update.changelog.isNotBlank()) {
                     Text(
-                        stringResource(R.string.check_update_changelog_header).uppercase(),
+                        stringResource(R.string.check_update_changelog_header).uppercaseForDisplay(),
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

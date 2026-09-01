@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Spanish (neutral, for Spain and Latin America) */
+
+"NSLocationWhenInUseUsageDescription" = "Minis usa tu ubicación para registrar dónde se inician las sesiones del agente en tu historial de sesiones.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis usa la ubicación en segundo plano para mantener las tareas del agente en ejecución cuando la app está en segundo plano. Los datos de ubicación solo se usan para registrar el historial de conexión de las sesiones.";
+"NSCalendarsUsageDescription" = "Minis usa el acceso al calendario para que el agente de IA pueda consultar tu agenda, comprobar tu disponibilidad y crear eventos en tu nombre.";
+"NSCalendarsFullAccessUsageDescription" = "Minis usa el acceso al calendario para que el agente de IA pueda consultar tu agenda, comprobar tu disponibilidad y crear eventos en tu nombre.";
+"NSRemindersUsageDescription" = "Minis usa el acceso a los recordatorios para que el agente de IA pueda consultarlos y crearlos en tu nombre.";
+"NSRemindersFullAccessUsageDescription" = "Minis usa el acceso a los recordatorios para que el agente de IA pueda consultarlos y crearlos en tu nombre.";
+"NSCameraUsageDescription" = "Minis necesita acceso a la cámara para tomar fotos y usarlas en las conversaciones con la IA.";
+"NSPhotoLibraryUsageDescription" = "Minis necesita acceso a la fototeca para adjuntar imágenes a las conversaciones con la IA.";
+"NSPhotoLibraryAddUsageDescription" = "Minis necesita permiso para guardar videos e imágenes en tu fototeca.";
+"NSHealthShareUsageDescription" = "Minis usa el acceso a HealthKit para que el agente de IA pueda leer tus datos de salud, como pasos, frecuencia cardíaca, sueño y entrenamientos, en tu nombre.";
+"NSHealthUpdateUsageDescription" = "Minis usa el acceso de escritura a HealthKit para que el agente de IA pueda registrar datos de salud, como pasos, peso y consumo de agua, en tu nombre.";
+"NSContactsUsageDescription" = "Minis usa el acceso a los contactos para que el agente de IA pueda buscarlos, verlos y gestionarlos en tu nombre.";
+"NSAppleMusicUsageDescription" = "Minis usa el acceso a la biblioteca multimedia para que el agente de IA pueda buscar en tu biblioteca de música y controlar la reproducción en tu nombre.";
+"NSMicrophoneUsageDescription" = "Minis necesita acceso al micrófono para la entrada de voz a texto en el chat.";
+"NSSpeechRecognitionUsageDescription" = "Minis usa el reconocimiento de voz para convertir tu voz en mensajes de texto.";
+"NSHomeKitUsageDescription" = "Minis usa el acceso a HomeKit para que el agente de IA pueda consultar y controlar los accesorios de tu casa inteligente en tu nombre.";
+"NSAlarmKitUsageDescription" = "Minis usa AlarmKit para que el agente de IA pueda configurar alarmas y temporizadores en tu nombre.";
+"NSLocalNetworkUsageDescription" = "La VM necesita acceso a la red para el funcionamiento de SLIRP.";

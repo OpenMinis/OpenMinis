@@ -216,6 +216,29 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         }
     }
 
+    /// [T-empty-key-compat-endpoints] Whether an EMPTY API key is a valid
+    /// configuration for this instance. True only for API-key-mode instances
+    /// pointing at a third-party OpenAI/Anthropic-compatible endpoint (custom
+    /// base URL set): local gateways, ollama, LM Studio, LiteLLM and many
+    /// relay deployments require no key at all, and forcing the user to type a
+    /// dummy one is pure friction. Deliberately NOT extended to:
+    ///   - official endpoints (no custom base URL) — an empty key against
+    ///     api.openai.com / api.anthropic.com is always a misconfiguration and
+    ///     treating it as valid would just move the failure to a confusing 401;
+    ///   - OAuth-mode instances — their credential is the token, and an
+    ///     instance with no token must keep reading as unauthenticated.
+    var allowsEmptyAPIKey: Bool {
+        guard credentialType == .apiKey,
+              let base = customBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !base.isEmpty else { return false }
+        switch providerType {
+        case .openAI, .openAIResponses, .anthropic:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Whether this instance currently has any usable credential — an API key,
     /// a manual OAuth token, or a stored per-provider OAuth token (e.g. Claude
     /// login). Routing layers consult this to skip instances that would
@@ -253,6 +276,10 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
     /// The uncached credential probe. Kept separate so the cache wraps it and
     /// tests / diagnostics can force a fresh read.
     func computeHasAnyCredential() -> Bool {
+        // [T-empty-key-compat-endpoints] Third-party compatible endpoint in
+        // API-key mode: configured-by-definition, no Keychain probe needed
+        // (also the cheapest possible path — zero XPC round-trips).
+        if allowsEmptyAPIKey { return true }
         // API-key path is identical across providers — query first.
         if ProviderKeychainHelper.loadAPIKey(instanceId: id, caller: "hasAnyCredential")?.isEmpty == false {
             return true

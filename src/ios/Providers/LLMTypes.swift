@@ -846,13 +846,13 @@ enum ThinkingLevel: String, Codable, Hashable, CaseIterable, Comparable {
 
     var displayName: String {
         switch self {
-        case .off: return String(localized: "Off")
-        case .low: return String(localized: "Low")
-        case .medium: return String(localized: "Med")
-        case .high: return String(localized: "High")
-        case .xhigh: return String(localized: "XHigh")
-        case .max: return String(localized: "Max")
-        case .ultra: return String(localized: "Ultra")
+        case .off: return AppLocalized("Off")
+        case .low: return AppLocalized("Low")
+        case .medium: return AppLocalized("Med")
+        case .high: return AppLocalized("High")
+        case .xhigh: return AppLocalized("XHigh")
+        case .max: return AppLocalized("Max")
+        case .ultra: return AppLocalized("Ultra")
         }
     }
 

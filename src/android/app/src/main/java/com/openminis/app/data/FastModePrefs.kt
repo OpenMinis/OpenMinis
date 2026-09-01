@@ -48,4 +48,17 @@ object FastModePrefs {
         cachedEnabled = enabled
         prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
     }
+
+    /**
+     * [T-android-xai-priority] Set ONLY the in-memory cache, with no Context and
+     * no persistence. Exists so JVM unit tests can exercise the real
+     * [isEnabled] path that request builders consult — there is no Robolectric
+     * in this module, so the Context-taking [setEnabled] is unusable there, and
+     * asserting against a hand-rolled fake would test the fake instead of the
+     * shipping code. Not for production use: a write here is lost on restart.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setCachedEnabledForTest(enabled: Boolean) {
+        cachedEnabled = enabled
+    }
 }

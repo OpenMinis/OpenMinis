@@ -630,13 +630,24 @@ class BrowserTabPool(private val context: Context) {
             ?: return BrowserActionResult.error("Failed to acquire browser tab")
         return try {
             val result = tab.manager.execute(input)
+            // [T-android-js-dialogs-256] If this tab's page tried to open an
+            // alert/confirm/prompt, the agent browser answered it with a default
+            // rather than showing a modal (which would hang an unattended loop).
+            // Surface that here, on the next result for this tab, so the model
+            // can react — otherwise the interception is invisible and it keeps
+            // assuming the page did what it asked. Prepended so it is read
+            // before the result it qualifies; draining clears the queue, so each
+            // dialog is reported exactly once.
+            val withDialogs = tab.manager.drainInterceptedDialogReport()
+                ?.let { result.copy(text = it + result.text) }
+                ?: result
             // [T-android-browser-result-tab-id] Stamp the VERIFIED tab id — the
             // id of the tab we actually acquired and dispatched on, NOT the
             // global selectedTabId, which the fan-out branch in acquireTab
             // overwrites mid-flight when it spawns a fresh tab for a concurrent
             // navigate. Without this the agent had to guess tab_id for its
             // follow-up reads/scrolls and routinely picked the wrong tab.
-            stampTabId(result.copy(pageURL = tab.manager.currentURL.value), tab.id)
+            stampTabId(withDialogs.copy(pageURL = tab.manager.currentURL.value), tab.id)
         } finally {
             tab.lastActivityDate = Date()
             if (implicitTab) {
@@ -783,7 +794,16 @@ class BrowserTabPool(private val context: Context) {
 
         val id = nextTabId++
         val webView = WebView(context)
-        val manager = BrowserUseManager(webView, userAgentProfile)
+        // [T-android-minis-url-session-scope] Hand the manager a LIVE reader of
+        // this pool's session id (set later via setSession) plus a context, so
+        // `minis://workspace/...` resolves against this chat's sandbox instead
+        // of the global, last-writer-wins bind-mount map.
+        val manager = BrowserUseManager(
+            webView,
+            userAgentProfile,
+            sessionIdProvider = { sessionId },
+            appContext = context.applicationContext,
+        )
         if (userAgentProfile == UserAgentProfile.CUSTOM && !customUserAgentString.isNullOrEmpty()) {
             manager.setUserAgent(userAgentProfile, customUserAgentString)
         }
@@ -884,7 +904,12 @@ class BrowserTabPool(private val context: Context) {
         }
         val id = nextTabId++
         val newWebView = WebView(context)
-        val manager = BrowserUseManager(newWebView, userAgentProfile)
+        val manager = BrowserUseManager(
+            newWebView,
+            userAgentProfile,
+            sessionIdProvider = { sessionId },
+            appContext = context.applicationContext,
+        )
         if (userAgentProfile == UserAgentProfile.CUSTOM && !customUserAgentString.isNullOrEmpty()) {
             manager.setUserAgent(userAgentProfile, customUserAgentString)
         }

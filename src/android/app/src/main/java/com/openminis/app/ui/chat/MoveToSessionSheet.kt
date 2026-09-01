@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Brush
@@ -44,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -73,6 +75,16 @@ import java.util.concurrent.TimeUnit
  * SessionListScreen's main list, and the LazyColumn is wrapped in a
  * 16dp rounded surface card so the picker reads as a discrete control
  * inside the sheet rather than naked list items.
+ *
+ * [T-android-moveto-new-chat] A "New Chat" row sits above the list, as on
+ * iOS (AIChatView.swift:5500). Without it the picker could only ever hand
+ * content to a session that already existed, so content arriving by share
+ * — which lands in whatever session happened to be open — had no route
+ * into a fresh conversation; the user had to create one first and share
+ * again. The row emits a `__new__<uuid>` draft id through the SAME
+ * [onSelect] callback as a real row, which is the id shape the chat route
+ * already understands (AppNavigation's own New Chat action builds one the
+ * same way), so nothing downstream needs to special-case it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,6 +110,13 @@ fun MoveToSessionSheet(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            // [T-android-moveto-new-chat] Deliberately OUTSIDE the
+            // `sessions.isEmpty()` branch below: "no other sessions" is
+            // precisely when the user most needs a new one, and the old
+            // layout showed only a dead-end message there.
+            NewChatRow(
+                onClick = { onSelect("__new__${java.util.UUID.randomUUID()}") },
+            )
             if (sessions.isEmpty()) {
                 Text(
                     stringResource(R.string.move_to_sheet_empty),
@@ -110,10 +129,23 @@ fun MoveToSessionSheet(
                     modifier = Modifier
                         .padding(horizontal = 16.dp)
                         .fillMaxWidth()
-                        .background(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = RoundedCornerShape(16.dp),
-                        ),
+                        // [T-android-moveto-hover-clip] `clip` BEFORE the
+                        // background, so the rounded shape bounds the rows too.
+                        //
+                        // A `background(shape = …)` only paints a rounded rect;
+                        // it does not constrain what children draw. Each row's
+                        // `clickable` indication is a full-width square
+                        // rectangle, so hovering the first or last row painted
+                        // over the container's corners and the highlight looked
+                        // detached from the card (reported from a GEM-W09
+                        // screenshot with a mouse attached — hover makes it
+                        // obvious, but a touch ripple has the same overhang).
+                        //
+                        // Clipping at the container rather than rounding each
+                        // row is what keeps the MIDDLE rows square-edged: per-row
+                        // rounding would carve notches between adjacent rows.
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(color = MaterialTheme.colorScheme.surface),
                 ) {
                     items(sessions, key = { it.id }) { session ->
                         MoveToPickerRow(
@@ -125,6 +157,61 @@ fun MoveToSessionSheet(
             }
         }
     }
+}
+
+/**
+ * [T-android-moveto-new-chat] The "New Chat" entry, above the session list.
+ *
+ * Geometry is copied from [MoveToPickerRow] — same 40dp tinted circle, same
+ * 16/12dp padding, same 15sp semibold title — so the two read as one list
+ * rather than a button bolted on top. It carries no second line because
+ * there is no timestamp to show; the row is correspondingly shorter, which
+ * also helps it read as the distinct action it is.
+ *
+ * Wrapped in its own 16dp rounded card, matching the card the session list
+ * below sits in (iOS separates them as a plain row above a Section; the
+ * card is the Android equivalent of that visual break).
+ */
+@Composable
+private fun NewChatRow(onClick: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .padding(horizontal = 16.dp)
+            .fillMaxWidth()
+            // [T-android-moveto-hover-clip] Same ordering as the session list:
+            // clip first, so this row's own click indication stays inside its
+            // rounded shape instead of squaring off the corners.
+            .clip(RoundedCornerShape(16.dp))
+            .background(color = MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .background(color = accent.copy(alpha = 0.18f), shape = CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Add,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        Text(
+            text = stringResource(R.string.new_chat),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+    androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
 }
 
 /**

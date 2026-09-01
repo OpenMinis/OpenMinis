@@ -178,7 +178,7 @@ struct SendPromptIntent: AppIntent {
             let promptPreview = String(prompt.prefix(50))
             ShortcutNotification.post(
                 id: "shortcut-start-\(sid)",
-                title: String(localized: "Minis Task Started"),
+                title: AppLocalized("Minis Task Started"),
                 body: "\(modelName): \(promptPreview)\(prompt.count > 50 ? "…" : "")",
                 sessionId: sid
             )
@@ -200,7 +200,7 @@ struct SendPromptIntent: AppIntent {
             if sendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-done-\(sid)",
-                    title: String(localized: "Minis Task Completed"),
+                    title: AppLocalized("Minis Task Completed"),
                     body: "\(modelName): \(String(responseText.prefix(200)))",
                     sessionId: sid
                 )
@@ -235,7 +235,7 @@ struct SendPromptIntent: AppIntent {
             if capturedSendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-done-\(capturedSid)",
-                    title: String(localized: "Minis Task Completed"),
+                    title: AppLocalized("Minis Task Completed"),
                     body: "\(capturedModelName): \(summary)",
                     sessionId: capturedSid
                 )
@@ -250,7 +250,7 @@ struct SendPromptIntent: AppIntent {
             prompt: prompt
         )
 
-        return .result(value: result, dialog: IntentDialog(stringLiteral: String(localized: "Task started with \(modelName). I'll notify you when it's done.")))
+        return .result(value: result, dialog: IntentDialog(stringLiteral: AppLocalized("Task started with \(modelName). I'll notify you when it's done.")))
     }
 
     // [T-shortcuts-automation-no-prompt-field] Without a `parameterSummary` the

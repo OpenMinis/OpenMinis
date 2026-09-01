@@ -526,6 +526,22 @@ object ThinkingRuleResolver {
      * model takes no thinking config at all (specialized -tts/-image/-embedding/-vision
      * modalities, 2.5 Flash Lite, and any id matching none of the families).
      */
+    /**
+     * [T-gemini37-minimal-400] Gemini 3.x Flash models that reject
+     * `thinkingLevel: "minimal"` with a 400 and must use "low" as their OFF floor.
+     *
+     * Matched by minor version rather than an exact-id list: 3.7 is where Google
+     * dropped the level, so anything from 3.7 up is assumed to have dropped it
+     * too. Guessing "low" for a model that would have accepted "minimal" costs a
+     * slightly higher thinking floor; guessing "minimal" for one that rejects it
+     * makes the model unusable outright. The asymmetry decides the default.
+     */
+    private fun rejectsMinimalLevel(lowerId: String): Boolean {
+        val m = Regex("""gemini-3\.(\d+)""").find(lowerId) ?: return false
+        val minor = m.groupValues[1].toIntOrNull() ?: return false
+        return minor >= 7
+    }
+
     fun geminiThinkingConfig(modelId: String, level: ThinkingLevel): JSONObject? {
         // [T-gemini-tts-thinking-400 / OpenMinis#226] Specialized modalities take
         // precedence over EVERY family rule and over the requested level: these models
@@ -556,16 +572,40 @@ object ThinkingRuleResolver {
         return when {
             isGemini3 -> JSONObject().apply {
                 if (level == ThinkingLevel.OFF) {
-                    // 3.x Pro cannot fully disable; "minimal" for Flash, "low" for Pro.
-                    put("thinkingLevel", if (modelId.contains("flash")) "minimal" else "low")
+                    // 3.x cannot fully disable thinking; the floor is the weakest
+                    // level the model will accept.
+                    //
+                    // [T-gemini37-minimal-400] "minimal" is NOT universal across the
+                    // 3.x Flash family. Verified on-device (Pixel 4a, Gemini API):
+                    // gemini-3-flash-preview / 3.5-flash / 3.6-flash accept it, but
+                    // gemini-3.7-flash returns a hard
+                    //   400 "Thinking level MINIMAL is not supported for this model."
+                    // on EVERY request — 5/5 consecutive, "all fallbacks exhausted".
+                    // So with 思考 set to Off, 3.7 Flash was completely unusable, not
+                    // merely un-thinking. "low" is accepted by the whole family and is
+                    // the same floor 3.x Pro already used, so fall back to it for the
+                    // models that reject minimal rather than probing at runtime.
+                    val acceptsMinimal = modelId.contains("flash") && !rejectsMinimalLevel(lowerId)
+                    put("thinkingLevel", if (acceptsMinimal) "minimal" else "low")
                 } else {
                     put(
                         "thinkingLevel",
                         when (level) {
                             ThinkingLevel.LOW -> "low"
                             ThinkingLevel.MEDIUM -> "medium"
-                            ThinkingLevel.HIGH, ThinkingLevel.XHIGH -> "high"
-                            else -> "low"
+                            // MAX/ULTRA were appended to ThinkingLevel after this
+                            // branch was written (for GPT-5.6) and fell through the
+                            // old `else -> "low"`, silently sending the WEAKEST level
+                            // when the user asked for the strongest. Gemini's ladder
+                            // tops out at "high", so every tier at or above HIGH maps
+                            // there. Latent today — no catalog rule lifts a Gemini
+                            // ceiling above XHIGH, so the picker doesn't offer
+                            // MAX/ULTRA — but a per-entry maxThinkingLevel override
+                            // reaches it, and a future catalog rule would too.
+                            ThinkingLevel.HIGH, ThinkingLevel.XHIGH,
+                            ThinkingLevel.MAX, ThinkingLevel.ULTRA,
+                            -> "high"
+                            ThinkingLevel.OFF -> "low" // unreachable; OFF handled above
                         },
                     )
                     put("includeThoughts", true)

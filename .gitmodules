@@ -1,7 +1,7 @@
 [submodule "deps/ish"]
 	path = deps/ish
 	url = https://github.com/OpenMinis/ish-arm64.git
-	branch = feature/fork-guard
+	branch = master
 [submodule "deps/proot"]
 	path = deps/proot
 	url = https://github.com/OpenMinis/proot.git

@@ -84,6 +84,10 @@ internal object ProviderDebugMethods {
         ProviderType.openRouter -> "https://openrouter.ai/api/v1"
         ProviderType.xAI -> "https://api.x.ai/v1"
         ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+        // [T-android-provider-type-parity] Responses API shares the OpenAI
+        // host; undrivable types have no canonical base to report.
+        ProviderType.openAIResponses -> "https://api.openai.com"
+        ProviderType.antigravity, ProviderType.unsupported -> ""
     }
 
     fun instancesList(context: Context, params: JSONObject): JSONObject {

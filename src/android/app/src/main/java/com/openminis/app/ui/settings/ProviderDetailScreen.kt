@@ -276,7 +276,7 @@ fun ProviderDetailScreen(
                         style = MaterialTheme.typography.bodyLarge,
                         modifier = Modifier.weight(1f),
                     )
-                    Switch(
+                    SettingsSwitch(
                         checked = appendV1Suffix,
                         onCheckedChange = { appendV1Suffix = it },
                     )
@@ -353,9 +353,9 @@ fun ProviderDetailScreen(
             SettingsSection(
                 header = stringResource(R.string.provider_detail_api_format),
                 footer = if (instance.useResponsesAPI) {
-                    "Uses /v1/responses endpoint format. Required for some Responses-API-only services."
+                    stringResource(R.string.provider_detail_api_format_footer_responses)
                 } else {
-                    "Standard /v1/chat/completions format. Compatible with most OpenAI-compatible services."
+                    stringResource(R.string.provider_detail_api_format_footer_chat)
                 },
             ) {
                 SettingsCardBlock {
@@ -404,6 +404,7 @@ fun ProviderDetailScreen(
                 )
             }
         }
+
 
         // ─── Image Generation Endpoint ──────────────────────────────
         // [T-android-image-endpoint-mode] OpenAI-compatible providers only.

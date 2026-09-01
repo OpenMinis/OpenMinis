@@ -52,7 +52,7 @@ struct ShadowVoiceProviderDetailView: View {
             }
 
             if let asr = shadow?.inputModels, !asr.isEmpty {
-                Section(String(localized: "Speech to Text", comment: "ASR section")) {
+                Section(AppLocalized("Speech to Text", comment: "ASR section")) {
                     ForEach(asr) { entry in
                         modelRow(entry, systemImage: "waveform.and.mic", color: .purple)
                     }
@@ -60,7 +60,7 @@ struct ShadowVoiceProviderDetailView: View {
             }
 
             if let tts = shadow?.outputModels, !tts.isEmpty {
-                Section(String(localized: "Text to Speech", comment: "TTS section")) {
+                Section(AppLocalized("Text to Speech", comment: "TTS section")) {
                     ForEach(tts) { entry in
                         modelRow(entry, systemImage: "speaker.wave.2.fill", color: .green)
                     }
@@ -79,7 +79,7 @@ struct ShadowVoiceProviderDetailView: View {
                      comment: "Shadow voice toggle note")
             }
         }
-        .navigationTitle(shadow?.displayName ?? instance?.label ?? String(localized: "Voice Service"))
+        .navigationTitle(shadow?.displayName ?? instance?.label ?? AppLocalized("Voice Service"))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(item: $quickTestEntry) { entry in
             // [T-quicktest-stale-session] Fresh identity per model — see

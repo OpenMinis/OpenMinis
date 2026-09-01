@@ -33,8 +33,59 @@ object ChatViewModelStore {
      */
     private val aliases = mutableMapOf<String, String>()
 
+    /**
+     * [T-android-split-draft-highlight] Bumped every time [aliases] changes.
+     *
+     * [aliases] is a plain map, so writing it schedules no recomposition — and
+     * the two-pane list resolves its highlight THROUGH that map. When a draft
+     * was promoted on first send the pane key deliberately stayed
+     * `__new__<uuid>` (see [rename]: aliasing rather than re-keying is what
+     * keeps the streaming ViewModel alive), so the highlight went on resolving
+     * to the draft id, matched no persisted row, and the running session sat
+     * unhighlighted in the list even after it had a title and a group.
+     *
+     * Exposing the generation as observable state gives Compose something to
+     * subscribe to: readers key on it, the write invalidates them, and the
+     * lookup re-runs against the now-populated alias.
+     */
+    private val aliasGeneration = androidx.compose.runtime.mutableIntStateOf(0)
+
     private fun resolveKey(sessionId: String): String =
         aliases[sessionId] ?: sessionId
+
+    /**
+     * [T-android-tablet-split] Public view of [resolveKey]: the PERSISTED id a
+     * (possibly draft) session id now stands for.
+     *
+     * The two-pane list highlights whichever session the detail pane is
+     * showing. When the detail holds a draft, the pane's key stays
+     * `__new__<uuid>` even after the first send promotes it — [rename] aliases
+     * the key rather than renaming it, precisely so the running screen and its
+     * ViewModel are not disturbed mid-stream. Without this lookup the list
+     * would go on highlighting nothing after the draft became a real row,
+     * because no persisted row ever matches a `__new__` id.
+     *
+     * Returns the input unchanged when there is no alias, so a plain persisted
+     * id and an un-promoted draft both behave sensibly.
+     */
+    @Synchronized
+    fun resolvePersistedId(sessionId: String): String = resolveKey(sessionId)
+
+    /**
+     * [T-android-split-draft-highlight] Compose-aware [resolvePersistedId].
+     *
+     * Reading [aliasGeneration] inside a composition subscribes the caller to
+     * alias changes, so a draft that gets promoted mid-stream re-resolves to
+     * its real id and the list highlight follows it. Call this from
+     * composables; [resolvePersistedId] remains for non-Compose callers.
+     */
+    @androidx.compose.runtime.Composable
+    fun rememberPersistedId(sessionId: String): String {
+        val generation = aliasGeneration.intValue
+        return androidx.compose.runtime.remember(sessionId, generation) {
+            resolveKey(sessionId)
+        }
+    }
 
     @Synchronized
     fun ownerFor(sessionId: String): ViewModelStoreOwner {
@@ -57,6 +108,7 @@ object ChatViewModelStore {
     fun release(sessionId: String) {
         val key = resolveKey(sessionId)
         aliases.entries.removeAll { it.value == key }
+        aliasGeneration.intValue++
         stores.remove(key)?.let {
             it.clear()
             Log.d(TAG, "release store for $key (remaining=${stores.size})")
@@ -97,6 +149,9 @@ object ChatViewModelStore {
             stores[toSessionId] = store
         }
         aliases[fromSessionId] = toSessionId
+        // Invalidate anything resolving through the alias map — see
+        // [aliasGeneration].
+        aliasGeneration.intValue++
         Log.d(TAG, "rename store $fromSessionId -> $toSessionId (alias kept)")
     }
 

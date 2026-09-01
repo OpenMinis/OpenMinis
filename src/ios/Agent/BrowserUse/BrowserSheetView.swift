@@ -549,7 +549,7 @@ struct BrowserDownloadPanelSheet: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(String(localized: "Close")) { dismiss() }
+                    Button(AppLocalized("Close")) { dismiss() }
                 }
             }
         }
@@ -605,7 +605,7 @@ private struct BrowserDownloadPanelRow: View {
                         .progressViewStyle(.linear)
                         .tint(Color.accentColor)
                 case .completed(let sizeText):
-                    Text("\(sizeText) · \(String(localized: "Show in Files", comment: "Completed download row hint"))")
+                    Text("\(sizeText) · \(AppLocalized("Show in Files", comment: "Completed download row hint"))")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 case .failed(let reason):
@@ -646,7 +646,7 @@ private struct BrowserDownloadPanelRow: View {
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             if entry.state != .downloading {
                 Button(role: .destructive, action: onClear) {
-                    Label(String(localized: "Clear"), systemImage: "trash")
+                    Label(AppLocalized("Clear"), systemImage: "trash")
                 }
             }
         }
@@ -750,7 +750,7 @@ struct BrowserDownloadCardRow: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         case .completed(let sizeText):
-            Text("\(sizeText) · \(String(localized: "Tap to view", comment: "Completed download card"))")
+            Text("\(sizeText) · \(AppLocalized("Tap to view", comment: "Completed download card"))")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         case .failed(let reason):

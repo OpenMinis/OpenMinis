@@ -29,6 +29,18 @@ internal class LazyReadAloudPlayer(context: Context) {
         p.speak(text)
     }
 
+    /**
+     * [T-android-readaloud-stop-stale] Stop whatever is currently being read.
+     *
+     * Deliberately does NOT bind an engine: if nothing has ever been spoken
+     * there is nothing to stop, and constructing a TTS engine here would undo
+     * the whole point of the lazy player (an unused ChatScreen never binds
+     * one). Idempotent and safe to call on every new reply.
+     */
+    fun stop() {
+        player?.stop()
+    }
+
     /** Release the engine if one was ever bound. Idempotent. */
     fun shutdown() {
         synchronized(this) {

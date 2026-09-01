@@ -112,7 +112,7 @@ struct FollowUpSessionIntent: AppIntent {
             let promptPreview = String(prompt.prefix(50))
             ShortcutNotification.post(
                 id: "shortcut-followup-\(sid)",
-                title: String(localized: "Minis: Follow-up Sent"),
+                title: AppLocalized("Minis: Follow-up Sent"),
                 body: "\(modelName): \(promptPreview)\(prompt.count > 50 ? "…" : "")",
                 sessionId: sid
             )
@@ -135,7 +135,7 @@ struct FollowUpSessionIntent: AppIntent {
             if sendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-followup-done-\(sid)",
-                    title: String(localized: "Minis: Follow-up Done"),
+                    title: AppLocalized("Minis: Follow-up Done"),
                     body: "\(modelName): \(String(responseText.prefix(200)))",
                     sessionId: sid
                 )
@@ -174,7 +174,7 @@ struct FollowUpSessionIntent: AppIntent {
             if capturedSendCompletionNotification {
                 ShortcutNotification.post(
                     id: "shortcut-followup-done-\(capturedSid)",
-                    title: String(localized: "Minis: Follow-up Done"),
+                    title: AppLocalized("Minis: Follow-up Done"),
                     body: "\(capturedModelName): \(summary)",
                     sessionId: capturedSid
                 )
@@ -189,7 +189,7 @@ struct FollowUpSessionIntent: AppIntent {
             prompt: prompt
         )
 
-        return .result(value: result, dialog: IntentDialog(stringLiteral: String(localized: "Follow-up sent to \(session.displayName) with \(modelName).")))
+        return .result(value: result, dialog: IntentDialog(stringLiteral: AppLocalized("Follow-up sent to \(session.displayName) with \(modelName).")))
     }
 
     // See the note in QuickTaskIntent: without a `parameterSummary` the action

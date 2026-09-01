@@ -37,7 +37,7 @@ struct FaceIDProtectionSettingsView: View {
                         return
                     }
                     Task { @MainActor in
-                        let reason = String(localized: "Enable \(BiometricAuth.biometryDisplayName) app lock")
+                        let reason = AppLocalized("Enable \(BiometricAuth.biometryDisplayName) app lock")
                         let ok = await BiometricAuth.authenticate(reason: reason)
                         if ok {
                             store.appLockEnabled = true
@@ -53,7 +53,7 @@ struct FaceIDProtectionSettingsView: View {
 
             if appLockEnabled {
                 Section {
-                    Picker(String(localized: "Require unlock"), selection: $appLockIdleSeconds) {
+                    Picker(AppLocalized("Require unlock"), selection: $appLockIdleSeconds) {
                         ForEach(SessionLockIdleOption.allOptions) { opt in
                             Text(opt.labelKey).tag(opt.seconds)
                         }
@@ -81,7 +81,7 @@ struct FaceIDProtectionSettingsView: View {
                 .onChange(of: enabled) { newValue in
                     guard newValue else { return }
                     Task { @MainActor in
-                        let reason = String(localized: "Enable \(BiometricAuth.biometryDisplayName) protection for chat sessions")
+                        let reason = AppLocalized("Enable \(BiometricAuth.biometryDisplayName) protection for chat sessions")
                         let ok = await BiometricAuth.authenticate(reason: reason)
                         if !ok {
                             enabled = false
@@ -94,7 +94,7 @@ struct FaceIDProtectionSettingsView: View {
 
             if enabled {
                 Section {
-                    Picker(String(localized: "Re-lock after idle"), selection: $idleSeconds) {
+                    Picker(AppLocalized("Re-lock after idle"), selection: $idleSeconds) {
                         ForEach(SessionLockIdleOption.allOptions) { opt in
                             Text(opt.labelKey).tag(opt.seconds)
                         }
@@ -119,7 +119,7 @@ struct FaceIDProtectionSettingsView: View {
                     if !store.lockedSessionIds.isEmpty {
                         Button(role: .destructive) {
                             Task { @MainActor in
-                                let reason = String(localized: "Remove all session locks")
+                                let reason = AppLocalized("Remove all session locks")
                                 let ok = await BiometricAuth.authenticate(reason: reason)
                                 if ok {
                                     for sid in store.lockedSessionIds {

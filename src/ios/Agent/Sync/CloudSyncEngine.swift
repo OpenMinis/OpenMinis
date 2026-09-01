@@ -1838,6 +1838,33 @@ final class CloudSyncEngine: ObservableObject {
         case skippedLocalDirty
     }
 
+    /// Merge a ProviderConfig into local state for a BACKUP RESTORE.
+    ///
+    /// [T-ios-backup-provider-merge] Restore used to call
+    /// `ProviderConfigStore.applyConfig`, which REPLACES the whole config — so
+    /// restoring a backup silently deleted every provider, model group and
+    /// session binding that existed locally but not in the backup, while the
+    /// confirmation dialog promised "Nothing is deleted". This routes restore
+    /// through the same union-by-id merger the sync engine uses, which already
+    /// handles instances/entries/groups correctly and keeps the per-device
+    /// pointer fields (voiceInput/voiceOutput/vision group ids, session
+    /// bindings, default pointers) local by construction.
+    ///
+    /// The three sync-only guards are deliberately NOT applied here:
+    ///   - own-echo: a restore is never our own upload echoing back;
+    ///   - local-dirty: a pending upload must not silently cancel a restore the
+    ///     user explicitly asked for;
+    ///   - re-upload throttle: handled by the caller's normal dirty marking.
+    /// Skipping a user-initiated restore for any of those would reproduce the
+    /// exact "reported success, changed nothing" failure this feature must not
+    /// have.
+    @MainActor
+    @discardableResult
+    static func mergeProviderConfigForRestore(_ remote: ProviderConfig) async
+        -> ProviderConfigMergeOutcome {
+        await mergeProviderConfigBody(remote: remote, isRestore: true)
+    }
+
     @MainActor
     @discardableResult
     static func mergeProviderConfig(remoteJson: String) async -> ProviderConfigMergeOutcome {
@@ -1877,6 +1904,16 @@ final class CloudSyncEngine: ObservableObject {
             return .skippedLocalDirty
         }
 
+        return await mergeProviderConfigBody(remote: remote, isRestore: false)
+    }
+
+    /// The actual union-by-id merge, shared by inbound sync and backup restore.
+    /// `isRestore` only affects the re-upload decision at the end.
+    @MainActor
+    @discardableResult
+    private static func mergeProviderConfigBody(remote: ProviderConfig,
+                                                isRestore: Bool) async
+        -> ProviderConfigMergeOutcome {
         // Read the authoritative current state from the store's in-memory config,
         // NOT from disk. Reading from disk would lose any changes still in-flight
         // between a UI edit and the debounced disk write (tiny but real window),
@@ -1916,7 +1953,46 @@ final class CloudSyncEngine: ObservableObject {
         for tid in tombstonedInstanceIds {
             instanceMap.removeValue(forKey: tid)
         }
-        local.instances = Array(instanceMap.values).sorted(by: { $0.createdAt < $1.createdAt })
+        // [T-backup-restore-order] Ordering is USER DATA here: the provider
+        // list is drag-reorderable, and `config.instances`'s array order is
+        // what carries it (ProviderConfigDB writes the array index into
+        // `sort_order` and reads back `ORDER BY sort_order`).
+        //
+        // Sorting by `createdAt` is right for SYNC — two devices must converge
+        // on the same order from the same set, and neither one's arrangement is
+        // authoritative. It is wrong for RESTORE: the package records the order
+        // the user arranged, and rebuilding by creation date discards it, which
+        // is the reported "恢复会把服务商、分组的排序全部打乱".
+        //
+        // On restore: take the backup's order first, then append local-only
+        // instances (which the backup could not know about) after it, keeping
+        // their relative order. That makes the restored device match the
+        // backup for everything the backup contained, and leaves anything
+        // added since at the end rather than interleaved by date.
+        if isRestore {
+            var ordered: [ProviderInstance] = []
+            var placed = Set<String>()
+            for ri in remote.instances {
+                if let merged = instanceMap[ri.id] {
+                    ordered.append(merged)
+                    placed.insert(ri.id)
+                }
+            }
+            for li in local.instances where !placed.contains(li.id) {
+                if let merged = instanceMap[li.id] {
+                    ordered.append(merged)
+                    placed.insert(li.id)
+                }
+            }
+            // Anything only reachable through the map (defensive; should be
+            // covered above) keeps the previous deterministic ordering.
+            for inst in instanceMap.values where !placed.contains(inst.id) {
+                ordered.append(inst)
+            }
+            local.instances = ordered
+        } else {
+            local.instances = Array(instanceMap.values).sorted(by: { $0.createdAt < $1.createdAt })
+        }
         // Drop modelEntries whose providerInstanceId was tombstoned. The
         // remote snapshot may still carry orphaned entries pointing at the
         // tombstoned instance; the local snapshot was already pruned by
@@ -2152,7 +2228,50 @@ final class CloudSyncEngine: ObservableObject {
                 localGroupByName[rg.name] = rg.id
             }
         }
-        local.modelGroups = Array(groupMap.values)
+        // [T-backup-restore-order] `Dictionary.values` has NO defined order, so
+        // this line alone could reshuffle the group list on every merge —
+        // worse than the instances case, which at least sorted by date.
+        // Rebuild deterministically: the backup's order first on a restore,
+        // then whatever is local-only; for sync, keep the local arrangement
+        // and append newly-arrived groups, so a pull does not rearrange a list
+        // the user dragged into place.
+        if isRestore {
+            var orderedGroups: [ModelGroup] = []
+            var placedGroups = Set<String>()
+            for rg in remote.modelGroups {
+                // The id may have been rewritten by the name-collision pass
+                // above, so resolve through the map rather than trusting `rg`.
+                if let merged = groupMap[rg.id] {
+                    orderedGroups.append(merged)
+                    placedGroups.insert(merged.id)
+                }
+            }
+            for lg in local.modelGroups where !placedGroups.contains(lg.id) {
+                if let merged = groupMap[lg.id] {
+                    orderedGroups.append(merged)
+                    placedGroups.insert(merged.id)
+                }
+            }
+            for g in groupMap.values where !placedGroups.contains(g.id) {
+                orderedGroups.append(g)
+                placedGroups.insert(g.id)
+            }
+            local.modelGroups = orderedGroups
+        } else {
+            var orderedGroups: [ModelGroup] = []
+            var placedGroups = Set<String>()
+            for lg in local.modelGroups {
+                if let merged = groupMap[lg.id] {
+                    orderedGroups.append(merged)
+                    placedGroups.insert(merged.id)
+                }
+            }
+            for g in groupMap.values where !placedGroups.contains(g.id) {
+                orderedGroups.append(g)
+                placedGroups.insert(g.id)
+            }
+            local.modelGroups = orderedGroups
+        }
 
         // Fix up dangling references to group ids we rewrote. Defaults / agent
         // loop lists live outside the group array itself but point at group ids.
@@ -2220,6 +2339,20 @@ final class CloudSyncEngine: ObservableObject {
         // explicitly below via localHasUnique.
         store.applyMergedConfigFromSync(local)
         logger.info("[iCloud] mergeProviderConfig: merged \(instanceMap.count) instances, \(local.modelEntries.count) entries, \(local.modelGroups.count) groups")
+
+        // A restore is user-initiated local authorship, not an inbound echo:
+        // mark dirty unconditionally so the restored providers propagate, and
+        // skip the anti-ping-pong throttle (which exists to damp device-to-
+        // device loops that a manual restore is not part of). §8.3 wants
+        // restored rows re-uploaded under this device's identity.
+        if isRestore {
+            Task {
+                await ChatStore.shared.markDirty(recordType: "ProviderConfig",
+                                                 recordId: "provider-config")
+            }
+            logger.info("[iCloud] mergeProviderConfigForRestore: merged and marked dirty")
+            return .applied
+        }
 
         // Re-upload merged result so other device gets our unique data too.
         // Throttle to at most once per 60s to prevent ping-pong between devices.
