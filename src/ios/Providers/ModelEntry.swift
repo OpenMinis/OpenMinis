@@ -134,7 +134,7 @@ struct ModelEntry: Identifiable, Codable, Hashable {
     var model: LLMModel {
         guard !overrides.isEmpty else { return baseModel }
         // LLMModel.displayName is a `let`, so rebuild via memberwise init to apply any override.
-        return LLMModel(
+        var effective = LLMModel(
             id: baseModel.id,
             displayName: overrides.displayName ?? baseModel.displayName,
             provider: baseModel.provider,
@@ -142,8 +142,13 @@ struct ModelEntry: Identifiable, Codable, Hashable {
             contextWindow: overrides.contextWindow ?? baseModel.contextWindow,
             maxOutputTokens: overrides.maxOutputTokens ?? baseModel.maxOutputTokens,
             supportsReasoning: overrides.supportsReasoning ?? baseModel.supportsReasoning,
-            interleavedReasoningField: baseModel.interleavedReasoningField
+            interleavedReasoningField: baseModel.interleavedReasoningField,
+            reasoningEffortValues: baseModel.reasoningEffortValues,
+            declaresNoEffortTiers: baseModel.declaresNoEffortTiers
         )
+        effective.effortDeclarationIsAuthoritative = baseModel.effortDeclarationIsAuthoritative
+        effective.codexCatalogMetadata = baseModel.codexCatalogMetadata
+        return effective
     }
 
     init(

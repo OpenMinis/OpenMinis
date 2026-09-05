@@ -814,8 +814,8 @@ final class ProviderConfigStore: ObservableObject {
             }
             config.modelEntries.append(contentsOf: entries)
             logger.info("[ModelList] addInstance (OAuth): instance=\(instance.label) seeded \(entries.count) built-in entries: [\(entries.map { $0.baseModel.id }.prefix(10).joined(separator: ","))]")
-            // Manual OAuth tokens and OpenRouter OAuth can fetch models from the API
-            if hasManualToken || instance.providerType == .openRouter {
+            // Refresh Codex's account catalog immediately after login too.
+            if hasManualToken || instance.providerType == .openRouter || instance.providerType == .openAI {
                 Task { await refreshModels(for: instance) }
             }
         } else if !VoiceProviderTemplate.mockEntries(for: instance).isEmpty {
@@ -2506,7 +2506,9 @@ final class ProviderConfigStore: ObservableObject {
         // [T-mimo-shadow-voice] No longer skipped for "voice-only" providers —
         // audio-modality template seed entries survive replaceEntries.
         let hasCustomModels = config.modelEntries.contains { $0.providerInstanceId == instance.id && $0.isCustom }
-        if hasCustomModels {
+        let usesLiveCodexCatalog = instance.providerType == .openAI && instance.credentialType == .oauth
+            && ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") == nil
+        if hasCustomModels && !usesLiveCodexCatalog {
             logger.info("[ModelList] autoRefreshModels (DAILY): instance=\(instance.label) SKIP — user has custom models")
             return
         }
@@ -2565,7 +2567,9 @@ final class ProviderConfigStore: ObservableObject {
     /// Called on first daily launch to keep model lists up-to-date.
     /// Skips instances where the user has manually added custom models.
     func refreshAllModelsIfNeeded() {
-        let key = "lastModelsRefreshDate"
+        // Refresh once on upgrading from the static Codex whitelist, even if
+        // the old build already refreshed today. Custom entries survive merge.
+        let key = "lastModelsRefreshDate.codex-live-v1"
         let lastRefresh = UserDefaults.standard.object(forKey: key) as? Date
         let calendar = Calendar.current
         let lastStr = lastRefresh.map { ISO8601DateFormatter().string(from: $0) } ?? "nil"
@@ -2660,7 +2664,10 @@ final class ProviderConfigStore: ObservableObject {
             if let manualToken = ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") {
                 return try await OpenAIModelsAPI.fetchModels(apiKey: manualToken, baseURL: customBase, appendV1Suffix: appendV1, forceRefresh: forceRefresh, userAgent: ua)
             }
-            return OpenAIModelsAPI.fetchModelsOAuth()
+            let token = try await CodexOAuthManager.shared.validAccessToken(instanceId: instance.id)
+            let accountId = CodexOAuthManager.shared.accountId(instanceId: instance.id)
+            return try await OpenAIModelsAPI.fetchModelsOAuth(accessToken: token, accountId: accountId,
+                                                             instanceId: instance.id, forceRefresh: forceRefresh)
         case (.antigravity, .apiKey):
             // Antigravity only supports OAuth
             return ModelsDevAPI.enrichModels(AntigravityModelsAPI.fetchModelsBuiltIn())
@@ -2825,6 +2832,13 @@ final class ProviderConfigStore: ObservableObject {
     static func fetchModelsWithFallback(_ instance: ProviderInstance, forceRefresh: Bool = false) async throws -> ModelFetchResult {
         var warnings: [String] = []
         let isThirdParty = isThirdPartyOpenAICompat(instance)
+        // Public API/models.dev listings do not establish ChatGPT entitlement.
+        // Preserve saved models on catalog failure and expose the actual error.
+        if instance.providerType == .openAI, instance.credentialType == .oauth,
+           ProviderKeychainHelper.loadOAuthString(instanceId: instance.id, account: "manual-oauth-token") == nil {
+            let models = try await fetchModelsForInstance(instance, forceRefresh: forceRefresh)
+            return ModelFetchResult(models: models, source: "codex-account", warnings: [])
+        }
 
         // Step 1: Try /v1/models API
         do {

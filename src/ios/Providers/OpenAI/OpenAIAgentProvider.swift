@@ -470,6 +470,19 @@ final class OpenAIAgentProvider: AgentProvider {
         if provider.isMistral {
             // No reasoning key, and reasoningRequested stays false so the
             // encrypted-reasoning include below is skipped too.
+        } else if isCodexOAuth {
+            // The authenticated Codex catalog owns its effort tiers. Preserve
+            // newly advertised values such as "ultra" instead of applying the
+            // API-compatible mapping below, then resolve against this account's
+            // model declaration. Thinking off retains the Codex low-effort
+            // fallback, adjusted when this model does not accept "low".
+            let requestedEffort = thinkingLevel.isEnabled ? thinkingLevel.rawValue : "low"
+            let effort = CodexModelCatalog.resolvedEffort(
+                requested: requestedEffort,
+                supported: model.reasoningEffortValues
+            )
+            body["reasoning"] = ["effort": effort, "summary": "auto"]
+            reasoningRequested = true
         } else if thinkingLevel.isEnabled, let effort = Self.reasoningEffort(for: model, level: thinkingLevel) {
             // `summary: "auto"` opts in to streaming the human-readable
             // reasoning summary (delivered as `response.reasoning_summary_text.delta`
@@ -478,11 +491,6 @@ final class OpenAIAgentProvider: AgentProvider {
             // token count. Safe to send to every Responses-flavor endpoint:
             // OpenAI ignores unknown variants and falls back to "auto"-equiv.
             body["reasoning"] = ["effort": effort, "summary": "auto"]
-            reasoningRequested = true
-        } else if isCodexOAuth {
-            // Codex requires a `reasoning` object on every request — fall back
-            // to "low" when the user has thinking off.
-            body["reasoning"] = ["effort": "low", "summary": "auto"]
             reasoningRequested = true
         } else if model.supportsReasoning ?? false,
                   let offEffort = Self.explicitOffEffort(for: provider, model: model, level: thinkingLevel) {

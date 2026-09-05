@@ -106,6 +106,9 @@ struct LLMModel: Equatable, Hashable, Identifiable, Sendable, Codable {
     /// configured entries with it. nil decodes cleanly and reads as "not authoritative",
     /// which is the permissive/pass-through direction.
     var effortDeclarationIsAuthoritative: Bool?
+    /// Set only for the Codex service catalog (or its pinned offline fixture).
+    /// Preserve its protocol capabilities when general catalog enrichment runs.
+    var codexCatalogMetadata: Bool?
 
     init(id: String, displayName: String, provider: String, modalityOverride: ModelModality? = nil,
          contextWindow: Int? = nil, maxOutputTokens: Int? = nil,
@@ -253,6 +256,18 @@ struct LLMModel: Equatable, Hashable, Identifiable, Sendable, Codable {
     ]
 
     // MARK: - OpenAI Models
+
+    /// Bundled Codex 0.153.4 fallback. Live account catalog takes precedence.
+    /// https://github.com/openai/codex/pull/42874
+    static let gpt6Astra: LLMModel = {
+        var model = LLMModel(id: "gpt-6-astra", displayName: "GPT-6 Astra", provider: "OpenAI",
+                             modalityOverride: [.textInput, .imageInput, .textOutput],
+                             contextWindow: 272_000, supportsReasoning: true,
+                             reasoningEffortValues: ["low", "medium", "high", "xhigh", "max", "ultra"])
+        model.effortDeclarationIsAuthoritative = true
+        model.codexCatalogMetadata = true
+        return model
+    }()
 
     static let gpt56Sol = LLMModel(
         id: "gpt-5.6-sol",
@@ -416,28 +431,17 @@ struct LLMModel: Equatable, Hashable, Identifiable, Sendable, Codable {
         .codexMini,
     ]
 
-    /// Models available via Codex OAuth (ChatGPT subscription).
-    ///
-    /// [T-codex-oauth-model-prune] The Codex backend rejects a model the
-    /// ChatGPT tier does not carry with
-    /// `HTTP 400 {"detail":"The '<id>' model is not supported when using Codex
-    /// with a ChatGPT account."}` — and that error surfaces as an empty
-    /// assistant turn, so an unusable entry in this picker reads to the user as
-    /// "tool calls are broken" rather than "wrong model". Entries verified 400
-    /// on-device (2026-08-01, real Codex OAuth token) were removed:
-    /// gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5-codex-mini, gpt-5.3, gpt-5.2,
-    /// gpt-5. The survivors match the model set CLIProxyAPI ships for the Codex
-    /// client (`internal/registry/models/codex_client_models.json`), which is
-    /// also gpt-5.6-*/5.5/5.4 only.
-    ///
-    /// Availability is tier-dependent, not absolute — a higher ChatGPT plan may
-    /// carry more. Re-probe before adding anything back; do not restore an id
-    /// from documentation alone.
+    /// Offline seeds for Codex OAuth. The live account-scoped catalog replaces
+    /// these after login/refresh, because availability varies by subscription.
+    /// Astra is pinned to the official Codex 0.153.4 bundled catalog. Existing
+    /// 5.x entries remain as upgrade/offline fallbacks, not a whitelist of future
+    /// supported IDs. Never use the public API-key catalog as OAuth entitlement.
     static let allOpenAICodexOAuth: [LLMModel] = [
+        .gpt6Astra,
         .gpt56Sol, .gpt56Terra, .gpt56Luna,
         .gpt55, .gpt54, .gpt54Mini,
         // gptImage2 is kept: it is an image endpoint, not a Codex chat model,
-        // so the text-model probe above does not apply to it.
+        // so it is preserved separately when the live catalog is refreshed.
         .gptImage2,
     ]
 
@@ -907,7 +911,7 @@ extension LLMModel {
         // "minimal" are OFF-ish tiers handled by the toggle, not the ladder.
         let mapping: [(wire: String, level: ThinkingLevel)] = [
             ("low", .low), ("medium", .medium), ("high", .high),
-            ("xhigh", .xhigh), ("max", .max),
+            ("xhigh", .xhigh), ("max", .max), ("ultra", .ultra),
         ]
         let set = Set(declared.map { $0.lowercased() })
         return mapping.filter { set.contains($0.wire) }.map(\.level)

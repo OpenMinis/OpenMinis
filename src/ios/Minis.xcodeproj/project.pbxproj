@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3BD594A899B4A4A203556F7E /* CodexOAuthToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDFDF3F2056928A4962F3F5D /* CodexOAuthToken.swift */; };
+		AFA914F7B2F9512705D3B2EF /* CodexModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 302E4EAE2D0FA503273FC484 /* CodexModelCatalog.swift */; };
+		382AE5C205C86C0759C093FC /* CodexModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 302E4EAE2D0FA503273FC484 /* CodexModelCatalog.swift */; };
+		7AA388FECCB20AAA257CD5DB /* CodexOAuthToken.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDFDF3F2056928A4962F3F5D /* CodexOAuthToken.swift */; };
 		21FED4B7BB6F6D9476C9992E /* VoiceProvider+System.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88993FC8E3F0199C6638F664 /* VoiceProvider+System.swift */; };
 		241D530017827D7F0EB604DE /* VoiceProviderFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2941B643B8A2F048A2B154E /* VoiceProviderFactory.swift */; };
 		2A4FD49F872431D703328384 /* VoiceOutputPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 424510790AF3FB2452D3CCE3 /* VoiceOutputPlayer.swift */; };
@@ -605,6 +609,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		302E4EAE2D0FA503273FC484 /* CodexModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodexModelCatalog.swift"; path = "Providers/OpenAI/OAuth/CodexModelCatalog.swift"; sourceTree = SOURCE_ROOT; };
+		DDFDF3F2056928A4962F3F5D /* CodexOAuthToken.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "CodexOAuthToken.swift"; path = "Providers/OpenAI/OAuth/CodexOAuthToken.swift"; sourceTree = SOURCE_ROOT; };
 		0ED149397BEA7E0408C92688 /* GroupVoiceModelsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupVoiceModelsView.swift; sourceTree = "<group>"; };
 		0F5379380323FA8C6477708C /* GroupSlotPicker.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GroupSlotPicker.swift; sourceTree = "<group>"; };
 		16FF3462D09402F14B610CD6 /* VoiceWaveformView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VoiceWaveformView.swift; sourceTree = "<group>"; };
@@ -1421,6 +1427,8 @@
 		E51000030 = {
 			isa = PBXGroup;
 			children = (
+				302E4EAE2D0FA503273FC484 /* CodexModelCatalog.swift */,
+				DDFDF3F2056928A4962F3F5D /* CodexOAuthToken.swift */,
 				E51000031 /* Minis */,
 				E5E000031 /* Shared */,
 				E5E000030 /* ShareExtension */,
@@ -2632,6 +2640,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3BD594A899B4A4A203556F7E /* CodexOAuthToken.swift in Sources */,
+				AFA914F7B2F9512705D3B2EF /* CodexModelCatalog.swift in Sources */,
 				BB1000120F700000000000AA /* ContextPolicy.swift in Sources */,
 				E5LD00002 /* ToolLoopDetector.swift in Sources */,
 				E5GWF0004 /* GeminiWireFormat.swift in Sources */,
@@ -2661,6 +2671,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				382AE5C205C86C0759C093FC /* CodexModelCatalog.swift in Sources */,
+				7AA388FECCB20AAA257CD5DB /* CodexOAuthToken.swift in Sources */,
 				AC0000202 /* ProviderCustomizationGenerated.swift in Sources */,
 				E54000AC1 /* DebugSkillGenerated.swift in Sources */,
 				E5FP00100 /* AppGroupChangeWatcher.swift in Sources */,
