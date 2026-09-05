@@ -799,6 +799,21 @@ extension AIChatViewModel {
             toolOutput = memResult.output
             toolSuccess = memResult.success
 
+        case "team_list", "team_create", "team_dispatch", "team_status", "team_cancel":
+            // Keep team actions inside the existing preflight, cancellation,
+            // loop-detection and snapshot pipeline. Do not execute a task by
+            // waiting on the shared iSH shell.
+            let teamResult = await executeTeamTool(
+                name: tu.name, args: toolArgs,
+                toolCallID: tu.id,
+                argumentsWereTruncated: truncationRepairTag != nil
+            )
+            toolOutput = teamResult.output
+            toolSuccess = teamResult.success
+            if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
+                messages[msgIdx].blocks[blockIdx].content = toolOutput
+            }
+
         default:
             toolOutput = "Error: Unknown tool '\(tu.name)'"
             toolSuccess = false

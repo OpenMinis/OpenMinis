@@ -202,6 +202,7 @@ extension AIChatViewModel {
             ))
         }
 
+        tools.append(contentsOf: makeTeamTools())
         return tools
     }
 

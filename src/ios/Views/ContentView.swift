@@ -864,6 +864,7 @@ private func probeRowHeight(_ h: CGFloat, _ tag: String) {
 /// Sheets triggered from the toolbar menu, consolidated into a single `.sheet(item:)`.
 enum ToolSheet: String, Identifiable {
     case settings
+    case team
     case rootfsManagement
     case browser
     case browserManagement
@@ -1042,6 +1043,7 @@ struct ContentView: View {
     @State private var showAlarmList = false
     @State private var hasAlarms = false
     @State private var activeToolSheet: ToolSheet?
+    @State private var pendingTeamSessionID: String?
     #if DEBUG
     // [debug] Keep the screen awake (disable the idle/auto-lock timer) while the
     // app is in the foreground. Memory-only on purpose — NOT persisted, so it
@@ -1443,10 +1445,21 @@ struct ContentView: View {
         .sheet(isPresented: $showAlarmList, onDismiss: { fetchAlarmsIfNeeded() }) {
             AlarmListView()
         }
-        .sheet(item: $activeToolSheet) { sheet in
+        .sheet(item: $activeToolSheet, onDismiss: {
+            if let sessionID = pendingTeamSessionID {
+                pendingTeamSessionID = nil
+                refreshSessionList()
+                switchToSession(sessionID)
+            }
+        }) { sheet in
             switch sheet {
             case .settings:
                 SettingsSheet(showTerminal: $showTerminal)
+            case .team:
+                MinisTeamView { sessionID in
+                    pendingTeamSessionID = sessionID
+                    activeToolSheet = nil
+                }
             case .rootfsManagement:
                 NavigationStack {
                     RootfsManagementView()
@@ -3377,6 +3390,12 @@ struct ContentView: View {
         ToolbarItem(placement: .topBarTrailing) {
             if !isSelecting {
                 Menu {
+                    Button {
+                        activeToolSheet = .team
+                    } label: {
+                        Label("Bot 团队", systemImage: "person.3")
+                    }
+                    Divider()
                     Button {
                         showTerminal = true
                     } label: {
