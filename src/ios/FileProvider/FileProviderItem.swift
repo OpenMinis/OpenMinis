@@ -4,12 +4,14 @@ import UniformTypeIdentifiers
 /// Maps a file or directory in the shared folder to FileProvider item metadata.
 final class FileProviderItem: NSObject, NSFileProviderItem {
     private let fileURL: URL
+    private let providerRoot: URL
     private let parentID: NSFileProviderItemIdentifier
     private let attrs: [FileAttributeKey: Any]?
     private let isRoot: Bool
 
-    init(url: URL, parentIdentifier: NSFileProviderItemIdentifier, isRoot: Bool = false) {
+    init(url: URL, providerRoot: URL, parentIdentifier: NSFileProviderItemIdentifier, isRoot: Bool = false) {
         self.fileURL = url
+        self.providerRoot = providerRoot
         self.parentID = parentIdentifier
         self.attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         self.isRoot = isRoot
@@ -18,7 +20,7 @@ final class FileProviderItem: NSObject, NSFileProviderItem {
 
     var itemIdentifier: NSFileProviderItemIdentifier {
         if isRoot { return .rootContainer }
-        let root = FileProviderExtension.providerRoot
+        let root = providerRoot
         let relative = fileURL.path.replacingOccurrences(of: root.path, with: "")
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if relative.isEmpty {

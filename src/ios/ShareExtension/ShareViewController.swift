@@ -11,6 +11,16 @@ class ShareViewController: UIViewController {
         view.backgroundColor = .clear
         NSLog("[ShareExt] viewDidLoad — starting processing")
 
+        guard SharedContainerStore.isAppGroupAvailable else {
+            NSLog("[ShareExt] App Group unavailable; cancelling share without reporting delivery")
+            extensionContext?.cancelRequest(withError: NSError(
+                domain: NSCocoaErrorDomain,
+                code: NSFileWriteNoPermissionError,
+                userInfo: [NSLocalizedDescriptionKey: "Sharing is unavailable because this signing configuration cannot access the shared container."]
+            ))
+            return
+        }
+
         Task { @MainActor in
             let vm = ShareViewModel()
             let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
