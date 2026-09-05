@@ -253,23 +253,31 @@ extension AIChatViewModel {
             .appendingPathComponent("browser", isDirectory: true)
     }
 
-    /// App Group container root for FileProvider-visible directories.
+    /// Resolve storage once per process so a local fallback never changes
+    /// halfway through a run. This does not grant access to another App Group
+    /// or make the private directory visible to extensions.
+    nonisolated private static let minisStorageContainerRoot: URL = {
+        if let shared = SharedContainerStore.containerURL { return shared }
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+        return library.appendingPathComponent("MinisLocalStorage", isDirectory: true)
+    }()
+
+    /// App Group container root for FileProvider-visible directories, or
+    /// app-private storage when the signing profile cannot access that group.
     /// Everything under this path is exposed to iOS Files via the replicated
     /// FileProvider extension. Keep ONLY user-facing subdirs (shared, skills,
     /// memory) here — anything else leaks into "On My iPhone → Minis".
     nonisolated static var minisAppGroupRoot: URL {
-        FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedContainerStore.appGroupID
-        )!.appendingPathComponent("MinisFileProvider", isDirectory: true)
+        let url = minisStorageContainerRoot.appendingPathComponent("MinisFileProvider", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
     }
 
     /// App Group subdirectory for private metadata that must NOT be exposed
     /// to iOS Files (mounted-folders.json, FileProvider extension logs, etc).
     /// Sibling of `minisAppGroupRoot` inside the same App Group container.
     nonisolated static var minisConfigRoot: URL {
-        let url = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedContainerStore.appGroupID
-        )!.appendingPathComponent("MinisConfig", isDirectory: true)
+        let url = minisStorageContainerRoot.appendingPathComponent("MinisConfig", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

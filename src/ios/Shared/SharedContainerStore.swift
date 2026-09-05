@@ -5,16 +5,24 @@ import Foundation
 enum SharedContainerStore {
     static let appGroupID = "group.com.openminis.app"
 
+    /// The actual shared container. A private app directory is never a
+    /// substitute for transferring data to an extension.
+    static var containerURL: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
+    }
+
+    static var isAppGroupAvailable: Bool { containerURL != nil }
+
     private static let pendingShareKey = "pendingShare"
 
     static var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+        guard isAppGroupAvailable else { return nil }
+        return UserDefaults(suiteName: appGroupID)
     }
 
     /// Directory in the shared container for transferring attachment files.
     static var sharedFileDirectory: URL? {
-        FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: appGroupID)?
+        containerURL?
             .appendingPathComponent("ShareExtension", isDirectory: true)
     }
 

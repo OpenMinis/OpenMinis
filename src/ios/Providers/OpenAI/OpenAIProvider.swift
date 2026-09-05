@@ -88,7 +88,7 @@ private func makeStreamingSession() -> URLSession {
 ///   - API Key: Standard Chat Completions API at api.openai.com
 ///   - OAuth (Codex): Responses API at chatgpt.com/backend-api/codex/responses
 final class OpenAIProvider: LLMProvider {
-    static let codexClientVersion = "0.144.1"
+    static let codexClientVersion = CodexModelCatalog.clientVersion
 
     /// [T-codex-fast-mode] UserDefaults key for the Codex Fast Mode toggle.
     /// Read at request-build time (not cached at init) so flipping the "..."
@@ -807,7 +807,7 @@ final class OpenAIProvider: LLMProvider {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue(Self.codexClientVersion, forHTTPHeaderField: "Version")
             request.setValue("responses=experimental", forHTTPHeaderField: "Openai-Beta")
-            request.setValue("codex_cli_rs/\(Self.codexClientVersion) (iOS; arm64)", forHTTPHeaderField: "User-Agent")
+            request.setValue("OpenMinis-iOS (Codex protocol \(Self.codexClientVersion); arm64)", forHTTPHeaderField: "User-Agent")
             request.setValue("codex_cli_rs", forHTTPHeaderField: "Originator")
             if let accountId = codexAccountId {
                 request.setValue(accountId, forHTTPHeaderField: "Chatgpt-Account-Id")
@@ -1109,7 +1109,7 @@ final class OpenAIProvider: LLMProvider {
         if isCodexOAuth {
             request.setValue(Self.codexClientVersion, forHTTPHeaderField: "Version")
             request.setValue("responses=experimental", forHTTPHeaderField: "Openai-Beta")
-            request.setValue("codex_cli_rs/\(Self.codexClientVersion) (iOS; arm64)", forHTTPHeaderField: "User-Agent")
+            request.setValue("OpenMinis-iOS (Codex protocol \(Self.codexClientVersion); arm64)", forHTTPHeaderField: "User-Agent")
             request.setValue("codex_cli_rs", forHTTPHeaderField: "Originator")
             if let accountId = codexAccountId {
                 request.setValue(accountId, forHTTPHeaderField: "Chatgpt-Account-Id")
@@ -1140,7 +1140,7 @@ final class OpenAIProvider: LLMProvider {
         // Include encrypted reasoning only for Codex OAuth
         if isCodexOAuth {
             body["include"] = ["reasoning.encrypted_content"]
-            body["reasoning"] = ["effort": "low"]
+            body["reasoning"] = ["effort": CodexModelCatalog.resolvedEffort(requested: "low", supported: model.reasoningEffortValues)]
         }
         // [T-codex-fast-mode] User-toggled Fast Mode ("..." menu). Wire value
         // verified against codex_cli_rs source: ServiceTier::Fast.

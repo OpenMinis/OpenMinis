@@ -18,7 +18,11 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     // MARK: - Full enumeration (initial sync)
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
-        let items = listItems()
+        guard let root = FileProviderExtension.providerRoot else {
+            observer.finishEnumeratingWithError(FileProviderExtension.appGroupUnavailableError)
+            return
+        }
+        let items = listItems(providerRoot: root)
         os_log("enumerateItems container=%{public}@ recursive=%d count=%d",
                log: Self.log, type: .info,
                containerItemIdentifier.rawValue, recursive ? 1 : 0, items.count)
@@ -30,8 +34,12 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     // MARK: - Change enumeration (incremental updates)
 
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from syncAnchor: NSFileProviderSyncAnchor) {
-        let currentAnchor = buildSyncAnchor()
-        let items = listItems()
+        guard let root = FileProviderExtension.providerRoot else {
+            observer.finishEnumeratingWithError(FileProviderExtension.appGroupUnavailableError)
+            return
+        }
+        let currentAnchor = buildSyncAnchor(providerRoot: root)
+        let items = listItems(providerRoot: root)
         os_log("enumerateChanges container=%{public}@ anchorMatch=%d itemCount=%d",
                log: Self.log, type: .info,
                containerItemIdentifier.rawValue,
@@ -62,7 +70,15 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
-        completionHandler(buildSyncAnchor())
+        guard let root = FileProviderExtension.providerRoot else {
+            // This protocol callback has no Error parameter; nil means no
+            // usable anchor. Enumeration requests report the explicit error.
+            os_log("currentSyncAnchor unavailable: App Group container is not authorized",
+                   log: Self.log, type: .error)
+            completionHandler(nil)
+            return
+        }
+        completionHandler(buildSyncAnchor(providerRoot: root))
     }
 
     /// Hex-encode an 8-byte anchor for human-readable log lines. Falls back
@@ -102,28 +118,28 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         return false
     }
 
-    private func directoryURL() -> URL {
+    private func directoryURL(providerRoot: URL) -> URL {
         if containerItemIdentifier == .rootContainer {
-            return FileProviderExtension.providerRoot
+            return providerRoot
         }
-        return FileProviderExtension.providerRoot
+        return providerRoot
             .appendingPathComponent(containerItemIdentifier.rawValue)
     }
 
-    private func listItems() -> [FileProviderItem] {
+    private func listItems(providerRoot: URL) -> [FileProviderItem] {
         // Trash is not supported — always return empty.
         if containerItemIdentifier == .trashContainer {
             return []
         }
 
-        let dirURL = directoryURL()
+        let dirURL = directoryURL(providerRoot: providerRoot)
         let fm = FileManager.default
         if containerItemIdentifier == .rootContainer {
             try? fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
         }
 
         if recursive {
-            return listItemsRecursively(at: dirURL, parentIdentifier: containerItemIdentifier)
+            return listItemsRecursively(at: dirURL, providerRoot: providerRoot, parentIdentifier: containerItemIdentifier)
         }
 
         guard var contents = try? fm.contentsOfDirectory(
@@ -158,12 +174,12 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         }
 
         return contents.map { url in
-            FileProviderItem(url: url, parentIdentifier: containerItemIdentifier)
+            FileProviderItem(url: url, providerRoot: providerRoot, parentIdentifier: containerItemIdentifier)
         }
     }
 
     /// Recursively list all items under a directory for the working set.
-    private func listItemsRecursively(at dirURL: URL, parentIdentifier: NSFileProviderItemIdentifier) -> [FileProviderItem] {
+    private func listItemsRecursively(at dirURL: URL, providerRoot: URL, parentIdentifier: NSFileProviderItemIdentifier) -> [FileProviderItem] {
         let fm = FileManager.default
         guard var contents = try? fm.contentsOfDirectory(
             at: dirURL,
@@ -176,7 +192,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         // Defensive: same reserved-identifier filter as the non-recursive path.
         contents = contents.filter { !Self.isHiddenMetadata($0.lastPathComponent) }
 
-        let rootURL = FileProviderExtension.providerRoot
+        let rootURL = providerRoot
         // At the provider root, apply the same hidden-folder filter as the
         // non-recursive path so hidden top-level subdirs don't leak into the
         // working set when iOS Files enumerates recursively.
@@ -194,7 +210,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
         let root = rootURL.path
         var items: [FileProviderItem] = []
         for url in contents {
-            let item = FileProviderItem(url: url, parentIdentifier: parentIdentifier)
+            let item = FileProviderItem(url: url, providerRoot: providerRoot, parentIdentifier: parentIdentifier)
             items.append(item)
 
             var isDir: ObjCBool = false
@@ -204,7 +220,7 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
                 let childParentID = relative.isEmpty
                     ? NSFileProviderItemIdentifier.rootContainer
                     : NSFileProviderItemIdentifier(relative)
-                items.append(contentsOf: listItemsRecursively(at: url, parentIdentifier: childParentID))
+                items.append(contentsOf: listItemsRecursively(at: url, providerRoot: providerRoot, parentIdentifier: childParentID))
             }
         }
         return items
@@ -213,8 +229,8 @@ final class FileProviderEnumerator: NSObject, NSFileProviderEnumerator {
     /// Build a compact, deterministic sync anchor from directory contents.
     /// Uses a fixed-size 8-byte representation to avoid exceeding the system's
     /// vendor-token size limit (which causes an assertion in FPXObserver).
-    private func buildSyncAnchor() -> NSFileProviderSyncAnchor {
-        let items = listItems()
+    private func buildSyncAnchor(providerRoot: URL) -> NSFileProviderSyncAnchor {
+        let items = listItems(providerRoot: providerRoot)
 
         // Base hash: item count (even 0 is fine — we still fold visibility in below).
         var hash: UInt64 = UInt64(items.count)

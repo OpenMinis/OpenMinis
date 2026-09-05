@@ -45,6 +45,10 @@ final class AppGroupChangeWatcher {
     /// Start watching the three exposed roots. Idempotent — calling twice is a no-op.
     func start() {
         guard !started else { return }
+        guard SharedContainerStore.isAppGroupAvailable else {
+            logger.warning("App Group unavailable; Files change watcher is disabled for private storage.")
+            return
+        }
         started = true
 
         let fm = FileManager.default

@@ -247,20 +247,26 @@ struct MountDetailView: View {
 
     private var visibilitySection: some View {
         Section {
-            Toggle(isOn: $visibleInFiles) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Show in Files app")
-                    Text(visibleInFiles
-                         ? AppLocalized("This folder appears in Files → On My iPhone → Minis.")
-                         : AppLocalized("This folder is hidden from the iOS Files app."))
+            if !SharedContainerStore.isAppGroupAvailable {
+                Label("Shared access is unavailable. This folder is accessible inside Minis only.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Toggle(isOn: $visibleInFiles) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show in Files app")
+                        Text(visibleInFiles
+                             ? AppLocalized("This folder appears in Files → On My iPhone → Minis.")
+                             : AppLocalized("This folder is hidden from the iOS Files app."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if context.isReadOnlyFromFiles {
+                    Text("Read-only from the Files app. The app itself can always read and write.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            }
-            if context.isReadOnlyFromFiles {
-                Text("Read-only from the Files app. The app itself can always read and write.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         } header: {
             Text("Files app")
@@ -340,6 +346,7 @@ struct MountDetailView: View {
     }
 
     private func signalFileProviderRoot() {
+        guard SharedContainerStore.isAppGroupAvailable else { return }
         let domainIdentifier = NSFileProviderDomainIdentifier("com.openminis.app.files")
         NSFileProviderManager.getDomainsWithCompletionHandler { domains, _ in
             guard let domain = domains.first(where: { $0.identifier == domainIdentifier }) else {

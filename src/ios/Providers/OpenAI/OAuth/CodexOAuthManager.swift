@@ -50,14 +50,17 @@ final class CodexOAuthManager: NSObject, ObservableObject {
     }
 
     func accountId(instanceId: String) -> String? {
-        ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self)?.accountId
+        ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self)?.resolvedAccountId
     }
 
     func planType(instanceId: String) -> String? {
-        ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self)?.planType
+        ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self)?.resolvedPlanType
     }
 
     func login(instanceId: String) async throws {
+        guard !isAuthenticating else {
+            throw LLMError.providerError(message: "An OpenAI login is already in progress")
+        }
         logger.info("=== Codex OAuth login started (instance: \(instanceId)) ===")
         // Defensive cleanup: stop any leftover server from a previous failed attempt
         callbackServer?.stop()
@@ -73,7 +76,7 @@ final class CodexOAuthManager: NSObject, ObservableObject {
 
         let (verifier, challenge) = generatePKCE()
         let state = generateState()
-        logger.info("PKCE generated — verifier length: \(verifier.count), challenge: \(challenge.prefix(16))...")
+        logger.info("PKCE generated")
 
         // 1. Start local HTTP server
         let server = OAuthCallbackServer(port: callbackPort, callbackPath: "/auth/callback")
@@ -96,7 +99,7 @@ final class CodexOAuthManager: NSObject, ObservableObject {
             URLQueryItem(name: "originator", value: "codex_cli_rs"),
         ]
         let authorizationURL = components.url!
-        logger.info("Authorization URL: \(authorizationURL.absoluteString)")
+        logger.info("Opening OpenAI authorization page")
 
         // 3. Open in-app Safari
         presentSafariViewController(url: authorizationURL)
@@ -131,13 +134,15 @@ final class CodexOAuthManager: NSObject, ObservableObject {
             throw LLMError.invalidAPIKey(detail: "Codex: no OAuth token found for instance \(instanceId)")
         }
 
-        let needsRefresh = storage.refreshToken != nil
-            && (storage.expireDate.map({ $0.timeIntervalSinceNow <= refreshBuffer }) ?? false)
+        let needsRefresh = storage.needsRefresh(buffer: refreshBuffer)
 
         if needsRefresh {
             storage = try await refreshTokenGuarded(instanceId: instanceId, existingStorage: storage)
         }
 
+        guard !storage.isExpired else {
+            throw LLMError.invalidAPIKey(detail: "Codex: token expired; sign in again")
+        }
         guard let token = Optional(storage.accessToken), !token.isEmpty else {
             throw LLMError.invalidAPIKey(detail: "Codex: access token is empty for instance \(instanceId)")
         }
@@ -153,10 +158,10 @@ final class CodexOAuthManager: NSObject, ObservableObject {
     /// the precise `invalid_grant` / `refresh_token_reused` codes + auth statuses
     /// cover real revocation without it.
     private func isRefreshTokenInvalid(_ error: LLMError) -> Bool {
-        OAuthRefreshErrorClassifier.isTokenInvalid(
-            error,
-            fatalErrorCodes: ["invalid_grant", "invalid_token", "invalid_request",
-                              "unauthorized_client", "refresh_token_reused"]
+        guard case .providerError(let message) = error else { return false }
+        return CodexOAuthTokenParser.refreshFailureIsFatal(
+            status: OAuthRefreshErrorClassifier.parseStatus(from: message),
+            code: OAuthRefreshErrorClassifier.parseErrorCode(fromBody: message)
         )
     }
 
@@ -168,12 +173,25 @@ final class CodexOAuthManager: NSObject, ObservableObject {
         do {
             return try await refreshSingleFlight.run(instanceId: instanceId) { [weak self] in
                 guard let self else { throw LLMError.providerError(message: "OAuth manager deallocated") }
+                guard let before = ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self) else {
+                    throw CancellationError()
+                }
+                guard before == existingStorage else { return before }
                 logger.info("Refreshing Codex token on-demand (instance: \(instanceId))...")
-                let refreshed = try await self.performRefresh(refreshToken: staleRefreshToken)
+                let refreshed = try await self.performRefresh(existingStorage: existingStorage)
+                // A logout or new login during the network round trip wins.
+                guard let current = ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self) else {
+                    throw CancellationError()
+                }
+                guard current == existingStorage else { return current }
                 ProviderKeychainHelper.saveOAuthToken(refreshed, instanceId: instanceId)
                 return refreshed
             }
         } catch {
+            if error is CancellationError { throw error }
+            guard ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self) != nil else {
+                throw LLMError.invalidAPIKey(detail: "Codex: signed out during refresh")
+            }
             return try OAuthRefreshCoordinator.resolveAfterRefreshFailure(
                 providerName: "Codex",
                 staleRefreshToken: staleRefreshToken,
@@ -248,45 +266,32 @@ final class CodexOAuthManager: NSObject, ObservableObject {
         return try await postTokenRequest(body: body, context: "Token exchange")
     }
 
-    private func performRefresh(refreshToken: String) async throws -> CodexTokenStorage {
+    private func performRefresh(existingStorage: CodexTokenStorage) async throws -> CodexTokenStorage {
+        guard let refreshToken = existingStorage.refreshToken, !refreshToken.isEmpty else {
+            throw LLMError.invalidAPIKey(detail: "Codex: missing refresh token")
+        }
         let body: [String: String] = [
             "grant_type": "refresh_token",
             "client_id": clientID,
             "refresh_token": refreshToken,
-            "scope": scopes,
         ]
-
-        var storage = try await postTokenRequest(body: body, context: "Token refresh")
-        // OpenAI may not return a new refresh token on every refresh;
-        // preserve the existing one so subsequent refreshes keep working.
-        if storage.refreshToken == nil {
-            storage = CodexTokenStorage(
-                accessToken: storage.accessToken,
-                refreshToken: refreshToken,
-                idToken: storage.idToken,
-                expireDate: storage.expireDate,
-                lastRefresh: storage.lastRefresh,
-                accountId: storage.accountId,
-                planType: storage.planType
-            )
-        }
-        return storage
+        return try await postTokenRequest(body: body, context: "Token refresh", previous: existingStorage)
     }
 
-    private func postTokenRequest(body: [String: String], context: String) async throws -> CodexTokenStorage {
+    private func postTokenRequest(body: [String: String], context: String, previous: CodexTokenStorage? = nil) async throws -> CodexTokenStorage {
         var request = URLRequest(url: URL(string: tokenURL)!)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let jsonData = try JSONSerialization.data(withJSONObject: body)
-        request.httpBody = jsonData
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 30
+        request.httpBody = CodexOAuthTokenParser.formBody(body)
 
         logger.info("\(context) POST \(self.tokenURL)")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
         let statusCode = http?.statusCode ?? -1
-        let responseBody = String(data: data, encoding: .utf8) ?? "<binary>"
+        let responseBody = "{\"error\":\"\(CodexOAuthTokenParser.sanitizedErrorCode(data))\"}"
 
         logger.info("\(context) Response status: \(statusCode)")
 
@@ -300,66 +305,11 @@ final class CodexOAuthManager: NSObject, ObservableObject {
             throw LLMError.providerError(message: "\(context) failed: " + OAuthRefreshErrorClassifier.makeErrorMessage(status: statusCode, body: responseBody))
         }
 
-        return try parseTokenResponse(data)
+        return try CodexOAuthTokenParser.parse(data, previous: previous)
     }
 
-    private func parseTokenResponse(_ data: Data) throws -> CodexTokenStorage {
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-
-        guard let accessToken = json["access_token"] as? String else {
-            throw LLMError.decodingError(underlying: NSError(domain: "OAuth", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Missing access_token"]))
-        }
-
-        let refreshToken = json["refresh_token"] as? String
-        let expiresIn = json["expires_in"] as? TimeInterval
-        let expireDate = expiresIn.map { Date().addingTimeInterval($0) }
-        let idToken = json["id_token"] as? String
-
-        // Parse JWT id_token to extract account info
-        var extractedAccountId: String?
-        var extractedPlanType: String?
-        if let idToken {
-            let claims = Self.decodeJWTPayload(idToken)
-            extractedAccountId = claims?["chatgpt_account_id"] as? String
-            extractedPlanType = claims?["chatgpt_plan_type"] as? String
-            if let aid = extractedAccountId {
-                logger.info("Extracted accountId: \(aid)")
-            }
-            if let plan = extractedPlanType {
-                logger.info("Extracted planType: \(plan)")
-            }
-        }
-
-        return CodexTokenStorage(
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            idToken: idToken,
-            expireDate: expireDate,
-            lastRefresh: Date(),
-            accountId: extractedAccountId,
-            planType: extractedPlanType
-        )
-    }
-
-    // MARK: - JWT Decode
-
-    /// Decode the payload (segment[1]) of a JWT without signature verification.
     static func decodeJWTPayload(_ jwt: String) -> [String: Any]? {
-        let segments = jwt.split(separator: ".")
-        guard segments.count >= 2 else { return nil }
-
-        var base64 = String(segments[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        // Pad to multiple of 4
-        let remainder = base64.count % 4
-        if remainder > 0 {
-            base64 += String(repeating: "=", count: 4 - remainder)
-        }
-
-        guard let data = Data(base64Encoded: base64) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        CodexOAuthTokenParser.decodeJWTPayload(jwt)
     }
 
     // MARK: - In-App Safari
@@ -373,23 +323,6 @@ final class CodexOAuthManager: NSObject, ObservableObject {
         let vc = SFSafariViewController(url: url)
         topVC.present(vc, animated: true)
         self.safariVC = vc
-    }
-}
-
-// MARK: - Token Storage Model
-
-struct CodexTokenStorage: Codable {
-    let accessToken: String
-    let refreshToken: String?
-    let idToken: String?
-    let expireDate: Date?
-    let lastRefresh: Date?
-    let accountId: String?
-    let planType: String?
-
-    var isExpired: Bool {
-        guard let expire = expireDate else { return false }
-        return expire < Date()
     }
 }
 

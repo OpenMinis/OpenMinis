@@ -37,12 +37,48 @@ enum OpenAIModelsAPI {
         return models
     }
 
-    /// OAuth mode: return built-in Codex model list enriched with models.dev data.
-    /// OAuth tokens cannot call /v1/models, so we use the static list.
-    static func fetchModelsOAuth() -> [LLMModel] {
-        let enriched = ModelsDevAPI.enrichModels(LLMModel.allOpenAICodexOAuth)
-        logger.info("Using built-in Codex OAuth model list (\(enriched.count) models, enriched)")
-        return enriched
+    /// ChatGPT OAuth has its own account-scoped catalog. The public API catalog
+    /// cannot tell us which new Codex models this account may use.
+    static func fetchModelsOAuth(accessToken: String, accountId: String?, instanceId: String,
+                                 forceRefresh: Bool = false) async throws -> [LLMModel] {
+        let cacheKey = "codex-models-v1:\(instanceId):\(accountId ?? "unknown"):\(CodexModelCatalog.clientVersion)"
+        if !forceRefresh, let cached = OpenAIModelsCache.load(credential: cacheKey, ttl: 3600) {
+            return cached
+        }
+        var request = URLRequest(url: CodexModelCatalog.modelsURL)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("OpenMinis-iOS (Codex protocol \(CodexModelCatalog.clientVersion))", forHTTPHeaderField: "User-Agent")
+        if let accountId { request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id") }
+        request.timeoutInterval = 30
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200..<300).contains(status) else {
+            if status == 401 || status == 403 {
+                throw LLMError.invalidAPIKey(detail: "Codex model catalog HTTP \(status); sign in again or check account access")
+            }
+            throw LLMError.providerError(message: "Codex model catalog HTTP \(status)")
+        }
+        var models = try CodexModelCatalog.parse(data).map { entry in
+            var modalities: ModelModality = [.textInput, .textOutput]
+            if entry.inputModalities?.contains("image") == true { modalities.insert(.imageInput) }
+            var model = LLMModel(id: entry.id, displayName: entry.displayName, provider: "OpenAI",
+                                 modalityOverride: modalities, contextWindow: entry.contextWindow,
+                                 supportsReasoning: entry.reasoningEfforts.map { !$0.isEmpty },
+                                 reasoningEffortValues: entry.reasoningEfforts,
+                                 declaresNoEffortTiers: entry.reasoningEfforts.map { $0.isEmpty })
+            model.effortDeclarationIsAuthoritative = entry.reasoningEfforts == nil ? nil : true
+            model.codexCatalogMetadata = true
+            return model
+        }
+        // Keep live reasoning/context authoritative over third-party catalogs.
+        guard !models.isEmpty else {
+            throw LLMError.providerError(message: "Codex returned no available models for this account")
+        }
+        // This existing image-tool shortcut is not a text catalog entry.
+        if !models.contains(where: { $0.id == LLMModel.gptImage2.id }) { models.append(.gptImage2) }
+        OpenAIModelsCache.save(models, credential: cacheKey)
+        return models
     }
 
     private static func performFetch(_ request: URLRequest, filterOpenAIOnly: Bool = true) async throws -> [LLMModel] {
@@ -185,7 +221,7 @@ private enum OpenAIModelsCache {
         cacheDir.appendingPathComponent(cacheKey(for: credential) + ".json")
     }
 
-    static func load(credential: String) -> [LLMModel]? {
+    static func load(credential: String, ttl: TimeInterval = 7 * 24 * 3600) -> [LLMModel]? {
         let file = cacheFile(for: credential)
         guard let data = try? Data(contentsOf: file),
               let entry = try? JSONDecoder().decode(Entry.self, from: data),

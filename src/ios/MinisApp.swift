@@ -740,6 +740,11 @@ struct MinisApp: App {
         // keeps the cache fresh after ensureExists() seeds a first-launch SOUL.md.
         SoulStore.refreshCache()
 
+        guard SharedContainerStore.isAppGroupAvailable else {
+            lifecycleLog.warning("[FileProvider] App Group unavailable; using private Library storage. Files integration and extension sharing are unavailable; domain registration skipped.")
+            return
+        }
+
         // Clean up stale directory created by a bug where workingSet identifier
         // was passed through as a subdirectory name.
         let staleDir = root.appendingPathComponent("shared/NSFileProviderWorkingSetContainerItemIdentifier")
@@ -888,6 +893,7 @@ struct MinisApp: App {
     }
 
     private static func signalFileProvider() {
+        guard SharedContainerStore.isAppGroupAvailable else { return }
         NSFileProviderManager(for: fileProviderDomain)?.signalEnumerator(for: .rootContainer) { error in
             if let error {
                 lifecycleLog.warning("[FileProvider] signal failed: \(error.localizedDescription)")
@@ -1044,8 +1050,12 @@ struct MinisApp: App {
     /// 4. Old App Group MinisShared/ → App Group MinisFileProvider/shared/
     private static func migrateSharedDirToAppGroup() {
         let fm = FileManager.default
+        guard let container = SharedContainerStore.containerURL else {
+            // Leave all historical shared/local data in place. Re-signing
+            // does not authorize access to the former shared container.
+            return
+        }
         let library = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
-        let container = fm.containerURL(forSecurityApplicationGroupIdentifier: "group.com.openminis.app")!
 
         let migrations: [(source: URL, dest: URL, label: String)] = [
             // Legacy Library/MinisChat/shared → new shared

@@ -20,7 +20,9 @@ struct SharedFoldersSettingsView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Shared folders", systemImage: "info.circle")
                         .font(.subheadline.weight(.semibold))
-                    Text("These directories appear in iOS Files under On My iPhone → Minis. Tap a row to see details, browse, or toggle visibility.")
+                    Text(SharedContainerStore.isAppGroupAvailable
+                         ? "These directories appear in iOS Files under On My iPhone → Minis. Tap a row to see details, browse, or toggle visibility."
+                         : "Shared access is unavailable with this signing configuration. These folders are stored privately on this device and can be browsed inside Minis. Files app integration and extension sharing are unavailable.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -111,7 +113,11 @@ private struct SharedFolderRow: View {
     /// Small pill showing whether Files app access is read/write or read-only.
     @ViewBuilder
     private var accessBadge: some View {
-        if entry.isWritableFromFiles {
+        if !SharedContainerStore.isAppGroupAvailable {
+            Text("In app only")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        } else if entry.isWritableFromFiles {
             Text("R/W")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.green)
@@ -224,6 +230,7 @@ final class SharedFoldersViewModel: ObservableObject {
     }
 
     private static func signalFileProviderRoot() {
+        guard SharedContainerStore.isAppGroupAvailable else { return }
         let domainIdentifier = NSFileProviderDomainIdentifier("com.openminis.app.files")
         NSFileProviderManager.getDomainsWithCompletionHandler { domains, _ in
             guard let domain = domains.first(where: { $0.identifier == domainIdentifier }) else {

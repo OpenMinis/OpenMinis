@@ -12,13 +12,24 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     private static let log = OSLog(subsystem: "com.openminis.app.FileProvider", category: "Extension")
 
     /// Root directory for all FileProvider-visible files in the App Group container.
-    static var providerRoot: URL {
-        let container = FileManager.default.containerURL(
+    /// A re-signed installation may have no App Group entitlement. The extension
+    /// must stay unavailable in that case, never substitute its private container.
+    static var providerRoot: URL? {
+        guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: "group.com.openminis.app"
-        )!
+        ) else { return nil }
         let url = container.appendingPathComponent("MinisFileProvider", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    static var appGroupUnavailableError: NSError {
+        NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSFileReadNoPermissionError,
+            userInfo: [NSLocalizedDescriptionKey:
+                "当前签名无法访问 Minis 的共享容器，系统“文件”集成不可用。请在 Minis 内查看文件。"]
+        )
     }
 
     /// The three top-level subdirectories exposed via the FileProvider.
@@ -28,7 +39,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         self.domain = domain
         super.init()
         let fm = FileManager.default
-        let root = Self.providerRoot
+        guard let root = Self.providerRoot else {
+            os_log("FileProvider unavailable: App Group container is not authorized",
+                   log: Self.log, type: .error)
+            return
+        }
         for sub in Self.topLevelSubdirs {
             try? fm.createDirectory(at: root.appendingPathComponent(sub, isDirectory: true),
                                     withIntermediateDirectories: true)
@@ -179,16 +194,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     func item(for identifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest,
               completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void) -> Progress {
+        guard let root = Self.providerRoot else {
+            completionHandler(nil, Self.appGroupUnavailableError)
+            return Progress()
+        }
         os_log("item(for: %{public}@)", log: Self.log, type: .debug, identifier.rawValue)
         if identifier == .rootContainer {
-            completionHandler(FileProviderItem(url: Self.providerRoot, parentIdentifier: .rootContainer, isRoot: true), nil)
+            completionHandler(FileProviderItem(url: root, providerRoot: root, parentIdentifier: .rootContainer, isRoot: true), nil)
             return Progress()
         }
         if identifier == .trashContainer {
             completionHandler(nil, NSFileProviderError(.noSuchItem))
             return Progress()
         }
-        let url = Self.providerRoot.appendingPathComponent(identifier.rawValue)
+        let url = root.appendingPathComponent(identifier.rawValue)
         guard FileManager.default.fileExists(atPath: url.path) else {
             completionHandler(nil, NSFileProviderError(.noSuchItem))
             return Progress()
@@ -197,7 +216,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         let parentID = parentPath.isEmpty
             ? NSFileProviderItemIdentifier.rootContainer
             : NSFileProviderItemIdentifier(parentPath)
-        completionHandler(FileProviderItem(url: url, parentIdentifier: parentID), nil)
+        completionHandler(FileProviderItem(url: url, providerRoot: root, parentIdentifier: parentID), nil)
         return Progress()
     }
 
@@ -205,6 +224,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
 
     func enumerator(for containerItemIdentifier: NSFileProviderItemIdentifier,
                     request: NSFileProviderRequest) throws -> NSFileProviderEnumerator {
+        guard Self.providerRoot != nil else { throw Self.appGroupUnavailableError }
         os_log("enumerator(for: %{public}@)", log: Self.log, type: .info, containerItemIdentifier.rawValue)
 
         switch containerItemIdentifier {
@@ -225,7 +245,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                        version requestedVersion: NSFileProviderItemVersion?,
                        request: NSFileProviderRequest,
                        completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
-        let url = Self.providerRoot.appendingPathComponent(itemIdentifier.rawValue)
+        guard let root = Self.providerRoot else {
+            completionHandler(nil, nil, Self.appGroupUnavailableError)
+            return Progress()
+        }
+        let url = root.appendingPathComponent(itemIdentifier.rawValue)
         guard FileManager.default.fileExists(atPath: url.path) else {
             completionHandler(nil, nil, NSFileProviderError(.noSuchItem))
             return Progress()
@@ -234,7 +258,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         let parentID = parentPath.isEmpty
             ? NSFileProviderItemIdentifier.rootContainer
             : NSFileProviderItemIdentifier(parentPath)
-        let item = FileProviderItem(url: url, parentIdentifier: parentID)
+        let item = FileProviderItem(url: url, providerRoot: root, parentIdentifier: parentID)
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         do {
@@ -256,6 +280,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     options: NSFileProviderCreateItemOptions = [],
                     request: NSFileProviderRequest,
                     completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void) -> Progress {
+        guard let root = Self.providerRoot else {
+            completionHandler(nil, [], false, Self.appGroupUnavailableError)
+            return Progress()
+        }
         // Block creation directly under root — only the fixed subdirs live there.
         // Block creation under memory/ or skills/ (read-only trees).
         // Block creation under trashContainer — we do not support a trash and
@@ -272,7 +300,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return Progress()
         }
 
-        let parentURL = Self.providerRoot.appendingPathComponent(itemTemplate.parentItemIdentifier.rawValue)
+        let parentURL = root.appendingPathComponent(itemTemplate.parentItemIdentifier.rawValue)
         let destURL = parentURL.appendingPathComponent(itemTemplate.filename)
 
         do {
@@ -284,7 +312,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 }
                 try FileManager.default.copyItem(at: sourceURL, to: destURL)
             }
-            let item = FileProviderItem(url: destURL, parentIdentifier: itemTemplate.parentItemIdentifier)
+            let item = FileProviderItem(url: destURL, providerRoot: root, parentIdentifier: itemTemplate.parentItemIdentifier)
             completionHandler(item, [], false, nil)
             signalParent(itemTemplate.parentItemIdentifier)
         } catch {
@@ -302,6 +330,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     options: NSFileProviderModifyItemOptions = [],
                     request: NSFileProviderRequest,
                     completionHandler: @escaping (NSFileProviderItem?, NSFileProviderItemFields, Bool, Error?) -> Void) -> Progress {
+        guard let root = Self.providerRoot else {
+            completionHandler(nil, [], false, Self.appGroupUnavailableError)
+            return Progress()
+        }
         let idRaw = item.itemIdentifier.rawValue
 
         // Block rename/move of the three fixed top-level subdirectories.
@@ -333,16 +365,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return Progress()
         }
 
-        let srcURL = Self.providerRoot.appendingPathComponent(item.itemIdentifier.rawValue)
+        let srcURL = root.appendingPathComponent(item.itemIdentifier.rawValue)
 
         do {
             var destURL = srcURL
             if changedFields.contains(.filename) || changedFields.contains(.parentItemIdentifier) {
                 let parentURL: URL
                 if item.parentItemIdentifier == .rootContainer {
-                    parentURL = Self.providerRoot
+                    parentURL = root
                 } else {
-                    parentURL = Self.providerRoot.appendingPathComponent(item.parentItemIdentifier.rawValue)
+                    parentURL = root.appendingPathComponent(item.parentItemIdentifier.rawValue)
                 }
                 destURL = parentURL.appendingPathComponent(item.filename)
                 if srcURL != destURL {
@@ -357,7 +389,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                 try FileManager.default.copyItem(at: newContents, to: destURL)
             }
 
-            let resultItem = FileProviderItem(url: destURL, parentIdentifier: item.parentItemIdentifier)
+            let resultItem = FileProviderItem(url: destURL, providerRoot: root, parentIdentifier: item.parentItemIdentifier)
             completionHandler(resultItem, [], false, nil)
             signalParent(item.parentItemIdentifier)
         } catch {
@@ -373,6 +405,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
                     options: NSFileProviderDeleteItemOptions = [],
                     request: NSFileProviderRequest,
                     completionHandler: @escaping (Error?) -> Void) -> Progress {
+        guard let root = Self.providerRoot else {
+            completionHandler(Self.appGroupUnavailableError)
+            return Progress()
+        }
         os_log("deleteItem id=%{public}@", log: Self.log, type: .info, identifier.rawValue)
 
         let idRaw = identifier.rawValue
@@ -383,7 +419,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             return Progress()
         }
 
-        let url = Self.providerRoot.appendingPathComponent(identifier.rawValue)
+        let url = root.appendingPathComponent(identifier.rawValue)
         if FileManager.default.fileExists(atPath: url.path) {
             do {
                 try FileManager.default.removeItem(at: url)

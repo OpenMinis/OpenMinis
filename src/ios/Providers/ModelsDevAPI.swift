@@ -302,6 +302,10 @@ enum ModelsDevAPI {
     private static func applyDevData(
         to model: LLMModel, from devModel: ModelsDevModel, authoritative: Bool = false
     ) -> LLMModel {
+        // The account-scoped Codex protocol catalog is authoritative. Replacing
+        // its new effort tiers/context with a lagging global catalog caused new
+        // models to disappear or issue invalid requests after enrichment.
+        if model.codexCatalogMetadata == true { return model }
         var result = model
 
         // Modality: models.dev is the source of truth — always apply when available.
