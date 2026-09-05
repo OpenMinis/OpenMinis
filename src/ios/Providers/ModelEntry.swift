@@ -27,19 +27,27 @@ struct ModelOverrides: Codable, Hashable, Sendable {
     /// Thinking toggle revert).
     var supportsReasoning: Bool?
     var maxThinkingLevel: ThinkingLevel?
+    /// User-set voice id for TTS (OpenAI `/v1/audio/speech` `voice` field, or
+    /// audio-modal voice token). When set, read-aloud and Quick Test send it
+    /// verbatim — this is how providers whose catalog entry is NOT itself a
+    /// voice (e.g. a fish reference_id on a plain TTS model) get a custom
+    /// voice. nil preserves today's provider-default behaviour.
+    var voiceOverride: String?
 
     init(displayName: String? = nil,
          maxOutputTokens: Int? = nil,
          modalityOverride: ModelModality? = nil,
          contextWindow: Int? = nil,
          supportsReasoning: Bool? = nil,
-         maxThinkingLevel: ThinkingLevel? = nil) {
+         maxThinkingLevel: ThinkingLevel? = nil,
+         voiceOverride: String? = nil) {
         self.displayName = displayName
         self.maxOutputTokens = maxOutputTokens
         self.modalityOverride = modalityOverride
         self.contextWindow = contextWindow
         self.supportsReasoning = supportsReasoning
         self.maxThinkingLevel = maxThinkingLevel
+        self.voiceOverride = voiceOverride
     }
 
     /// True when the user has not set any override.
@@ -50,10 +58,11 @@ struct ModelOverrides: Codable, Hashable, Sendable {
             && contextWindow == nil
             && supportsReasoning == nil
             && maxThinkingLevel == nil
+            && voiceOverride == nil
     }
 
     private enum CodingKeys: String, CodingKey {
-        case displayName, maxOutputTokens, modalityOverride, contextWindow, supportsReasoning, maxThinkingLevel
+        case displayName, maxOutputTokens, modalityOverride, contextWindow, supportsReasoning, maxThinkingLevel, voiceOverride
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +77,7 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         } else {
             self.maxThinkingLevel = nil
         }
+        self.voiceOverride = try container.decodeIfPresent(String.self, forKey: .voiceOverride)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -78,6 +88,7 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         try container.encodeIfPresent(contextWindow, forKey: .contextWindow)
         try container.encodeIfPresent(supportsReasoning, forKey: .supportsReasoning)
         try container.encodeIfPresent(maxThinkingLevel?.rawValue, forKey: .maxThinkingLevel)
+        try container.encodeIfPresent(voiceOverride, forKey: .voiceOverride)
     }
 }
 

@@ -412,13 +412,13 @@ class ReadAloudPlayer(context: Context) {
         val data = try {
             withContext(Dispatchers.IO) {
                 voice.synthesize(
-                    // The entry id doubles as the voice id — template voices carry
-                    // the voice id as the model id (same convention QuickTestSheet
-                    // relies on, iOS 0a52bdbf).
+                    // Template voices carry the voice id as the model id; an explicit
+                    // per-entry voiceOverride (e.g. a fish reference_id on a plain
+                    // TTS model) wins when set. Mirrors iOS voice-override support.
                     VoiceOutputRequest(
                         input = text,
                         model = modelEntry.model.id,
-                        voice = modelEntry.model.id,
+                        voice = modelEntry.overrides.voiceOverride ?: modelEntry.model.id,
                     ),
                 )
             }

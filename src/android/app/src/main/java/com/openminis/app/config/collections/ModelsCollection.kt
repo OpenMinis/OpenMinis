@@ -51,6 +51,7 @@ class ModelsCollection(
             modalitiesOverrideField(forId),
             contextWindowField(forId),
             contextWindowOverrideField(forId),
+            voiceOverrideField(forId),
             supportsToolsField(forId),
             supportsVisionField(forId),
         )
@@ -388,6 +389,25 @@ class ModelsCollection(
                 mutate(id) { e ->
                     e.copy(overrides = e.overrides.copy(contextWindow = if (i == 0) null else i))
                 }
+            },
+        )
+
+    private fun voiceOverrideField(id: String): ConfigField =
+        ClosureField(
+            path = "models.$id.voiceOverride",
+            displayName = "Voice override",
+            description = "User-set TTS voice id. Sent as the `voice` field of /v1/audio/speech (or audio-modal requests). Empty restores the provider default.",
+            valueSchema = ConfigSchema.Str(maxLength = 256),
+            risk = ConfigRisk.SENSITIVE,
+            revertable = true,
+            reader = {
+                val e = entry(id) ?: return@ClosureField ConfigValue.Null
+                val v = e.overrides.voiceOverride
+                if (v.isNullOrEmpty()) ConfigValue.Null else ConfigValue.Str(v)
+            },
+            writer = { v ->
+                val s = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
+                mutate(id) { e -> e.copy(overrides = e.overrides.copy(voiceOverride = s.ifEmpty { null })) }
             },
         )
 
