@@ -347,6 +347,10 @@ data class ModelOverrides(
     // of older JSON (unlike adding an enum case) — old configs simply lack the
     // key and it defaults to null.
     val maxThinkingLevel: ThinkingLevel? = null,
+    // User-set TTS voice id (OpenAI /v1/audio/speech `voice` field, or audio-modal
+    // voice token). Sent verbatim when set; null = provider default. Mirrors iOS
+    // ModelOverrides.voiceOverride. Optional field = safe for old config JSON.
+    val voiceOverride: String? = null,
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -356,6 +360,7 @@ data class ModelOverrides(
             && inputModalities == null
             && outputModalities == null
             && maxThinkingLevel == null
+            && voiceOverride == null
 }
 
 @Serializable

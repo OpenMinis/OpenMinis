@@ -43,6 +43,7 @@ struct ModelsCollection: ConfigCollection {
             modalitiesOverrideField(for: id),
             contextWindowField(for: id),
             contextWindowOverrideField(for: id),
+            voiceOverrideField(for: id),
             supportsToolsField(for: id),
             supportsVisionField(for: id),
         ]
@@ -338,6 +339,25 @@ struct ModelsCollection: ConfigCollection {
             writer: { [self] v in
                 guard case .int(let i) = v else { throw ConfigError.typeMismatch(expected: "int") }
                 try mutate(id) { $0.overrides.contextWindow = (i == 0) ? nil : i }
+            }
+        )
+    }
+
+    private func voiceOverrideField(for id: String) -> ConfigField {
+        ClosureField(
+            path: "models.\(id).voiceOverride",
+            displayName: "Voice override",
+            description: "User-set voice id for TTS. Sent as the `voice` field of /v1/audio/speech (or audio-modal requests). Empty string clears the override and restores the provider default.",
+            valueSchema: .string(maxLength: 256),
+            risk: .sensitive, revertable: true,
+            reader: { [self] in
+                guard let e = entry(id) else { return .null }
+                guard let v = e.overrides.voiceOverride, !v.isEmpty else { return .null }
+                return .string(v)
+            },
+            writer: { [self] v in
+                guard case .string(let s) = v else { throw ConfigError.typeMismatch(expected: "string") }
+                try mutate(id) { $0.overrides.voiceOverride = s.isEmpty ? nil : s }
             }
         )
     }

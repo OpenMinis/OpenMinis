@@ -475,14 +475,13 @@ internal suspend fun performTest(
                 } else {
                     runCatching {
                         // The selected entry id is the model AND the voice id
-                        // (template voices carry the voice id as the model id) —
-                        // iOS 0a52bdbf: pass entry.model.id for both so the test
-                        // speaks in THAT voice, not the vendor default.
+                        // (template voices carry the voice id as the model id); an
+                        // explicit per-entry voiceOverride wins when set — iOS 0a52bdbf.
                         val data = voice.synthesize(
                             com.openminis.app.provider.voice.VoiceOutputRequest(
                                 input = "Hi! This is Minis testing text to speech.",
                                 model = entry.model.id,
-                                voice = entry.model.id,
+                                voice = entry.overrides.voiceOverride ?: entry.model.id,
                             ),
                         )
                         if (data.isEmpty()) {

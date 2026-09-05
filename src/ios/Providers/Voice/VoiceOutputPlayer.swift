@@ -97,6 +97,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
     struct Candidate {
         let key: String          // ModelEntry.id (stable identity for stickiness)
         let modelId: String?
+        let voice: String?       // entry override; nil = provider default
         let label: String
         let provider: any VoiceOutputCapable
     }
@@ -360,6 +361,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
             VoiceProviderResolver.resolvedOutputCandidates().compactMap { entry in
                 guard let p = VoiceProviderResolver.outputProvider(for: entry) else { return nil }
                 return Candidate(key: entry.id, modelId: entry.model.id,
+                                 voice: entry.overrides.voiceOverride,
                                  label: entry.model.displayName, provider: p)
             }
         guard !candidates.isEmpty else { return }
@@ -442,7 +444,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
         for (i, c) in candidates.enumerated() {
             if Task.isCancelled { throw CancellationError() }
             do {
-                let data = try await synthWithRetry(text: text, model: c.modelId, provider: c.provider, seq: seq)
+                let data = try await synthWithRetry(text: text, model: c.modelId, voice: c.voice, provider: c.provider, seq: seq)
                 if i > 0 { VoiceLog.log("TTS #\(seq): succeeded on fail-over model \(i + 1)/\(candidates.count) (\(c.label))") }
                 return (data, c)
             } catch is CancellationError {
@@ -462,14 +464,14 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
     /// synthesize+concatenate those (a too-long / partially-rejected batch often
     /// succeeds in smaller pieces). Throws only if even the split fallback fails.
     nonisolated private static func synthWithRetry(
-        text: String, model: String?, provider: any VoiceOutputCapable, seq: Int
+        text: String, model: String?, voice: String?, provider: any VoiceOutputCapable, seq: Int
     ) async throws -> Data {
         var lastError: Error?
         // Phase 1: retry the same text.
         for attempt in 0...synthRetriesSameText {
             if Task.isCancelled { throw CancellationError() }
             do {
-                return try await provider.synthesize(VoiceOutputRequest(input: text, model: model))
+                return try await provider.synthesize(VoiceOutputRequest(input: text, model: model, voice: voice))
             } catch {
                 lastError = error
                 VoiceLog.log("TTS synth retry #\(seq) attempt \(attempt + 1)/\(synthRetriesSameText + 1) failed: \(error.localizedDescription)")
@@ -487,7 +489,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
             var ok = false
             for attempt in 0...synthRetriesSameText {
                 do {
-                    let d = try await provider.synthesize(VoiceOutputRequest(input: chunk, model: model))
+                    let d = try await provider.synthesize(VoiceOutputRequest(input: chunk, model: model, voice: voice))
                     pieces.append(d); ok = true; break
                 } catch {
                     lastError = error
