@@ -29,4 +29,12 @@ data class UsageRecord(
     val tokenUsage: String,
     val createdAt: Long,
     val sessionId: String,
+    /**
+     * [T-usage-success-rate] Terminal error marker on the message row, used by
+     * the Usage page to estimate a per-request success rate. Null or blank for
+     * a normal turn. Not a proxy for network-level failures that never wrote a
+     * message row, but the only per-row signal available without changing the
+     * collection pipeline.
+     */
+    val errorInfo: String? = null,
 )

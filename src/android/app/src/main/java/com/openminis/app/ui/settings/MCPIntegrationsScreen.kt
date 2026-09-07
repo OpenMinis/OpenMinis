@@ -18,11 +18,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Refresh
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -42,7 +44,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,8 +56,51 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.data.repository.MCPRepository
+import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.ui.components.DialogTextField
 import com.openminis.app.ui.components.MinisTextButton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+
+/**
+ * Live "test connection" state for one MCP server row. [connected] == null
+ * means the server hasn't been tested yet. The test shells out to
+ * `minis-mcp-cli refresh <server>` which force-reconnects and lists tools, so
+ * a successful run yields both connectivity and the tool count in one shot.
+ */
+private data class MCPTestState(
+    val testing: Boolean = false,
+    val connected: Boolean? = null,
+    val toolCount: Int = 0,
+)
+
+/**
+ * Run `minis-mcp-cli refresh <serverId>` (force re-handshake + tools/list) in
+ * the PRoot sandbox and map stdout JSON to a [MCPTestState]. The CLI prints
+ * one JSON line on stdout — success is `{"server":…,"tools":[…],"count":N}`,
+ * failure is `{"error":…,"code":…,"server":…}` with exit code 1. The sandbox
+ * appends an "(exit code: N)" trailer on non-zero exits, so strip that before
+ * parsing.
+ */
+private suspend fun runMCPTest(serverId: String): MCPTestState {
+    val result = withContext(Dispatchers.IO) {
+        ExecutionCoordinator.execute(
+            sessionId = "mcp-test",
+            command = "minis-mcp-cli refresh \"$serverId\"",
+            timeout = 120_000L,
+        )
+    }
+    var text = result.output.trim()
+    val exitIdx = text.indexOf("\n(exit code:")
+    if (exitIdx != -1) text = text.substring(0, exitIdx).trim()
+    val obj = runCatching { JSONObject(text) }.getOrNull()
+    return when {
+        obj == null -> MCPTestState(connected = false)
+        obj.has("count") -> MCPTestState(connected = true, toolCount = obj.optInt("count", 0))
+        else -> MCPTestState(connected = false)
+    }
+}
 
 /**
  * MCP Integrations management screen. Mirrors [SkillsManagementScreen]:
@@ -87,6 +134,9 @@ fun MCPIntegrationsScreen(
     // mode (matches iOS). null = the sheet is for adding a new server.
     var editServer by remember { mutableStateOf<MCPRepository.MCPServerConfig?>(null) }
     var deleteId by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    // Live "test connection" results per server id (local to this screen visit).
+    val testStates = remember { mutableStateMapOf<String, MCPTestState>() }
 
     SettingsScaffold(
         title = stringResource(R.string.mcp_title),
@@ -129,9 +179,28 @@ fun MCPIntegrationsScreen(
             } else {
                 servers.forEachIndexed { index, server ->
                     val transportIcon = if (server.isStdio) Icons.Outlined.Terminal else Icons.Outlined.Language
+                    val testState = testStates[server.id]
+                    val testingLabel = stringResource(R.string.mcp_testing)
+                    val connectedLabel = stringResource(R.string.mcp_connected_tools, testState?.toolCount ?: 0)
+                    val failedLabel = stringResource(R.string.mcp_connection_failed)
+                    val subtitle = buildString {
+                        server.transportSummary.takeIf { it.isNotBlank() }?.let { append(it) }
+                        if (testState != null) {
+                            if (testState.testing) {
+                                if (isNotEmpty()) append(" · ")
+                                append(testingLabel)
+                            } else if (testState.connected == true) {
+                                if (isNotEmpty()) append(" · ")
+                                append(connectedLabel)
+                            } else if (testState.connected == false) {
+                                if (isNotEmpty()) append(" · ")
+                                append(failedLabel)
+                            }
+                        }
+                    }.takeIf { it.isNotBlank() }
                     SettingsRow(
                         title = server.id,
-                        subtitle = server.transportSummary.takeIf { it.isNotBlank() },
+                        subtitle = subtitle,
                         showChevron = true,
                         showDivider = index < servers.size - 1,
                         // FIX 1: plain tap opens the edit form (was delete-confirm).
@@ -139,6 +208,30 @@ fun MCPIntegrationsScreen(
                         onClick = { editServer = server },
                         trailing = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (testState?.testing == true) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                    )
+                                } else {
+                                    IconButton(
+                                        onClick = {
+                                            scope.launch {
+                                                testStates[server.id] = MCPTestState(testing = true)
+                                                testStates[server.id] = runMCPTest(server.id)
+                                            }
+                                        },
+                                        modifier = Modifier.size(32.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Refresh,
+                                            contentDescription = stringResource(R.string.mcp_test_connection),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(18.dp),
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.width(8.dp))
                                 Icon(
                                     transportIcon,
                                     contentDescription = null,

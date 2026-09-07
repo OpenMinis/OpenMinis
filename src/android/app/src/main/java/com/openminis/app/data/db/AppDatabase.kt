@@ -14,8 +14,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CompactMarkerEntity::class,
         WebAppShortcutEntity::class,
         FolderEntity::class,
+        ModelPricingEntity::class,
     ],
-    version = 12,
+    version = 13,
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -25,6 +26,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
     abstract fun webAppShortcutDao(): WebAppShortcutDao
+    abstract fun modelPricingDao(): ModelPricingDao
 
     companion object {
         @Volatile
@@ -308,6 +310,30 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [T-usage-model-pricing] model_pricing table backs the Usage Stats
+         * page's cost column. Pure additive migration — no existing entity is
+         * modified and no rows are rewritten. Rows are written by the user
+         * from the Usage Stats screen.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS model_pricing (
+                        model_id TEXT NOT NULL PRIMARY KEY,
+                        input_per_million REAL NOT NULL DEFAULT 0,
+                        output_per_million REAL NOT NULL DEFAULT 0,
+                        cache_read_per_million REAL NOT NULL DEFAULT 0,
+                        cache_write_per_million REAL NOT NULL DEFAULT 0,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -321,7 +347,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_11,
+                        MIGRATION_11_12, MIGRATION_12_13, MIGRATION_12_11,
                     )
                     .build()
                     .also { INSTANCE = it }

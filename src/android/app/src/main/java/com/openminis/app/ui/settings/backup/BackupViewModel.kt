@@ -230,16 +230,11 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         if (_isRunning.value) return
         val cats = _selected.value
         if (cats.isEmpty()) { _errorText.value = "Choose at least one thing to include."; return }
-        // [T-android-backup-destination-gate] Refuse to produce a package that
-        // can only land in our own sandbox. Re-read here rather than trusting
-        // the cached list: the user may have removed the last destination in
-        // another screen since this one was composed.
+        // [T-android-backup-local-first] A local package is always a valid
+        // backup: it lands in filesDir/backups and the UI offers Share / Save
+        // to Files, so no rclone remote is required. Re-read destinations here
+        // anyway so delivery to any configured remotes sees fresh data.
         refreshDestinations()
-        if (!hasDestination) {
-            _errorText.value = getApplication<Application>()
-                .getString(com.openminis.app.R.string.backup_needs_destination)
-            return
-        }
         val encrypting = _encrypt.value
         if (encrypting && passphrase.isNullOrEmpty()) {
             _errorText.value = "Set a passphrase to encrypt this backup."

@@ -50,7 +50,7 @@ object DatabaseVersionGuard {
      * agree, so they cannot drift apart silently — a stale copy here would
      * either disable the guard or trip it on every launch.
      */
-    const val CODE_DB_VERSION = 12
+    const val CODE_DB_VERSION = 13
 
     /** Filename must match the one passed to `Room.databaseBuilder`. */
     private const val DB_NAME = "minis.db"

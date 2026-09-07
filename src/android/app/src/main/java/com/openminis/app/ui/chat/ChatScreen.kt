@@ -532,6 +532,10 @@ fun ChatScreen(
     onModelGroupsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val messageTts = remember { MessageTtsController(context) }
+    DisposableEffect(Unit) {
+        onDispose { messageTts.shutdown() }
+    }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     // Scoped to a process-level per-session ViewModelStore (ChatViewModelStore)
@@ -3626,6 +3630,7 @@ fun ChatScreen(
                     is FlatChatItem.AssistantTyping -> false
                     is FlatChatItem.AssistantError -> grayedMap[originalMessageId(messageId)] == true
                     is FlatChatItem.AssistantLegacyContent -> grayedMap[originalMessageId(messageId)] == true
+                    is FlatChatItem.AssistantMessageFooter -> grayedMap[originalMessageId(messageId)] == true
                 }
                 // SelectionContainer must wrap the WHOLE LazyColumn — placing
                 // it per-item breaks long-press because items get disposed
@@ -4250,6 +4255,11 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                            is FlatChatItem.AssistantMessageFooter -> AssistantMessageFooterRow(
+                                messageId = item.messageId,
+                                plainText = item.plainText,
+                                controller = messageTts,
+                            )
                         }
                         } // Box (alpha wrapper)
                     }

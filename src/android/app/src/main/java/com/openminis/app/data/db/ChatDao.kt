@@ -246,7 +246,8 @@ interface ChatDao {
                m.model_display_name  AS modelDisplayName,
                m.provider_type       AS providerType,
                (m.model_id IS NOT NULL) AS hasSnapshot,
-               m.token_usage AS tokenUsage, m.created_at AS createdAt, m.session_id AS sessionId
+               m.token_usage AS tokenUsage, m.created_at AS createdAt, m.session_id AS sessionId,
+               m.error_info AS errorInfo
         FROM messages m LEFT JOIN sessions s ON m.session_id = s.id
         WHERE m.token_usage IS NOT NULL
     """)
