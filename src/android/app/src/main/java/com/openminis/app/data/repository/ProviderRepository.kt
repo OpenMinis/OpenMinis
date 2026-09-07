@@ -224,6 +224,18 @@ class ProviderRepository(private val context: Context) {
                     "[ProviderStore] initial load failed; leaving config unloaded for retry: ${e.message}",
                 )
             }
+            // [T-android-thinking-rules-cold-cache] Prime the resolver's custom-rule
+            // cache HERE, not only in ensureConfigLoaded(). That helper early-returns
+            // once _configLoaded is true, and on a cold start THIS loader is what flips
+            // the flag — so its warm-up call never ran and the resolver spent the whole
+            // process lifetime with an empty cache. An empty cache means built-in rules
+            // only: a relay whose model ids match no vendor pattern falls through to
+            // `openai-compatible-default` (root reasoning_effort) and the endpoint 400s.
+            // To the user that reads as "my custom thinking rule stopped working after a
+            // restart" — and because every mutation republishes the cache, deleting and
+            // re-adding the rule "fixed" it for the rest of that session. iOS primes the
+            // same cache in ProviderConfigStore.adoptDB; this is the Android parity fix.
+            warmThinkingRuleCache()
             // Completed in every path, including the failure one: awaitConfigLoaded()
             // callers (refreshAllModelsIfNeeded) would otherwise suspend forever.
             if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
@@ -1640,11 +1652,32 @@ class ProviderRepository(private val context: Context) {
 
     /** Warm the resolver cache with every instance's custom rules (called on config load). */
     fun loadAllThinkingRulesIntoCache() {
+        runBlocking { warmThinkingRuleCache() }
+    }
+
+    /**
+     * [T-android-thinking-rules-cold-cache] Suspend twin of [loadAllThinkingRulesIntoCache]
+     * for callers already inside a coroutine — notably the init loader, which must warm the
+     * cache on the cold-start path it owns (nesting runBlocking there would block an IO
+     * thread on another IO thread for no reason). Failure is swallowed exactly like the sync
+     * wrapper's: an unreadable rules table degrades to built-in behaviour, never to a crash.
+     */
+    private suspend fun warmThinkingRuleCache() {
         runCatching {
-            val rows = runBlocking { providerDao.loadAllThinkingRules() }
+            val rows = providerDao.loadAllThinkingRules()
             val byInstance = rows.groupBy { it.providerInstanceId }
                 .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { ThinkingRuleCoding.toRule(it) } }
             ThinkingRuleResolver.setAllCustomRules(byInstance)
+            android.util.Log.i(
+                "ProviderRepo",
+                "[ThinkingRules] resolver cache warmed: ${byInstance.values.sumOf { it.size }} " +
+                    "custom rule(s) across ${byInstance.size} instance(s)",
+            )
+        }.onFailure { e ->
+            android.util.Log.w(
+                "ProviderRepo",
+                "[ThinkingRules] cache warm failed; resolving with built-ins only: ${e.message}",
+            )
         }
     }
 
