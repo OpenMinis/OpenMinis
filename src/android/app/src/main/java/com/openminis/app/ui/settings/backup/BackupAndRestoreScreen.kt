@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.UnfoldMore
@@ -77,7 +78,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import android.content.Context
+import android.content.Intent
+import java.io.File
+import java.io.FileOutputStream
 import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.backup.BackupCategory
@@ -227,6 +233,7 @@ private fun BackupTab(
     val destinations by vm.destinations.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
+    val exportReady by vm.exportReady.collectAsState()
 
     // Re-read destinations every time this tab appears: the user may have just
     // added one via "Manage Destinations…" and navigated back, and a stale
@@ -245,6 +252,24 @@ private fun BackupTab(
         vm.refreshDestinations()
         vm.refreshHistory()
     }
+    // [T-android-backup-local-save] SAF "Save to Files" target for the local
+    // package produced by the run that just finished. The file stays in
+    // filesDir/backups until the user saves it somewhere the OS can reach.
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        val result = exportReady ?: return@rememberLauncherForActivityResult
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openFileDescriptor(uri, "w")?.use { fd ->
+                    FileOutputStream(fd.fileDescriptor).use { out ->
+                        result.packageFile.inputStream().use { it.copyTo(out) }
+                    }
+                }
+            }
+        }
+    }
+
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -395,11 +420,11 @@ private fun BackupTab(
             // while running would disable the button mid-run and leave no way
             // to stop the backup from this screen.
             //
-            // A package with no destination reaches only our own sandbox and
-            // dies with the app it protects — that is not a backup, so the
-            // button refuses rather than producing one (iOS parity).
+            // [T-android-backup-local-first] No rclone destination is required:
+            // a run with zero remotes still produces a local package that the
+            // Backup Ready card below lets the user Share / Save to Files.
             enabled = running || (
-                selected.isNotEmpty() && passphraseValid && destinations.isNotEmpty()
+                selected.isNotEmpty() && passphraseValid
                 ),
             colors = if (running) {
                 androidx.compose.material3.ButtonDefaults.buttonColors(
@@ -434,12 +459,10 @@ private fun BackupTab(
             )
         }
 
-        // Why the button is disabled. Destination first: it is the requirement
-        // a new user is most likely to be missing, since the categories arrive
-        // already selected (same ordering and rationale as iOS).
+        // Why the button is disabled. Categories arrive already selected, so
+        // the usual remaining gap is the passphrase when encryption is on.
         if (!running) {
             val hint = when {
-                destinations.isEmpty() -> stringResource(R.string.backup_needs_destination)
                 selected.isEmpty() -> stringResource(R.string.backup_needs_category)
                 encrypt && passphrase.isEmpty() -> stringResource(R.string.backup_needs_passphrase)
                 else -> null
@@ -491,6 +514,35 @@ private fun BackupTab(
                         outcome = d,
                         showDivider = i < r.destinations.lastIndex,
                     )
+                }
+                // [T-android-backup-local-save] The local package always exists
+                // at this point: share it to any target, or persist it via the
+                // system document picker (local-only runs land nowhere else).
+                if (exportReady != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        MinisOutlinedButton(
+                            onClick = { shareBackupPackage(context, exportReady!!.packageFile) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(
+                                Icons.Outlined.Share,
+                                contentDescription = null,
+                                modifier = Modifier.padding(end = 4.dp),
+                            )
+                            Text(stringResource(R.string.backup_share))
+                        }
+                        MinisButton(
+                            onClick = { saveLauncher.launch(exportReady!!.packageFile.name) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.backup_save_to_files))
+                        }
+                    }
                 }
             }
         }
@@ -1140,6 +1192,16 @@ private fun DestinationsSection(
             onClick = onManage,
             showDivider = false,
         )
+        // [T-android-backup-local-first] No remotes configured is fine: the
+        // package still lands locally and can be shared / saved as a file.
+        if (destinations.isEmpty()) {
+            Text(
+                stringResource(R.string.backup_local_only_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+        }
     }
 }
 
@@ -1600,3 +1662,23 @@ internal fun humanBytes(bytes: Long): String = when {
 // Max Per-File Size sentinel tags, matching iOS noFilesTag / unlimitedTag.
 internal const val MAX_FILE_NO_FILES = -1
 internal const val MAX_FILE_UNLIMITED = 0
+
+/**
+ * [T-android-backup-local-save] Ship the finished local backup package to the
+ * system share sheet. The package lives in app-private storage, so it is
+ * staged under `cacheDir/shared/` (declared in `file_provider_paths.xml`)
+ * before handing out a content:// URI — same pattern as the log / provider
+ * export screens.
+ */
+private fun shareBackupPackage(context: Context, file: File) {
+    val dir = File(context.cacheDir, "shared").apply { mkdirs() }
+    val copy = File(dir, file.name)
+    runCatching { file.copyTo(copy, overwrite = true) }.onFailure { return }
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", copy)
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "application/octet-stream"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(send, context.getString(R.string.backup_share_chooser)))
+}

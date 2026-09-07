@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.annotation.StringRes
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.data.db.ChatDao
@@ -98,29 +99,29 @@ internal enum class Attribution {
 }
 
 /** Time-range filter on the Usage screen. */
-private enum class TimeFilter(val label: String) {
-    ALL("全部"),
-    TODAY("今天"),
-    WEEK("本周"),
-    MONTH("本月"),
-    LAST30("近30天"),
-    CUSTOM("📅 自定义"),
+private enum class TimeFilter(@StringRes val labelRes: Int) {
+    ALL(R.string.usage_time_all),
+    TODAY(R.string.usage_time_today),
+    WEEK(R.string.usage_time_week),
+    MONTH(R.string.usage_time_month),
+    LAST30(R.string.usage_time_last30),
+    CUSTOM(R.string.usage_time_custom),
 }
 
 /** Per-request token-size bucket filter. */
-private enum class TokenBucket(val label: String) {
-    ALL("全部"),
-    MICRO("微(≤1k)"),
-    SMALL("小(1k~10k)"),
-    MEDIUM("中(10k~100k)"),
-    LARGE("大(>100k)"),
+private enum class TokenBucket(@StringRes val labelRes: Int) {
+    ALL(R.string.usage_bucket_all),
+    MICRO(R.string.usage_bucket_micro),
+    SMALL(R.string.usage_bucket_small),
+    MEDIUM(R.string.usage_bucket_medium),
+    LARGE(R.string.usage_bucket_large),
 }
 
 /** Secondary sort mode for the provider/model cards. */
-private enum class SortMode(val label: String) {
-    COST("费用"),
-    TOKENS("Token"),
-    REQUESTS("请求数"),
+private enum class SortMode(@StringRes val labelRes: Int) {
+    COST(R.string.usage_sort_cost),
+    TOKENS(R.string.usage_sort_tokens),
+    REQUESTS(R.string.usage_sort_requests),
 }
 
 /** One raw token-usage request, flattened from a UsageRecord for filtering. */
@@ -628,7 +629,7 @@ private fun FilterBar(
                 FilterChip(
                     selected = timeFilter == t,
                     onClick = { onTimeFilter(t) },
-                    label = { Text(t.label) },
+                    label = { Text(stringResource(t.labelRes)) },
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
@@ -645,6 +646,9 @@ private fun FilterBar(
                 )
             }
             items(availableProviders) { p ->
+                val label = if (p == UNKNOWN_PROVIDER) {
+                    stringResource(R.string.usage_unknown_provider)
+                } else p
                 FilterChip(
                     selected = p in selectedProviders,
                     onClick = { onToggleProvider(p) },
@@ -657,7 +661,7 @@ private fun FilterBar(
                                     .height(8.dp)
                                     .background(providerColor(p), androidx.compose.foundation.shape.CircleShape),
                             )
-                            Text(p)
+                            Text(label)
                         }
                     },
                     modifier = Modifier.padding(end = 8.dp),
@@ -676,10 +680,13 @@ private fun FilterBar(
                 )
             }
             items(availableModels) { (key, info) ->
+                val label = if (info.first == UNKNOWN_MODEL_KEY) {
+                    stringResource(R.string.usage_unknown_model)
+                } else info.first
                 FilterChip(
                     selected = key in selectedModels,
                     onClick = { onToggleModel(key) },
-                    label = { Text(info.first) },
+                    label = { Text(label) },
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
@@ -691,7 +698,7 @@ private fun FilterBar(
                 FilterChip(
                     selected = tokenBucket == b,
                     onClick = { onTokenBucket(b) },
-                    label = { Text(b.label) },
+                    label = { Text(stringResource(b.labelRes)) },
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
@@ -711,7 +718,7 @@ private fun FilterBar(
                 FilterChip(
                     selected = sortMode == s,
                     onClick = { onSortMode(s) },
-                    label = { Text(stringResource(R.string.usage_sort_by) + " " + s.label) },
+                    label = { Text(stringResource(s.labelRes)) },
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
@@ -765,7 +772,10 @@ private fun ProviderGroupCard(
     onConfigurePrice: (String) -> Unit,
 ) {
     val color = providerColor(group.name)
-    SettingsSection(header = group.name) {
+    val header = if (group.name == UNKNOWN_PROVIDER) {
+        stringResource(R.string.usage_unknown_provider)
+    } else group.name
+    SettingsSection(header = header) {
         // Header subtotal: cost / tokens / requests + proportion bar.
         Row(
             modifier = Modifier
@@ -781,9 +791,11 @@ private fun ProviderGroupCard(
                     .background(color, androidx.compose.foundation.shape.CircleShape),
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text(group.name, style = MaterialTheme.typography.titleSmall)
+                Text(header, style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "${formatCount(group.totalTokens)} · ${group.totalRequests} reqs · ${formatUsd(group.totalCost)}",
+                    "${formatCount(group.totalTokens)} · " +
+                        stringResource(R.string.usage_count_reqs, group.totalRequests) +
+                        " · ${formatUsd(group.totalCost)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -808,7 +820,12 @@ private fun ModelRow(
     onConfigurePrice: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val summaryText = "${formatCount(model.totalTokens)} · ${model.requests} reqs · ${formatUsd(model.costUsd)}"
+    val displayName = if (model.displayName == UNKNOWN_MODEL_KEY) {
+        stringResource(R.string.usage_unknown_model)
+    } else model.displayName
+    val summaryText = "${formatCount(model.totalTokens)} · " +
+        stringResource(R.string.usage_count_reqs, model.requests) +
+        " · ${formatUsd(model.costUsd)}"
 
     Column {
         Row(
@@ -819,7 +836,7 @@ private fun ModelRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(model.displayName, style = MaterialTheme.typography.bodyLarge)
+                Text(displayName, style = MaterialTheme.typography.bodyLarge)
                 val caveat = when (model.attribution) {
                     Attribution.MEASURED, Attribution.ESTIMATED -> null
                     Attribution.UNKNOWN_SESSION -> stringResource(R.string.usage_attr_unknown_session)
@@ -915,7 +932,8 @@ private fun RequestRow(entry: UsageEntry) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            "${formatCount(entry.requestTokens)} tok · ${formatUsd(entry.costUsd)}" +
+            stringResource(R.string.usage_count_tokens, formatCount(entry.requestTokens)) +
+                " · ${formatUsd(entry.costUsd)}" +
                 (if (entry.hasError) " · " + stringResource(R.string.usage_label_failed) else ""),
             style = MaterialTheme.typography.bodySmall,
             color = if (entry.hasError) MaterialTheme.colorScheme.error
