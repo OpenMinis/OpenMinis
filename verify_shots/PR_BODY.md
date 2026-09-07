@@ -25,3 +25,5 @@
 
 - `model_pricing` 表未纳入备份包（保持 .minisbak 跨平台格式不变）；如需携带价格配置可作为后续扩展。
 - 本地备份的门槛变化改变了 Android 端「无目的地不可备份」的既有行为，属有意为之（对齐用户诉求与 iOS 的本地行为）。
+
+7. **并发工具执行（"子代理"）**：模型单回合发出多个 `tool_use` 时，Android 侧不再串行逐条执行，改为并发 fan-out（镜像 iOS `AIChatViewModel+ConcurrentTools`）。每回合同时在飞工具数上限 `MAX_CONCURRENT_TOOLS = 10`，结果按原始 `tool_use` 顺序拼回（满足 Anthropic `tool_result` 顺序要求）。并发写入共享状态（`allToolBlocks` / `toolLoopDetector` / `toolInputChunkRings`）均经 `synchronized(allToolBlocks)` 保护；`executeShellCommand` 的流式回调与 delay 倒计时同步也做了 lock 包裹，避免多线程竞态。单工具路径保持原行为（走 sequential fallback），无回归。
