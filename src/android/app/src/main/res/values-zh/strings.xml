@@ -232,6 +232,11 @@
     <string name="mcp_import_submit">导入</string>
     <string name="mcp_delete_title">删除 %1$s？</string>
     <string name="mcp_delete_message">这将从 servers.json 中移除该服务器。此操作无法撤销。</string>
+    <!-- MCP 连通性测试 -->
+    <string name="mcp_test_connection">测试连通</string>
+    <string name="mcp_testing">测试中…</string>
+    <string name="mcp_connected_tools">已连通 · %1$d 个工具</string>
+    <string name="mcp_connection_failed">连接失败</string>
     <string name="settings_soul">人格</string>
     <string name="settings_soul_subtitle">持久化人格与身份（SOUL.md）</string>
     <string name="soul_settings_title">人格</string>

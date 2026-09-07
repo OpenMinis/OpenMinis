@@ -269,6 +269,11 @@
     <string name="mcp_import_submit">Import</string>
     <string name="mcp_delete_title">Delete %1$s?</string>
     <string name="mcp_delete_message">This removes the server from servers.json. This cannot be undone.</string>
+    <!-- MCP connection test -->
+    <string name="mcp_test_connection">Test connection</string>
+    <string name="mcp_testing">Testing…</string>
+    <string name="mcp_connected_tools">Connected · %1$d tools</string>
+    <string name="mcp_connection_failed">Connection failed</string>
     <!-- T-soul-md — SOUL.md personality / identity settings -->
     <string name="settings_soul">Soul</string>
     <string name="settings_soul_subtitle">Persistent personality and identity (SOUL.md)</string>
