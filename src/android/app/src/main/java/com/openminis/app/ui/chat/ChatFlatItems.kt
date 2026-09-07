@@ -481,6 +481,42 @@ internal sealed class FlatChatItem {
             return h
         }
     }
+
+    /**
+     * Per-assistant-message action footer (Copy whole reply / TTS read-aloud).
+     *
+     * Emitted once after the last rendered block of each assistant (non-system)
+     * message that carries reply content. Because the flattened list splits one
+     * assistant turn across several LazyColumn rows, this single footer row is
+     * the only stable place to hang per-message actions — mounting them inside
+     * each text block would render one button set per paragraph.
+     *
+     * `plainText` is the precomputed copy/speak payload for the whole reply
+     * (text blocks + any non-textual attachments noted as placeholders). Same
+     * cheap-equals discipline as the other body rows: compare by id + length,
+     * never a full char-by-char walk during streaming rebuilds.
+     */
+    class AssistantMessageFooter(
+        val messageId: String,
+        val plainText: String,
+        val messageMarkdown: String,
+    ) : FlatChatItem() {
+        override val key = "footer:$messageId"
+        override val contentType = "footer"
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is AssistantMessageFooter) return false
+            return messageId == other.messageId &&
+                plainText.length == other.plainText.length &&
+                messageMarkdown.length == other.messageMarkdown.length
+        }
+        override fun hashCode(): Int {
+            var h = messageId.hashCode()
+            h = h * 31 + plainText.length
+            h = h * 31 + messageMarkdown.length
+            return h
+        }
+    }
 }
 
 /**
@@ -560,6 +596,11 @@ internal fun buildFlatChatItems(
                 messageId = "${item.messageId}#$n",
                 content = item.content,
                 isStreaming = item.isStreaming,
+                messageMarkdown = item.messageMarkdown,
+            )
+            is FlatChatItem.AssistantMessageFooter -> FlatChatItem.AssistantMessageFooter(
+                messageId = "${item.messageId}#$n",
+                plainText = item.plainText,
                 messageMarkdown = item.messageMarkdown,
             )
         }
@@ -776,6 +817,45 @@ internal fun buildFlatChatItems(
         // Inline error banner
         message.error?.let {
             out.add(dedupe(FlatChatItem.AssistantError(message.id, it)))
+        }
+
+        // [T-usage-actions] Per-message action footer: Copy whole reply /
+        // TTS read-aloud. One footer per assistant (non-system) reply that
+        // carries content — the flat list splits a single assistant turn
+        // across many LazyColumn rows, so this row is the only stable mount
+        // point for the per-message buttons (mounting them inside each text
+        // block would render a button set per paragraph).
+        if (!isSystem && (hasAnyTextBlock || message.content.isNotEmpty())) {
+            val replyMarkdown = if (hasAnyTextBlock) {
+                message.toolBlocks.filter { it.kind == "text" && it.content.isNotEmpty() }
+                    .joinToString("\n\n") { it.content }
+            } else {
+                message.content
+            }
+            // Images a tool produced (e.g. browser screenshots) can't be
+            // serialised into clipboard text; note them as explicit
+            // placeholders so the copy still reflects "the reply came with
+            // an image", per the usage-actions spec.
+            val imageNotes = buildList {
+                message.toolBlocks.forEach { b ->
+                    if (b.kind == "tool_use" && !b.imageFilePath.isNullOrBlank()) {
+                        add("[image: ${b.toolTitle.ifBlank { "screenshot" }}]")
+                    }
+                }
+                message.imageUris.forEachIndexed { i, _ -> add("[image $i]") }
+            }
+            val plainText = buildString {
+                append(MarkdownClipboard.markdownToPlainText(replyMarkdown).trim())
+                if (imageNotes.isNotEmpty()) {
+                    if (isNotEmpty()) append("\n\n")
+                    append(imageNotes.joinToString("\n"))
+                }
+            }
+            out.add(dedupe(FlatChatItem.AssistantMessageFooter(
+                messageId = message.id,
+                plainText = plainText,
+                messageMarkdown = replyMarkdown,
+            )))
         }
     }
     return out
