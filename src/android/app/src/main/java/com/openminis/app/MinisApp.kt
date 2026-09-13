@@ -31,6 +31,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.network.NetworkMonitor
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.provider.ModelsDevApi
+import com.openminis.app.scheduled.ScheduledTaskManager
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.sandbox.MountedFolderCoordinator
 import com.openminis.app.sandbox.NativeOffloadServer
@@ -451,6 +452,25 @@ class MinisApp : Application(), ImageLoaderFactory {
             // failure into an unrecoverable launch loop.
             Log.e("MinisApp", "subsystem init failed — app will start in degraded mode", t)
             return
+        }
+
+        // [T-android-alarm-rearm] Re-register scheduled-task alarms on every process
+        // start, not only on BOOT_COMPLETED.
+        //
+        // AlarmManager entries are held by the system, so they survive process death —
+        // but they are dropped whenever the package is force-stopped, which also happens
+        // on every app update and on some OEM "clean up" sweeps. None of those deliver
+        // BOOT_COMPLETED, so the alarms were never restored and every enabled scheduled
+        // task silently went dead until the next reboot. Verified on-device: a task whose
+        // alarm was armed before a force-stop never fired, and its next trigger jumped a
+        // full day forward.
+        //
+        // rescheduleAll() reuses the same PendingIntent per task, so calling it on every
+        // launch is idempotent and cheap (one SharedPreferences read).
+        try {
+            ScheduledTaskManager(this).rescheduleAll()
+        } catch (t: Throwable) {
+            Log.w("MinisApp", "scheduled-task rescheduleAll failed", t)
         }
 
         // [T-soul-md] Seed SOUL.md with the default content on first launch

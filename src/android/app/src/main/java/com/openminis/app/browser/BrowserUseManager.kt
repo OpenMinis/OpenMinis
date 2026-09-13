@@ -16,17 +16,18 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.openminis.app.ui.webview.handleRenderProcessGone
+import java.io.ByteArrayOutputStream
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.File
 
 /**
  * Manages a single Android WebView for browser automation.
@@ -342,6 +343,11 @@ class BrowserUseManager(
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebViewClient() {
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: android.webkit.RenderProcessGoneDetail?
+            ): Boolean = view.handleRenderProcessGone(detail, "BrowserUseManager")
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: WebResourceRequest,

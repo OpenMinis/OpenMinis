@@ -7229,7 +7229,13 @@ class ChatViewModel(
             for ((partIdx, part) in msg.contentParts.withIndex()) {
                 when (part) {
                     is AgentContentPart.ToolResult -> {
-                        if (part.content.startsWith(ContextOffload.OFFLOADED_PREFIX)) {
+                        // [GH#343] isOffloadReadback() also catches the prefixed form that
+                        // FileReadTool returns ("[<path> | <n> bytes | <m> lines | ...]")
+                        // when the model reads an offload stub back. A bare
+                        // startsWith(OFFLOADED_PREFIX) check misses those, so the stub was
+                        // offloaded again, and again — an unbounded loop that only kept
+                        // moving the same content to a new file.
+                        if (ContextOffload.isOffloadReadback(part.content)) {
                             skippedAlreadyOffloaded++
                             continue
                         }

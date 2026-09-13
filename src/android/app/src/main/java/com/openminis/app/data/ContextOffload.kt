@@ -124,5 +124,27 @@ object ContextOffload {
         "$OFFLOADED_PREFIX Content (~$approxTokens tokens, $byteCount bytes) saved to: $linuxPath\n" +
             "Use file_read tool to retrieve if needed."
 
+    /**
+     * [GH#343] True when [content] is an offload stub that has come back into the
+     * history — either raw, or wrapped in the "[<path> | <n> bytes | <m> lines |
+     * showing a-b of c]" header that FileReadTool prepends to every result.
+     *
+     * The wrapper is exactly why a plain `content.startsWith(OFFLOADED_PREFIX)`
+     * check is not enough: reading an offloaded file back yields
+     * "[/var/minis/offloads/tools/x.txt | 12345 bytes | …]\n[CONTEXT OFFLOADED] …",
+     * so the candidate scan saw a brand-new large result every turn and offloaded
+     * the stub again — relocating the same context to a new file forever.
+     */
+    fun isOffloadReadback(content: String): Boolean {
+        val markerAt = content.indexOf(OFFLOADED_PREFIX)
+        if (markerAt < 0) return false
+        if (markerAt == 0) return true
+        if (markerAt > READBACK_HEADER_MAX) return false
+        return content.substring(0, markerAt).contains(LINUX_OFFLOADS_DIR)
+    }
+
+    /** Longest "[<path> | <n> bytes | <m> lines | showing a-b of c]" header we tolerate. */
+    private const val READBACK_HEADER_MAX = 512
+
     private const val TAG = "ContextOffload"
 }

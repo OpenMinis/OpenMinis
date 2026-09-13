@@ -49,17 +49,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.repository.SkillRepository
+import com.openminis.app.ui.webview.handleRenderProcessGone
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
-import java.net.URL
 
 private enum class HudState {
     HIDDEN, IMPORTING, SUCCESS, ERROR, HINT
@@ -147,6 +148,11 @@ fun MinisSkillsBrowserScreen(
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
                         webViewClient = object : WebViewClient() {
+                            override fun onRenderProcessGone(
+                                view: WebView,
+                                detail: android.webkit.RenderProcessGoneDetail?
+                            ): Boolean = view.handleRenderProcessGone(detail, "MinisSkillsBrowserScreen")
+
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 url?.let { currentUrl = it }
                             }
