@@ -102,6 +102,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisOutlinedButton
+import com.openminis.app.ui.components.MinisDropdownMenu
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
 import com.openminis.app.ui.components.SectionDesign
@@ -1567,7 +1568,7 @@ private fun DualFabRow(
             ) {
                 Icon(Icons.Outlined.Forum, contentDescription = "New Chat", tint = Color.White, modifier = Modifier.size(24.dp))
             }
-            DropdownMenu(
+            MinisDropdownMenu(
                 expanded = showGroupMenu,
                 onDismissRequest = { showGroupMenu = false },
             ) {

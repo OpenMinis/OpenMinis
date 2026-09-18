@@ -129,21 +129,33 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         isCustom || isHidden || !overrides.isEmpty
     }
 
-    /// Effective model as seen by the rest of the app: `baseModel` with `overrides` applied.
-    /// New override fields: add them to the memberwise rebuild below.
+    /// Effective model as seen by the rest of the app: live catalog capabilities
+    /// on `baseModel`, then `overrides` on top.
+    ///
+    /// [GH#340] Capabilities used to be a snapshot taken when the model was
+    /// added. `deepseek-flash` arrived as text-only (OpenAI-compat `/v1/models`
+    /// always-writes `.textInput/.textOutput` when architecture is missing) and
+    /// never picked up image input after models.dev learned it. Re-deriving
+    /// here — without rewriting persistence — unfreezes vision / context /
+    /// reasoning. User overrides still win because they are applied last.
     var model: LLMModel {
-        guard !overrides.isEmpty else { return baseModel }
+        let live = ModelsDevAPI.enrichModel(baseModel)
+        guard !overrides.isEmpty else { return live }
         // LLMModel.displayName is a `let`, so rebuild via memberwise init to apply any override.
-        return LLMModel(
-            id: baseModel.id,
-            displayName: overrides.displayName ?? baseModel.displayName,
-            provider: baseModel.provider,
-            modalityOverride: overrides.modalityOverride ?? baseModel.modalityOverride,
-            contextWindow: overrides.contextWindow ?? baseModel.contextWindow,
-            maxOutputTokens: overrides.maxOutputTokens ?? baseModel.maxOutputTokens,
-            supportsReasoning: overrides.supportsReasoning ?? baseModel.supportsReasoning,
-            interleavedReasoningField: baseModel.interleavedReasoningField
+        var result = LLMModel(
+            id: live.id,
+            displayName: overrides.displayName ?? live.displayName,
+            provider: live.provider,
+            modalityOverride: overrides.modalityOverride ?? live.modalityOverride,
+            contextWindow: overrides.contextWindow ?? live.contextWindow,
+            maxOutputTokens: overrides.maxOutputTokens ?? live.maxOutputTokens,
+            supportsReasoning: overrides.supportsReasoning ?? live.supportsReasoning,
+            interleavedReasoningField: live.interleavedReasoningField,
+            reasoningEffortValues: live.reasoningEffortValues,
+            declaresNoEffortTiers: live.declaresNoEffortTiers
         )
+        result.effortDeclarationIsAuthoritative = live.effortDeclarationIsAuthoritative
+        return result
     }
 
     init(

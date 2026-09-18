@@ -1231,7 +1231,12 @@ struct AddCustomModelSheet: View {
             contextWindow: parsedContextWindow,
             supportsReasoning: supportsThinking
         )
-        let entry = ModelEntry(providerInstanceId: instance.id, model: model, isCustom: true)
+        // User-typed context must live in overrides: `ModelEntry.model` re-applies
+        // models.dev at use time and would otherwise overwrite baseModel's 1M
+        // with a stale catalog 128K (same hole as the detail-sheet save).
+        var customOverrides = ModelOverrides()
+        customOverrides.contextWindow = parsedContextWindow
+        let entry = ModelEntry(providerInstanceId: instance.id, model: model, overrides: customOverrides, isCustom: true)
         if store.addEntry(entry) {
             dismiss()
         } else {
@@ -1320,9 +1325,14 @@ struct ModelEntryDetailSheet: View {
                     HStack {
                         Text("Display Name")
                             .foregroundStyle(.secondary)
-                        Spacer()
+                        // [GH#365] Trailing alignment + intrinsic width hides trailing
+                        // spaces: they do not contribute to the field's measured width,
+                        // so the caret never moves and the spaces appear to vanish.
+                        // Take the remaining row width so a trailing space is a visible
+                        // caret advance.
                         TextField("Display name", text: $displayName)
-                            .multilineTextAlignment(.trailing)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
@@ -1690,9 +1700,11 @@ struct ModelEntryDetailSheet: View {
             newOverrides.modalityOverride = modality
         }
 
-        if typedContextWindow != entry.baseModel.contextWindow {
-            newOverrides.contextWindow = typedContextWindow
-        }
+        // Always persist the typed window into overrides. Comparing against
+        // `baseModel.contextWindow` skipped the write when the user re-entered
+        // the same 1M they had stored on the custom-model skeleton — then
+        // `ModelEntry.model` re-enriched from models.dev and compact saw 128K.
+        newOverrides.contextWindow = typedContextWindow
 
         if supportsThinking != (entry.baseModel.supportsReasoning ?? false) {
             newOverrides.supportsReasoning = supportsThinking

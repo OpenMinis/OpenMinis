@@ -1595,7 +1595,7 @@ extension AIChatViewModel {
                     parts: unanswered.map { id, name in
                         AgentContentPart.toolResult(
                             id: id, name: name,
-                            content: "Tool execution was interrupted by an unexpected error.",
+                            content: "Tool execution was interrupted before a result was returned.",
                             isError: true
                         )
                     }

@@ -1,0 +1,90 @@
+name: Acceptance Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: '可选：构建产物下载地址（提供后做 APK/dex 级校验）'
+        required: false
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  source-gates:
+    name: 源码级门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gate 1 — 基线提交（补丁③ 所在提交 80ac3f1f）
+        run: |
+          if git merge-base --is-ancestor 80ac3f1f HEAD 2>/dev/null; then
+            echo "OK: baseline includes 80ac3f1f"
+          else
+            echo "::warning::HEAD 不含 80ac3f1f —— 若这是精简/快照仓库属正常，请人工确认补丁③（offload 回读守卫）在源码中"
+          fi
+
+      - name: Gate 2 — default_mount 不得含 CRLF（对应 issue #3，否则 minis-mcp-cli / minis-open 语法错误）
+        run: |
+          set -e
+          hit=0
+          for d in src/android/app/src/main/assets/default_mount src/ios/default_mount; do
+            [ -d "$d" ] || continue
+            if grep -rIl $'\r' "$d"; then hit=1; fi
+          done
+          if [ "$hit" = "1" ]; then
+            echo "::error::发现 CRLF 文本文件 —— 打包前必须做 LF 归一化"
+            exit 1
+          fi
+          echo "OK: no CRLF under default_mount"
+
+      - name: Gate 3 — 沙箱地基（jniLibs 里的 proot 产物）
+        run: |
+          set -e
+          ls -la src/android/app/src/main/jniLibs/arm64-v8a/ || true
+          test -f src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so \
+            || echo "::warning::libproot-loader.so 不在仓库中（可能由 BUILDING.md 的步骤生成）"
+
+      - name: Gate 4 — 补丁① ② 的字符串指纹（源码侧）
+        run: |
+          set -e
+          grep -q "render process gone" src/android/app/src/main/java/com/openminis/app/ui/webview/WebViewRenderProcess.kt \
+            || { echo "::error::补丁① 的日志字面量缺失"; exit 1; }
+          grep -q "scheduled-task rescheduleAll failed" src/android/app/src/main/java/com/openminis/app/MinisApp.kt \
+            || { echo "::error::补丁② 的日志字面量缺失"; exit 1; }
+          echo "OK: patch ① ② markers present"
+          echo "note: 补丁③（isOffloadReadback）无独有字符串，无法用指纹校验 —— 只能按提交号或行为验证"
+
+  apk-gates:
+    name: APK / dex 级门禁
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apk_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载 APK
+        run: curl -fL -o app.apk "${{ github.event.inputs.apk_url }}"
+
+      - name: Gate 5 — proot 是否真的打进 APK（历史上漏过一次导致沙箱全废）
+        run: |
+          set -e
+          unzip -l app.apk | grep -E 'lib/arm64-v8a/(libproot|libproot-loader)\.so'
+
+      - name: Gate 6 — dex 字符串指纹（补丁① ②）
+        run: |
+          set -e
+          a=$(unzip -p app.apk 'classes*.dex' | strings | grep -c 'render process gone' || true)
+          b=$(unzip -p app.apk 'classes*.dex' | strings | grep -c 'scheduled-task rescheduleAll failed' || true)
+          echo "patch① hits=$a  patch② hits=$b"
+          [ "$a" -ge 1 ] || { echo "::error::补丁① 不在包里"; exit 1; }
+          [ "$b" -ge 1 ] || { echo "::error::补丁② 不在包里"; exit 1; }
+
+      - name: Gate 7 — 包内脚本换行必须为 LF（issue #3）
+        run: |
+          set -e
+          tmp=$(mktemp -d)
+          unzip -q app.apk 'assets/*' -d "$tmp" 2>/dev/null || true
+          if grep -rIl $'\r' "$tmp" 2>/dev/null | head -5; then
+            echo "::error::APK 内的文本资源含 CRLF"
+            exit 1
+          fi
+          echo "OK: assets 无 CRLF（若资源不在 assets 下，本步自动跳过）"

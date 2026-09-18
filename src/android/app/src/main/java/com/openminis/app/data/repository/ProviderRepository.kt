@@ -2915,7 +2915,18 @@ class ProviderRepository(private val context: Context) {
                 val m = models.getJSONObject(i)
                 val modelId = m.optString("modelId", "")
                 if (modelId.isEmpty()) continue
-                val displayName = m.optString("displayName", modelId)
+                // [T-android-backup-restore-model-display-name] When the backup
+                // carries the raw ID as displayName (iOS exports the id verbatim
+                // when no user override was set), reformat it into the human-
+                // friendly casing that Android's `modelDisplayName` produces.
+                // This keeps iOS↔Android round-trips consistent and prevents
+                // the same model from appearing twice under different names.
+                val rawDisplayName = m.optString("displayName", modelId)
+                val displayName = if (rawDisplayName == modelId) {
+                    LLMModel.modelDisplayName(modelId)
+                } else {
+                    rawDisplayName
+                }
                 val isCustom = m.optBoolean("isCustom", false)
                 val isHidden = m.optBoolean("isHidden", false)
                 val contextWindow = if (m.has("contextWindow")) m.optInt("contextWindow").takeIf { it > 0 } else null

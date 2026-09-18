@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +44,8 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.theme.DarkColorScheme
+import com.openminis.app.ui.theme.LightColorScheme
 
 /**
  * App-wide popup menu with a unified look: softer rounded corners, a lifted
@@ -246,4 +249,31 @@ object MinisMenuDefaults {
         leadingIconColor = MaterialTheme.colorScheme.error,
         trailingIconColor = MaterialTheme.colorScheme.error,
     )
+}
+
+/**
+ * GH#187: wraps [DropdownMenu] in a [MaterialTheme] scope so the popup
+ * always uses the in-app color scheme (DarkChatPalette / LightChatPalette)
+ * instead of the Android system theme.  Without this wrapper, switching the
+ * app to dark while the device stays light renders the menu with light
+ * background + light text — invisible on the dark chat surface.
+ */
+@Composable
+fun MinisDropdownMenu(
+    expanded: Boolean,
+    onDismissRequest: () -> Unit,
+    modifier: Modifier = Modifier,
+    properties: PopupProperties = PopupProperties(focusable = true),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val appColorScheme = if (ChatColors.isDark) DarkColorScheme else LightColorScheme
+    MaterialTheme(colorScheme = appColorScheme) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismissRequest,
+            modifier = modifier,
+            properties = properties,
+            content = content,
+        )
+    }
 }

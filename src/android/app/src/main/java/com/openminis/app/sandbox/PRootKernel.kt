@@ -44,6 +44,14 @@ object PRootKernel {
     /** Custom environment variables injected into every proot command. */
     val customEnvironment: MutableMap<String, String> = mutableMapOf()
 
+    /**
+     * Sticky GH#186 workaround: once any PersistentShell learns this device
+     * needs PROOT_NO_SECCOMP=1, detached guests reuse it instead of dying
+     * on first python/apk spawn.
+     */
+    @Volatile
+    var stickyNoSeccomp: Boolean = false
+
     /** Bind mounts: Linux path -> host filesystem path. */
     val bindMounts: MutableMap<String, String> = linkedMapOf()
 
@@ -122,6 +130,10 @@ object PRootKernel {
         //   PRoot on Android where the sandbox is also IO-bound.
         customEnvironment.putIfAbsent("NO_COLOR", "1")
         customEnvironment.putIfAbsent("PYTHONDONTWRITEBYTECODE", "1")
+        // [#7] CPython fully buffers stdout when it is not a TTY. PersistentShell
+        // is a pipe (`TERM=dumb`), so `nohup python` looks like it never started.
+        customEnvironment.putIfAbsent("PYTHONUNBUFFERED", "1")
+        customEnvironment.putIfAbsent("PYTHONIOENCODING", "utf-8")
         customEnvironment.putIfAbsent("GOMAXPROCS", "2")
 
         // T222: PRoot's link2symlink extension creates .l2s.* sentinel files
@@ -596,7 +608,10 @@ object PRootKernel {
      *         /bin/sh -c "<command>"
      * ```
      */
-    fun buildProotCommand(shellCommand: String): List<String> {
+    fun buildProotCommand(shellCommand: String): List<String> =
+        buildProotCommand(shellCommand, bindMounts)
+
+    fun buildProotCommand(shellCommand: String, mounts: Map<String, String>): List<String> {
         check(isBooted) { "PRootKernel.boot() must be called before building commands" }
 
         val cmd = mutableListOf<String>()
@@ -633,7 +648,7 @@ object PRootKernel {
         cmd.add("/root")
 
         // User bind mounts
-        for ((linuxPath, hostPath) in bindMounts) {
+        for ((linuxPath, hostPath) in mounts) {
             cmd.add("-b")
             cmd.add("$hostPath:$linuxPath")
             // Log external-folder binds specifically — these are the ones that
@@ -658,6 +673,35 @@ object PRootKernel {
 
         Log.d(TAG, "proot cmd: ${cmd.take(cmd.size - 1).joinToString(" ")} <shellCommand ${shellCommand.length} bytes>")
         return cmd
+    }
+
+    fun newGuestProcessBuilder(
+        context: Context,
+        sessionId: String,
+        mounts: Map<String, String>,
+        guestCommand: String,
+        noSeccomp: Boolean = false,
+    ): ProcessBuilder {
+        val pb = ProcessBuilder(buildProotCommand(guestCommand, mounts))
+        pb.redirectErrorStream(true)
+        val env = pb.environment()
+        env["PROOT_TMP_DIR"] = getProotTmpDir(context).absolutePath
+        if (nativeLibDir.isNotEmpty()) env["LD_LIBRARY_PATH"] = nativeLibDir
+        if (prootLoaderPath.isNotEmpty()) env["PROOT_LOADER"] = prootLoaderPath
+        if (prootLoader32Path.isNotEmpty()) env["PROOT_LOADER_32"] = prootLoader32Path
+        env["TERM"] = "dumb"
+        env["PS1"] = ""
+        env["TZ"] = posixTz()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["MINIS_CHAT_SESSION_ID"] = sessionId
+        for ((key, value) in customEnvironment) {
+            env[key] = value
+        }
+        if (noSeccomp || stickyNoSeccomp) {
+            env[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
+        }
+        return pb
     }
 
     /** Subdirs that live under `minis-sessions/<sessionId>/` rather than the global pool. */

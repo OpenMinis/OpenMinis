@@ -82,7 +82,7 @@ private val NeutralDarkGroupedCard = Color(0xFF1C1C1E)
 private val NeutralDarkGroupedCardElevated = Color(0xFF2C2C2E)
 private val NeutralDarkOutline = Color(0xFF38383A)
 
-private val LightColorScheme = lightColorScheme(
+internal val LightColorScheme = lightColorScheme(
     primary = TealPrimary,
     onPrimary = TealOnPrimary,
     primaryContainer = TealPrimaryContainer,
@@ -110,7 +110,7 @@ private val LightColorScheme = lightColorScheme(
     outlineVariant = NeutralOutline,
 )
 
-private val DarkColorScheme = darkColorScheme(
+internal val DarkColorScheme = darkColorScheme(
     primary = TealDarkPrimary,
     onPrimary = TealDarkOnPrimary,
     primaryContainer = TealDarkPrimaryContainer,

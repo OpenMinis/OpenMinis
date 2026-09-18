@@ -150,6 +150,26 @@ tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach { dependsOn(copyBashismRules) }
 tasks.named("preBuild") { dependsOn(copyBashismRules) }
 
+// [#3] Windows checkouts turn default_mount scripts into CRLF; busybox then
+// dies on `then\r`. Force LF in the source assets before they are packed.
+val normalizeDefaultMount by tasks.registering {
+    val srcDir = layout.projectDirectory.dir("src/main/assets/default_mount")
+    inputs.dir(srcDir)
+    doLast {
+        srcDir.asFile.walkTopDown().filter { it.isFile }.forEach { f ->
+            val bytes = f.readBytes()
+            if (bytes.contains(0.toByte())) return@forEach
+            val original = bytes.toString(Charsets.UTF_8)
+            val lf = original.replace("\r\n", "\n").replace("\r", "\n")
+            if (lf != original) {
+                f.writeText(lf, Charsets.UTF_8)
+            }
+        }
+    }
+}
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(normalizeDefaultMount) }
+
 // [T-android-debugserver-skill] Stage the debug-server skill + an Android
 // reference client into the DEBUG-ONLY asset source set, so the debug server
 // can serve them over GET /skill (mirrors the iOS "Generate Debug Skill" build
@@ -205,6 +225,9 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.15.0")
+    // [#6] MediaStyle + MediaSession so Flyme/Android 11 renders a player
+    // card whose PlaybackState.position ticks locally (no 1s notify loop).
+    implementation("androidx.media:media:1.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     // ProcessLifecycleOwner — used by XAIOAuthManager to detect Custom

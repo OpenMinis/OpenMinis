@@ -51,7 +51,7 @@ internal fun formatStepDuration(seconds: Long, stillRunning: Boolean): String {
 
 // Helper: tool accent color
 internal fun toolAccentColor(toolName: String): Color = when (toolName) {
-    "shell_execute" -> Color(0xFF34C759)
+    "shell_execute", "task_output" -> Color(0xFF34C759)
     "file_read" -> Color(0xFF32ADE6)
     "file_write" -> Color(0xFF007AFF)
     "file_edit" -> Color(0xFFFF9500)
@@ -64,7 +64,7 @@ internal fun toolAccentColor(toolName: String): Color = when (toolName) {
 
 // Helper: tool icon (iOS: distinct SF Symbols per tool type)
 internal fun toolIconFor(toolName: String) = when (toolName) {
-    "shell_execute" -> Icons.Default.Terminal
+    "shell_execute", "task_output" -> Icons.Default.Terminal
     "file_read" -> Icons.Default.Description         // iOS: doc.text
     "file_write" -> Icons.AutoMirrored.Filled.NoteAdd   // iOS: doc.text.fill (filled variant)
     "file_edit" -> Icons.Default.EditNote             // iOS: square.and.pencil
@@ -78,6 +78,7 @@ internal fun toolIconFor(toolName: String) = when (toolName) {
 // Helper: tool display name for "Minis is using X"
 internal fun toolDisplayName(toolName: String): String = when (toolName) {
     "shell_execute" -> "terminal"
+    "task_output" -> "task output"
     "file_read" -> "file reader"
     "file_write" -> "file writer"
     "file_edit" -> "file editor"
@@ -95,6 +96,7 @@ internal fun toolDisplayName(toolName: String): String = when (toolName) {
  */
 internal fun toolTitleLabel(toolName: String): String = when (toolName) {
     "shell_execute" -> "Minis is using Shell"
+    "task_output" -> "Minis is reading Task"
     "file_read" -> "Minis is reading File"
     "file_write" -> "Minis is using Editor"
     "file_edit" -> "Minis is editing File"

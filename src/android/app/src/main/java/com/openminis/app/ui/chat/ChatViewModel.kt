@@ -22,8 +22,10 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Extension
 import com.openminis.app.data.BPETokenizer
+import com.openminis.app.data.ContextImageTrim
 import com.openminis.app.data.ContextOffload
 import com.openminis.app.data.ContextPolicy
+import com.openminis.app.data.InlineMediaScrubber
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.FileMentionIndex
 import com.openminis.app.data.db.CompactMarkerEntity
@@ -68,6 +70,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -457,6 +460,27 @@ class ChatViewModel(
         private const val TOOL_INPUT_CHUNK_RING_MAX = 10
         /** Auto-retry backoff schedule (seconds). Mirrors iOS retryDelays, scaled to task spec: 1s → 2s → 4s. */
         private val AUTO_RETRY_DELAYS_SEC = intArrayOf(1, 2, 4)
+
+        /**
+         * 429 backoff (seconds). Caps at 60s and then repeats — DeepSeek-style
+         * burst quotas clear in tens of seconds; aborting drops tool results.
+         */
+        private val RATE_LIMIT_RETRY_DELAYS_SEC = intArrayOf(5, 10, 20, 40, 60)
+
+        /** Same-provider retry: 429 never exhausts; other transients follow [AUTO_RETRY_DELAYS_SEC]. */
+        internal fun shouldRetrySameProvider(
+            retryAttempt: Int,
+            isRateLimit: Boolean,
+            isTransient: Boolean,
+        ): Boolean {
+            if (isRateLimit) return true
+            return isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size
+        }
+
+        internal fun sameProviderRetryDelaySec(retryAttempt: Int, isRateLimit: Boolean): Int {
+            val table = if (isRateLimit) RATE_LIMIT_RETRY_DELAYS_SEC else AUTO_RETRY_DELAYS_SEC
+            return table[retryAttempt.coerceIn(0, table.lastIndex)]
+        }
 
         /**
          * Factory for use with `viewModel(factory = ...)`. Binds the ChatViewModel
@@ -1398,6 +1422,17 @@ class ChatViewModel(
     val enhancedCacheEnabled: StateFlow<Boolean> = _enhancedCacheEnabled.asStateFlow()
 
     /**
+     * [GH#357] Independent toggle for daily-memory injection. The main
+     * `_memoryEnabled` flag gates all memory reads (memory_get, memory_write
+     * and the daily/global system-prompt fragments). This separate flag lets
+     * the user keep memory_get/memory_write active while suppressing the
+     * daily-log fragment that breaks prompt caching whenever new content is
+     * appended. Default is true — same behaviour as before this fix.
+     */
+    internal val _memoryDailyInjectionEnabled = MutableStateFlow(true)
+    val memoryDailyInjectionEnabled: StateFlow<Boolean> = _memoryDailyInjectionEnabled.asStateFlow()
+
+    /**
      * [T-android-enhanced-cache] Whether the Enhanced Cache menu item is shown.
      * Mirrors iOS `showEnhancedCacheToggle` (commit 57aaf122): only visible when
      * the current session's resolved provider instance is the *official*
@@ -1676,8 +1711,10 @@ class ChatViewModel(
         val window = liveModel?.contextWindowTokens ?: return null
         val groupLimit = _selectedGroupId.value
             ?.let { gid -> config.modelGroups.find { it.id == gid }?.contextLimitTokens }
-            ?.takeIf { it > 0 }
-        return if (groupLimit != null) minOf(window, groupLimit) else window
+        // iOS parity: a finite group slider value IS the compact window.
+        // min(model, group) swallowed a user 1M cap when the model id still
+        // heuristic-reported 128K (DeepSeek), so compactThreshold stayed 108K.
+        return ContextPolicy.effectiveWindow(window, groupLimit)
     }
 
     val currentModelMaxOutputTokens: Int?
@@ -1780,6 +1817,12 @@ class ChatViewModel(
             subtitle = "",
         ),
         SlashCommand(
+            id = "memorydaily",
+            icon = Icons.Default.Psychology,
+            title = "Memory Daily",
+            subtitle = "[GH#357] Toggle daily-log injection on/off",
+        ),
+        SlashCommand(
             id = "thinking",
             icon = Icons.Default.Lightbulb,
             title = "Thinking",
@@ -1842,11 +1885,12 @@ class ChatViewModel(
         _slashMenuSelectedIndex.value = -1
 
         when (cmd.id) {
-            "compact" -> compactAll()
-            "memory" -> toggleMemoryEnabled()
-            "thinking" -> toggleThinking()
-            "clear" -> _clearChatConfirmRequested.value = true
-            else -> AppLogger.info(TAG, "[Slash] unrecognized id=${cmd.id} — no dispatch")
+             "compact" -> compactAll()
+             "memory" -> toggleMemoryEnabled()
+             "memorydaily" -> toggleMemoryDailyInjectionEnabled()
+             "thinking" -> toggleThinking()
+             "clear" -> _clearChatConfirmRequested.value = true
+             else -> AppLogger.info(TAG, "[Slash] unrecognized id=${cmd.id} — no dispatch")
         }
         // [T-android-slash-menu-align-ios-prepend] Action command: restore the
         // saved ORIGINAL (stripping the injected "/ " prefix) so the body text
@@ -1872,6 +1916,21 @@ class ChatViewModel(
         }
         appendSystemInfo(
             text = "Memory writes ${if (newValue) "enabled" else "disabled"}. Reads are unaffected.",
+            iconKind = "memory",
+        )
+    }
+
+    /**
+     * [GH#357] Toggle daily-memory fragment injection independently from the
+     * main memory toggle. Global memory (GLOBAL.md) is always shown when
+     * memory is on — only the time-varying daily log block is affected, which
+     * is what destabilises prompt caching.
+     */
+    internal fun toggleMemoryDailyInjectionEnabled() {
+        val newValue = !_memoryDailyInjectionEnabled.value
+        _memoryDailyInjectionEnabled.value = newValue
+        appendSystemInfo(
+            text = "Daily memory injection ${if (newValue) "enabled" else "disabled"}. Global memory still active.",
             iconKind = "memory",
         )
     }
@@ -2959,7 +3018,7 @@ class ChatViewModel(
                             AgentContentPart.ToolResult(
                                 id = it.id,
                                 name = it.name,
-                                content = "Tool execution was interrupted by an unexpected error.",
+                                content = com.openminis.app.data.ToolInterrupt.UNEXPECTED,
                                 isError = true,
                             )
                         },
@@ -3227,7 +3286,9 @@ class ChatViewModel(
             )
         }
         val model = currentModel
-        val contextWindow = model?.contextWindow ?: 128_000
+        val contextWindow = effectiveContextWindowTokens()
+            ?: model?.contextWindowTokens
+            ?: 128_000
         val estimatedInput = userMessage.length / 4
         val maxOut = maxOf(1024, minOf(8192, contextWindow - estimatedInput))
         val provider = currentProvider
@@ -6994,7 +7055,7 @@ class ChatViewModel(
             val placeholders = toolUses.filter { it.id in missingIds }.map { use ->
                 AgentContentPart.ToolResult(
                     id = use.id, name = use.name,
-                    content = "Tool execution was interrupted by an unexpected error.",
+                    content = com.openminis.app.data.ToolInterrupt.UNEXPECTED,
                     isError = true,
                 )
             }
@@ -7032,6 +7093,157 @@ class ChatViewModel(
                 iter.set(msg.copy(contentParts = cleaned))
             }
         }
+    }
+
+    /**
+     * [GH#323] Drop image bytes from older history entries, leaving a
+     * `read_image` path. Mirrors iOS `trimOldImagesFromHistory`.
+     */
+    private fun trimOldImagesFromHistory() {
+        val sid = activeSessionId
+        val result = ContextImageTrim.trim(agentHistory) { toolId, bytes, mime ->
+            ContextOffload.offloadImage(context, sid, bytes, toolId, mime)
+        }
+        if (result.evicted <= 0) return
+        agentHistory.clear()
+        agentHistory.addAll(result.history)
+        AppLogger.info(
+            TAG,
+            "Context image trim: evicted ${result.evicted} old image(s) " +
+                "(snapshots: ${result.snapshots}), kept last ${ContextImageTrim.KEEP_COUNT}",
+        )
+    }
+
+    /**
+     * [GH#352] Rewrite agentHistory so large inline base64 / data-URI images
+     * are no longer prompt text. Images become ToolResult.imageData (structured
+     * channel, ~267 tokens) plus a path stub. Runs every turn so a session that
+     * already 400'd can self-repair on retry.
+     */
+    private fun scrubInlineMediaFromHistory() {
+        val sid = activeSessionId
+        val attach = currentModelHasNativeVision
+        for (i in agentHistory.indices) {
+            val msg = agentHistory[i]
+            var changed = false
+            val newParts = ArrayList<AgentContentPart>(msg.contentParts.size)
+            for (part in msg.contentParts) {
+                when (part) {
+                    is AgentContentPart.ToolResult -> {
+                        val rewritten = materializeToolResult(
+                            id = part.id,
+                            name = part.name,
+                            content = part.content,
+                            isError = part.isError,
+                            imageData = part.imageData,
+                            imageMimeType = part.imageMimeType,
+                            imageLinuxPath = part.imageLinuxPath,
+                            attachImage = attach,
+                            sessionId = sid,
+                        )
+                        if (rewritten != part) changed = true
+                        newParts += rewritten
+                    }
+                    is AgentContentPart.Text -> {
+                        val scrubbed = InlineMediaScrubber.scrub(part.text)
+                        if (!scrubbed.changed) {
+                            newParts += part
+                        } else {
+                            changed = true
+                            newParts += AgentContentPart.Text(scrubbed.text)
+                            for ((idx, img) in scrubbed.images.withIndex()) {
+                                val path = ContextOffload.offloadImage(
+                                    context, sid, img.bytes,
+                                    toolId = "txt${i}_$idx",
+                                    mimeType = img.mimeType,
+                                )
+                                if (attach) {
+                                    newParts += AgentContentPart.ImageData(
+                                        data = img.bytes,
+                                        mimeType = img.mimeType,
+                                        linuxPath = path.ifEmpty { null },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    else -> newParts += part
+                }
+            }
+            if (changed) {
+                agentHistory[i] = msg.copy(contentParts = newParts)
+                Log.i(TAG, "scrubInlineMedia: history[$i] stripped inline base64")
+            }
+        }
+    }
+
+    /**
+     * Decode / strip inline media in a single tool result. Idempotent on stubs.
+     */
+    private fun materializeToolResult(
+        id: String,
+        name: String,
+        content: String,
+        isError: Boolean,
+        imageData: ByteArray? = null,
+        imageMimeType: String? = null,
+        imageLinuxPath: String? = null,
+        attachImage: Boolean = currentModelHasNativeVision,
+        sessionId: String = activeSessionId,
+    ): AgentContentPart.ToolResult {
+        if (ContextOffload.isOffloadReadback(content)) {
+            return AgentContentPart.ToolResult(
+                id, name, content, isError, imageData, imageMimeType, imageLinuxPath,
+            )
+        }
+        val scrubbed = InlineMediaScrubber.scrub(content)
+        if (!scrubbed.changed) {
+            return AgentContentPart.ToolResult(
+                id, name, content, isError, imageData, imageMimeType, imageLinuxPath,
+            )
+        }
+        var nextImage = imageData
+        var nextMime = imageMimeType
+        var nextPath = imageLinuxPath
+        val first = scrubbed.images.firstOrNull()
+        if (first != null) {
+            val path = ContextOffload.offloadImage(
+                context, sessionId, first.bytes,
+                toolId = id,
+                mimeType = first.mimeType,
+            )
+            if (path.isNotEmpty()) nextPath = path
+            if (attachImage && nextImage == null) {
+                nextImage = first.bytes
+                nextMime = first.mimeType
+            }
+            for ((idx, extra) in scrubbed.images.drop(1).withIndex()) {
+                ContextOffload.offloadImage(
+                    context, sessionId, extra.bytes,
+                    toolId = "${id}_$idx",
+                    mimeType = extra.mimeType,
+                )
+            }
+        } else {
+            ContextOffload.offloadContent(
+                context, sessionId, content,
+                toolId = id, toolName = name,
+            )
+        }
+        val note = if (nextPath.isNullOrEmpty()) {
+            scrubbed.text
+        } else {
+            scrubbed.text + "\n[saved to $nextPath — use read_image to view]"
+        }
+        return AgentContentPart.ToolResult(
+            id = id,
+            name = name,
+            content = note,
+            isError = isError,
+            imageData = nextImage,
+            imageMimeType = nextMime,
+            imageLinuxPath = nextPath,
+        )
     }
 
     private fun unwrapFlowException(e: Throwable): Throwable {
@@ -7183,8 +7395,19 @@ class ChatViewModel(
     ) {
         val sid = activeSessionId
         val policy = ContextPolicy.forContextWindow(contextWindow)
+        val hasBomb = agentHistory.any { msg ->
+            msg.contentParts.any { part ->
+                when (part) {
+                    is AgentContentPart.ToolResult ->
+                        ContextOffload.isForceOffloadContent(part.content)
+                    is AgentContentPart.Text ->
+                        ContextOffload.isForceOffloadContent(part.text)
+                    else -> false
+                }
+            }
+        }
 
-        if (!force && policy.offloadThreshold == 0) {
+        if (!force && policy.offloadThreshold == 0 && !hasBomb) {
             // Small-window tier: offload disabled — UI surfaces "exhausted"
             // when the user crosses the threshold. Nothing to do here.
             return
@@ -7193,7 +7416,7 @@ class ChatViewModel(
         val effectiveTokens =
             if (lastContextTokens > 0) lastContextTokens else estimateContextTokens()
 
-        if (!force && effectiveTokens < policy.offloadThreshold) {
+        if (!force && effectiveTokens < policy.offloadThreshold && !hasBomb) {
             // Below threshold — no work needed. Caller logs at debug level
             // via dynamicMaxTokens; we stay silent to keep logs readable.
             return
@@ -7218,21 +7441,30 @@ class ChatViewModel(
 
         val protectedCount = minOf(4, agentHistory.size)
         val candidateUpper = agentHistory.size - protectedCount
-        AppLogger.info(TAG, "  Scanning messages 0..<$candidateUpper (last $protectedCount protected)")
+        AppLogger.info(TAG, "  Scanning messages 0..<$candidateUpper (last $protectedCount protected; bombs still eligible)")
 
         val candidates = mutableListOf<OffloadCandidate>()
         var skippedAlreadyOffloaded = 0
         var skippedTooSmall = 0
 
-        for (msgIdx in 0 until candidateUpper) {
+        for (msgIdx in agentHistory.indices) {
+            val inProtectedTail = msgIdx >= candidateUpper
             val msg = agentHistory[msgIdx]
             for ((partIdx, part) in msg.contentParts.withIndex()) {
                 when (part) {
                     is AgentContentPart.ToolResult -> {
-                        if (part.content.startsWith(ContextOffload.OFFLOADED_PREFIX)) {
+                        // [GH#343] isOffloadReadback() also catches the prefixed form that
+                        // FileReadTool returns ("[<path> | <n> bytes | <m> lines | ...]")
+                        // when the model reads an offload stub back. A bare
+                        // startsWith(OFFLOADED_PREFIX) check misses those, so the stub was
+                        // offloaded again, and again — an unbounded loop that only kept
+                        // moving the same content to a new file.
+                        if (ContextOffload.isOffloadReadback(part.content)) {
                             skippedAlreadyOffloaded++
                             continue
                         }
+                        val bomb = ContextOffload.isForceOffloadContent(part.content)
+                        if (inProtectedTail && !bomb) continue
                         val hasLargeContent = part.content.length > 500
                         val hasLargeImage = (part.imageData?.size ?: 0) > 1024
                         if (!hasLargeContent && !hasLargeImage) {
@@ -7245,6 +7477,7 @@ class ChatViewModel(
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, bytes, part.id, part.name))
                     }
                     is AgentContentPart.ToolUse -> {
+                        if (inProtectedTail) continue
                         if (part.name != "file_write" && part.name != "file_edit") continue
                         val content = part.input.optString("content", "")
                         if (content.length <= 500) continue
@@ -7253,6 +7486,7 @@ class ChatViewModel(
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, bytes, part.id, part.name))
                     }
                     is AgentContentPart.ImageData -> {
+                        if (inProtectedTail) continue
                         if (part.data.size <= 1024) {
                             skippedTooSmall++
                             continue
@@ -7262,7 +7496,14 @@ class ChatViewModel(
                         val synthId = "img${msgIdx}_$partIdx"
                         candidates.add(OffloadCandidate(msgIdx, partIdx, tokens, part.data.size, synthId, "image"))
                     }
-                    is AgentContentPart.Text -> Unit
+                    is AgentContentPart.Text -> {
+                        if (!ContextOffload.isForceOffloadContent(part.text)) continue
+                        val tokens = countPartTokens(part)
+                        val bytes = part.text.toByteArray(Charsets.UTF_8).size
+                        candidates.add(
+                            OffloadCandidate(msgIdx, partIdx, tokens, bytes, "txt${msgIdx}_$partIdx", "text"),
+                        )
+                    }
                 }
             }
         }
@@ -7276,11 +7517,15 @@ class ChatViewModel(
         var freedTokens = 0
 
         for (candidate in candidates) {
-            if (currentTokens <= targetTokens) break
-
             val msg = agentHistory[candidate.msgIdx]
             val parts = msg.contentParts.toMutableList()
             val part = parts[candidate.partIdx]
+            val isBomb = when (part) {
+                is AgentContentPart.ToolResult -> ContextOffload.isForceOffloadContent(part.content)
+                is AgentContentPart.Text -> ContextOffload.isForceOffloadContent(part.text)
+                else -> false
+            }
+            if (!isBomb && currentTokens <= targetTokens) break
             var linuxPath = ""
 
             val newPart: AgentContentPart? = when (part) {
@@ -7329,7 +7574,15 @@ class ChatViewModel(
                         ContextOffload.stub(candidate.tokens, candidate.bytes, linuxPath),
                     )
                 }
-                is AgentContentPart.Text -> null
+                is AgentContentPart.Text -> {
+                    linuxPath = ContextOffload.offloadContent(
+                        context, sid, part.text,
+                        toolId = candidate.toolId, toolName = candidate.toolName,
+                    )
+                    AgentContentPart.Text(
+                        ContextOffload.stub(candidate.tokens, candidate.bytes, linuxPath),
+                    )
+                }
             }
 
             if (newPart == null) continue
@@ -7530,6 +7783,17 @@ class ChatViewModel(
         for (turn in 0 until MAX_AGENT_TURNS) {
             // Sanitize history before each API call (mirrors iOS pre-API validation)
             sanitizeAgentHistory()
+
+            // [GH#352] Strip inline base64 / data-URI images from text BEFORE
+            // token-threshold offload. The bomb lives in the latest tool result
+            // (protected tail) and char/3.5 under-counts it, so offload never
+            // fired and the session 400'd forever.
+            scrubInlineMediaFromHistory()
+
+            // [GH#323] Keep only the last 20 images as bytes; older ones become
+            // path placeholders (iOS trimOldImagesFromHistory). ImageBudget is
+            // still the 25MB request-time belt; this mutates agentHistory.
+            trimOldImagesFromHistory()
 
             // Context window management: offload large tool outputs in older
             // messages to disk when the policy threshold for this model's
@@ -8269,21 +8533,26 @@ class ChatViewModel(
                         actual.detail.contains(Regex("[5][0-9]{2}"))
                     // Auto-retry on transient network/5xx/transient errors on the SAME provider
                     // before considering a fallback (mirrors iOS streamWithAutoRetry).
-                    // Rate limits are provider-level signals that should trigger fallback immediately,
-                    // not retry on the same provider.
+                    // 429 is retried on the same provider (unbounded, longer backoff)
+                    // instead of aborting the turn when the group has no next model.
                     val isTransient = actual is com.openminis.app.data.model.LLMError.NetworkError ||
                         actual is com.openminis.app.data.model.LLMError.TransientError ||
                         is5xx
-                    if (isTransient && retryAttempt < AUTO_RETRY_DELAYS_SEC.size) {
-                        val delaySec = AUTO_RETRY_DELAYS_SEC[retryAttempt]
+                    if (shouldRetrySameProvider(retryAttempt, isRateLimit, isTransient)) {
+                        val delaySec = sameProviderRetryDelaySec(retryAttempt, isRateLimit)
                         retryAttempt += 1
                         val errDesc = actual.message ?: actual.javaClass.simpleName
-                        Log.w(TAG, "🔁 Transient error on ${currentProvider.model.displayName}, retry $retryAttempt/${AUTO_RETRY_DELAYS_SEC.size} in ${delaySec}s: $errDesc")
+                        val retryLabel = if (isRateLimit) {
+                            "$errDesc — retrying (#$retryAttempt) in ${delaySec}s…"
+                        } else {
+                            "$errDesc — retrying ($retryAttempt/${AUTO_RETRY_DELAYS_SEC.size})…"
+                        }
+                        Log.w(TAG, "🔁 ${if (isRateLimit) "Rate limit" else "Transient error"} on ${currentProvider.model.displayName}, $retryLabel")
                         withContext(Dispatchers.Main) {
                             _autoRetryAttempt.value = retryAttempt
                             // Show the error inline on the streaming assistant message during countdown.
                             // Keeps isStreaming=true so the UI doesn't tear down the streaming state.
-                            setTransientInlineError("$errDesc — retrying ($retryAttempt/${AUTO_RETRY_DELAYS_SEC.size})…")
+                            setTransientInlineError(retryLabel)
                         }
                         try {
                             for (remaining in delaySec downTo 1) {
@@ -8666,6 +8935,20 @@ class ChatViewModel(
             // Execute all tool calls
             val resultParts = mutableListOf<AgentContentPart>()
             for ((id, name, args) in toolCalls) {
+                if (!currentCoroutineContext().isActive) {
+                    for ((rid, rname, _) in toolCalls) {
+                        if (resultParts.any { p -> p is AgentContentPart.ToolResult && p.id == rid }) continue
+                        resultParts.add(
+                            AgentContentPart.ToolResult(
+                                id = rid,
+                                name = rname,
+                                content = com.openminis.app.data.ToolInterrupt.USER_STOP,
+                                isError = true,
+                            ),
+                        )
+                    }
+                    break
+                }
                 // [T-android-overlay-tool-title] Pull tool_title uniformly
                 // from args for ALL tools — without this browser_use's
                 // tool_title never reached the overlay (only shell_execute
@@ -8757,8 +9040,13 @@ class ChatViewModel(
                 val preIdx = allToolBlocks.indexOfFirst { it.id == id }
                 if (preIdx >= 0 && allToolBlocks[preIdx].toolStatus == ToolBlockStatus.PENDING) {
                     allToolBlocks[preIdx] = allToolBlocks[preIdx].copy(toolStatus = ToolBlockStatus.RUNNING)
-                    withContext(Dispatchers.Main) {
-                        updateAssistantMessage(assistantId, accumulatedText, true, allToolBlocks)
+                    try {
+                        withContext(Dispatchers.Main) {
+                            updateAssistantMessage(assistantId, accumulatedText, true, allToolBlocks)
+                        }
+                    } catch (_: CancellationException) {
+                        // Fall through; the !isActive check after execute / at
+                        // next iteration persists whatever we already have.
                     }
                 }
 
@@ -8885,7 +9173,8 @@ class ChatViewModel(
                     val resultContent = if (name == "shell_execute") {
                         result.output.lines().takeLast(80).joinToString("\n")
                     } else {
-                        result.output
+                        // [GH#352] Don't hand Compose a 1.3M-char base64 line.
+                        InlineMediaScrubber.preview(result.output)
                     }
                     val finalContent = if (existingContent.length > resultContent.length) existingContent else resultContent
                     // [T-truncated-args-visibility #119] A call built from
@@ -8939,28 +9228,39 @@ class ChatViewModel(
                     outputForLLM
                 }
 
-                resultParts.add(AgentContentPart.ToolResult(
-                    id = id,
-                    name = name,
-                    content = outputForLLMWithNote,
-                    isError = !result.success,
-                    imageData = result.imageData,
-                    imageMimeType = result.imageMimeType,
-                    imageLinuxPath = result.imageLinuxPath,
-                ))
-            }
-
-            // Update UI with tool statuses. Mark as awaiting the next model
-            // response so "Minis is thinking" shows during the network gap
-            // between tool results being sent and the next turn's first chunk.
-            // Mirrors iOS isAwaitingModelResponse.
-            withContext(Dispatchers.Main) {
-                updateAssistantMessage(
-                    assistantId, accumulatedText, true, allToolBlocks,
-                    isAwaitingModelResponse = true,
+                resultParts.add(
+                    materializeToolResult(
+                        id = id,
+                        name = name,
+                        content = outputForLLMWithNote,
+                        isError = !result.success,
+                        imageData = result.imageData,
+                        imageMimeType = result.imageMimeType,
+                        imageLinuxPath = result.imageLinuxPath,
+                    ),
                 )
+                // [OpenMinis-Fix #7] Job already cancelled: don't run the rest of
+                // this batch, but do emit results for every tool_use so sanitize
+                // cannot replace real stdout with a generic placeholder.
+                if (!currentCoroutineContext().isActive) {
+                    for ((rid, rname, _) in toolCalls) {
+                        if (resultParts.any { p -> p is AgentContentPart.ToolResult && p.id == rid }) continue
+                        resultParts.add(
+                            AgentContentPart.ToolResult(
+                                id = rid,
+                                name = rname,
+                                content = com.openminis.app.data.ToolInterrupt.USER_STOP,
+                                isError = true,
+                            ),
+                        )
+                    }
+                    break
+                }
             }
 
+            // Persist even if the job was cancelled mid-tool — otherwise
+            // withContext(Main) throws and stdout never reaches history.
+            withContext(NonCancellable) {
             // Persist the assistant+tools turn (with full input JSON and thinking).
             // Capture the persisted DB id so we can back-fill agentHistory's last
             // assistant entry — compact-marker boundary resolution depends on it.
@@ -8984,6 +9284,22 @@ class ChatViewModel(
                 contentParts = resultParts,
                 dbMessageId = toolResultDbId,
             ))
+            }
+
+            // Update UI with tool statuses. Mark as awaiting the next model
+            // response so "Minis is thinking" shows during the network gap
+            // between tool results being sent and the next turn's first chunk.
+            // Mirrors iOS isAwaitingModelResponse.
+            try {
+                withContext(Dispatchers.Main) {
+                    updateAssistantMessage(
+                        assistantId, accumulatedText, true, allToolBlocks,
+                        isAwaitingModelResponse = true,
+                    )
+                }
+            } catch (_: CancellationException) {
+                // History already persisted; UI will catch up on next snapshot.
+            }
 
             // Auto-title after first exchange (mirrors iOS generateSessionTitleIfNeeded)
             if (turn == 0) {
@@ -9174,6 +9490,7 @@ class ChatViewModel(
             // /var/minis/{workspace,attachments,offloads,browser} files.
             ReadImageTool.NAME -> executeReadImageTool(argsJson)
             "shell_execute" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+            "task_output" -> com.openminis.app.tools.TaskOutputTool.execute(argsJson, activeSessionId)
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
@@ -9406,6 +9723,15 @@ class ChatViewModel(
                 }
             }
 
+            if (com.openminis.app.sandbox.DetachedShell.jsonFlag(args, "detach")) {
+                val spawned = ExecutionCoordinator.spawnDetached(dispatchSessionId, command)
+                return ToolExecutionResult(
+                    output = spawned.message,
+                    success = spawned.ok,
+                    toolTitle = toolTitle,
+                )
+            }
+
             var result = ExecutionCoordinator.execute(
                 sessionId = dispatchSessionId,
                 command = command,
@@ -9493,6 +9819,20 @@ class ChatViewModel(
                 success = result.exitCode == 0,
                 toolTitle = toolTitle,
                 timedOut = timedOut,
+            )
+        } catch (e: CancellationException) {
+            val fromBlocks = toolBlocks.firstOrNull { it.id == toolId }?.content.orEmpty()
+            val fromShell = ExecutionCoordinator.takeInterruptedOutput(activeSessionId)
+            val partial = if (fromShell.length >= fromBlocks.length) fromShell else fromBlocks
+            val reason = if (_promptQueue.value.isNotEmpty()) {
+                com.openminis.app.data.ToolInterrupt.NEW_MESSAGE
+            } else {
+                com.openminis.app.data.ToolInterrupt.USER_STOP
+            }
+            ToolExecutionResult(
+                output = com.openminis.app.data.ToolInterrupt.withPartial(partial, reason),
+                success = false,
+                toolTitle = try { JSONObject(argsJson).optString("tool_title", "shell_execute") } catch (_: Exception) { "shell_execute" },
             )
         } catch (e: Exception) {
             ToolExecutionResult("Error: ${e.message}", false)
@@ -10208,7 +10548,7 @@ Environment variables:
 - Settings deep links: when you tell the user "go to Settings → X" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).
 - To check if a variable is set, use `[ -n "${'$'}VAR" ] && echo 'set' || echo 'not set'`. NEVER use echo ${'$'}VAR, printenv VAR, or any command that would output the actual value into the conversation context.${memorySystemSection}
 
-Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the native alarm tool (AlarmManager) or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"""
+Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. For recurring tasks that must fire while the app is backgrounded, use the native alarm tool (AlarmManager) or tell the user to set up a system-level schedule (Google Calendar event, Tasker automation, etc.). (Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.) For long jobs inside a turn, use shell_execute detach=true + task_output — do not use nohup python; PersistentShell is a pipe, so CPython buffers and looks dead while `nohup sh` prints immediately."""
 
         // Match iOS order exactly: skills → global memory → recent daily memory.
         // See ios/Agent/Chat/AIChatViewModel.swift:4375-4387. Each fragment is
@@ -10234,7 +10574,15 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         // tool surface and SOUL.md is part of identity, both orthogonal
         // to the memory feature.
         val globalMemoryFragment = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
-        val dailyMemoryFragment = if (memoryOn) memoryRepository?.loadRecentDailyMemoryFragment() else null
+        // [GH#357] Daily-log injection is gated separately from the main
+        // memory toggle: disabling it stabilises the system-prompt prefix for
+        // prompt caching while still allowing memory_get / memory_write to
+        // function. The maxAgeDays cap (7) further limits drift on enabled
+        // sessions.
+        val dailyMemoryFragment =
+            if (memoryOn && _memoryDailyInjectionEnabled.value)
+                memoryRepository?.loadRecentDailyMemoryFragment(maxAgeDays = 7)
+            else null
         // [XSessionDiag] Hypothesis 3: ties the memory-injection sizes to a
         // SESSION id. MemoryRepository itself has no session context, so its own
         // `memory/daily-inject` line (which names the source files) cannot say who
@@ -11122,7 +11470,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 // CancellationException again and write nothing — a fallback
                 // that silently never runs is worse than none, because the log
                 // line would claim it did.
-                if (!isActive) {
+                if (!currentCoroutineContext().isActive) {
                     AppLogger.warning(
                         "TitleGen",
                         "outcome=cancelled attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +

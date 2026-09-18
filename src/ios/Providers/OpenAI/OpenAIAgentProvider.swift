@@ -1284,7 +1284,10 @@ final class OpenAIAgentProvider: AgentProvider {
         // thinking level or where the history came from. Same detection the
         // thinking-param skip already uses (provider.isMistral, base URL
         // contains mistral.ai).
-        let forbidReasoningField = provider.isMistral
+        // [GH OpenMinis#361] Cerebras is the same class of constraint: its
+        // AssistantMessage schema rejects `reasoning_content` with
+        // `400 ... is unsupported`, so the echo must be suppressed there too.
+        let forbidReasoningField = provider.isMistral || provider.isCerebras
         // Placeholder is a subset of the echo path. Two triggers:
         //  1. forced-reasoning model with thinking enabled (legacy: tool-call turns
         //     where reasoning wasn't captured),

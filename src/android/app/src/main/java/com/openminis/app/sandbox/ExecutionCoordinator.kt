@@ -3,8 +3,10 @@ package com.openminis.app.sandbox
 import android.content.Context
 import android.util.Log
 import com.openminis.app.data.repository.EnvVarRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -49,6 +51,12 @@ object ExecutionCoordinator {
      * keep the stale value around indefinitely.
      */
     private val lastInjectedKeys = ConcurrentHashMap<String, Set<String>>()
+
+    /** [OpenMinis-Fix #7] Survives shell removal so cancel can still read stdout. */
+    private val interruptedBySession = ConcurrentHashMap<String, String>()
+
+    fun takeInterruptedOutput(sessionId: String): String =
+        interruptedBySession.remove(sessionId).orEmpty()
 
     /**
      * Global lock used only for shell creation to prevent duplicate shells
@@ -234,7 +242,23 @@ object ExecutionCoordinator {
         // shouldn't try to `unset` keys that don't exist in the new shell.
         lastInjectedKeys.remove(sessionId)
         shell?.stop()
+        DetachedShell.killSession(sessionId)
         if (shell != null) Log.i(TAG, "[$sessionId] Shell terminated")
+    }
+
+    /**
+     * Start [command] in its own PRoot process. Does not occupy PersistentShell
+     * and does not wait for stdout. [#7]
+     */
+    suspend fun spawnDetached(sessionId: String, command: String): DetachedShell.SpawnResult {
+        if (!PRootKernel.isBooted) {
+            PRootKernel.boot(appContext)
+        }
+        val mounts = buildSessionBindMounts(sessionId)
+        val envVars = envVarRepository?.allAsDict() ?: emptyMap()
+        return withContext(Dispatchers.IO) {
+            DetachedShell.spawn(appContext, sessionId, command, mounts, extraEnv = envVars)
+        }
     }
 
     /**
@@ -246,7 +270,11 @@ object ExecutionCoordinator {
             val shell = shells.remove(sessionId)
             // T124a: snapshot belongs to the now-dead shell.
             lastInjectedKeys.remove(sessionId)
+            val before = shell?.takeInterruptedOutput().orEmpty()
             shell?.stop()
+            val after = shell?.takeInterruptedOutput().orEmpty()
+            val best = if (after.length >= before.length) after else before
+            if (best.isNotEmpty()) interruptedBySession[sessionId] = best
             Log.i(TAG, "[$sessionId] Shell stopped by user")
         } else {
             // Stop all sessions (legacy/fallback)

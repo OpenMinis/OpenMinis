@@ -641,10 +641,11 @@ fun ModelGroupDetailScreen(
  * any) are in the group. The previous behaviour clipped the ladder to the
  * largest member-declared context window, but model metadata is unreliable
  * (e.g. image-output / router models report no window and fall through to
- * the 128K heuristic default) and the per-model field is already enforced
- * at runtime when assembling requests via `min(groupLimit, modelLimit)`.
+ * the 128K heuristic default). Runtime now treats a finite slider value as
+ * THE compact window (iOS `effectiveContextWindow`), so 1M actually raises
+ * a 128K heuristic instead of being min()'d away.
  * Keeping the ladder fixed makes the UI a pure user-intent slider —
- * "I want this group to cap context at N" — and removes the entire family
+ * "I want this group to use N tokens of context" — and removes the entire family
  * of bugs where adding/removing a model would silently shrink the picker.
  *
  * The "Unlimited" stop maps to `Int.MAX_VALUE` in the binding; the runtime

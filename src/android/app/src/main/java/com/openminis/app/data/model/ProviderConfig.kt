@@ -1,5 +1,6 @@
 package com.openminis.app.data.model
 
+import com.openminis.app.provider.ModelsDevApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
@@ -374,16 +375,29 @@ data class ModelEntry(
 ) {
     val id: String get() = uuid
 
-    /** Effective model as seen by the rest of the app: baseModel with overrides applied. */
+    /**
+     * Effective model as seen by the rest of the app: live catalog capabilities
+     * on [baseModel], then [overrides] on top.
+     *
+     * [GH#340] Capabilities used to be a snapshot taken when the model was
+     * added. `deepseek-flash` arrived as text-only (OpenAI-compat `/v1/models`
+     * has no architecture block; bundled models.dev was equally stale) and
+     * never picked up image input after the catalog learned it. Re-deriving
+     * here — without rewriting persistence — unfreezes vision / context /
+     * reasoning. User overrides still win because they are applied last.
+     */
     val model: LLMModel
-        get() = if (overrides.isEmpty) baseModel else baseModel.copy(
-            displayName = overrides.displayName ?: baseModel.displayName,
-            maxOutputTokens = overrides.maxOutputTokens ?: baseModel.maxOutputTokens,
-            contextWindow = overrides.contextWindow ?: baseModel.contextWindow,
-            supportsReasoning = overrides.supportsReasoning ?: baseModel.supportsReasoning,
-            inputModalities = overrides.inputModalities ?: baseModel.inputModalities,
-            outputModalities = overrides.outputModalities ?: baseModel.outputModalities,
-        )
+        get() {
+            val live = ModelsDevApi.liveCapabilities(baseModel)
+            return if (overrides.isEmpty) live else live.copy(
+                displayName = overrides.displayName ?: live.displayName,
+                maxOutputTokens = overrides.maxOutputTokens ?: live.maxOutputTokens,
+                contextWindow = overrides.contextWindow ?: live.contextWindow,
+                supportsReasoning = overrides.supportsReasoning ?: live.supportsReasoning,
+                inputModalities = overrides.inputModalities ?: live.inputModalities,
+                outputModalities = overrides.outputModalities ?: live.outputModalities,
+            )
+        }
 
     /** True when this entry carries user intent beyond API-reported defaults. */
     val isUserModified: Boolean

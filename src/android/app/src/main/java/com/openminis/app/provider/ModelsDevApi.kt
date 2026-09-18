@@ -3,6 +3,7 @@ package com.openminis.app.provider
 import android.content.Context
 import android.util.Log
 import com.openminis.app.data.model.LLMModel
+import com.openminis.app.data.model.normalizeModalities
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -89,52 +90,77 @@ object ModelsDevApi {
 
     // MARK: - Public: Enrich models with models.dev data
 
+    /**
+     * [GH#340] Effective catalog view of a persisted snapshot.
+     *
+     * Reads only the in-memory registry (never parses JSON or hits the network)
+     * so it is safe to call from [com.openminis.app.data.model.ModelEntry.model]
+     * on the UI thread. The known-id overlay still runs when the registry has
+     * not been loaded yet, which is what unfreezes `deepseek-flash` vision on
+     * already-saved text-only entries.
+     */
+    fun liveCapabilities(model: LLMModel): LLMModel {
+        val registry = cachedRegistry
+        val catalogued = if (registry != null) {
+            lookupDevModel(model, registry)?.let { applyDevData(model, it) } ?: model
+        } else {
+            model
+        }
+        return applyKnownCapabilityOverlay(catalogued)
+    }
+
     fun enrichModel(model: LLMModel): LLMModel {
-        val registry = loadRegistry() ?: return model
-
-        // Try mapped provider keys first
-        val keys = providerKeyMap[model.provider] ?: emptyList()
-        for (key in keys) {
-            val prov = registry[key] ?: continue
-            val devModel = prov.models[model.id] ?: continue
-            return applyDevData(model, devModel)
-        }
-
-        // Fallback: scan all providers for the model ID
-        for ((_, prov) in registry) {
-            val devModel = prov.models[model.id] ?: continue
-            return applyDevData(model, devModel)
-        }
-
-        return model
+        loadRegistry()
+        return liveCapabilities(model)
     }
 
     fun enrichModels(models: List<LLMModel>): List<LLMModel> {
-        val registry = loadRegistry() ?: return models
-        return models.map { model ->
-            val keys = providerKeyMap[model.provider] ?: emptyList()
-            for (key in keys) {
-                val prov = registry[key] ?: continue
-                val devModel = prov.models[model.id] ?: continue
-                return@map applyDevData(model, devModel)
-            }
-            // Fallback scan: the same model id is published by many providers
-            // (e.g. `glm-5.2` appears under 19), and a custom relay's provider
-            // name matches none of them, so this scan is what third-party
-            // gateways actually hit.
-            //
-            // [T-reasoning-effort-data-driven] Map iteration order is not a
-            // stable contract, and these entries disagree on capabilities: 17 of
-            // the 19 `glm-5.2` entries declare effort tiers, 2 declare none.
-            // Sort by key for a stable pick and prefer an entry that carries
-            // reasoning metadata, so the richer declaration wins over a sparser
-            // duplicate. Mirrors iOS ModelsDevAPI.enrichModels.
-            val candidates = registry.keys.sorted().mapNotNull { registry[it]?.models?.get(model.id) }
-            val best = candidates.firstOrNull { !it.reasoningEffortValues.isNullOrEmpty() }
-                ?: candidates.firstOrNull()
-            if (best != null) return@map applyDevData(model, best)
-            model
+        loadRegistry()
+        return models.map { liveCapabilities(it) }
+    }
+
+    /**
+     * Own-provider exact id first, then a stable cross-provider scan.
+     * When several publishers share an id, prefer one that declares image
+     * input so a text-only relay cannot freeze vision ([GH#340]); otherwise
+     * prefer an entry that declares effort tiers (existing enrichModels rule).
+     */
+    private fun lookupDevModel(model: LLMModel, registry: Map<String, ProviderEntry>): ModelDevEntry? {
+        val keys = providerKeyMap[model.provider] ?: emptyList()
+        for (key in keys) {
+            registry[key]?.models?.get(model.id)?.let { return it }
         }
+        val candidates = registry.keys.sorted().mapNotNull { registry[it]?.models?.get(model.id) }
+        if (candidates.isEmpty()) return null
+        fun hasImage(entry: ModelDevEntry): Boolean =
+            entry.inputModalities.orEmpty().any { it.contains("image", ignoreCase = true) }
+        return candidates.firstOrNull { hasImage(it) }
+            ?: candidates.firstOrNull { !it.reasoningEffortValues.isNullOrEmpty() }
+            ?: candidates.first()
+    }
+
+    /**
+     * [GH#340] The bundled models.dev snapshot (and many OpenAI-compatible
+     * `/v1/models` responses) still describe `deepseek-flash` as text-only,
+     * even though DeepSeek V4.1 Flash accepts images. Re-enriching a frozen
+     * snapshot against that catalog would leave vision off. This overlay
+     * upgrades the known id; user overrides still win because ModelEntry.model
+     * applies them afterwards.
+     */
+    internal fun applyKnownCapabilityOverlay(model: LLMModel): LLMModel {
+        val tail = model.id.substringAfterLast('/').lowercase()
+        if (tail != "deepseek-flash" && !tail.startsWith("deepseek-flash-")) return model
+        val inputs = (model.inputModalities.normalizeModalities() ?: emptyList()).toMutableList()
+        if ("text" !in inputs) inputs.add("text")
+        if ("image" !in inputs) inputs.add("image")
+        val outputs = model.outputModalities.normalizeModalities() ?: listOf("text")
+        return model.copy(
+            inputModalities = inputs,
+            outputModalities = outputs,
+            contextWindow = maxOf(model.contextWindow ?: 0, 1_000_000),
+            maxOutputTokens = maxOf(model.maxOutputTokens ?: 0, 384_000),
+            supportsReasoning = model.supportsReasoning ?: true,
+        )
     }
 
     // MARK: - Apply models.dev data

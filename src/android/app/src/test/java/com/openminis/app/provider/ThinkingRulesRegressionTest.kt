@@ -482,6 +482,68 @@ class ThinkingRulesRegressionTest {
     }
 
     /**
+     * [GH#356] `deepseek-flash` is the recommended id and must take the same vendor-native
+     * sibling shape as `deepseek-v4*`. The old `*deepseek-v4*` glob missed it.
+     */
+    @Test
+    fun `deepseek flash sends thinking and reasoning_effort as root siblings`() {
+        val body = capture(
+            model = model("deepseek-flash", reasoningEffortValues = listOf("low", "high", "max")),
+            level = ThinkingLevel.HIGH,
+        )
+        val thinking = body.optJSONObject("thinking")
+        assertTrue("`thinking` object must be present when enabled: $body", thinking != null)
+        assertEquals("thinking.type must be 'enabled': $body", "enabled", thinking?.optString("type"))
+        assertEquals("root reasoning_effort must be the clamped tier: $body", "high", body.optString("reasoning_effort"))
+        assertFalse(
+            "reasoning_effort must NOT be nested inside thinking{}: $body",
+            thinking?.has("reasoning_effort") ?: false,
+        )
+    }
+
+    @Test
+    fun `deepseek flash explicitly disables when off`() {
+        val body = capture(
+            model = model("deepseek-flash", reasoningEffortValues = listOf("low", "high", "max")),
+            level = ThinkingLevel.OFF,
+        )
+        assertEquals(
+            "deepseek-flash must emit thinking.type=disabled at OFF: $body",
+            "disabled",
+            body.optJSONObject("thinking")?.optString("type"),
+        )
+    }
+
+    @Test
+    fun `deepseek flash family fallback ceiling is high`() {
+        for (id in listOf("deepseek-flash", "deepseek-v4", "deepseek-v4-pro", "deepseek-flash-0731")) {
+            assertEquals(
+                "$id must cap at HIGH for the no-catalog-data fallback",
+                ThinkingLevel.HIGH,
+                ThinkingLevelCatalog.declaredMaxLevel(id),
+            )
+        }
+    }
+
+    @Test
+    fun `unified gateway outranks deepseek flash vendor rule`() {
+        val body = capture(
+            model = model("deepseek-flash", reasoningEffortValues = listOf("low", "high", "max")),
+            level = ThinkingLevel.HIGH,
+            basePath = server.url("/ark.volces.com/api/v3").toString().trimEnd('/'),
+        )
+        assertTrue(
+            "on a unified gateway the vendor-native thinking{} must NOT be sent: $body",
+            body.optJSONObject("thinking") == null,
+        )
+        assertEquals(
+            "on a unified gateway the tier travels in root reasoning_effort: $body",
+            "high",
+            body.optString("reasoning_effort"),
+        )
+    }
+
+    /**
      * Rule: Ark/Azure re-host third-party families behind a uniform OpenAI surface where
      * thinking is controlled ONLY by `reasoning_effort` — the vendor-native `thinking:{}`
      * shape is not honoured there. Same model id, different endpoint, different shape.

@@ -64,7 +64,11 @@ fun ModelEntryDetailScreen(
     var modelId by remember { mutableStateOf(baseModel.id) }
     var displayName by remember { mutableStateOf(overrides.displayName ?: baseModel.displayName) }
     var maxOutputTokensText by remember { mutableStateOf(overrides.maxOutputTokens?.toString() ?: "") }
-    var contextWindowText by remember { mutableStateOf(overrides.contextWindow?.toString() ?: "") }
+    var contextWindowText by remember {
+        mutableStateOf(
+            (overrides.contextWindow ?: entry.model.contextWindow)?.toString() ?: ""
+        )
+    }
     var thinkingEnabled by remember {
         mutableStateOf(overrides.supportsReasoning ?: baseModel.supportsReasoning ?: false)
     }
@@ -124,8 +128,16 @@ fun ModelEntryDetailScreen(
                         if (imageOutput) add("image")
                         if (audioOutput) add("audio")
                     }
-                    val newOverrides = ModelOverrides(
-                        displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
+                     val newOverrides = ModelOverrides(
+                         // [T-android-custom-model-name-trailing-space] Match iOS
+                         // `T-custom-model-name-trailing-space`: preserve the user's
+                         // spacing verbatim in the display NAME. Only a whitespace-only
+                         // entry counts as empty (falls back to baseModel displayName).
+                         displayName = displayName.trim().let { trimmed ->
+                             if (trimmed.isEmpty()) null
+                             else if (trimmed != baseModel.displayName) displayName
+                             else null
+                         },
                         maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
                         contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
                         // supportsReasoning: persist only when user diverged from base.

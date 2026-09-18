@@ -175,14 +175,15 @@ data class LLMModel(
 
         /**
          * Heuristic display-name formatter for API model ids.
-         * Mirrors iOS `modelDisplayName(from:)`: splits on `/` and `-`, preserves a
-         * small set of uppercase acronyms, applies brand-name capitalization for
-         * well-known vendors (OpenAI, DeepSeek, etc.), and title-cases the rest.
+         * Mirrors iOS `modelDisplayName(from:)`: `/` and `-` become spaces so
+         * `deepseek-v4-flash` → `DeepSeek V4 Flash`. The previous hyphenated
+         * form (`DeepSeek-V4-Flash`) made iOS backups restore as a duplicate
+         * next to the catalog name (GH#366).
          */
         fun modelDisplayName(fromId: String): String {
             if (fromId.isBlank()) return fromId
             val upperTokens = setOf(
-                "gpt", "glm", "oss", "ai", "xl", "vl", "llm", "moe", "api",
+                "gpt", "glm", "oss", "ai", "xl", "xxl", "vl", "llm", "moe", "api",
                 "hd", "sd", "rp", "sft", "rl", "dpo", "gguf", "fp16", "bf16", "int4", "int8",
             )
             val brandRewrites = mapOf(
@@ -197,17 +198,17 @@ data class LLMModel(
                 "qwen" to "Qwen",
                 "yi" to "Yi",
             )
-            return fromId.split('/').joinToString(" / ") { segment ->
-                segment.split('-').joinToString("-") { token ->
+            return fromId.replace('/', ' ').replace('-', ' ')
+                .split(Regex("\\s+"))
+                .filter { it.isNotEmpty() }
+                .joinToString(" ") { token ->
                     val lower = token.lowercase()
                     when {
                         brandRewrites.containsKey(lower) -> brandRewrites[lower]!!
                         upperTokens.contains(lower) -> lower.uppercase()
-                        token.isEmpty() -> token
                         else -> token.replaceFirstChar { it.titlecase() }
                     }
                 }
-            }
         }
     }
 

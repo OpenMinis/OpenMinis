@@ -272,18 +272,28 @@ class MemoryRepository(private val memoryDir: File) {
      * `AIChatViewModel.loadRecentDailyMemoryFragment()` exactly: same header,
      * same intro paragraph, same per-entry labels, same 200-line cap, same
      * "(N more lines, use memory_get to search)" continuation.
+     *
+     * [GH#357] Daily log injection now accepts a `maxAgeDays` cap (default 7).
+     * Entries older than that are skipped, which stabilizes the prefix of the
+     * system prompt across days and avoids repeated re-injection of stale
+     * per-task state that defeats LLM prompt caching. The global memory
+     * fragment is unaffected — it is static content and safe to cache.
      */
-    fun loadRecentDailyMemoryFragment(): String? {
+    fun loadRecentDailyMemoryFragment(maxAgeDays: Int = 7): String? {
         val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
         val now = Date()
         val fragments = mutableListOf<String>()
-        // [XSessionDiag] Names of the logs actually injected, for the diagnostic
-        // line below. Collected alongside `fragments` so the log can name the
-        // source files rather than just a count.
         val injectedFiles = mutableListOf<String>()
         var dayOffset = 0
 
         while (fragments.size < MAX_RECENT_FILES && dayOffset < MAX_LOOKBACK_DAYS) {
+            // [GH#357] Skip entries beyond the configured age cap so that the
+            // injected block prefix stays stable within a week and prompt
+            // caches are not invalidated by a slowly-growing daily log.
+            if (dayOffset >= maxAgeDays) {
+                dayOffset++
+                continue
+            }
             val date = Date(now.time - dayOffset.toLong() * 86400_000L)
             val dateStr = dateFmt.format(date)
             val file = File(memoryDir, "$dateStr.md")

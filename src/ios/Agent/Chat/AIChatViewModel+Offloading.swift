@@ -19,6 +19,19 @@ extension AIChatViewModel {
         String(toolId.suffix(12))
     }
 
+    /// [GH#343] True when `content` is an offload stub — either raw, or wrapped in the
+    /// "[<path> | <n> bytes | <m> lines | …]" header that file_read prepends. A bare
+    /// `hasPrefix("[CONTEXT OFFLOADED]")` misses the prefixed form, so the stub was
+    /// offloaded again in a loop.
+    private nonisolated static func isOffloadReadback(_ content: String) -> Bool {
+        let prefix = "[CONTEXT OFFLOADED]"
+        guard let marker = content.range(of: prefix) else { return false }
+        let markerAt = content.distance(from: content.startIndex, to: marker.lowerBound)
+        if markerAt == 0 { return true }
+        if markerAt > 512 { return false }
+        return content[..<marker.lowerBound].contains(Self.minisOffloadsLinuxDir)
+    }
+
     private func offloadContextContent(_ content: String, toolId: String, toolName: String, ext: String = "txt") -> String {
         let fm = FileManager.default
         let sid = sessionId ?? "unknown"
@@ -373,8 +386,25 @@ extension AIChatViewModel {
         let contextWindow = effectiveContextWindow(for: model)
         let policy = ContextPolicy(contextWindow: contextWindow)
 
+        let hardOffloadChars = 32_768
+        func isForceOffloadContent(_ content: String) -> Bool {
+            content.count >= hardOffloadChars && !Self.isOffloadReadback(content)
+        }
+        let hasBomb = agentHistory.contains { msg in
+            msg.parts.contains { part in
+                switch part {
+                case .toolResult(_, _, let content, _, _, _, _, _):
+                    return isForceOffloadContent(content)
+                case .text(let t):
+                    return isForceOffloadContent(t)
+                default:
+                    return false
+                }
+            }
+        }
+
         // Policy disables offloading for this context window tier
-        if !force && policy.offloadThreshold == 0 {
+        if !force && policy.offloadThreshold == 0 && !hasBomb {
             logger.debug("Context offload: disabled for window \(contextWindow) tokens")
             return
         }
@@ -384,7 +414,7 @@ extension AIChatViewModel {
         var effectiveTokens = lastContextTokens
         if lastContextTokens == 0 {
             effectiveTokens = estimateContextTokens()
-            if !force {
+            if !force && !hasBomb {
                 if effectiveTokens < policy.offloadThreshold {
                     let remaining = contextWindow - effectiveTokens
                     logger.debug("Context offload: skipped (estimate \(effectiveTokens)/\(contextWindow), remaining ~\(remaining) tokens)")
@@ -396,7 +426,7 @@ extension AIChatViewModel {
 
         let pct = Int(Double(effectiveTokens) / Double(contextWindow) * 100)
 
-        if !force {
+        if !force && !hasBomb {
             guard effectiveTokens >= policy.offloadThreshold else {
                 let remaining = contextWindow - effectiveTokens
                 logger.debug("Context offload: below threshold — \(effectiveTokens)/\(contextWindow) (\(pct)%), remaining ~\(remaining) tokens")
@@ -422,10 +452,10 @@ extension AIChatViewModel {
         }
         logger.info("  Agent history: \(self.agentHistory.count) messages")
 
-        // Protect the last 4 messages from offloading
+        // Protect the last 4 messages from offloading, except GH#352 bombs.
         let protectedCount = min(4, agentHistory.count)
-        let candidateRange = 0..<(agentHistory.count - protectedCount)
-        logger.info("  Scanning messages 0..<\(candidateRange.upperBound) (last \(protectedCount) protected)")
+        let candidateUpper = agentHistory.count - protectedCount
+        logger.info("  Scanning messages 0..<\(candidateUpper) (last \(protectedCount) protected; bombs still eligible)")
 
         // Collect offload candidates: (messageIndex, partIndex, tokenCount, byteCount)
         struct OffloadCandidate {
@@ -441,16 +471,18 @@ extension AIChatViewModel {
         var skippedAlreadyOffloaded = 0
         var skippedTooSmall = 0
 
-        for msgIdx in candidateRange {
+        for msgIdx in agentHistory.indices {
+            let inProtectedTail = msgIdx >= candidateUpper
             let msg = agentHistory[msgIdx]
             for (partIdx, part) in msg.parts.enumerated() {
                 switch part {
                 case .toolResult(let id, let name, let content, _, let imgData, _, _, _):
-                    // Skip already-offloaded parts
-                    if content.hasPrefix("[CONTEXT OFFLOADED]") {
+                    // Skip already-offloaded parts, including file_read-prefixed stubs.
+                    if Self.isOffloadReadback(content) {
                         skippedAlreadyOffloaded += 1
                         continue
                     }
+                    if inProtectedTail && !isForceOffloadContent(content) { continue }
                     // Only offload substantial content (>500 chars) or large images (>1KB)
                     let hasLargeContent = content.count > 500
                     let hasLargeImage = (imgData?.count ?? 0) > 1024
@@ -464,6 +496,7 @@ extension AIChatViewModel {
                     candidates.append(OffloadCandidate(msgIdx: msgIdx, partIdx: partIdx, tokens: tokens, bytes: bytes, toolId: id, toolName: name))
 
                 case .toolUse(let id, let name, let input):
+                    if inProtectedTail { continue }
                     // Offload large file_write/file_edit tool inputs
                     guard name == "file_write" || name == "file_edit" else { continue }
                     if let content = input["content"] as? String, content.count > 500 {
@@ -473,6 +506,7 @@ extension AIChatViewModel {
                     }
 
                 case .imageData(let data, _, _):
+                    if inProtectedTail { continue }
                     guard data.count > 1024 else {
                         skippedTooSmall += 1
                         continue
@@ -480,8 +514,10 @@ extension AIChatViewModel {
                     let tokens = BPETokenizer.shared.countPartTokens(part)
                     candidates.append(OffloadCandidate(msgIdx: msgIdx, partIdx: partIdx, tokens: tokens, bytes: data.count, toolId: "img\(msgIdx)_\(partIdx)", toolName: "image"))
 
-                case .text:
-                    continue
+                case .text(let t):
+                    guard isForceOffloadContent(t) else { continue }
+                    let tokens = BPETokenizer.shared.countPartTokens(part)
+                    candidates.append(OffloadCandidate(msgIdx: msgIdx, partIdx: partIdx, tokens: tokens, bytes: t.utf8.count, toolId: "txt\(msgIdx)_\(partIdx)", toolName: "text"))
                 }
             }
         }
@@ -506,9 +542,15 @@ extension AIChatViewModel {
         var freedTokens = 0
 
         for candidate in candidates {
-            guard currentTokens > targetTokens else { break }
-
             let part = agentHistory[candidate.msgIdx].parts[candidate.partIdx]
+            let isBomb: Bool = {
+                switch part {
+                case .toolResult(_, _, let content, _, _, _, _, _): return isForceOffloadContent(content)
+                case .text(let t): return isForceOffloadContent(t)
+                default: return false
+                }
+            }()
+            if !isBomb && currentTokens <= targetTokens { break }
             var linuxPath = ""
 
             switch part {
@@ -543,8 +585,10 @@ extension AIChatViewModel {
                 let stub = "[CONTEXT OFFLOADED] Image (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
                 agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .text(stub)
 
-            case .text:
-                continue
+            case .text(let t):
+                linuxPath = offloadContextContent(t, toolId: candidate.toolId, toolName: "text")
+                let stub = "[CONTEXT OFFLOADED] Content (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
+                agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .text(stub)
             }
 
             currentTokens -= candidate.tokens
@@ -885,4 +929,217 @@ extension AIChatViewModel {
         return "minis://attachments/\(encoded)"
     }
 
+    /// [GH#352] Same hole as Android: a 1MB PNG inlined as text/base64 is ~960k
+    /// tokens, lives in the protected last-4, and char/3.5 never trips offload.
+    func scrubInlineMediaFromHistory() {
+        let attach = activeModelHasNativeVision
+        for mi in agentHistory.indices {
+            var changed = false
+            var newParts: [AgentContentPart] = []
+            newParts.reserveCapacity(agentHistory[mi].parts.count)
+            for part in agentHistory[mi].parts {
+                switch part {
+                case .toolResult(let id, let name, let content, let isError, let imgData, let imgMime, let pageURL, let imgPath):
+                    let rewritten = materializeToolResult(
+                        id: id, name: name, content: content, isError: isError,
+                        imageData: imgData, imageMimeType: imgMime, pageURL: pageURL,
+                        imageLinuxPath: imgPath, attachImage: attach
+                    )
+                    if case .toolResult(_, _, let newContent, _, _, _, _, _) = rewritten, newContent != content {
+                        changed = true
+                    }
+                    newParts.append(rewritten)
+                case .text(let t):
+                    let scrubbed = InlineMediaScrubber.scrub(t)
+                    if !scrubbed.changed {
+                        newParts.append(part)
+                    } else {
+                        changed = true
+                        newParts.append(.text(scrubbed.text))
+                        if attach {
+                            for (idx, img) in scrubbed.images.enumerated() {
+                                let path = offloadContextImage(img.bytes, toolId: "txt\(mi)_\(idx)", mimeType: img.mimeType)
+                                newParts.append(.imageData(data: img.bytes, mimeType: img.mimeType, linuxPath: path.isEmpty ? nil : path))
+                            }
+                        }
+                    }
+                default:
+                    newParts.append(part)
+                }
+            }
+            if changed {
+                agentHistory[mi].parts = newParts
+                logger.info("scrubInlineMedia: history[\(mi)] stripped inline base64")
+            }
+        }
+    }
+
+    private func materializeToolResult(
+        id: String, name: String, content: String, isError: Bool,
+        imageData: Data?, imageMimeType: String?, pageURL: String?,
+        imageLinuxPath: String?, attachImage: Bool
+    ) -> AgentContentPart {
+        if Self.isOffloadReadback(content) {
+            return .toolResult(id: id, name: name, content: content, isError: isError, imageData: imageData, imageMimeType: imageMimeType, pageURL: pageURL, imageLinuxPath: imageLinuxPath)
+        }
+        let scrubbed = InlineMediaScrubber.scrub(content)
+        guard scrubbed.changed else {
+            return .toolResult(id: id, name: name, content: content, isError: isError, imageData: imageData, imageMimeType: imageMimeType, pageURL: pageURL, imageLinuxPath: imageLinuxPath)
+        }
+        var nextImage = imageData
+        var nextMime = imageMimeType
+        var nextPath = imageLinuxPath
+        if let first = scrubbed.images.first {
+            let path = offloadContextImage(first.bytes, toolId: id, mimeType: first.mimeType)
+            if !path.isEmpty { nextPath = path }
+            if attachImage && nextImage == nil {
+                nextImage = first.bytes
+                nextMime = first.mimeType
+            }
+        } else {
+            _ = offloadContextContent(content, toolId: id, toolName: name)
+        }
+        let note: String
+        if let nextPath, !nextPath.isEmpty {
+            note = scrubbed.text + "\n[saved to \(nextPath) — use read_image to view]"
+        } else {
+            note = scrubbed.text
+        }
+        return .toolResult(id: id, name: name, content: note, isError: isError, imageData: nextImage, imageMimeType: nextMime, pageURL: pageURL, imageLinuxPath: nextPath)
+    }
+
+}
+
+// MARK: - [GH#352] Inline base64 / data-URI stripper (Android InlineMediaScrubber parity)
+
+enum InlineMediaScrubber {
+    static let minDataURIChars = 512
+    static let minRawBlobChars = 8_192
+
+    struct ExtractedImage {
+        let bytes: Data
+        let mimeType: String
+    }
+
+    struct Result {
+        let text: String
+        let images: [ExtractedImage]
+        let strippedChars: Int
+        var changed: Bool { strippedChars > 0 }
+    }
+
+    static func scrub(_ text: String) -> Result {
+        let hits = findHits(text)
+        guard !hits.isEmpty else { return Result(text: text, images: [], strippedChars: 0) }
+        var images: [ExtractedImage] = []
+        var out = ""
+        out.reserveCapacity(min(text.count, 8_192))
+        var last = text.startIndex
+        var stripped = 0
+        for hit in hits {
+            out += text[last..<hit.start]
+            let compact = String(hit.payload.filter { !$0.isWhitespace })
+            let decoded = Data(base64Encoded: compact)
+            let sniffed = decoded.flatMap { sniffImageMime($0) }
+            let mime = sniffed ?? hit.mimeHint.flatMap { $0.hasPrefix("image/") ? $0 : nil }
+            if let decoded, let mime {
+                images.append(ExtractedImage(bytes: decoded, mimeType: mime))
+                out += "[inline image extracted | \(mime) | \(decoded.count) bytes]"
+            } else if let decoded {
+                out += "[inline binary extracted | \(decoded.count) bytes]"
+            } else {
+                out += "[inline base64 omitted | \(text.distance(from: hit.start, to: hit.end)) chars]"
+            }
+            stripped += text.distance(from: hit.start, to: hit.end)
+            last = hit.end
+        }
+        out += text[last...]
+        return Result(text: out, images: images, strippedChars: stripped)
+    }
+
+    private struct Hit {
+        let start: String.Index
+        let end: String.Index
+        let payload: String
+        let mimeHint: String?
+    }
+
+    private static func findHits(_ text: String) -> [Hit] {
+        guard text.count >= minDataURIChars else { return [] }
+        var hits: [Hit] = []
+        var search = text.startIndex
+        while search < text.endIndex, let range = text.range(of: "data:", range: search..<text.endIndex) {
+            if let parsed = parseDataURI(text, at: range.lowerBound) {
+                hits.append(parsed)
+                search = parsed.end
+            } else {
+                search = text.index(range.lowerBound, offsetBy: 5, limitedBy: text.endIndex) ?? text.endIndex
+            }
+        }
+        search = text.startIndex
+        while search < text.endIndex, let magic = indexOfMagicPrefix(text, from: search) {
+            if hits.contains(where: { magic >= $0.start && magic < $0.end }) {
+                search = text.index(after: magic)
+                continue
+            }
+            let end = consumeBase64(text, from: magic)
+            if text.distance(from: magic, to: end) >= minRawBlobChars {
+                hits.append(Hit(start: magic, end: end, payload: String(text[magic..<end]), mimeHint: nil))
+                search = end
+            } else {
+                search = text.index(after: magic)
+            }
+        }
+        hits.sort { $0.start < $1.start }
+        return hits
+    }
+
+    private static func parseDataURI(_ text: String, at: String.Index) -> Hit? {
+        guard text[at...].hasPrefix("data:") else { return nil }
+        let afterData = text.index(at, offsetBy: 5)
+        guard let comma = text[afterData...].firstIndex(of: ","),
+              text.distance(from: at, to: comma) <= 128 else { return nil }
+        let header = String(text[afterData..<comma])
+        guard let mark = header.range(of: ";base64") else { return nil }
+        let mime = String(header[..<mark.lowerBound])
+        let payloadStart = text.index(after: comma)
+        let payloadEnd = consumeBase64(text, from: payloadStart)
+        guard text.distance(from: at, to: payloadEnd) >= minDataURIChars else { return nil }
+        return Hit(start: at, end: payloadEnd, payload: String(text[payloadStart..<payloadEnd]), mimeHint: mime.isEmpty ? nil : mime)
+    }
+
+    private static func indexOfMagicPrefix(_ text: String, from: String.Index) -> String.Index? {
+        let keys = ["iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR"]
+        var best: String.Index?
+        for key in keys {
+            if let r = text.range(of: key, range: from..<text.endIndex) {
+                if best == nil || r.lowerBound < best! { best = r.lowerBound }
+            }
+        }
+        return best
+    }
+
+    private static func consumeBase64(_ text: String, from: String.Index) -> String.Index {
+        var i = from
+        while i < text.endIndex {
+            let c = text[i]
+            if c.isLetter || c.isNumber || c == "+" || c == "/" || c == "=" || c == "\n" || c == "\r" {
+                i = text.index(after: i)
+            } else {
+                break
+            }
+        }
+        return i
+    }
+
+    static func sniffImageMime(_ bytes: Data) -> String? {
+        let b = [UInt8](bytes.prefix(12))
+        if b.count >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47
+            && b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A { return "image/png" }
+        if b.count >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return "image/jpeg" }
+        if b.count >= 6 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38 { return "image/gif" }
+        if b.count >= 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
+            && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50 { return "image/webp" }
+        return nil
+    }
 }

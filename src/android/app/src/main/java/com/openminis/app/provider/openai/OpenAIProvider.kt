@@ -181,6 +181,22 @@ class OpenAIProvider private constructor(
         private const val CODEX_CLIENT_VERSION = "0.144.1"
 
         /**
+         * [T-android-tool-call-adjacency / GH#342] Non-empty stand-in for a
+         * role:"tool" reply that is missing from the flattened request, so the
+         * Chat Completions adjacency invariant still holds. See
+         * [sanitizeToolCallAdjacency].
+         */
+        private const val TOOL_REPLY_UNAVAILABLE =
+            "Tool execution result is unavailable (history was truncated or interrupted)."
+
+        /**
+         * [T-android-tool-call-adjacency / GH#342] Stand-in for a role:"tool"
+         * reply whose real content was empty. Some OpenAI-compatible gateways
+         * treat blank tool content as a missing reply and reject the request.
+         */
+        private const val TOOL_REPLY_EMPTY = "{\"error\":\"tool returned empty\"}"
+
+        /**
          * [T-android-stale-conn-retry-hang] Streaming time-to-first-byte
          * budget: response HEADERS must arrive within this window. Does NOT
          * bound the SSE body — a flowing stream stays unlimited.
@@ -502,6 +518,30 @@ class OpenAIProvider private constructor(
      * over-suppress (harmless — the field is optional for everyone else).
      */
     private val isMistral: Boolean = basePath.lowercase().contains("mistral.ai")
+
+    /**
+     * [GH OpenMinis#361] Detect Cerebras' OpenAI-compatible endpoint
+     * (api.cerebras.ai).
+     *
+     * Cerebras' Chat Completions message schema rejects the non-standard
+     * `messages[].assistant.reasoning_content` property outright, with
+     * `400 ... property 'messages.N.assistant.reasoning_content' is unsupported`
+     * (code `wrong_api_format`). The first turn succeeds; every later turn whose
+     * history carries captured reasoning from the previous answer fails.
+     *
+     * Its native reasoning control is a root `reasoning_effort`, so Cerebras
+     * models may legitimately use thinking — only the history ECHO of
+     * reasoning_content must be suppressed, which is why this flag feeds
+     * [forbidReasoningField] rather than routing the provider through
+     * [usesUnifiedReasoningEffort] (that would also rewrite the request-level
+     * thinking shape for every hosted family).
+     *
+     * Case-insensitive and host-matched, same predicate class and caveats as
+     * [isMistral]: a relay proxying Cerebras under another hostname is not
+     * detected, and a URL merely mentioning `cerebras` over-suppresses
+     * (harmless — the field is optional for everyone else).
+     */
+    private val isCerebras: Boolean = basePath.lowercase().contains("cerebras")
 
     /**
      * [OpenMinis#163] Talking to xAI's own API (api.x.ai), as opposed to a relay
@@ -2019,7 +2059,9 @@ class OpenAIProvider private constructor(
         // history while Mistral forbids it, and neither advertises
         // supportsReasoning via /v1/models — opposite requirements on the same
         // generic openAI provider path. Hence a spec-driven vendor flag.
-        val forbidReasoningField = isMistral
+        // [GH OpenMinis#361] Cerebras is the same class of constraint (400
+        // `...reasoning_content is unsupported`), so it shares the suppression.
+        val forbidReasoningField = isMistral || isCerebras
         val includeReasoning =
             (thinkingLevel.isEnabled || modelAlwaysReasons) && modelMayReason && !forbidReasoningField
         val echoReasoning = includeReasoning
@@ -2299,6 +2341,18 @@ class OpenAIProvider private constructor(
         // "Duplicate value for tool_call_id ... in message[N]" whenever
         // any id repeats across the full messages array.
         globallyDedupeToolCallIds(messagesArray)
+        // [T-android-tool-call-adjacency / GH#342] OpenAI Chat Completions
+        // requires every assistant `tool_calls` entry to be IMMEDIATELY
+        // followed by a matching role:"tool" reply. The agent layer pairs
+        // tool_use/tool_result by id but does not enforce ordering, so
+        // cross-provider history (Anthropic/Gemini → OpenAI-compat fallback)
+        // or a queued user prompt spliced mid-turn can leave a tool_calls
+        // block whose replies appear later — DeepSeek/OpenAI-compat reject
+        // the whole request with
+        //   "An assistant message with 'tool_calls' must be followed by tool
+        //    messages responding to each 'tool_call_id'".
+        // Mirrors iOS OpenAIAgentProvider.sanitizeToolCallAdjacency.
+        sanitizeToolCallAdjacency(messagesArray)
         body.put("messages", messagesArray)
 
         // [T-android-model-use-passthrough-mode GH#72] Merge user-supplied extra
@@ -2379,6 +2433,100 @@ class OpenAIProvider private constructor(
         }
         if (renamedCount > 0) {
             android.util.Log.w("OpenAIProvider", "[dedupe-tool-call-id] renamed $renamedCount duplicate tool_call_id(s) across messages — likely DB-loaded history or cross-provider switch")
+        }
+    }
+
+    /**
+     * [T-android-tool-call-adjacency / GH#342] Enforce the Chat Completions
+     * adjacency invariant: every `tool_calls` entry on an assistant message is
+     * immediately followed by its matching `role:"tool"` reply, in order.
+     *
+     * Two-pass repair, a direct port of iOS
+     * `OpenAIAgentProvider.sanitizeToolCallAdjacency`:
+     *  1. Collect every role:"tool" message into `pendingToolReplies` keyed by
+     *     `tool_call_id` (first wins — later duplicates are dropped) and pull
+     *     them out of `body`.
+     *  2. Re-emit `body` in order, splicing each assistant turn's replies right
+     *     after it. A call with no collected reply gets a synthesized error
+     *     placeholder so the pair is complete; any reply no assistant turn
+     *     claims is dropped.
+     *
+     * A present-but-empty tool reply is also filled in, because several
+     * OpenAI-compatible gateways (DeepSeek et al.) treat an empty `content`
+     * on role:"tool" as a missing reply and answer with the same 400 — this is
+     * the "parallel tool call where one returned empty" trigger.
+     */
+    private fun sanitizeToolCallAdjacency(messagesArray: JSONArray) {
+        val pendingToolReplies = HashMap<String, JSONObject>()
+        val body = ArrayList<JSONObject>(messagesArray.length())
+        var sawToolMessage = false
+        var sawAssistantToolCalls = false
+        for (i in 0 until messagesArray.length()) {
+            val msg = messagesArray.optJSONObject(i) ?: continue
+            if (msg.optString("role") == "tool") {
+                sawToolMessage = true
+                val id = msg.optString("tool_call_id", "")
+                if (id.isEmpty()) {
+                    body.add(msg)
+                    continue
+                }
+                if (pendingToolReplies.containsKey(id)) {
+                    android.util.Log.w("OpenAIProvider", "[sanitize] duplicate role:tool entry for id=$id — keeping first")
+                } else {
+                    normalizeEmptyToolContent(msg)
+                    pendingToolReplies[id] = msg
+                }
+            } else {
+                val calls = msg.optJSONArray("tool_calls")
+                if (calls != null && calls.length() > 0) sawAssistantToolCalls = true
+                body.add(msg)
+            }
+        }
+
+        // Hot path: no tool messages and no tool_calls → the invariant already
+        // holds, skip the rebuild entirely.
+        if (!sawToolMessage && !sawAssistantToolCalls) return
+
+        val out = ArrayList<JSONObject>(messagesArray.length())
+        for (msg in body) {
+            out.add(msg)
+            if (msg.optString("role") != "assistant") continue
+            val toolCalls = msg.optJSONArray("tool_calls") ?: continue
+            if (toolCalls.length() == 0) continue
+            for (j in 0 until toolCalls.length()) {
+                val call = toolCalls.optJSONObject(j) ?: continue
+                val id = call.optString("id", "")
+                if (id.isEmpty()) continue
+                val reply = pendingToolReplies.remove(id)
+                if (reply != null) {
+                    out.add(reply)
+                } else {
+                    val toolName = call.optJSONObject("function")?.optString("name", "unknown") ?: "unknown"
+                    android.util.Log.w("OpenAIProvider", "[sanitize] injecting placeholder tool reply for orphan tool_call id=$id name=$toolName")
+                    out.add(JSONObject().apply {
+                        put("role", "tool")
+                        put("tool_call_id", id)
+                        put("content", TOOL_REPLY_UNAVAILABLE)
+                    })
+                }
+            }
+        }
+
+        if (pendingToolReplies.isNotEmpty()) {
+            android.util.Log.w("OpenAIProvider", "[sanitize] dropped ${pendingToolReplies.size} orphan role:tool entr(ies) with no matching assistant.tool_calls: ${pendingToolReplies.keys.sorted().joinToString(",")}")
+        }
+
+        for (i in 0 until messagesArray.length()) messagesArray.remove(0)
+        for (m in out) messagesArray.put(m)
+    }
+
+    /** Replace a blank role:"tool" content with a non-empty placeholder — see
+     * [sanitizeToolCallAdjacency]. Structured (JSONArray) content is left
+     * alone; this provider only ever emits string content here. */
+    private fun normalizeEmptyToolContent(msg: JSONObject) {
+        val content = msg.opt("content")
+        if (content is String && content.isBlank()) {
+            msg.put("content", TOOL_REPLY_EMPTY)
         }
     }
 

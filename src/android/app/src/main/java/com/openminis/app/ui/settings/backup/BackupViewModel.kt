@@ -442,36 +442,38 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
      * leave the user an entry whose files are already half-gone, which is a
      * worse state to reason about than no entry at all. Failures are logged
      * rather than surfaced, since the screen is leaving anyway.
+     *
+     * Suspends until the deletion is done so the caller can pop the back stack
+     * only after the history is updated — otherwise the user is navigated away
+     * while the coroutine runs in the background and never sees the row vanish.
      */
-    fun removeHistoryRecordWithFiles(id: String) {
+    suspend fun removeHistoryRecordWithFiles(id: String) {
         val record = history.records().firstOrNull { it.id == id }
         val name = record?.packageName
         if (record == null || name.isNullOrEmpty()) {
             removeHistoryRecord(id)
             return
         }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-                    store.syncToRclone()
-                    val uploader =
-                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                    for (outcome in record.destinations.filter { it.succeeded }) {
-                        val remote = store.remotes.firstOrNull { it.name == outcome.name }
-                            ?: continue
-                        runCatching { uploader.deletePackage(remote, name) }
-                            .onFailure {
-                                AppLogger.error(
-                                    TAG,
-                                    "[Backup] deleting '$name' from '${outcome.name}' failed: ${it.message}",
-                                )
-                            }
-                    }
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                store.syncToRclone()
+                val uploader =
+                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                for (outcome in record.destinations.filter { it.succeeded }) {
+                    val remote = store.remotes.firstOrNull { it.name == outcome.name }
+                        ?: continue
+                    runCatching { uploader.deletePackage(remote, name) }
+                        .onFailure {
+                            AppLogger.error(
+                                TAG,
+                                "[Backup] deleting '$name' from '${outcome.name}' failed: ${it.message}",
+                            )
+                        }
                 }
             }
-            removeHistoryRecord(id)
         }
+        removeHistoryRecord(id)
     }
 
     fun removeHistoryRecord(id: String) {

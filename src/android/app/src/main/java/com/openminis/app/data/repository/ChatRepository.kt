@@ -779,6 +779,10 @@ class ChatRepository(internal val dao: ChatDao) {
             // 2. per-tool key argument
             when (toolName) {
                 "shell_execute" -> str("command")?.let { return cap(cleanPreview("$ $it")) }
+                "task_output" -> {
+                    val id = str("task_id")
+                    return cap(cleanPreview(if (id != null) "task $id" else "task_output"))
+                }
                 "file_read" -> str("path")?.let { return cap(cleanPreview("Reading $it")) }
                 "file_write" -> str("path")?.let { return cap(cleanPreview("Writing $it")) }
                 "file_edit" -> str("path")?.let { return cap(cleanPreview("Editing $it")) }

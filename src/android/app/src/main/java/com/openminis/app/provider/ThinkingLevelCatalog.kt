@@ -35,6 +35,11 @@ object ThinkingLevelCatalog {
         // "bytedance-seed/…"): rejects xhigh with "Invalid reasoning_effort:
         // xhigh". Ark's ladder tops out at high.
         Rule({ it.contains("seed-") || it.contains("bytedance-seed") }, ThinkingLevel.HIGH),
+        // DeepSeek V4 (recommended `deepseek-flash`, legacy `deepseek-v4*`) declares
+        // low/high/max and does NOT include xhigh. The models.dev entry already tops
+        // out at `max`; this family rule is the safety net for a custom endpoint whose
+        // bare id never gets enriched — otherwise a literal "xhigh" would 400. (GH#356)
+        Rule({ it.contains("deepseek-flash") || it.contains("deepseek-v4") }, ThinkingLevel.HIGH),
         // Anthropic Opus 4.x adaptive-thinking family. The old per-version
         // startsWith("claude-opus-4.7"/"claude-opus-4.6") checks never matched:
         // LLMModel.id separates the minor version with a hyphen

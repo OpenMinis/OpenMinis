@@ -29,6 +29,7 @@ object AgentTools {
         memoryEnabled: Boolean = true,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
+        add(TaskOutputTool.definition())
         add(FileReadTool.definition())
         add(FileWriteTool.definition())
         add(FileEditTool.definition())
@@ -45,18 +46,24 @@ object AgentTools {
     // Aligned with iOS AIChatViewModel.swift:4982-4993
     private fun shellExecuteDefinition(): AgentToolDefinition = AgentToolDefinition(
         name = "shell_execute",
-        description = "Execute a command in an isolated Linux process (Alpine Linux via PRoot). " +
-            "The command runs via /bin/sh -c with stdout and stderr merged. " +
-            "Each invocation spawns a fresh process — there is no shared terminal session. " +
-            "Default timeout is 15 minutes.",
+        description = "Execute a command in the Alpine/PRoot Linux environment. " +
+            "stdout and stderr are merged. Default timeout is 15 minutes. " +
+            "For long jobs (servers, publishers, sleep loops, pm install) set detach=true: " +
+            "the call returns immediately with a task_id; then use task_output to read stdout. " +
+            "Do NOT use nohup/& for background work — PersistentShell is a pipe not a TTY, " +
+            "so `nohup python` looks like it never started (CPython fully buffers stdout when " +
+            "redirected; later output is discarded once the command marker fires). " +
+            "`nohup sh -c 'echo hi'` appears to work because ash prints immediately. " +
+            "When detach=true do not append &; timeout is ignored (the job keeps running).",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Install Python data analysis packages', 'List files in home directory'). Use the same language as the user."),
             "command" to AgentToolParam("string", "The shell command to execute. Supports multi-line commands directly — no special escaping needed. Keep under 1000 chars; for longer scripts, write to a file with file_write first, then run it."),
-            "timeout" to AgentToolParam("integer", "Timeout in seconds (default: 900). Use a larger value for long-running commands like package installs."),
+            "timeout" to AgentToolParam("integer", "Timeout in seconds (default: 900). Ignored when detach=true."),
             "delay" to AgentToolParam("integer", "Delay in seconds before execution begins. The tool blocks the agent flow during this wait WITHOUT occupying the shell, so other concurrent tasks can use it. Use this instead of sleep commands to avoid resource contention."),
+            "detach" to AgentToolParam("boolean", "If true, run in a separate process, return task_id immediately, do not wait on child stdout. Use task_output to poll the log."),
         ),
         required = listOf("tool_title", "command"),
-        propertyOrdering = listOf("tool_title", "command", "timeout", "delay"),
+        propertyOrdering = listOf("tool_title", "command", "timeout", "delay", "detach"),
     )
 
     // Aligned with iOS AIChatViewModel.swift browser_use definition

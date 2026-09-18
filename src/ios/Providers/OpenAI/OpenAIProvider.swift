@@ -178,6 +178,25 @@ final class OpenAIProvider: LLMProvider {
         return base.contains("dashscope")
     }
 
+    /// [GH OpenMinis#361] Whether this provider points at Cerebras (api.cerebras.ai).
+    ///
+    /// Cerebras' Chat Completions message schema rejects the non-standard
+    /// `messages[].assistant.reasoning_content` property with
+    /// `400 ... property 'messages.N.assistant.reasoning_content' is unsupported`
+    /// (code `wrong_api_format`). The first turn succeeds; every later turn whose
+    /// history echoes reasoning captured from the previous answer fails.
+    ///
+    /// Cerebras' native reasoning control is a root `reasoning_effort`, so models
+    /// there may still use thinking — only the history ECHO must be suppressed.
+    /// Same host-match predicate class and caveats as `isMistral`: a relay hiding
+    /// the vendor behind another hostname is not detected, and a URL merely
+    /// mentioning `cerebras` over-suppresses (harmless — the field is optional
+    /// for everyone else).
+    var isCerebras: Bool {
+        guard let base = customBaseURL?.lowercased() else { return false }
+        return base.contains("cerebras")
+    }
+
     /// Whether this provider actually talks to OpenRouter.
     ///
     /// Deliberately NOT `useOpenRouterCompat`: that flag only means "use the

@@ -105,9 +105,13 @@ enum ModelsDevAPI {
     /// Looks up by provider name + model ID. Returns the original model if no match found.
     /// Only fills in fields that are currently nil/unset on the model.
     static func enrichModel(_ model: LLMModel) -> LLMModel {
-        guard let registry = loadRegistry() else { return model }
-        guard let match = resolveDevModel(for: model, in: registry) else { return model }
-        return applyDevData(to: model, from: match.model, authoritative: match.authoritative)
+        let catalogued: LLMModel
+        if let registry = loadRegistry(), let match = resolveDevModel(for: model, in: registry) {
+            catalogued = applyDevData(to: model, from: match.model, authoritative: match.authoritative)
+        } else {
+            catalogued = model
+        }
+        return applyKnownCapabilityOverlay(catalogued)
     }
 
     /// [T-modelsdev-id-normalization] Normalize a model id for catalog lookup.
@@ -285,16 +289,27 @@ enum ModelsDevAPI {
 
     /// Enrich an array of models in bulk.
     static func enrichModels(_ models: [LLMModel]) -> [LLMModel] {
-        guard let registry = loadRegistry() else { return models }
-        return models.map { model in
-            // [T-modelsdev-id-normalization] Same resolver as the single-model
-            // path: own provider → exact id → normalized id, each stage picking
-            // deterministically and preferring an entry that declares effort
-            // tiers. The fallback scan is what third-party gateways actually
-            // hit, since a relay's provider name matches no catalog key.
-            guard let match = resolveDevModel(for: model, in: registry) else { return model }
-            return applyDevData(to: model, from: match.model, authoritative: match.authoritative)
-        }
+        models.map { enrichModel($0) }
+    }
+
+    /// [GH#340] Bundled models.dev and OpenAI-compat `/v1/models` still describe
+    /// `deepseek-flash` as text-only, even though DeepSeek V4.1 Flash accepts
+    /// images. Re-enriching a frozen snapshot against that catalog would leave
+    /// vision off. Overlay the known id; user overrides still win because
+    /// `ModelEntry.model` applies them afterwards.
+    private static func applyKnownCapabilityOverlay(_ model: LLMModel) -> LLMModel {
+        let tail = (model.id.split(separator: "/").last.map(String.init) ?? model.id).lowercased()
+        guard tail == "deepseek-flash" || tail.hasPrefix("deepseek-flash-") else { return model }
+        var result = model
+        var modality = result.modalityOverride ?? []
+        modality.insert(.textInput)
+        modality.insert(.textOutput)
+        modality.insert(.imageInput)
+        result.modalityOverride = modality
+        if (result.contextWindow ?? 0) < 1_000_000 { result.contextWindow = 1_000_000 }
+        if (result.maxOutputTokens ?? 0) < 384_000 { result.maxOutputTokens = 384_000 }
+        if result.supportsReasoning == nil { result.supportsReasoning = true }
+        return result
     }
 
     // MARK: - Apply models.dev data to LLMModel

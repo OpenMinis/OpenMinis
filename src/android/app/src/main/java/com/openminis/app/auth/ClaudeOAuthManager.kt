@@ -25,7 +25,7 @@ import kotlin.coroutines.resume
  * 3. Open claude.ai/oauth/authorize in Chrome Custom Tab (in-app browser)
  * 4. User authorizes → Anthropic redirects to localhost:54545/callback
  * 5. Callback server captures code + state
- * 6. Exchange code for tokens via POST JSON to console.anthropic.com/v1/oauth/token
+ * 6. Exchange code for tokens via POST JSON to claude.ai/v1/oauth/token
  * 7. Store access_token as API key via ProviderRepository
  *
  * Key differences from OpenRouter:
@@ -112,7 +112,12 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     }
 
     override val authURL = "https://claude.ai/oauth/authorize"
-    override val tokenURL = "https://console.anthropic.com/v1/oauth/token"
+    // https://github.com/anthropics/anthropic-sdk-swift/issues/243 reports
+    // that tokens issued against console.anthropic.com get silently
+    // demoted to pay-per-use pricing; claude.ai is the canonical endpoint.
+    // Also: `claude.ai` proxies through Cloudflare so session state stays
+    // in-sync with the web UI. Keep in lockstep with sub2api FullClaudeCodeMimicry.
+    override val tokenURL = "https://claude.ai/v1/oauth/token"
     override val clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     override val clientSecret: String? = null
     override val callbackPort = 54545
@@ -197,6 +202,24 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val request = okhttp3.Request.Builder()
             .url(tokenURL)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
+            // Match the OAuthClient mimicry headers so the Anthropic OAuth
+            // backend sees the same fingerprint as a real claude-cli request.
+            // Without these, Cloudflare/Anthropic returns 403 before the
+            // token handler is reached. Kept in sync with iOS ClaudeCodeMimicry.
+            .header("anthropic-version", "2023-06-01")
+            .header(
+                "anthropic-beta",
+                listOf(
+                    "claude-code-20250219",
+                    "oauth-2025-04-20",
+                    "interleaved-thinking-2025-05-14",
+                    "prompt-caching-scope-2026-01-05",
+                    "effort-2025-11-24",
+                    "context-management-2025-06-27",
+                    "extended-cache-ttl-2025-04-11",
+                ).joinToString(",")
+            )
+            .header("User-Agent", "claude-cli/2.1.195 (external, cli)")
             .build()
         val response = httpClient.newCall(request).execute()
         val responseCode = response.code

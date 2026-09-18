@@ -292,6 +292,71 @@ final class ThinkingRulesRegressionTests: XCTestCase {
                         "on Ark the tier travels in reasoning_effort: \(body)")
     }
 
+    /// Rule: `deepseek-flash` is the id DeepSeek now RECOMMENDS (the legacy
+    /// `deepseek-v4-flash` alias is kept only for compatibility), so it must take the
+    /// same vendor-native sibling shape. The old scope glob was `*deepseek-v4*`, which
+    /// "deepseek-flash" does not match, so the recommended id silently fell through to
+    /// `openai-compatible-default` and lost the whole DeepSeek contract.
+    /// evidence §A · 847822eb · GH#356.
+    func testDeepSeekFlashGetsVendorNativeSiblingShape() {
+        let m = model("deepseek-flash", effortValues: ["low", "high", "max"])
+        let body = inject(model: m, level: .high, offEffort: nil)
+        let thinking = body["thinking"] as? [String: Any]
+        XCTAssertEqual(thinking?["type"] as? String, "enabled",
+                       "recommended deepseek-flash id must get thinking.type=enabled, not the generic default: \(body)")
+        XCTAssertEqual(body["reasoning_effort"] as? String, "high",
+                       "root reasoning_effort must be the clamped tier: \(body)")
+        XCTAssertNil(thinking?["reasoning_effort"],
+                     "reasoning_effort must be a ROOT sibling, never nested under thinking{}: \(body)")
+    }
+
+    /// Rule: the recommended id must also be able to turn thinking OFF explicitly.
+    /// Before the scope fix there was no reliable way to disable it from the UI because
+    /// the generic fallback never emits the DeepSeek `thinking` toggle. evidence §A · GH#356.
+    func testDeepSeekFlashExplicitlyDisablesWhenOff() {
+        let m = model("deepseek-flash", effortValues: ["low", "high", "max"])
+        let body = inject(model: m, level: .off)
+        let thinking = body["thinking"] as? [String: Any]
+        XCTAssertEqual(thinking?["type"] as? String, "disabled",
+                       "deepseek-flash must emit thinking.type=disabled at OFF: \(body)")
+        XCTAssertNil(body["reasoning_effort"],
+                     "with thinking disabled the tier is meaningless: \(body)")
+    }
+
+    /// Rule: xhigh is NOT in DeepSeek's declared [low,high,max] ladder, so the emitted
+    /// tier must be clamped onto the declared set rather than sent literally. evidence §A · GH#356.
+    func testDeepSeekFlashClampsXhighOntoDeclaredSet() {
+        let m = model("deepseek-flash", effortValues: ["low", "high", "max"])
+        let body = inject(model: m, level: .xhigh)
+        let sent = body["reasoning_effort"] as? String
+        XCTAssertTrue(sent == "high" || sent == "max",
+                      "xhigh must be clamped onto [low,high,max], got \(sent ?? "nil"): \(body)")
+    }
+
+    /// Rule: a unified gateway still outranks the DeepSeek vendor rule, so the new
+    /// recommended id behaves like every other family there. evidence §A · ba055121 · GH#356.
+    func testUnifiedGatewayOutranksDeepSeekFlashRule() {
+        let m = model("deepseek-flash", effortValues: ["low", "high", "max"])
+        let body = inject(model: m, level: .high, unifiedReasoningEffort: true)
+        XCTAssertNil(body["thinking"],
+                     "on a unified gateway the vendor-native thinking:{} must NOT be sent: \(body)")
+        XCTAssertEqual(body["reasoning_effort"] as? String, "high",
+                       "on a unified gateway the tier travels in root reasoning_effort: \(body)")
+    }
+
+    /// Rule: the DeepSeek fallback ceiling exists for custom endpoints whose id is never
+    /// enriched from models.dev — without it a stray xhigh would be emitted verbatim.
+    /// A declared set is a stronger statement and still wins via `selectableThinkingLevels`.
+    /// evidence §A · GH#356.
+    func testDeepSeekFamilyFallsBackToHighCeiling() {
+        for id in ["deepseek-flash", "deepseek-v4", "deepseek-v4-pro", "deepseek-flash-0731"] {
+            XCTAssertEqual(
+                ThinkingLevelCatalog.declaredMaxLevel(for: id), .high,
+                "\(id) must cap at .high for the no-catalog-data fallback — the backend does not declare xhigh"
+            )
+        }
+    }
+
     /// Rule: Qwen dual-sends at root AND `extra_body` (DashScope reads extra_body;
     /// vLLM/SGLang accept top-level). evidence §A "[Qwen] 根级 + extra_body 双发" · 25165700.
     func testQwenDualSendsAtRootAndExtraBody() {

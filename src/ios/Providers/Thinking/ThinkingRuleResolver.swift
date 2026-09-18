@@ -326,6 +326,23 @@ enum ThinkingRuleResolver {
             label: "deepseek-v4-official"
         ))
 
+        // [GH#356] `deepseek-flash` is the id DeepSeek now recommends (served by the same
+        // DeepSeek-V4.1-Flash as the legacy `deepseek-v4-flash` alias), and it carries the
+        // same vendor-native contract: `thinking:{type:enabled|disabled}` as a ROOT sibling
+        // of `reasoning_effort`. The `*deepseek-v4*` glob above does NOT cover it — "v4-" is
+        // absent — so before this the recommended id fell through to
+        // `openai-compatible-default`, losing both the sibling shape and the ability to
+        // turn thinking off. Same label prefix so the two DeepSeek rules stay recognisable
+        // as one vendor concept in the trace. A glob rather than a second scope kind: it
+        // also covers sibling aliases (`deepseek-flash-*`).
+        rules.append(ThinkingRule(
+            kind: .officialVendor,
+            scope: .modelPattern("*deepseek-flash*"),
+            wireFormat: .deepSeekSibling,
+            reasoningEcho: ReasoningEchoPolicy(fieldName: "reasoning_content", timing: .afterToolUseOnly),
+            label: "deepseek-flash-official"
+        ))
+
         // Fallback for the providerType: generic root reasoning_effort, subject to the
         // self-reasoning skip in stage B. `.allModels` guarantees stage A always matches.
         rules.append(ThinkingRule(

@@ -916,6 +916,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     var skipCompactCheck = false
     /// When false, memory_write tool calls are skipped (returns "Memory disabled") in this session.
     @Published var memoryEnabled = true
+    /// When false, the daily-log fragment is omitted from the system prompt.
+    /// Global memory (GLOBAL.md) still injects when memoryEnabled is true.
+    /// [GH#357] This lets the user stabilise the prompt prefix for LLM prompt
+    /// caching while keeping memory_get / memory_write fully functional.
+    @Published var memoryDailyInjectionEnabled = true
 
     // MARK: - Session Stats
     /// Accumulated streaming duration (seconds) for output token speed calculation.
@@ -4818,7 +4823,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             if let memoryFragment = Self.loadGlobalMemoryFragment() {
                 userSystemPrompt += "\n\n" + memoryFragment
             }
-            if let dailyFragment = Self.loadRecentDailyMemoryFragment() {
+            // [GH#357] Daily-log injection is gated separately: disabling it
+            // keeps the prompt prefix byte-stable for LLM prompt caching while
+            // memory_get / memory_write and global-memory still work.
+            if memoryDailyInjectionEnabled,
+               let dailyFragment = Self.loadRecentDailyMemoryFragment() {
                 userSystemPrompt += "\n\n" + dailyFragment
             }
         }
@@ -4957,7 +4966,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             let placeholderParts = orphanedToolUses.map { (id, name) in
                 AgentContentPart.toolResult(
                     id: id, name: name,
-                    content: "Tool execution was interrupted by an unexpected error.",
+                    content: "Tool execution was interrupted before a result was returned.",
                     isError: true
                 )
             }
@@ -5037,6 +5046,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     self.committedBlockCount = 0
                 }
             }
+
+            // [GH#352] Strip inline base64 / data-URI images from text first.
+            scrubInlineMediaFromHistory()
 
             // Trim old images: keep only the most recent `kImageContextKeepCount`
             // images in history; older ones become text placeholders so the model
@@ -5283,14 +5295,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 // the gate from the first injection site — fallback to a
                 // new provider must respect the per-session memoryEnabled
                 // toggle the same way the initial system prompt did.
-                if memoryEnabled {
-                    if let memoryFragment = Self.loadGlobalMemoryFragment() {
-                        userSystemPrompt += "\n\n" + memoryFragment
-                    }
-                    if let dailyFragment = Self.loadRecentDailyMemoryFragment() {
-                        userSystemPrompt += "\n\n" + dailyFragment
-                    }
-                }
+                 if memoryEnabled {
+                     if let memoryFragment = Self.loadGlobalMemoryFragment() {
+                         userSystemPrompt += "\n\n" + memoryFragment
+                     }
+                     // [GH#357] Mirror the primary injection gate: daily log is
+                     // suppressed when the user has disabled it, keeping the
+                     // system-prompt prefix stable for prompt caching.
+                     if memoryDailyInjectionEnabled,
+                        let dailyFragment = Self.loadRecentDailyMemoryFragment() {
+                         userSystemPrompt += "\n\n" + dailyFragment
+                     }
+                 }
                 userSystemPrompt += memoryStatusFragment
                 fallbackTrigger += 1
                 if !fallbackReasons.isEmpty {

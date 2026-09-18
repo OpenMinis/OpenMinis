@@ -515,10 +515,47 @@ private final class TokenBoxRegistry: @unchecked Sendable {
 
 // MARK: - URLProtocol that swaps auth headers
 
-/// Intercepts outgoing requests that contain `x-api-key`, removes it,
-/// and injects `Authorization: Bearer <token>` + the OAuth beta header.
-/// Streams response data incrementally so both `data(for:)` and
-/// `bytes(for:)` on URLSession work correctly.
+/// Tokens shared between this URLProtocol and ClaudeOAuthManager so both
+/// the streaming chat path (this file) and the direct token-exchange path
+/// (`postTokenRequest`) speak the same Claude-Code fingerprint. Any drift
+/// between the two sources is what lets Cloudflare / the Anthropic OAuth
+/// backend reject token requests with 403 even though chat requests pass.
+private enum ClaudeCodeMimicry {
+    /// Canonical OAuth access-token endpoint. Keep in sync with
+    /// `ClaudeOAuthManager.accessTokenEndpoint`.
+    static let accessTokenEndpoint = "https://claude.ai/v1/oauth/token"
+    /// The exact beta flags Claude Code sends to the OAuth token endpoint.
+    /// Note: `redact-thinking-2026-02-12` is intentionally absent here
+    /// (same rationale as in startLoading — it blanks thinking text in
+    /// responses). The full set must match sub2api's FullClaudeCodeMimicryBetas.
+    static let betaFlags: [String] = [
+        "claude-code-20250219",
+        "oauth-2025-04-20",
+        "interleaved-thinking-2025-05-14",
+        "prompt-caching-scope-2026-01-05",
+        "effort-2025-11-24",
+        "context-management-2025-06-27",
+        "extended-cache-ttl-2025-04-11",
+    ]
+    /// Builds the `anthropic-beta` header value for a token request, merging
+    /// our required flags with any pre-existing value (e.g. from a caller
+    /// that already set the header). Returns nil when no flags are needed.
+    static func betaHeaderValue(existing: String?) -> String? {
+        guard !betaFlags.isEmpty else { return nil }
+        let newFlags = betaFlags.joined(separator: ",")
+        if let existing, !existing.isEmpty {
+            let existingSet: Set<String> = existing.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            let merged = Set(betaFlags) + existingSet
+            return merged.sorted().joined(separator: ",")
+        }
+        return newFlags
+    }
+    /// User-Agent sent by the real claude-cli. The Anthropic OAuth backend
+    /// pairs this UA with X-Stainless-* to validate the client identity; a
+    /// mismatch causes 403 before the request reaches token-handling logic.
+    static let userAgent = "claude-cli/2.1.195 (external, cli)"
+}
+
 private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
 
     private lazy var innerSession: URLSession = {
@@ -592,25 +629,12 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         // showThinkingSummaries: true). Dropping it = always the
         // showThinkingSummaries:true behavior, so thinking text is visible. The
         // other 7 mimicry betas are unchanged.
-        let mimicryBetas = [
-            "claude-code-20250219",
-            "oauth-2025-04-20",
-            "interleaved-thinking-2025-05-14",
-            "prompt-caching-scope-2026-01-05",
-            "effort-2025-11-24",
-            "context-management-2025-06-27",
-            "extended-cache-ttl-2025-04-11",
-        ]
-        var flags = existing.isEmpty ? [] : existing.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-        for flag in mimicryBetas where !flags.contains(flag) {
-            flags.append(flag)
-        }
-        mutable.setValue(flags.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
+        mutable.setValue(ClaudeCodeMimicry.betaHeaderValue(existing: existing), forHTTPHeaderField: "anthropic-beta")
 
         // Stainless / CLI fingerprint headers. Versions intentionally pinned
         // to claude-cli/2.1.195 — bump in lockstep with sub2api when the real
         // CLI version moves.
-        mutable.setValue("claude-cli/2.1.195 (external, cli)", forHTTPHeaderField: "User-Agent")
+        mutable.setValue(ClaudeCodeMimicry.userAgent, forHTTPHeaderField: "User-Agent")
         mutable.setValue("js", forHTTPHeaderField: "X-Stainless-Lang")
         mutable.setValue("0.106.0", forHTTPHeaderField: "X-Stainless-Package-Version")
         mutable.setValue("Linux", forHTTPHeaderField: "X-Stainless-OS")

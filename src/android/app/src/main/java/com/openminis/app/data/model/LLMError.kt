@@ -13,8 +13,8 @@ sealed class LLMError(message: String, cause: Throwable? = null) : Exception(mes
     /** Pure connectivity failure — the request didn't land at all. */
     val isNetworkError: Boolean get() = this is NetworkError
 
-    /** Worth retrying on the same provider (bounded backoff). */
-    val isRetryable: Boolean get() = this is NetworkError || this is TransientError
+    /** Worth retrying on the same provider. 429 ([RateLimited]) is retried with backoff instead of aborting the turn. */
+    val isRetryable: Boolean get() = this is NetworkError || this is TransientError || this is RateLimited
 
     /** Should immediately fall back to the next model in the group — same model won't help. */
     val isFallbackable: Boolean get() = this is RateLimited || this is InvalidApiKey || this is ProviderError

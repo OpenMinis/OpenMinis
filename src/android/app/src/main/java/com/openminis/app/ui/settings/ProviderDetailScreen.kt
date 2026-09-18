@@ -1,6 +1,8 @@
 package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -37,7 +39,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
@@ -70,6 +71,7 @@ import com.openminis.app.ui.util.bringIntoViewOnFocus
 import com.openminis.app.R
 import kotlinx.coroutines.launch
 import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.components.MinisDropdownMenu
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisSmallButton
 import com.openminis.app.ui.components.MinisSmallOutlinedButton
@@ -158,6 +160,7 @@ fun ProviderDetailScreen(
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                         fieldModifier = Modifier.bringIntoViewOnFocus(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                     )
                     if (labelChanged) {
                         Spacer(modifier = Modifier.width(8.dp))
@@ -645,7 +648,7 @@ fun ProviderDetailScreen(
                     // inside the row's Box so it opens over the entry the user
                     // pressed. Delete stays custom-only, matching the previous
                     // long-press behaviour and the repo's constraint.
-                    DropdownMenu(
+                    MinisDropdownMenu(
                         expanded = menuEntryId == entry.id,
                         onDismissRequest = { menuEntryId = null },
                     ) {

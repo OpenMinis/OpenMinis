@@ -42,9 +42,9 @@ enum LLMError: LocalizedError {
     /// Includes both network errors and transient server-side errors (5xx).
     var isRetryable: Bool {
         switch self {
-        case .networkError, .transientError:
+        case .networkError, .transientError, .rateLimited:
             return true
-        case .invalidAPIKey, .providerError, .decodingError, .rateLimited, .cancelled, .unknown:
+        case .invalidAPIKey, .providerError, .decodingError, .cancelled, .unknown:
             return false
         }
     }

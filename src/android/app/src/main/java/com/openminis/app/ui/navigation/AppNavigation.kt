@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -639,16 +641,19 @@ fun AppNavigation(
                 // the screen.
                 val vm: com.openminis.app.ui.settings.backup.BackupViewModel =
                     androidx.lifecycle.viewmodel.compose.viewModel()
+                val scope = rememberCoroutineScope()
                 com.openminis.app.ui.settings.backup.BackupHistoryDetailScreen(
                     record = record,
                     onBack = { navController.safePopBackStack() },
                     onRemove = {
-                        history.remove(id)
+                        vm.removeHistoryRecord(id)
                         navController.safePopBackStack()
                     },
                     onRemoveWithFiles = {
-                        vm.removeHistoryRecordWithFiles(id)
-                        navController.safePopBackStack()
+                        scope.launch {
+                            vm.removeHistoryRecordWithFiles(id)
+                            navController.safePopBackStack()
+                        }
                     },
                     onOpenDestination = { name ->
                         navController.safeNavigate(

@@ -12,6 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.ui.webview.handleRenderProcessGone
 
 /**
  * Holds a single WebView instance + the page-state observed from it.
@@ -96,6 +97,11 @@ class WebViewHolder(
             setAcceptThirdPartyCookies(wv, true)
         }
         webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: android.webkit.RenderProcessGoneDetail?
+            ): Boolean = view.handleRenderProcessGone(detail, "WebViewHolder")
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: android.webkit.WebResourceRequest,

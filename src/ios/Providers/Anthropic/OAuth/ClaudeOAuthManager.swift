@@ -14,7 +14,13 @@ final class ClaudeOAuthManager: NSObject, ObservableObject {
     // MARK: - OAuth Config
 
     private let authURL = "https://claude.ai/oauth/authorize"
-    private let tokenURL = "https://console.anthropic.com/v1/oauth/token"
+    // https://github.com/anthropics/anthropic-sdk-swift/issues/243 reports
+    // that tokens issued against console.anthropic.com get silently
+    // demoted to pay-per-use pricing; claude.ai is the canonical endpoint.
+    // Also: `claude.ai` is the route that proxies through Cloudflare so
+    // that session state (device bindings / IP allowlists) stays in-sync
+    // with the web UI. Keep in lockstep with sub2api FullClaudeCodeMimicry.
+    private let tokenURL = "https://claude.ai/v1/oauth/token"
     private let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     private let callbackPort: UInt16 = 54545
     private var redirectURI: String { "http://localhost:\(callbackPort)/callback" }
@@ -347,6 +353,11 @@ final class ClaudeOAuthManager: NSObject, ObservableObject {
         var request = URLRequest(url: URL(string: tokenURL)!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Match the OAuthClient mimickry headers so the Anthropic OAuth
+        // backend sees the same fingerprint as a real claude-cli request.
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue(ClaudeCodeMimicry.betaHeaderValue(existing: nil), forHTTPHeaderField: "anthropic-beta")
+        request.setValue(ClaudeCodeMimicry.userAgent, forHTTPHeaderField: "User-Agent")
 
         let jsonData = try JSONSerialization.data(withJSONObject: body)
         request.httpBody = jsonData

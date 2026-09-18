@@ -36,6 +36,7 @@ extension AIChatViewModel {
         SlashCommand(id: "clear", icon: "trash", title: "Clear", subtitle: "Clear all messages in this session"),
         SlashCommand(id: "compact", icon: "arrow.down.right.and.arrow.up.left", title: "Compact", subtitle: "Compress conversation history into summary"),
         SlashCommand(id: "memory", icon: "brain.head.profile", title: "Memory", subtitle: "Toggle memory writes on/off (reads unaffected)"),
+        SlashCommand(id: "memorydaily", icon: "brain.head.profile", title: "Memory Daily", subtitle: "[GH#357] Toggle daily-log injection on/off (global memory unchanged)"),
         SlashCommand(id: "thinking", icon: "lightbulb", title: "Thinking", subtitle: "Toggle deep thinking mode on/off"),
     ]
 
@@ -407,6 +408,10 @@ extension AIChatViewModel {
             }
             let status = memoryEnabled ? "enabled" : "disabled"
             appendSystemInfo("Memory writes \(status). Reads are unaffected.", icon: "brain.head.profile")
+        case "memorydaily":
+            memoryDailyInjectionEnabled.toggle()
+            let dailyStatus = memoryDailyInjectionEnabled ? "enabled" : "disabled"
+            appendSystemInfo("Daily memory injection \(dailyStatus). Global memory and writes unaffected.", icon: "brain.head.profile")
         case "clear":
             clearChatConfirmRequested = true
         default:

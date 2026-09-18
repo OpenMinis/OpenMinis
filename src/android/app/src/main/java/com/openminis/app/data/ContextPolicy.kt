@@ -51,6 +51,22 @@ data class ContextPolicy(
 
     companion object {
         /**
+         * [context-limit-write-through] Resolve the window compaction actually
+         * judges against.
+         *
+         * iOS `effectiveContextWindow` treats a finite group slider value as THE
+         * window (not `min(model, group)`). Android used to min() with the model's
+         * heuristic, so sliding a group to 1M against a DeepSeek id that still
+         * reports 128K left compactThreshold at 108K — the 1M stop appeared to
+         * "not write". Unlimited (`Int.MAX_VALUE`) still means "use the model".
+         */
+        fun effectiveWindow(modelWindow: Int, groupLimit: Int?): Int {
+            val limit = groupLimit ?: return modelWindow
+            if (limit <= 0 || limit >= Int.MAX_VALUE) return modelWindow
+            return limit
+        }
+
+        /**
          * Produce the policy for a given context window size. Four tiers:
          *   - `<32K`   → offload/compact disabled; UI tells user to start a new chat.
          *   - `32K–64K` → offload only; exhaust line = ctx − 10k.

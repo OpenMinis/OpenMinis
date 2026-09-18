@@ -13,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.openminis.app.ui.media.VisualMediaPickers
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -194,13 +195,20 @@ fun AddToHomeSheet(
         }
     }
 
-    val galleryLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
+    val handleGalleryUri: (Uri?) -> Unit = { uri ->
+        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
         if (uri != null) {
             selectedIcon = IconChoice.Gallery(uri)
         }
     }
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = handleGalleryUri,
+    )
+    val galleryLauncherLegacy = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = handleGalleryUri,
+    )
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -305,9 +313,21 @@ fun AddToHomeSheet(
                     IconOption(
                         selected = selectedIcon is IconChoice.Gallery,
                         onClick = {
-                            galleryLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                            )
+                            com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(true)
+                            if (VisualMediaPickers.isReliablePhotoPicker(context)) {
+                                runCatching {
+                                    galleryLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                    )
+                                }.onFailure {
+                                    com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+                                }
+                            } else {
+                                runCatching { galleryLauncherLegacy.launch(VisualMediaPickers.IMAGE_MIME) }
+                                    .onFailure {
+                                        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+                                    }
+                            }
                         },
                         contentDescription = stringResource(R.string.webapp_sheet_icon_pick),
                     ) {

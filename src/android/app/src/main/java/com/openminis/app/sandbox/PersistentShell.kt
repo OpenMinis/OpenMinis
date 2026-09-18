@@ -47,11 +47,33 @@ class PersistentShell(
     @Volatile
     private var stdinWriter: BufferedWriter? = null
 
+    @Volatile
+    private var stdoutStream: java.io.InputStream? = null
+
     private val isStarting = AtomicBoolean(false)
 
     /** Pending command callback — only one command at a time. */
     @Volatile
     private var pendingCallback: CommandCallback? = null
+
+    /**
+     * [OpenMinis-Fix #7] Stdout captured when a command is cancelled or the
+     * shell is killed mid-flight. [takeInterruptedOutput] is destructive.
+     */
+    @Volatile
+    private var interruptedOutput: String = ""
+
+    fun takeInterruptedOutput(): String {
+        val s = interruptedOutput
+        interruptedOutput = ""
+        return s
+    }
+
+    private fun stashInterruptedOutput(text: String) {
+        if (text.isNotEmpty() && text.length >= interruptedOutput.length) {
+            interruptedOutput = text
+        }
+    }
 
     val isAlive: Boolean
         get() = process?.isAlive == true
@@ -113,6 +135,7 @@ class PersistentShell(
                         // Sticky for this shell's lifetime: every later respawn
                         // keeps the workaround instead of rediscovering it.
                         useNoSeccomp = true
+                        PRootKernel.stickyNoSeccomp = true
                         startProcess()
                         if (isAlive) {
                             com.openminis.app.logging.AppLogger.warning(
@@ -256,6 +279,7 @@ class PersistentShell(
         val p = processBuilder.start()
         process = p
         stdinWriter = BufferedWriter(OutputStreamWriter(p.outputStream, StandardCharsets.UTF_8))
+        stdoutStream = p.inputStream
 
         // Start background reader thread
         Thread({
@@ -500,7 +524,9 @@ class PersistentShell(
                     pendingCallback = cb
 
                     cont.invokeOnCancellation {
+                        val cb = pendingCallback
                         pendingCallback = null
+                        stashInterruptedOutput(cb?.output?.toString().orEmpty())
                     }
 
                     try {
@@ -516,8 +542,17 @@ class PersistentShell(
             }
 
             if (result == null) {
-                // Timeout — cancel pending, but don't kill the shell
+                // Timeout (GH#358). The command is still running inside the
+                // persistent shell's /bin/sh, and that shell will not read the
+                // next command off stdin until the current one finishes. Merely
+                // dropping the callback therefore leaves every later command
+                // queued behind a process that may never exit — the session's
+                // shell execution is dead until it is recreated. Tear the shell
+                // down here so the next execute() gets a fresh one;
+                // ExecutionCoordinator re-injects the env-var snapshot on it.
+                Log.w(TAG, "Command timed out after ${timeout}ms — killing shell so the next command gets a clean channel")
                 pendingCallback = null
+                stop()
                 Pair("[Command timed out after ${timeout / 1000}s]", 124)
             } else {
                 result
@@ -564,13 +599,22 @@ class PersistentShell(
 
     /**
      * Stop the persistent shell.
+     *
+     * GH#358: on timeout the reader thread was left blocking forever on
+     * `InputStream.read()` because nothing closed the stdout stream.  Close
+     * both stdin and stdout here so the readLoop unblocks, then kill the
+     * process — the reader will see EOF / broken pipe and fall through to the
+     * "process exited" path which cleans up pending callbacks.
      */
     fun stop() {
+        try { stdoutStream?.close() } catch (_: Exception) {}
+        stdoutStream = null
         try { stdinWriter?.close() } catch (_: Exception) {}
         stdinWriter = null
         process?.destroyForcibly()
         process = null
         pendingCallback?.let {
+            stashInterruptedOutput(it.output.toString())
             it.onComplete?.invoke(it.output.toString(), -1)
         }
         pendingCallback = null

@@ -20,6 +20,15 @@ enum ThinkingLevelCatalog {
         // xhigh" — the field report behind T-fallback-thinking-preclamp. Ark's
         // ladder tops out at high.
         ({ $0.contains("seed-") || $0.contains("bytedance-seed") }, .high),
+        // DeepSeek V4 (recommended `deepseek-flash`, legacy `deepseek-v4*`, and the
+        // `*-pro` members) declares low/high/max and does NOT include xhigh. When the
+        // models.dev entry is present the data-driven ceiling already tops out at `max`;
+        // this family rule is the safety net for a custom OpenAI-compatible DeepSeek
+        // endpoint whose bare id never gets enriched — there `reasoningEffort(for:level:)`
+        // would otherwise emit a literal "xhigh" the vendor does not declare. Same class
+        // of mismatch as MiMo/Agnes, so the same `.high` fallback cap.
+        // (GH#356)
+        ({ $0.contains("deepseek-flash") || $0.contains("deepseek-v4") }, .high),
         // Claude Opus 4.x — model IDs use hyphens (claude-opus-4-8) in the
         // built-in catalog but third-party proxies may return dots
         // (claude-opus-4.8). Normalize to match both.

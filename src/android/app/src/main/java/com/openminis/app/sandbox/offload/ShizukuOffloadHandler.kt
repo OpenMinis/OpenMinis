@@ -50,7 +50,7 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
 
         val group = argv[0]
         val rest = argv.drop(1)
-        val args = OffloadArgs(rest)
+        val args = OffloadArgs(rest, booleanFlags = setOf("detach"))
 
         // `service ping/status` reports state without requiring READY.
         if (group == "service") return handleService(rest, args)
@@ -909,8 +909,31 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
      */
     private fun handleExec(rest: List<String>, args: OffloadArgs): NativeOffloadResult {
         if (rest.isEmpty() || rest.firstOrNull() in listOf("help", "--help", "-h")) return ok(EXEC_HELP)
-        val cmd = rest.joinToString(" ")
+        val cmd = args.positional.joinToString(" ").ifBlank { rest.joinToString(" ") }
         val timeout = args.getInt("timeout-ms")?.toLong() ?: 30_000L
+        if (args.hasFlag("detach")) {
+            // [#7] Don't wait for child stdout. Outer sh prints $! and exits.
+            val wrapped = "($cmd) >/dev/null 2>&1 & echo \$!"
+            val r = ShizukuManager.runProcess(arrayOf("sh", "-c", wrapped), timeoutMs = minOf(timeout, 5_000L))
+            val pid = r.stdout.trim().lines().lastOrNull()?.trim()?.toIntOrNull()
+            val data = JSONObject()
+                .put("command", cmd)
+                .put("detached", true)
+                .put("pid", pid ?: JSONObject.NULL)
+                .put("exitCode", r.exitCode)
+                .put("stdout", r.stdout)
+                .put("stderr", r.stderr)
+            return if (pid != null && r.exitCode == 0) {
+                okEnvelope(data, args)
+            } else {
+                val obj = JSONObject().put("ok", false)
+                    .put("error", JSONObject()
+                        .put("code", "OPERATION_FAILED")
+                        .put("message", failMessage(r, "exec --detach `$cmd`")))
+                    .put("data", data)
+                NativeOffloadResult(r.exitCode, OffloadOutput.formatBody(obj.toString(2), args) + "\n")
+            }
+        }
         val r = ShizukuManager.runProcess(arrayOf("sh", "-c", cmd), timeoutMs = timeout)
         val data = JSONObject()
             .put("command", cmd)
@@ -1092,7 +1115,7 @@ Run `android-shizuku-cli <group> --help` for group-specific flags.
         private const val EXEC_HELP = """exec — raw shell passthrough (T341).
 
 Usage:
-  android-shizuku-cli exec <shell command...>     [--timeout-ms N]
+  android-shizuku-cli exec <shell command...>     [--timeout-ms N] [--detach]
 
 Runs the joined argv via `sh -c` under the Shizuku service uid (same
 privilege as `adb shell`). Returns {ok, data:{command, exitCode, stdout,
@@ -1108,6 +1131,8 @@ Examples:
 Notes:
   - Caller owns quoting/escaping. Metacharacters (; | > backticks) work.
   - Default timeout 30s; override via --timeout-ms.
+  - --detach: run in background, return {pid} immediately (do not wait on
+    child stdout). Use for `pm install`, long sleep, daemons.
   - Prefer curated subcommands when they exist — they emit structured JSON.
 """
 

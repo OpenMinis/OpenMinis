@@ -116,7 +116,7 @@ class CompactToolPairingTest {
                             AgentContentPart.ToolResult(
                                 id = it.id,
                                 name = it.name,
-                                content = "Tool execution was interrupted by an unexpected error.",
+                                content = com.openminis.app.data.ToolInterrupt.UNEXPECTED,
                                 isError = true,
                             )
                         },

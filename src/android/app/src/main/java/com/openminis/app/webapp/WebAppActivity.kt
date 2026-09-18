@@ -65,15 +65,16 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
 import com.openminis.app.MainActivity
-import com.openminis.app.ui.components.MinisButton
 import com.openminis.app.MinisApp
 import com.openminis.app.R
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.webview.handleRenderProcessGone
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * T-pwa-1 (renamed Pwa → WebApp): immersive WebView host for a pinned
@@ -505,6 +506,11 @@ class WebAppActivity : ComponentActivity() {
             .build()
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: android.webkit.RenderProcessGoneDetail?
+            ): Boolean = view.handleRenderProcessGone(detail, "WebAppActivity")
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,

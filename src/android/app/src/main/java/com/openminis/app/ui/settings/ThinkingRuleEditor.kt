@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -27,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
+import com.openminis.app.ui.components.MinisDropdownMenu
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.thinking.ThinkingRule
@@ -156,7 +156,7 @@ fun ThinkingRuleEditorDialog(
                     MinisTextButton(onClick = { formatMenuOpen = true }) {
                         Text(stringResource(choice.titleRes))
                     }
-                    DropdownMenu(expanded = formatMenuOpen, onDismissRequest = { formatMenuOpen = false }) {
+                    MinisDropdownMenu(expanded = formatMenuOpen, onDismissRequest = { formatMenuOpen = false }) {
                         FormatChoice.entries.forEach { c ->
                             DropdownMenuItem(
                                 text = { Text(stringResource(c.titleRes)) },

@@ -13,7 +13,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import com.openminis.app.ui.media.VisualMediaPickers
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
@@ -303,6 +306,31 @@ internal val SparkleColor2 = Color(0xFF99998C) // rgb(0.6, 0.6, 0.55)
 // sides and toast the user when their selection is trimmed. Mirrors iOS
 // PHPickerConfiguration.selectionLimit = 50.
 private const val ATTACHMENT_PICK_LIMIT = 50
+
+
+private fun launchVisualMediaPicker(
+    context: android.content.Context,
+    mediaPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>,
+    filePickerLauncher: ActivityResultLauncher<Array<String>>,
+) {
+    com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(true)
+    val launchDocs = {
+        runCatching { filePickerLauncher.launch(VisualMediaPickers.IMAGE_AND_VIDEO_MIME) }
+            .onFailure {
+                com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+            }
+    }
+    if (!VisualMediaPickers.isReliablePhotoPicker(context)) {
+        launchDocs()
+        return
+    }
+    runCatching {
+        mediaPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+        )
+    }.onFailure { launchDocs() }
+}
+
 
 /**
  * [T-android-send-no-autoscroll-behind-preview] Follow-grace window after a
@@ -918,6 +946,7 @@ fun ChatScreen(
             maxItems = ATTACHMENT_PICK_LIMIT,
         ),
     ) { uris: List<Uri> ->
+        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         val limited = uris.take(ATTACHMENT_PICK_LIMIT)
         for (uri in limited) {
@@ -1061,6 +1090,7 @@ fun ChatScreen(
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
+        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         val limited = uris.take(ATTACHMENT_PICK_LIMIT)
         for (uri in limited) {
@@ -6074,10 +6104,10 @@ fun ChatScreen(
                                     leadingIcon = { Icon(Icons.Default.PhotoLibrary, contentDescription = null) },
                                     onClick = {
                                         showAttachMenu = false
-                                        mediaPickerLauncher.launch(
-                                            androidx.activity.result.PickVisualMediaRequest(
-                                                ActivityResultContracts.PickVisualMedia.ImageAndVideo,
-                                            ),
+                                        launchVisualMediaPicker(
+                                            context = context,
+                                            mediaPickerLauncher = mediaPickerLauncher,
+                                            filePickerLauncher = filePickerLauncher,
                                         )
                                     },
                                 )
@@ -6088,7 +6118,11 @@ fun ChatScreen(
                                         showAttachMenu = false
                                         // OpenMultipleDocuments takes a mime-
                                         // type array; "*/*" stays the wildcard.
-                                        filePickerLauncher.launch(arrayOf("*/*"))
+                                        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(true)
+                                        runCatching { filePickerLauncher.launch(arrayOf("*/*")) }
+                                            .onFailure {
+                                                com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+                                            }
                                     },
                                 )
                             }

@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import com.openminis.app.ui.components.MinisDropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -567,7 +568,7 @@ fun InlineVoiceInputPanel(
                         icon = Icons.Default.Language,
                         contentDescription = stringResource(R.string.voice_panel_language),
                     ) { showLanguageMenu = true }
-                    DropdownMenu(
+                    MinisDropdownMenu(
                         expanded = showLanguageMenu,
                         onDismissRequest = { showLanguageMenu = false },
                     ) {

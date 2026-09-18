@@ -76,10 +76,14 @@ class BackgroundTaskNotifier(
                 val rawTitle = session?.title?.takeIf { it.isNotBlank() }
                     ?: context.getString(R.string.notif_task_completed_default_title)
                 val title = if (isError) "❌ $rawTitle" else rawTitle
-                val body = if (isError) {
-                    context.getString(R.string.notif_task_failed_body)
-                } else {
-                    context.getString(R.string.notif_task_completed_body)
+                val excerpt = com.openminis.app.service.SessionActivityTracker
+                    .lastReplyExcerpt.value
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                val body = when {
+                    isError -> context.getString(R.string.notif_task_failed_body)
+                    excerpt != null -> excerpt
+                    else -> context.getString(R.string.notif_task_completed_body)
                 }
                 postNotification(sessionId, title, body)
             } catch (t: Throwable) {
@@ -119,11 +123,13 @@ class BackgroundTaskNotifier(
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
             .setContentText(body)
+            .setTicker(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
 
         try {

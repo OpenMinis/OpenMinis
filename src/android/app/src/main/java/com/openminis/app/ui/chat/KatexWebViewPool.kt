@@ -13,6 +13,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.ui.unit.IntSize
+import com.openminis.app.ui.webview.handleRenderProcessGone
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -222,6 +223,11 @@ internal object KatexWebViewPool {
                 pending?.complete(Triple(w, h, err))
             }, "AndroidBridge")
             webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(
+                    view: WebView,
+                    detail: android.webkit.RenderProcessGoneDetail?
+                ): Boolean = view.handleRenderProcessGone(detail, "KatexWebViewPool")
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     isReady = true

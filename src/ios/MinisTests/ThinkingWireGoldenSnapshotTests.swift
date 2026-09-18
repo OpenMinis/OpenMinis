@@ -149,6 +149,15 @@ final class ThinkingWireGoldenSnapshotTests: XCTestCase {
                  isOpenRouter: false, unified: false, offEffort: nil, maxTokens: 8192),
             Case(label: "deepseek-v4-unified", model: model("deepseek-v4-pro", effortValues: ["high", "max"]),
                  isOpenRouter: false, unified: true, offEffort: "minimal", maxTokens: 8192),
+            // [GH#356] The id DeepSeek now recommends (`deepseek-flash`) is a DIFFERENT
+            // string from the legacy `deepseek-v4-flash`, so it must resolve to the same
+            // vendor-native sibling shape rather than fall through to the generic default.
+            Case(label: "deepseek-flash", model: model("deepseek-flash", effortValues: ["low", "high", "max"]),
+                 isOpenRouter: false, unified: false, offEffort: nil, maxTokens: 8192),
+            // Cross-product control: the unified-gateway rule still outranks the new
+            // vendor-native pattern, so a DeepSeek id on Ark/Azure keeps the uniform shape.
+            Case(label: "deepseek-flash-unified", model: model("deepseek-flash", effortValues: ["low", "high", "max"]),
+                 isOpenRouter: false, unified: true, offEffort: "minimal", maxTokens: 8192),
             // Declared-capability path (GLM) and the legacy undeclared skip.
             Case(label: "glm-declared", model: model("glm-5.2", effortValues: ["high", "max"]),
                  isOpenRouter: false, unified: false, offEffort: nil, maxTokens: 8192),
@@ -391,6 +400,20 @@ deepseek-v4-unified/high -> {reasoning_effort:"high"}
 deepseek-v4-unified/xhigh -> {reasoning_effort:"high"}
 deepseek-v4-unified/max -> {reasoning_effort:"max"}
 deepseek-v4-unified/ultra -> {reasoning_effort:"max"}
+deepseek-flash/off -> {thinking:{type:"disabled"}}
+deepseek-flash/low -> {reasoning_effort:"low",thinking:{type:"enabled"}}
+deepseek-flash/medium -> {reasoning_effort:"low",thinking:{type:"enabled"}}
+deepseek-flash/high -> {reasoning_effort:"high",thinking:{type:"enabled"}}
+deepseek-flash/xhigh -> {reasoning_effort:"high",thinking:{type:"enabled"}}
+deepseek-flash/max -> {reasoning_effort:"max",thinking:{type:"enabled"}}
+deepseek-flash/ultra -> {reasoning_effort:"max",thinking:{type:"enabled"}}
+deepseek-flash-unified/off -> {}
+deepseek-flash-unified/low -> {reasoning_effort:"low"}
+deepseek-flash-unified/medium -> {reasoning_effort:"low"}
+deepseek-flash-unified/high -> {reasoning_effort:"high"}
+deepseek-flash-unified/xhigh -> {reasoning_effort:"high"}
+deepseek-flash-unified/max -> {reasoning_effort:"max"}
+deepseek-flash-unified/ultra -> {reasoning_effort:"max"}
 glm-declared/off -> {}
 glm-declared/low -> {reasoning_effort:"high"}
 glm-declared/medium -> {reasoning_effort:"high"}

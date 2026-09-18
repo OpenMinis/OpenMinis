@@ -752,6 +752,7 @@ class ToolOverlayController(private val context: Context) {
     private fun toolDisplayLabel(toolName: String?): String = when (toolName) {
         null -> "Minis"
         "shell_execute" -> "Shell"
+        "task_output" -> "Task"
         "file_read" -> "File"
         "file_write" -> "Editor"
         "file_edit" -> "Edit"

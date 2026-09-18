@@ -1,7 +1,9 @@
 package com.openminis.app.ui.settings
 
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import com.openminis.app.ui.media.VisualMediaPickers
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -61,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisButton
+import com.openminis.app.ui.components.MinisDropdownMenu
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.agent.SoulBodyLimitCheck
@@ -129,10 +131,9 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
     // because a full-resolution camera photo is expensive to decode and scan.
     val iconUnreadableMsg = stringResource(R.string.soul_icon_error_unreadable)
     val iconTooLargeMsg = stringResource(R.string.soul_icon_error_too_large)
-    val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    val handleSoulIconUri: (Uri?) -> Unit = handleSoulIconUri@{ uri ->
+        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+        if (uri == null) return@handleSoulIconUri
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 val bmp = runCatching {
@@ -155,6 +156,14 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
             }
         }
     }
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+        onResult = handleSoulIconUri,
+    )
+    val imagePickerLegacy = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = handleSoulIconUri,
+    )
 
     // Initial load + (defensive) ensureExists. The Application-level call
     // already seeded on first run, but loading from a freshly cleared app
@@ -293,11 +302,23 @@ fun SoulSettingsScreen(onBack: () -> Unit) {
                         onChooseEmoji = { showIconMenu = false; showEmojiSheet = true },
                         onChooseImage = {
                             showIconMenu = false
-                            imagePicker.launch(
-                                PickVisualMediaRequest(
-                                    ActivityResultContracts.PickVisualMedia.ImageOnly,
-                                ),
-                            )
+                            com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(true)
+                            if (VisualMediaPickers.isReliablePhotoPicker(context)) {
+                                runCatching {
+                                    imagePicker.launch(
+                                        PickVisualMediaRequest(
+                                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                        ),
+                                    )
+                                }.onFailure {
+                                    com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+                                }
+                            } else {
+                                runCatching { imagePickerLegacy.launch(VisualMediaPickers.IMAGE_MIME) }
+                                    .onFailure {
+                                        com.openminis.app.service.SessionActivityTracker.setCameraSuppressActive(false)
+                                    }
+                            }
                         },
                         onUseDefault = { showIconMenu = false; icon = "" },
                     )
@@ -554,7 +575,7 @@ private fun SoulIconMenu(
     onChooseImage: () -> Unit,
     onUseDefault: () -> Unit,
 ) {
-    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+    MinisDropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
             text = { Text(stringResource(R.string.soul_icon_choose_emoji)) },
             onClick = onChooseEmoji,
