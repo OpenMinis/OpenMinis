@@ -19,7 +19,7 @@
 //       only the non-secret oauth config (endpoints/clientId). A peer device
 //       receives the server and simply shows "Not authorized" until the user
 //       authorizes there.
-//    2. The guest bridge file (<MinisConfig>/mcp-servers/oauth/<name>.json,
+//    2. The guest bridge file (<MinisConfig>/mcp-servers/<name>.oauth.json,
 //       chmod 600) duplicates access/refresh tokens + client credentials so the
 //       daemon can self-refresh while the app is backgrounded. It sits OUTSIDE
 //       servers.json and outside every sync fingerprint — container-local only.
@@ -153,23 +153,23 @@ final class MCPOAuthController: NSObject, ObservableObject {
     // MARK: - CLI-seeded client secret [T-mcp-cli-oauth-flags]
 
     /// `minis-mcp-cli add --oauth-client-secret` can't reach the Keychain from
-    /// the guest, so it seeds <mcp-servers>/oauth/<name>.secret. Import it
+    /// the guest, so it seeds <mcp-servers>/<name>.oauth.secret. Import it
     /// into the Keychain (the authority) and delete the file. Called when the
     /// server's edit form opens and before authorize — the seed is a handoff,
     /// not a storage location. Returns true when a seed was imported.
     @discardableResult
     static func importPendingSecretIfAny(server: String) -> Bool {
-        let url = AIChatViewModel.minisMcpServersPersistentDir
-            .appendingPathComponent("oauth", isDirectory: true)
-            .appendingPathComponent("\(server).secret")
-        guard let data = try? Data(contentsOf: url),
-              let secret = String(data: data, encoding: .utf8)?
-                  .trimmingCharacters(in: .whitespacesAndNewlines),
-              !secret.isEmpty else { return false }
-        setClientSecret(secret, server: server)
-        try? FileManager.default.removeItem(at: url)
-        AppLogger(category: "MCPOAuth").info("[SeedSecret] imported CLI-seeded client secret for '\(server)' into Keychain")
-        return true
+        for url in [pendingSecretFileURL(server: server), legacyPendingSecretFileURL(server: server)] {
+            guard let data = try? Data(contentsOf: url),
+                  let secret = String(data: data, encoding: .utf8)?
+                      .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !secret.isEmpty else { continue }
+            setClientSecret(secret, server: server)
+            try? FileManager.default.removeItem(at: url)
+            AppLogger(category: "MCPOAuth").info("[SeedSecret] imported CLI-seeded client secret for '\(server)' into Keychain")
+            return true
+        }
+        return false
     }
 
     // MARK: - Token state
@@ -205,6 +205,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
     static func signOut(server: String) {
         keychainDelete(account: "\(server)#tokens")
         try? FileManager.default.removeItem(at: bridgeFileURL(server: server))
+        try? FileManager.default.removeItem(at: legacyBridgeFileURL(server: server))
     }
 
     /// Full cleanup on server delete: secret + tokens + bridge file.
@@ -236,12 +237,33 @@ final class MCPOAuthController: NSObject, ObservableObject {
 
     // MARK: - Guest bridge file
 
-    /// Host URL of the guest-visible token bridge for `server`
-    /// (bind-mounted at /var/minis/mcp-servers/oauth/<name>.json).
+    /// Host URL of the guest-visible token bridge for `server`.
+    ///
+    /// Keep this as a flat file under the already-mounted MCP config directory.
+    /// The iSH shared-directory mount used by App Store build 1.13 accepts file
+    /// writes but can reject creation of a nested `oauth/` directory with ENOENT.
+    /// Guest path: /var/minis/mcp-servers/<name>.oauth.json.
     nonisolated static func bridgeFileURL(server: String) -> URL {
+        AIChatViewModel.minisMcpServersPersistentDir
+            .appendingPathComponent("\(server).oauth.json")
+    }
+
+    /// Read/delete compatibility for credentials materialized by pre-fix builds.
+    nonisolated static func legacyBridgeFileURL(server: String) -> URL {
         AIChatViewModel.minisMcpServersPersistentDir
             .appendingPathComponent("oauth", isDirectory: true)
             .appendingPathComponent("\(server).json")
+    }
+
+    nonisolated static func pendingSecretFileURL(server: String) -> URL {
+        AIChatViewModel.minisMcpServersPersistentDir
+            .appendingPathComponent("\(server).oauth.secret")
+    }
+
+    nonisolated static func legacyPendingSecretFileURL(server: String) -> URL {
+        AIChatViewModel.minisMcpServersPersistentDir
+            .appendingPathComponent("oauth", isDirectory: true)
+            .appendingPathComponent("\(server).secret")
     }
 
     /// Write the bridge file the guest transport reads. Includes refresh
@@ -265,8 +287,6 @@ final class MCPOAuthController: NSObject, ObservableObject {
         }
         do {
             let url = bridgeFileURL(server: server)
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: obj)
             try data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

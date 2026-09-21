@@ -82,7 +82,7 @@ def _parse_response(resp):
 # the Keychain-backed credentials). The native side materializes a token
 # bridge file the guest can read:
 #
-#     /var/minis/mcp-servers/oauth/<server>.json
+#     /var/minis/mcp-servers/<server>.oauth.json
 #     { "access_token": "...", "expires_at": 1789999999,
 #       "refresh_token": "...", "token_endpoint": "https://...",
 #       "client_id": "...", "client_secret": "..." }        # secret optional
@@ -95,11 +95,15 @@ def _parse_response(resp):
 # Settings → MCP Integrations. The bridge file lives OUTSIDE servers.json on
 # purpose: servers.json syncs across devices via iCloud, tokens must not.
 
-OAUTH_DIR = "/var/minis/mcp-servers/oauth"
+OAUTH_ROOT = "/var/minis/mcp-servers"
 
 
 def _oauth_token_path(server_name):
-    return os.path.join(OAUTH_DIR, "%s.json" % server_name)
+    return os.path.join(OAUTH_ROOT, "%s.oauth.json" % server_name)
+
+
+def _legacy_oauth_token_path(server_name):
+    return os.path.join(OAUTH_ROOT, "oauth", "%s.json" % server_name)
 
 
 def _authorize_deeplink(server_name):
@@ -113,16 +117,17 @@ def _authorize_deeplink(server_name):
 
 
 def _load_oauth_tokens(server_name):
-    try:
-        with open(_oauth_token_path(server_name), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    for path in (_oauth_token_path(server_name), _legacy_oauth_token_path(server_name)):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def _save_oauth_tokens(server_name, tokens):
     try:
-        os.makedirs(OAUTH_DIR, exist_ok=True)
         tmp = _oauth_token_path(server_name) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(tokens, f)
