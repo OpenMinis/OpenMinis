@@ -458,15 +458,13 @@ def cmd_add(args, pretty):
         server["oauth"] = oauth
         # Client Secret must NOT enter servers.json (it syncs via iCloud).
         # The Keychain is the authority, but the CLI runs in the guest and
-        # cannot write it — so seed a handoff file next to the token bridge
-        # (<oauth-dir>/<name>.secret, chmod 600, never synced). The native
+        # cannot write it — so seed a flat handoff file next to the token bridge
+        # (<config-dir>/<name>.oauth.secret, chmod 600, never synced). The native
         # side imports it into the Keychain and deletes the file the next
         # time the server's edit form is opened (or Authorize is tapped).
         if oauth_client_secret:
             try:
-                secret_dir = os.path.join(config.CONFIG_DIR, "oauth")
-                os.makedirs(secret_dir, exist_ok=True)
-                secret_path = os.path.join(secret_dir, "%s.secret" % name)
+                secret_path = os.path.join(config.CONFIG_DIR, "%s.oauth.secret" % name)
                 with open(secret_path, "w", encoding="utf-8") as f:
                     f.write(oauth_client_secret)
                 try:

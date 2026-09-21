@@ -182,3 +182,22 @@ final class OAuthRefreshRaceAllProvidersTests: XCTestCase {
         XCTAssertFalse(fatal(googleFatal)(reused), "Gemini/Antigravity do not list reuse")
     }
 }
+
+/// [T-mcp-oauth-flat-bridge] The iSH shared MCP directory supports regular
+/// files but not nested directory creation on the App Store 1.13 runtime.
+/// Pin the native side to the same flat-file contract as minis-mcp-cli.
+final class MCPOAuthBridgePathTests: XCTestCase {
+    func testBridgeUsesFlatFileInMcpDirectory() {
+        let url = MCPOAuthController.bridgeFileURL(server: "example")
+
+        XCTAssertEqual(url.lastPathComponent, "example.oauth.json")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "mcp-servers")
+    }
+
+    func testClientSecretHandoffUsesFlatFileInMcpDirectory() {
+        let url = MCPOAuthController.pendingSecretFileURL(server: "example")
+
+        XCTAssertEqual(url.lastPathComponent, "example.oauth.secret")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "mcp-servers")
+    }
+}
