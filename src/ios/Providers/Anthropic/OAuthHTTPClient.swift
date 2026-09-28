@@ -607,10 +607,15 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         }
         mutable.setValue(flags.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
 
-        // Stainless / CLI fingerprint headers. Versions intentionally pinned
-        // to claude-cli/2.1.195 — bump in lockstep with sub2api when the real
-        // CLI version moves.
-        mutable.setValue("claude-cli/2.1.195 (external, cli)", forHTTPHeaderField: "User-Agent")
+        // Stainless / CLI fingerprint headers.
+        //
+        // [T-anthropic-cli-version] The claude-cli version is resolved at
+        // runtime by `ClaudeCLIVersion` instead of being hardcoded: Anthropic
+        // gates new models on a minimum CLI version (Fable 5.1 needed
+        // >= 2.1.251, Opus 5.5 needs >= 2.1.280) and rejects older clients
+        // with `claude_code_version_too_old`. A constant means every model
+        // launch breaks OAuth users until the next app release (#301).
+        mutable.setValue(ClaudeCLIVersion.userAgent(), forHTTPHeaderField: "User-Agent")
         mutable.setValue("js", forHTTPHeaderField: "X-Stainless-Lang")
         mutable.setValue("0.106.0", forHTTPHeaderField: "X-Stainless-Package-Version")
         mutable.setValue("Linux", forHTTPHeaderField: "X-Stainless-OS")

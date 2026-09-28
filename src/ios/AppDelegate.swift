@@ -38,6 +38,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // remains as an idempotent backstop.
         ShortcutNotificationDelegate.shared.register()
 
+        // [T-anthropic-cli-version] Warm the claude-cli fingerprint used on
+        // the Anthropic OAuth path and refresh it in the background when the
+        // persisted value is older than a day. Never blocks: the request
+        // builder reads an in-memory cache, and a failed refresh keeps the
+        // last known version (falling back to the compiled-in floor on a
+        // fresh install).
+        ClaudeCLIVersion.prime()
+
         // Refresh the dynamic shortcut list every cold launch. The
         // items themselves are stable, but their localized titles
         // depend on the current `String(localized:)` resolution which
