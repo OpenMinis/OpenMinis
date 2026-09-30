@@ -22,6 +22,34 @@ package com.openminis.app.speech
  */
 object VoiceTextSanitizer {
 
+    // [T-android-md-regex-hoist] Patterns compiled once instead of per call.
+    // Android's java.util.regex is ICU: every Matcher allocates a native
+    // buffer released only by a Cleaner after GC, and ~8 KB buffers take an
+    // mmap plus a guard page each — two VMA entries. Repeated compilation on
+    // a hot path exhausted vm.max_map_count and aborted the process.
+    // See the MarkdownParser.parse() fix for the measured crash.
+    private val multiSpaceRegex = Regex("[ \\t]{2,}")
+    private val paddedNewlineRegex = Regex(" *\\n *")
+    private val fencedBlockRegex = Regex("```[\\s\\S]*?```")
+    private val inlineCodeRegex = Regex("`([^`]+)`")
+    private val boldStarRegex = Regex("\\*\\*([^*]+)\\*\\*")
+    private val boldUnderscoreRegex = Regex("__([^_]+)__")
+    private val italicStarRegex = Regex("\\*([^*]+)\\*")
+    private val italicUnderscoreRegex = Regex("(?<!\\w)_([^_]+)_(?!\\w)")
+    private val strikeRegex = Regex("~~([^~]+)~~")
+    private val headingRegex = Regex("(?m)^\\s{0,3}#{1,6}\\s*")
+    private val blockquoteRegex = Regex("(?m)^\\s{0,3}>\\s?")
+    private val bulletRegex = Regex("(?m)^\\s{0,3}[-*+]\\s+")
+    private val orderedRegex = Regex("(?m)^\\s{0,3}\\d+[.)]\\s+")
+    private val tableSeparatorRegex = Regex("(?m)^\\s*\\|?[-:| ]+\\|?\\s*$")
+    private val pipeRegex = Regex("\\|")
+    private val thematicBreakRegex = Regex("(?m)^\\s*([-*_])\\1{2,}\\s*$")
+    private val strayUnderscoreRegex = Regex("(?<!\\w)_+|_+(?!\\w)")
+    private val strayMarkerRegex = Regex("[*~`]+")
+    private val markdownLinkRegex = Regex("!?\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)")
+    private val bareUrlRegex = Regex("https?://[^\\s)\\]]+")
+
+
     /**
      * Localized wording for spoken link substitutions.
      *
@@ -57,8 +85,8 @@ object VoiceTextSanitizer {
         }
         // Collapse the whitespace the removals left behind.
         return sb.toString()
-            .replace(Regex("[ \\t]{2,}"), " ")
-            .replace(Regex(" *\\n *"), "\n")
+            .replace(multiSpaceRegex, " ")
+            .replace(paddedNewlineRegex, "\n")
             .trim()
     }
 
@@ -69,27 +97,27 @@ object VoiceTextSanitizer {
     private fun stripMarkdown(text: String, phrases: LinkPhrases): String {
         var s = text
         // Fenced code blocks are dropped entirely — reading code aloud is noise.
-        s = s.replace(Regex("```[\\s\\S]*?```"), " ")
+        s = s.replace(fencedBlockRegex, " ")
         // Inline `code` → keep the inner text.
-        s = s.replace(Regex("`([^`]+)`"), "$1")
+        s = s.replace(inlineCodeRegex, "$1")
         // Links/images before emphasis, so a description containing * is safe.
         s = rewriteMarkdownLinks(s, phrases)
         // Emphasis: **x** __x__ *x* _x_ ~~x~~ → x
-        s = s.replace(Regex("\\*\\*([^*]+)\\*\\*"), "$1")
-        s = s.replace(Regex("__([^_]+)__"), "$1")
-        s = s.replace(Regex("\\*([^*]+)\\*"), "$1")
+        s = s.replace(boldStarRegex, "$1")
+        s = s.replace(boldUnderscoreRegex, "$1")
+        s = s.replace(italicStarRegex, "$1")
         // Intra-word underscores (snake_case) must survive, hence the guards.
-        s = s.replace(Regex("(?<!\\w)_([^_]+)_(?!\\w)"), "$1")
-        s = s.replace(Regex("~~([^~]+)~~"), "$1")
+        s = s.replace(italicUnderscoreRegex, "$1")
+        s = s.replace(strikeRegex, "$1")
         // Line-leading block markers.
-        s = s.replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")        // # headings
-        s = s.replace(Regex("(?m)^\\s{0,3}>\\s?"), "")             // > blockquote
-        s = s.replace(Regex("(?m)^\\s{0,3}[-*+]\\s+"), "")         // - bullet
-        s = s.replace(Regex("(?m)^\\s{0,3}\\d+[.)]\\s+"), "")      // 1. ordered
-        s = s.replace(Regex("(?m)^\\s*\\|?[-:| ]+\\|?\\s*$"), " ") // table separator
-        s = s.replace(Regex("\\|"), " ")                           // table pipes
+        s = s.replace(headingRegex, "")        // # headings
+        s = s.replace(blockquoteRegex, "")             // > blockquote
+        s = s.replace(bulletRegex, "")         // - bullet
+        s = s.replace(orderedRegex, "")      // 1. ordered
+        s = s.replace(tableSeparatorRegex, " ") // table separator
+        s = s.replace(pipeRegex, " ")                           // table pipes
         // Horizontal rules --- *** ___
-        s = s.replace(Regex("(?m)^\\s*([-*_])\\1{2,}\\s*$"), " ")
+        s = s.replace(thematicBreakRegex, " ")
         // Stray leftover emphasis markers.
         //
         // DIVERGENCE FROM iOS (bug fix): iOS strips `[*_~`]{1,}` unconditionally,
@@ -98,8 +126,8 @@ object VoiceTextSanitizer {
         // Underscores are only stripped when NOT sitting between word
         // characters, so snake_case survives; the other markers are never
         // meaningful mid-identifier and stay unconditional.
-        s = s.replace(Regex("(?<!\\w)_+|_+(?!\\w)"), "")
-        s = s.replace(Regex("[*~`]+"), "")
+        s = s.replace(strayUnderscoreRegex, "")
+        s = s.replace(strayMarkerRegex, "")
         return s
     }
 
@@ -108,7 +136,7 @@ object VoiceTextSanitizer {
      * verbatim; an empty one becomes the spoken link phrase.
      */
     private fun rewriteMarkdownLinks(text: String, phrases: LinkPhrases): String {
-        val re = Regex("!?\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)")
+        val re = markdownLinkRegex
         return re.replace(text) { m ->
             val desc = m.groupValues[1].trim()
             if (desc.isEmpty()) linkPhrase(m.groupValues[2], phrases) else desc
@@ -117,7 +145,7 @@ object VoiceTextSanitizer {
 
     /** Replace bare http(s) URLs in plain text with the spoken link phrase. */
     private fun rewriteBareUrls(text: String, phrases: LinkPhrases): String =
-        Regex("https?://[^\\s)\\]]+").replace(text) { m -> linkPhrase(m.value, phrases) }
+        bareUrlRegex.replace(text) { m -> linkPhrase(m.value, phrases) }
 
     private fun linkPhrase(url: String, phrases: LinkPhrases): String {
         val host = hostOf(url)
