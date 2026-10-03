@@ -138,6 +138,29 @@ final class SpeechRecognitionManager: ObservableObject {
             return aName.localizedCaseInsensitiveCompare(bName) == .orderedAscending
         }
         self.availableLocales = sorted
+
+        // [T-voice-interrupt-cannot-restart] Observe interruptions so a call /
+        // Siri that kills the engine is reflected in `state` immediately,
+        // instead of leaving the UI showing "recording" over a dead engine
+        // until the user taps and nothing happens.
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw),
+                  type == .began else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.state == .recording else { return }
+                // Deliberately no auto-resume: this is a live dictation session
+                // whose partial transcript the user is watching. Tearing down
+                // keeps `recognizedText` (tearDown does not clear it) and hands
+                // control back, rather than silently reopening the mic after a
+                // call the user may still be on.
+                self.logger.info("Recording interrupted by the system — stopping")
+                self.tearDown()
+            }
+        }
     }
 
     // MARK: - Language Selection
@@ -210,6 +233,17 @@ final class SpeechRecognitionManager: ObservableObject {
     // MARK: - Recording
 
     func startRecording() throws {
+        // [T-voice-interrupt-cannot-restart] This manager observes no audio
+        // interruptions at all, so a call/Siri that stops the engine leaves
+        // `state == .recording` with nothing running, and every later call
+        // returned silently here — the same "voice input never works again
+        // after an interruption" wedge as the VAD path. Reconcile against the
+        // engine instead of trusting the flag.
+        if state == .recording {
+            guard !audioEngine.isRunning else { return }   // genuinely recording
+            logger.warning("startRecording found a stale recording state (interrupted?) — tearing down first")
+            tearDown()
+        }
         guard state == .idle else { return }
 
         recognitionTask?.cancel()

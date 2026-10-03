@@ -7,7 +7,7 @@ Subcommands:
   refresh <server> [--pretty]                   force-reconnect + re-list tools
   info <server> [--pretty]                      show a server's config
   ping <server> [--pretty]                      reachability check
-  call <server> <tool> [--input '{}'] [k=v ...] invoke a tool
+  call <server> <tool> ['{...}'] [--input '{}'] [k=v ...] invoke a tool
   add --name N (--url U [--header "K: V"] | --command C [--args "..."] [--env "K=V"]) [--note ...]
       [--oauth-client-id ID --oauth-auth-endpoint URL --oauth-token-endpoint URL
        [--oauth-client-secret S] [--oauth-scopes "..."] [--oauth-redirect-uri URI]]
@@ -338,25 +338,57 @@ def cmd_ping(args, pretty):
     _emit(result, pretty)
 
 
+def _looks_like_json(token):
+    """A positional argument that is meant as a JSON payload: an object, or an
+    array passed by mistake (rejected below with a clear message)."""
+    t = token.strip()
+    return (t.startswith("{") and t.endswith("}")) or (t.startswith("[") and t.endswith("]"))
+
+
+def _parse_json_object(raw, label, name, pretty):
+    """Parse `raw` as a JSON object or fail with a PARSE_ERROR naming `label`."""
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        _fail("invalid %s '%s': %s" % (label, raw, exc), "PARSE_ERROR", name, pretty)
+    if not isinstance(parsed, dict):
+        _fail("%s must be a JSON object {...} (got %s)" % (label, type(parsed).__name__),
+              "PARSE_ERROR", name, pretty)
+    return parsed
+
+
 def cmd_call(args, pretty):
+    """[GH#292] Arguments come from, in order: a positional JSON object OR
+    --input (not both), then key=value pairs that extend / override it. The
+    positional form is what users and agents reach for first
+    (`call <server> <tool> '{"query":"x"}'`); it used to fail with
+    "unexpected argument". It is detected before the key=value loop, so a JSON
+    payload containing '=' (a URL query) is never split as a pair."""
     if len(args) < 2:
-        _fail("usage: call <server> <tool> [--input '{}'] [key=value ...]", "PARSE_ERROR", None, pretty)
+        _fail("usage: call <server> <tool> ['{\"k\":\"v\"}'] [--input '{}'] [key=value ...]. "
+              "Run 'minis-mcp-cli --help' for examples.", "PARSE_ERROR", None, pretty)
     name, tool = args[0], args[1]
     rest = args[2:]
     raw_input = _pop_opt(rest, "--input")
+    pos = next((i for i, token in enumerate(rest) if _looks_like_json(token)), None)
+    raw_pos = rest.pop(pos).strip() if pos is not None else None
+    if raw_pos is not None and raw_input:
+        _fail("cannot specify both positional JSON and --input. Use one or the other.",
+              "PARSE_ERROR", name, pretty)
     arguments = {}
     if raw_input:
-        try:
-            arguments = json.loads(raw_input)
-        except ValueError as exc:
-            _fail("invalid --input JSON: %s" % exc, "PARSE_ERROR", name, pretty)
-    # key=value pairs override / extend the --input object.
+        arguments.update(_parse_json_object(raw_input, "--input JSON", name, pretty))
+    if raw_pos is not None:
+        arguments.update(_parse_json_object(raw_pos, "positional JSON argument", name, pretty))
+    # key=value pairs extend / override the JSON object.
     for token in rest:
         if "=" in token:
             k, v = token.split("=", 1)
             arguments[k] = v
         else:
-            _fail("unexpected argument: %s" % token, "PARSE_ERROR", name, pretty)
+            _fail("unexpected argument: %s. Expected a JSON object '{\"...\"}' or a key=value pair. "
+                  "Example: minis-mcp-cli call %s %s '{\"query\":\"test\"}'" % (token, name, tool),
+                  "PARSE_ERROR", name, pretty)
     result = call_daemon({"cmd": "call", "server": name, "tool": tool, "args": arguments}, pretty)
     _emit(result, pretty)
 
@@ -522,9 +554,11 @@ Commands:
   refresh <server>                      Alias for `tools <server> --refresh`.
   info <server>                         Show a server's stored config.
   ping <server>                         Reachability check (initialize handshake).
-  call <server> <tool> [--input '{}'] [key=value ...]
-                                        Invoke a tool. --input is a JSON object;
-                                        trailing key=value pairs extend/override it.
+  call <server> <tool> ['{"k":"v"}'] [--input '{}'] [key=value ...]
+                                        Invoke a tool. Pass the arguments as a JSON
+                                        object (directly or via --input, not both)
+                                        and/or key=value pairs; trailing key=value
+                                        pairs extend/override the JSON object.
   add --name <n> --url <url> [--header "K: V" ...] [--note "..."]
   add --name <n> --command <cmd> [--args "..."] [--env "K=V" ...] [--note "..."]
       [--startup-timeout <seconds>]
@@ -560,7 +594,10 @@ Files:
 Examples:
   minis-mcp-cli list --pretty
   minis-mcp-cli tools notion
-  minis-mcp-cli call notion search --input '{"q":"x"}'
+  minis-mcp-cli call notion search '{"query":"meeting"}'
+  minis-mcp-cli call notion search --input '{"query":"meeting"}'
+  minis-mcp-cli call notion search query="meeting" page_size=10
+  minis-mcp-cli call notion search '{"query":"meeting"}' page_size=20
   minis-mcp-cli add --name notion --url https://mcp.notion.so/mcp --header "Authorization: Bearer $NOTION_TOKEN"
   minis-mcp-cli add --name github --command npx --args "-y @modelcontextprotocol/server-github" --env "GITHUB_TOKEN=$GITHUB_TOKEN"
   minis-mcp-cli add --name atlassian --command uvx --args "mcp-atlassian" --startup-timeout 120

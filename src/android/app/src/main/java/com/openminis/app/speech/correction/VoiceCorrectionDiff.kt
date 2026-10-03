@@ -25,15 +25,53 @@ object VoiceCorrectionDiff {
     data class Pair(val from: String, val to: String)
 
     /**
-     * Levenshtein over the raw text, normalized by the longer side. Compared
-     * against [VoiceCorrectionConfig.MAX_CHAR_CHANGE_RATIO] to reject an LLM
-     * that rewrote the whole utterance instead of fixing it.
+     * Share of the text that changed: Levenshtein over edit units, normalized by
+     * the longer side. Compared against [VoiceCorrectionConfig.MAX_CHAR_CHANGE_RATIO]
+     * to reject an LLM that rewrote the whole utterance instead of fixing it.
+     *
+     * [T-android-voice-mixed-term-restore] Each CJK character or symbol is one
+     * unit, and each run of ASCII letters/digits is ONE unit. Counting raw
+     * characters made restoring an English term look like a rewrite: "看看遗穴"
+     * -> "看看Issue" is one word swapped, but 5 of 7 characters differ (0.71 >
+     * 0.5) and the correction was thrown away. A Latin word is one spoken word,
+     * so it is one unit here (2 of 4 = 0.5, accepted). Port of iOS 8622ea275.
      */
     fun charChangeRatio(from: String, to: String): Double {
-        if (from.isEmpty() && to.isEmpty()) return 0.0
-        val longest = maxOf(from.length, to.length)
-        if (longest == 0) return 0.0
-        return PinyinNormalizer.levenshtein(from, to).toDouble() / longest.toDouble()
+        val a = editUnits(from)
+        val b = editUnits(to)
+        if (a.isEmpty() && b.isEmpty()) return 0.0
+        return levenshtein(a, b).toDouble() / maxOf(a.size, b.size, 1).toDouble()
+    }
+
+    internal fun editUnits(text: String): List<String> {
+        val units = mutableListOf<String>()
+        val word = StringBuilder()
+        for (c in text) {
+            if (c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9') { word.append(c); continue }
+            if (word.isNotEmpty()) { units.add(word.toString()); word.setLength(0) }
+            units.add(c.toString())
+        }
+        if (word.isNotEmpty()) units.add(word.toString())
+        return units
+    }
+
+    private fun levenshtein(a: List<String>, b: List<String>): Int {
+        if (a.isEmpty()) return b.size
+        if (b.isEmpty()) return a.size
+        var previous = IntArray(b.size + 1) { it }
+        var current = IntArray(b.size + 1)
+        for (i in 1..a.size) {
+            current[0] = i
+            for (j in 1..b.size) {
+                current[j] = minOf(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1,
+                )
+            }
+            val t = previous; previous = current; current = t
+        }
+        return previous[b.size]
     }
 
     /**

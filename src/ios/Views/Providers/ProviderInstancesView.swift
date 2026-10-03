@@ -182,24 +182,19 @@ struct ProviderInstancesView: View {
         // [T-provider-group-swipe-actions] Swipe-Edit lands on the very screen
         // the row taps into, so there is one provider editor, not two.
         //
-        // `NavigationLink(isActive:)` rather than `navigationDestination(item:)`:
-        // this target still deploys to iOS 16 and that modifier is 17+ (same
-        // reason BackupSettingsView uses the hidden-link form). Kept in a
-        // `.background` so it adds no visible row.
-        .background {
-            NavigationLink(isActive: Binding(
-                get: { editingInstanceId != nil },
-                set: { if !$0 { editingInstanceId = nil } }
-            )) {
-                // Resolved at push time: if the provider was deleted while this
-                // was open, show nothing rather than a detail screen bound to a
-                // vanished id.
-                if let id = editingInstanceId,
-                   store.instances.contains(where: { $0.id == id }) {
-                    ProviderInstanceDetailView(instanceId: id)
-                }
-            } label: { EmptyView() }
-            .opacity(0)
+        // [T-swipe-edit-white-screen] The destination is built from the id
+        // captured at push time, NOT re-read from `editingInstanceId` inside
+        // the closure. The previous form guarded the destination with
+        // `if let id = editingInstanceId, store.instances.contains(id)`, which
+        // yielded NO content whenever that read came back empty during the
+        // swipe's retraction — pushing an opaque blank screen the user was
+        // stuck on. See SwipeEditDestination.swift for the full mechanism.
+        //
+        // The deleted-while-open case that guard was aiming at is handled by
+        // ProviderInstanceDetailView itself, which is reached the same way by
+        // the row tap and so must already tolerate a vanishing instance.
+        .swipeEditDestination(item: $editingInstanceId) { id in
+            ProviderInstanceDetailView(instanceId: id)
         }
         // Same wording and same call (`store.removeInstance`) as the Delete
         // button inside ProviderInstanceDetailView — the swipe is a shortcut to
@@ -250,6 +245,7 @@ struct ProviderInstancesView: View {
             "ProviderConfig", "ProviderConfigV2",
             "ProviderInstanceV3", "ProviderModelEntryV3",
             "ProviderModelGroupV3", "ProviderThinkingRuleV3",
+            "SubAgentV3",
         ])
         forceSyncToast = AppLocalized("Syncing providers via iCloud")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -318,6 +314,9 @@ final class ProviderRowCredentialCache: @unchecked Sendable {
     struct Display {
         let isConfigured: Bool
         let summary: String
+        /// [T-oauth-keep-credentials] OAuth credential kept but its refresh was
+        /// rejected — row renders red until the user signs in again.
+        var needsReauth = false
     }
 
     /// Backstop only — `authRevision` is the primary invalidation signal.
@@ -369,6 +368,7 @@ private struct InstanceRow: View {
         ProviderRowCredentialCache.shared.value(for: instance.id, revision: store.authRevision) {
             let configured: Bool
             let summary: String
+            var needsReauth = false
             switch instance.credentialType {
             case .apiKey:
                 // Single Keychain read serves BOTH the dot and the masked subtitle;
@@ -386,11 +386,13 @@ private struct InstanceRow: View {
                 }
             case .oauth:
                 let authed = Self.probeOAuthAuthenticated(instance)
-                configured = authed
-                summary = authed ? AppLocalized("Authenticated")
-                                 : AppLocalized("Not authenticated")
+                needsReauth = authed && ProviderKeychainHelper.oauthNeedsReauth(instanceId: instance.id)
+                configured = authed && !needsReauth
+                summary = needsReauth ? AppLocalized("Sign-in expired")
+                    : authed ? AppLocalized("Authenticated")
+                    : AppLocalized("Not authenticated")
             }
-            return .init(isConfigured: configured, summary: summary)
+            return .init(isConfigured: configured, summary: summary, needsReauth: needsReauth)
         }
     }
 
@@ -414,6 +416,7 @@ private struct InstanceRow: View {
         case .openAIResponses: return false // API key only
         case .xAI: return XAIOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .kimiCode: return KimiOAuthManager.shared.isAuthenticated(instanceId: instance.id)
+        case .githubCopilot: return CopilotOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .unsupported: return false // synced from newer build
         }
     }
@@ -426,7 +429,8 @@ private struct InstanceRow: View {
         let _ = store.authRevision  // subscribe to OAuth state changes
         HStack(spacing: 12) {
             Circle()
-                .fill(isConfigured && instance.isEnabled ? Color.green : Color(UIColor.quaternaryLabel))
+                .fill(credentialDisplay.needsReauth ? Color.red
+                      : isConfigured && instance.isEnabled ? Color.green : Color(UIColor.quaternaryLabel))
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -441,7 +445,7 @@ private struct InstanceRow: View {
                         .foregroundStyle(.quaternary)
                     Text(credentialSummary)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(credentialDisplay.needsReauth ? AnyShapeStyle(Color.red) : AnyShapeStyle(.secondary))
                         .lineLimit(1)
                 }
                 if modelCount > 0 {

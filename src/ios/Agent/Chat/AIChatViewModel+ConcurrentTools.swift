@@ -89,6 +89,30 @@ extension AIChatViewModel {
     ) async -> ToolExecOutcome {
         let blockIdx = tu.blockIdx
 
+        // [T-perf-cpu-probe] Every tool call in the app funnels through this
+        // function, so one pair of samples here covers them all — no per-tool
+        // instrumentation to keep in sync as tools are added.
+        //
+        // `defer` rather than a call before each `return`: this function exits
+        // from many places (early cancel checks, per-tool error paths, two
+        // catch blocks), and a missed exit would silently drop the "after"
+        // sample for exactly the failure cases most worth measuring.
+        // [T-perf-cpu-probe] Identify WHICH conversation issued the call, not
+        // just which tool ran. A sub agent reports its job id (and its agent
+        // name, since several agents can share a tool and the name is what a
+        // reader recognises); the main conversation reports its session id.
+        // Without this, a `browser_use` line under concurrent sub agents says
+        // the tool is expensive but not which agent is spending it.
+        let perfJobId: String = {
+            if let cfg = helperConfig {
+                let name = cfg.subAgentName.isEmpty ? "builtin" : cfg.subAgentName
+                return "\(name)#\(cfg.jobId.prefix(8))"
+            }
+            return "main:\(sessionId?.prefix(8) ?? "none")"
+        }()
+        let perfStarted = PerfProbe.toolBefore(tool: tu.name, job: perfJobId)
+        defer { PerfProbe.toolAfter(tool: tu.name, job: perfJobId, started: perfStarted) }
+
         // Graceful cancel pre-check: any task that begins after the user
         // tapped Stop short-circuits with a synthetic cancellation result
         // so history stays paired.
@@ -239,6 +263,73 @@ extension AIChatViewModel {
             )
         }
 
+        // [T-offload-placeholder-write-guard issue #374] Refuse to execute a
+        // WRITE whose payload IS an offload placeholder.
+        //
+        // offloadContextIfNeeded rewrites a historical file_write's `content`
+        // argument in `agentHistory` to the "[CONTEXT OFFLOADED] … saved to: …"
+        // stub, to reclaim the tokens. That rewritten tool_use is what the model
+        // sees from then on — so a call re-issued from it (a retry, a resumed
+        // pending call, the model copying its own earlier call) carries the
+        // ~130-char stub where the real file body used to be. Nothing in the
+        // write path could tell the difference: the args are complete and
+        // well-formed, so the stub landed on disk over the user's real file and
+        // was reported as a plain success with a byte count matching the stub.
+        //
+        // Same reasoning as the truncated-write refusal above: for a write, a
+        // wrong artifact is strictly worse than none, and it silently destroys
+        // data. Refuse, and tell the model what actually happened so it re-reads
+        // the offloaded file instead of repeating the call verbatim. Reads and
+        // shell calls are untouched — a stub as a *path* is just a miss.
+        if tu.name == "file_write" || tu.name == "file_edit" {
+            // Only the fields whose value BECOMES file bytes: file_write's
+            // `content` and file_edit's replacement text. A stub in
+            // file_edit's `old_string` is merely a search that will not match,
+            // which the edit tool already reports clearly.
+            let payloadKeys = tu.name == "file_write" ? ["content"] : ["new_string"]
+            // Both stub formats, current and legacy — see isOffloadedStub.
+            if let offendingKey = payloadKeys.first(where: {
+                guard let v = toolArgs[$0] as? String else { return false }
+                return Self.isOffloadedStub(v)
+            }) {
+                let path = (toolArgs["path"] as? String) ?? (toolArgs["file_path"] as? String) ?? ""
+                AppLogger(category: "ToolPreflight").warning(
+                    "[ToolRepair] REFUSED offload-placeholder write tool=\(tu.name) id=\(tu.id) field=\(offendingKey) path=\(path)"
+                )
+                let uiMessage = AppLocalized("Blocked: content was offloaded from context")
+                let modelMessage = """
+                Error: This call was NOT executed. Its `\(offendingKey)` is an offload \
+                placeholder, not real content — the original text was moved out of context \
+                to free tokens, and only a reference notice survived in the conversation. \
+                Writing it would have replaced the file\(path.isEmpty ? "" : " at \(path)") \
+                with that notice. Nothing was written to disk — the target file is unchanged.
+
+                Use file_read on the path named inside the placeholder to recover the real \
+                content, then re-issue this write with it. Do not resend the placeholder.
+                """
+                if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
+                    messages[msgIdx].blocks[blockIdx].content = uiMessage
+                    messages[msgIdx].blocks[blockIdx].toolStatus = .failed(message: uiMessage)
+                }
+                toolLoopDetector.record(
+                    toolName: tu.name, params: tu.args,
+                    result: nil, errorMessage: modelMessage, toolCallId: tu.id
+                )
+                let refusedSnap = ToolSnapshot(type: .text, text: modelMessage, mediaRef: nil, duration: nil)
+                let item = ToolSnapshotItem(
+                    id: tu.id, toolName: tu.name, snapshot: refusedSnap,
+                    mediaResolver: await ChatStore.shared.mediaFileURLResolver()
+                )
+                return ToolExecOutcome(
+                    toolId: tu.id, toolName: tu.name,
+                    resultPart: .toolResult(id: tu.id, name: tu.name, content: modelMessage, isError: true),
+                    snapshotEntry: (toolName: tu.name, snapshot: refusedSnap),
+                    snapshotItem: item,
+                    cancelled: false
+                )
+            }
+        }
+
         // Preflight: reject empty / missing-required-field tool calls.
         if let preflightError = Self.preflightValidateToolCall(name: tu.name, args: toolArgs, tools: tools) {
             let chunkRing = tu.inputChunkRing
@@ -360,12 +451,34 @@ extension AIChatViewModel {
                 var lineBuffer: [String] = []
                 var lastFlush = Date.distantPast
                 let kMaxStreamingDisplayChars = 30_000
+                // [T-ios-flushlines-mainactor] Hop to the main actor before
+                // touching `messages`.
+                //
+                // This closure runs on ISHShellExecutor's reader queue (it is
+                // `executeCommand`'s per-line callback), but `messages` is
+                // @Published on a @MainActor view model and
+                // `scrollToBottomSignal` drives UI. Writing both from a
+                // background queue is a data race on SwiftUI state — the kind
+                // that corrupts the view graph rather than failing cleanly.
+                //
+                // The buffer drain stays OUTSIDE the hop and remains
+                // synchronous: `lineBuffer` and `lastFlush` belong to the
+                // reader queue, and deferring their reset would let the next
+                // callback re-read lines this flush already claimed. So the
+                // lines are taken here, and only the UI write is hopped.
+                //
+                // The bounds check moves inside the hop with the access it
+                // guards — checking on the reader queue and using the value on
+                // the main actor would be checking a snapshot that could have
+                // changed by the time it is used.
                 let flushLines: () -> Void = { [weak self] in
                     guard let self, !lineBuffer.isEmpty else { return }
                     let joined = lineBuffer.joined(separator: "\n")
                     lineBuffer.removeAll()
                     lastFlush = Date()
-                    if msgIdx < self.messages.count && blockIdx < self.messages[msgIdx].blocks.count {
+                    Task { @MainActor in
+                        guard msgIdx < self.messages.count,
+                              blockIdx < self.messages[msgIdx].blocks.count else { return }
                         let current = self.messages[msgIdx].blocks[blockIdx].content
                         var newContent: String
                         if current.hasSuffix("Executing...") {
@@ -545,10 +658,17 @@ extension AIChatViewModel {
             }
 
         case "browser_use":
+            // [T-tools-master-switch] Not in the schema when off; a request
+            // built before the switch flipped can still name it.
+            guard AgentToolSwitch.isToolEnabled(tu.name) else {
+                toolOutput = Self.toolsDisabledMessage
+                toolSuccess = false
+                break
+            }
             var browserResult: BrowserActionResult
             if let input = BrowserActionInput.parse(from: argsJson) {
                 do {
-                    browserResult = try await browserTabPool.execute(action: input)
+                    browserResult = try await browserTabPool.execute(action: input, owner: sessionId)
                 } catch {
                     browserResult = .error(error.localizedDescription)
                 }
@@ -799,6 +919,54 @@ extension AIChatViewModel {
             toolOutput = memResult.output
             toolSuccess = memResult.success
 
+        case SubAgentDefinition.toolName:
+            // [T-agents-debug-only] A refusal in the sub-agent result dialect,
+            // so HelperBlockInfo renders the block as "Rejected" (a plain
+            // string parsed as the `.starting` phase and left a spinner on a
+            // call that never ran — Release device run).
+            guard AgentToolSwitch.isToolEnabled(tu.name) else {
+                toolOutput = Self.jsonString(["ok": false, "status": "rejected", "reason": "tools_disabled",
+                                              "detail": Self.toolsDisabledMessage])
+                toolSuccess = false
+                // The live block reads `content`, not `toolOutput` — the latter
+                // only reaches the block via applyToolResults on a session
+                // reload. Without this write the row stayed on the "starting"
+                // spinner for the rest of the turn and only read "Rejected"
+                // after reopening the session. Same as HelperRunner.reject.
+                if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
+                    messages[msgIdx].blocks[blockIdx].content = toolOutput
+                }
+                break
+            }
+            // [T-sub-agents-v1] One tool, three actions:
+            // delegating and inspecting/stopping what was delegated are the
+            // same capability, so they share a declaration. `delegate` is the
+            // default because it is what the model calls almost every time.
+            switch (toolArgs["action"] as? String)?.lowercased() ?? "delegate" {
+            case "resume":
+                let r = await executeResumeAgents(args: toolArgs)
+                if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
+                    messages[msgIdx].blocks[blockIdx].content = r.output
+                }
+                toolOutput = r.output
+                toolSuccess = r.success
+            case "status", "steer", "cancel":
+                let statusResult = executeAgentStatus(args: toolArgs)
+                if msgIdx < messages.count, blockIdx < messages[msgIdx].blocks.count {
+                    messages[msgIdx].blocks[blockIdx].content = statusResult.output
+                }
+                toolOutput = statusResult.output
+                toolSuccess = statusResult.success
+            default:
+                // [T-p1-delegate-task] Runs a sub agent in a hidden child
+                // session; wait mode blocks this tool call on it. See
+                // HelperRunner.swift.
+                let helperResult = await executeDelegateTask(args: toolArgs, toolUseId: tu.id,
+                                                             msgIdx: msgIdx, blockIdx: blockIdx)
+                toolOutput = helperResult.output
+                toolSuccess = helperResult.success
+            }
+
         default:
             toolOutput = "Error: Unknown tool '\(tu.name)'"
             toolSuccess = false
@@ -911,15 +1079,57 @@ extension AIChatViewModel {
                     ? .success
                     : .failed(message: toolOutput.components(separatedBy: "\n").first ?? "Failed")
             }
+            // [T-p2-agent-in-toolbar] A delegate_task that returned
+            // `status: running` (background mode) is NOT finished from the
+            // user's point of view: keep the block `.running` so the floating
+            // tool bar / Live Activity treat it as active until the job's
+            // completion hook writes the final state.
+            if tu.name == SubAgentDefinition.toolName,
+               let obj = AIChatViewModel.parseDelegateResult(toolOutput),
+               (obj["status"] as? String) == "running" {
+                blk.toolStatus = .running
+            }
             ctLogger.info("[ToolLifecycle] COMPLETED toolId=\(tu.id.prefix(20)) tool=\(tu.name) sid=\(sessionId?.prefix(8) ?? "nil") appState=\(UIApplication.shared.applicationState == .active ? "fg" : "bg") suspended=\(streamingUIUpdatesSuspended) isProcessing=\(isProcessing) success=\(toolSuccess) duration=\(String(format: "%.1f", toolDuration ?? 0))s")
             scrollToBottomSignal.send()
         }
+
+        // [T-offload-readback-loop] GH#343. Is this result merely the content of
+        // a file the offloader itself wrote, fetched back by `file_read`?
+        //
+        // Decided from the ARGUMENT the call was made with, before the content
+        // is looked at — by the time it is content, it is byte-for-byte the
+        // original payload and indistinguishable from new material, which is
+        // precisely the bug. Only `file_read` performs such a fetch; every
+        // other tool reaching the offload store produces genuinely new output.
+        let isOffloadReadback: Bool = {
+            guard tu.name == "file_read",
+                  let path = toolArgs["path"] as? String else { return false }
+            return AIChatViewModel.isOffloadStorePath(path)
+        }()
 
         // Compose finalOutput with truncation/offload.
         let maxToolResultLength = Self.kMaxToolResultChars
         var finalOutput: String
         if toolOutput.isEmpty {
             finalOutput = "(no output)"
+        } else if toolOutput.count > maxToolResultLength && isOffloadReadback {
+            // [T-offload-readback-loop] PATH B of the loop. This branch used to
+            // write a SECOND copy of content that is already on disk — the
+            // `file_read_<ts>_c-read-*.txt` files observed piling up on device —
+            // and hand the model a stub pointing at the new copy, which it read,
+            // which produced another copy.
+            //
+            // Truncate (the 15K cap still protects the context) but do NOT
+            // write, and point the model back at the file it already has. Note
+            // the tail differs from the normal branch on purpose: telling it to
+            // "use file_read to read the complete output" is exactly the advice
+            // that starts the cycle over.
+            finalOutput = String(toolOutput.prefix(maxToolResultLength))
+                + "\n\n[OUTPUT TRUNCATED] Showing the first \(maxToolResultLength) of \(toolOutput.count) chars. "
+                + "This content is already stored at the path you just read — it has not been copied "
+                + "anywhere new. To see more, call file_read on that same path again with the "
+                + "`offset` from the `next_offset=` value in the header above."
+            ctLogger.info("♻️[OffloadReadback] file_read id:\(tu.id.prefix(8)) returned offload-store content — truncated WITHOUT writing a second copy")
         } else if toolOutput.count > maxToolResultLength {
             let offloadResult = offloadToolOutput(toolOutput, toolName: tu.name, toolId: tu.id)
             let offloadMinisURL = linuxPathToMinisURL(offloadResult.linuxPath)
@@ -991,7 +1201,8 @@ extension AIChatViewModel {
         let resultPart = AgentContentPart.toolResult(
             id: tu.id, name: tu.name, content: finalOutput, isError: !toolSuccess,
             imageData: toolImageData, imageMimeType: toolImageMimeType,
-            pageURL: toolPageURL, imageLinuxPath: toolImageLinuxPath
+            pageURL: toolPageURL, imageLinuxPath: toolImageLinuxPath,
+            isOffloadReadback: isOffloadReadback
         )
 
         #if DEBUG

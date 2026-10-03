@@ -34,24 +34,61 @@ class ScheduledTaskManager(private val context: Context) {
     fun get(taskId: String): ScheduledTask? = store.get(taskId)
 
     fun create(task: ScheduledTask): ScheduledTask {
-        store.upsert(task)
-        if (task.enabled) registerAlarm(task)
-        return task
+        // [T-android-scheduled-triggers] A relative trigger counts from now.
+        val armed = if (task.usesAnchor && task.anchorMs == null) {
+            task.copy(anchorMs = System.currentTimeMillis())
+        } else task
+        store.upsert(armed)
+        if (armed.enabled) registerAlarm(armed)
+        if (armed.triggerKind == ScheduledTriggerKind.ON_COMPLETION) {
+            ScheduledCompletionTriggers.ensureListening(context)
+        }
+        return armed
     }
 
+    /**
+     * Save an edited task.
+     *
+     * [T-android-scheduled-triggers] Bookkeeping the editor does not own is
+     * carried over from the stored row: the editor rebuilds the task from its
+     * fields, so saving used to reset the run history and fire count (and
+     * would reset the new relative triggers' anchor and fire count). Only a
+     * value the incoming task leaves empty is taken from the stored one.
+     */
     fun update(task: ScheduledTask): ScheduledTask {
         cancelAlarm(task.id)
-        store.upsert(task)
-        if (task.enabled) registerAlarm(task)
-        return task
+        val merged = store.get(task.id)?.let { prev -> mergeBookkeeping(task, prev) } ?: task
+        store.upsert(merged)
+        if (merged.enabled) registerAlarm(merged)
+        return merged
     }
 
     fun setEnabled(taskId: String, enabled: Boolean) {
         val t = store.get(taskId) ?: return
-        val updated = t.copy(enabled = enabled)
+        // [T-android-scheduled-triggers] Re-enabling a relative trigger starts
+        // it over: "after 30m" counts from now again, and an interval gets its
+        // full count back. A calendar task simply resumes its schedule.
+        val updated = if (enabled && t.usesAnchor) {
+            t.copy(enabled = true, anchorMs = System.currentTimeMillis(), triggeredCount = 0)
+        } else if (enabled && t.triggerKind == ScheduledTriggerKind.ON_COMPLETION) {
+            t.copy(enabled = true, triggeredCount = 0)
+        } else {
+            t.copy(enabled = enabled)
+        }
         store.upsert(updated)
         if (enabled) registerAlarm(updated) else cancelAlarm(taskId)
     }
+
+    /**
+     * [T-android-scheduled-triggers] Atomically take a one-shot fire that is
+     * not driven by an alarm (on-completion): false when it is disabled or has
+     * already fired, so two callers cannot both fire it.
+     */
+    fun claimOneShotFire(taskId: String): Boolean =
+        store.update(taskId) { t ->
+            if (!t.enabled || (t.triggeredCount ?: 0) >= 1) null
+            else t.copy(enabled = false, triggeredCount = 1)
+        } != null
 
     fun delete(taskId: String) {
         cancelAlarm(taskId)
@@ -70,6 +107,11 @@ class ScheduledTaskManager(private val context: Context) {
             return
         }
         var count = 0
+        // [T-android-scheduled-triggers] On-completion tasks have no alarm; they
+        // need the agent-job completion stream collected in this process.
+        if (tasks.any { it.enabled && it.triggerKind == ScheduledTriggerKind.ON_COMPLETION }) {
+            ScheduledCompletionTriggers.ensureListening(context)
+        }
         for (t in tasks) {
             if (!t.enabled) continue
             registerAlarm(t)
@@ -83,33 +125,78 @@ class ScheduledTaskManager(private val context: Context) {
      * the next occurrence. ONCE tasks get disabled in-place (enabled=false)
      * so they linger in the list with their lastResult* metadata visible.
      */
-    fun rescheduleNext(taskId: String) {
-        val t = store.get(taskId) ?: return
+    /**
+     * Returns whether this alarm delivery is a real fire that should run. Only
+     * a relative trigger can say no — see [relativeAlarmDue].
+     */
+    fun rescheduleNext(taskId: String): Boolean {
+        val t = store.get(taskId) ?: return false
+        // [T-android-scheduled-triggers] Counted HERE, when the alarm fires and
+        // before the run starts, so the next slot never depends on a run that
+        // may take minutes to record itself.
+        //
+        // [T-android-scheduled-fire-claim] Checked and counted in ONE atomic
+        // step. A cold start by this very alarm also runs rescheduleAll, which
+        // can read the row before it is counted, see it overdue and arm it for
+        // "now" again — a second delivery of the same fire. Both deliveries
+        // then counted and ran. Now the second finds the fire already taken
+        // (the anchor has moved on), re-arms the real next slot that the stale
+        // registration replaced (same PendingIntent), and does not run.
+        if (!t.isCalendar) {
+            val now = System.currentTimeMillis()
+            var arm = false
+            val stored = store.update(taskId) { cur ->
+                if (!cur.enabled || !relativeAlarmDue(cur, now)) return@update null
+                val (next, a) = afterAlarmFire(cur, now) ?: return@update null
+                arm = a
+                next
+            }
+            if (stored == null) {
+                val cur = store.get(taskId)
+                AppLogger.info(TAG, "alarm for task=$taskId is not a due fire (enabled=${cur?.enabled}) — not running")
+                if (cur != null && cur.enabled) registerAlarm(cur)
+                return false
+            }
+            if (arm) registerAlarm(stored)
+            return true
+        }
         if (t.repeatMode == ScheduledRepeatMode.ONCE) {
             // Mark fired ONCE task as disabled — keep row so the user can
             // see its last result, re-enable if they want to re-run.
             store.upsert(t.copy(enabled = false))
-            return
+            return true
         }
         registerAlarm(t)
+        return true
     }
 
-    fun markFired(taskId: String, sessionId: String?, resultPreview: String?, ok: Boolean = true) {
-        val t = store.get(taskId) ?: return
-        val now = System.currentTimeMillis()
+    fun markFired(
+        taskId: String,
+        sessionId: String?,
+        resultPreview: String?,
+        ok: Boolean = true,
+        // [T-scheduled-task-detail] When the fire STARTED. The run record used
+        // to be stamped at completion, which could be minutes later and could
+        // not be matched to the fire's envelope (which carries the start).
+        firedAt: Long = System.currentTimeMillis(),
+    ) {
+        val now = firedAt
         // [T-android-scheduled-tasks-run-records] Prepend a run record
         // (newest-first), capped at MAX_RUN_HISTORY. lastResult* are kept in
         // sync for back-compat but are no longer surfaced in the list UI.
         val run = ScheduledRun(firedAt = now, sessionId = sessionId, preview = resultPreview, ok = ok)
-        val history = (listOf(run) + t.runHistory).take(ScheduledTask.MAX_RUN_HISTORY)
-        store.upsert(
+        // [T-android-scheduled-fire-claim] Atomic: a run finishing minutes
+        // after its fire must not write back a count / anchor the next fire
+        // has moved on since.
+        store.update(taskId) { t ->
             t.copy(
                 lastFiredAt = now,
                 lastResultPreview = resultPreview,
                 lastResultSessionId = sessionId,
-                runHistory = history,
-            ),
-        )
+                runHistory = (listOf(run) + t.runHistory).take(ScheduledTask.MAX_RUN_HISTORY),
+                fireCount = t.firesSoFar + 1,
+            )
+        }
     }
 
     private fun registerAlarm(task: ScheduledTask) {
@@ -168,6 +255,64 @@ class ScheduledTaskManager(private val context: Context) {
 
     companion object {
         private const val TAG = "ScheduledTaskManager"
+
+        /**
+         * [T-android-scheduled-fire-claim] Tolerance for an alarm delivered a
+         * moment before its slot (clock granularity). Exact alarms are not
+         * delivered early, so anything well before the slot is a stale
+         * registration, not the fire.
+         */
+        private const val ALARM_EARLY_SLACK_MS = 5_000L
+
+        /**
+         * [T-android-scheduled-fire-claim] Whether an alarm delivered at [now]
+         * is [t]'s pending fire: the slot has come, and a --after has not
+         * fired / an interval has count left. Pure, for tests. Calendar and
+         * on-completion kinds are not decided here.
+         */
+        internal fun relativeAlarmDue(t: ScheduledTask, now: Long): Boolean {
+            val anchor = t.anchorMs ?: t.createdAt
+            return when (t.triggerKind) {
+                ScheduledTriggerKind.AFTER ->
+                    (t.triggeredCount ?: 0) < 1 && anchor + (t.delaySec ?: 0L) * 1000 <= now + ALARM_EARLY_SLACK_MS
+                ScheduledTriggerKind.INTERVAL -> {
+                    val iv = t.intervalSec ?: return false
+                    (t.maxFires == null || (t.triggeredCount ?: 0) < t.maxFires) &&
+                        anchor + iv * 1000 <= now + ALARM_EARLY_SLACK_MS
+                }
+                ScheduledTriggerKind.ON_COMPLETION, ScheduledTriggerKind.CALENDAR -> true
+            }
+        }
+
+        /**
+         * [T-android-scheduled-triggers] What a relative trigger's row becomes
+         * when its alarm fires at [now], and whether to arm the next one. Pure,
+         * for tests; null for kinds the alarm does not drive.
+         *  - AFTER: fired once -> disabled (kept in the list, like ONCE).
+         *  - INTERVAL: counted and re-anchored to [now]; the last of --count
+         *    disables it instead of arming another.
+         */
+        internal fun afterAlarmFire(t: ScheduledTask, now: Long): Pair<ScheduledTask, Boolean>? = when (t.triggerKind) {
+            ScheduledTriggerKind.AFTER -> t.copy(enabled = false, triggeredCount = 1) to false
+            ScheduledTriggerKind.INTERVAL -> {
+                val n = (t.triggeredCount ?: 0) + 1
+                val next = t.copy(triggeredCount = n, anchorMs = now)
+                if (t.maxFires != null && n >= t.maxFires) next.copy(enabled = false) to false else next to true
+            }
+            ScheduledTriggerKind.ON_COMPLETION, ScheduledTriggerKind.CALENDAR -> null
+        }
+
+        /**
+         * [T-android-scheduled-triggers] [incoming] with the bookkeeping it
+         * leaves empty taken from [prev]. Pure, for tests.
+         */
+        internal fun mergeBookkeeping(incoming: ScheduledTask, prev: ScheduledTask): ScheduledTask =
+            incoming.copy(
+                runHistory = incoming.runHistory.ifEmpty { prev.runHistory },
+                fireCount = incoming.fireCount ?: prev.fireCount,
+                anchorMs = incoming.anchorMs ?: prev.anchorMs,
+                triggeredCount = incoming.triggeredCount ?: prev.triggeredCount,
+            )
         const val ACTION_FIRE = "com.openminis.app.scheduled.FIRE"
         const val EXTRA_TASK_ID = "task_id"
         const val CHANNEL_ID = "minis_scheduled_tasks"

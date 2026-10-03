@@ -16,6 +16,7 @@ import com.openminis.app.config.fields.PrefsLongField
 import com.openminis.app.config.fields.PrefsStringField
 import com.openminis.app.config.fields.ReadOnlyField
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.sandbox.ContainerDns
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.model.ThinkingLevel
@@ -50,6 +51,22 @@ internal object ConfigBuiltins {
         registerDefaults(r, providerRepo)
         registerSoul(r, context)
         registerMemory(r, context)
+        registerNetwork(r, context)
+    }
+
+    // -- Network — the sandbox's DNS (Container Network) --
+    //
+    // [T-container-network-dns] (OpenMinis#396) Same prefs + keys as the
+    // Settings > Rootfs > Container Network section (ContainerDns), so the
+    // agent and the UI read and write one source of truth. Both writers
+    // re-apply the sandbox resolv.conf at once: waiting for the next network
+    // change or reboot would leave a "set but not in effect" gap.
+
+    private fun registerNetwork(r: ConfigRegistry, context: Context) {
+        val fields = com.openminis.app.config.fields.ContainerDnsFields.build(ContainerDns.PrefsStore(context)) {
+            runCatching { com.openminis.app.sandbox.RootfsManager.getInstance(context).refreshDns() }
+        }
+        fields.forEach { r.register(it) }
     }
 
     // -- Memory — global default toggle for the persistent memory feature --
@@ -131,7 +148,7 @@ internal object ConfigBuiltins {
                         val session = runBlocking { chatRepo.dao.getSession(sid) }
                         val raw = session?.thinkingOverride
                         val token = if (raw == null) "off" else thinkingLevelToToken(
-                            runCatching { ThinkingLevel.valueOf(raw) }.getOrDefault(ThinkingLevel.OFF)
+                            ThinkingLevel.parseOrNull(raw) ?: ThinkingLevel.OFF
                         )
                         ConfigValue.Str(token)
                     }

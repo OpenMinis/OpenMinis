@@ -281,14 +281,26 @@ extension KaTeXRenderer: WKScriptMessageHandler {
                 // In dark mode, invert the black-on-white snapshot to white-on-black,
                 // then make the background transparent.
                 // Debug: sample some pixels from the raw snapshot
-                if let dp = cg.dataProvider, let data = dp.data, let ptr = CFDataGetBytePtr(data) {
+                // [T-ios-katex-pixel-probe-oob] Diagnostic pixel sampling.
+                //
+                // This guarded on `off + bpp <= length` but then read
+                // ptr[off+1...off+3] unconditionally, so any image with
+                // bitsPerPixel < 32 (a grayscale or alpha-only snapshot, where
+                // bpp is 1) let the read run up to 3 bytes past the buffer.
+                // It is a READ, so it cannot corrupt the heap on its own — but
+                // it is unbounded-by-construction, ships in Release, and runs
+                // for every rendered formula. Require a full 4-byte pixel and
+                // bound every index that is actually dereferenced.
+                if cg.bitsPerPixel >= 32, let dp = cg.dataProvider, let data = dp.data,
+                   let ptr = CFDataGetBytePtr(data) {
                     let bpr = cg.bytesPerRow
-                    let midY = cg.height / 2
-                    // Sample pixel at (10, midY) and (width/2, midY)
-                    let off1 = midY * bpr + 10 * (cg.bitsPerPixel / 8)
-                    let off2 = midY * bpr + (cg.width / 2) * (cg.bitsPerPixel / 8)
                     let bpp = cg.bitsPerPixel / 8
-                    if off1 + bpp <= CFDataGetLength(data) && off2 + bpp <= CFDataGetLength(data) {
+                    let midY = cg.height / 2
+                    let len = CFDataGetLength(data)
+                    let off1 = midY * bpr + 10 * bpp
+                    let off2 = midY * bpr + (cg.width / 2) * bpp
+                    // +4 (not +bpp): four bytes are dereferenced at each offset.
+                    if off1 >= 0, off2 >= 0, off1 + 4 <= len, off2 + 4 <= len {
                         logger.info("pixel@(10,\(midY)): \(ptr[off1]),\(ptr[off1+1]),\(ptr[off1+2]),\(ptr[off1+3])  pixel@(\(cg.width/2),\(midY)): \(ptr[off2]),\(ptr[off2+1]),\(ptr[off2+2]),\(ptr[off2+3])")
                     }
                 }

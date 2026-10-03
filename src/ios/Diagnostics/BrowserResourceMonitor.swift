@@ -452,7 +452,49 @@ final class BrowserResourceMonitor {
     /// so a pegged WebContent will NOT show up here — a low number alongside a
     /// stuck action is itself evidence that we're blocked on another process
     /// rather than spinning.
-    private static func appCPUPercent() -> Double {
+    /// [T-perf-cpu-probe] Shared, nonisolated CPU reading, CACHED.
+    ///
+    /// `appCPUPercent()` below is `private` and this type is `@MainActor`, but
+    /// sub agents and tool calls run off the main actor and need the same
+    /// number. Rather than duplicate the thread walk, expose it — one
+    /// implementation, one definition of the metric, so `[SubAgentPerf]` and
+    /// `[ToolCallPerf]` lines are directly comparable with the `app_cpu` field
+    /// this monitor already emits.
+    ///
+    /// The cache is not an optimisation, it is a correctness requirement for
+    /// the callers. `appCPUPercent()` walks every thread with `task_threads` +
+    /// per-thread `thread_info` — both MIG RPCs, and `task_threads` returns a
+    /// send right per thread. Calling that twice per tool call, with several
+    /// sub agents running, is precisely the MIG-in-a-hot-path pattern that
+    /// caused the PORT_SPACE kills this diagnostic exists to investigate.
+    ///
+    /// 2s TTL: short enough that a before/after pair around anything slower
+    /// than that still shows real movement, long enough that a burst of quick
+    /// tool calls shares one reading instead of issuing dozens of walks.
+    private static let cpuCacheTTL: TimeInterval = 2.0
+    nonisolated(unsafe) private static var cpuCacheValue: Double = -1
+    nonisolated(unsafe) private static var cpuCacheStamp: TimeInterval = 0
+    private static let cpuCacheLock = NSLock()
+
+    nonisolated static func currentAppCPUPercent() -> Double {
+        let now = Date().timeIntervalSince1970
+        cpuCacheLock.lock()
+        if cpuCacheStamp != 0, now - cpuCacheStamp < cpuCacheTTL {
+            defer { cpuCacheLock.unlock() }
+            return cpuCacheValue
+        }
+        cpuCacheLock.unlock()
+
+        let fresh = appCPUPercent()
+
+        cpuCacheLock.lock()
+        cpuCacheValue = fresh
+        cpuCacheStamp = now
+        cpuCacheLock.unlock()
+        return fresh
+    }
+
+    nonisolated private static func appCPUPercent() -> Double {
         var threadList: thread_act_array_t?
         var threadCount: mach_msg_type_number_t = 0
         guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,

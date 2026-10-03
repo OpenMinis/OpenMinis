@@ -10,8 +10,8 @@ import Foundation
 ///
 /// ⚠️ Client ID: this uses the OFFICIAL Kimi Code OAuth client, made configurable
 /// (not hardcoded in logic) so it can be swapped for a publicly-registrable
-/// third-party client when one exists. See the Kimi Code OAuth design notes §7 for the
-/// accepted risk. We do NOT copy CLIProxyAPI's registration and do NOT implement
+/// third-party client when one exists. The official id is not issued to Minis and may
+/// be rotated or revoked upstream. We do NOT copy CLIProxyAPI's registration and do NOT implement
 /// anything to circumvent official limits.
 @MainActor
 final class KimiOAuthManager: ObservableObject {
@@ -24,9 +24,9 @@ final class KimiOAuthManager: ObservableObject {
     private let refreshBuffer: TimeInterval = 5 * 60
 
     /// The official Kimi Code OAuth client id (the one the first-party Kimi Code
-    /// CLI uses, observed via CLIProxyAPI's public source). Per the recorded
-    /// product decision (Kimi Code OAuth design notes §7): use the official client
-    /// with the risk documented — NOT a copied CLIProxyAPI registration, and
+    /// CLI uses, observed via CLIProxyAPI's public source). It is not issued to
+    /// Minis and may be rotated or revoked upstream. It is NOT a copied
+    /// CLIProxyAPI registration, and
     /// nothing here circumvents official rate/usage limits. Kept overridable via
     /// the `KimiOAuthClientID` Info.plist key so it can be swapped for a
     /// publicly-registrable third-party client if/when one exists; an explicit
@@ -211,7 +211,7 @@ final class KimiOAuthManager: ObservableObject {
                 error: error,
                 isFatal: KimiOAuthRefreshCoordinator.isRefreshTokenInvalid,
                 loadCurrent: { ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: KimiTokenStorage.self) },
-                deleteCredentials: { ProviderKeychainHelper.deleteOAuthToken(instanceId: instanceId) },
+                markNeedsReauth: { ProviderKeychainHelper.markOAuthNeedsReauth(instanceId: instanceId) },
                 log: { [weak self] in self?.logger.info($0) }
             )
         }

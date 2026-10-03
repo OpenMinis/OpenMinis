@@ -55,7 +55,19 @@ enum AgentParamType: String {
 /// A single content part in agent messages — provider-agnostic.
 enum AgentContentPart: @unchecked Sendable {
     case text(String)
-    case toolUse(id: String, name: String, input: [String: Any])
+    /// `isOffloadedArgument` — [T-offload-stub-system-reminder issue #374]. True
+    /// when the context offloader replaced this call's `content` argument with a
+    /// pruned-argument notice because the real payload was moved to
+    /// `/var/minis/offloads/…`. The `.toolResult` case has carried
+    /// `isOffloadReadback` since GH#343 for the same reason: the scanner cannot
+    /// tell its own output from new material by reading the text.
+    ///
+    /// Provenance, not presentation: the notice text is also detectable via
+    /// `AIChatViewModel.isOffloadedStub`, but that is a string test on a payload
+    /// the model can imitate, whereas this flag is set only by the offloader.
+    /// Defaults to `false` so every existing construction site and all history
+    /// persisted before this change decode unchanged.
+    case toolUse(id: String, name: String, input: [String: Any], isOffloadedArgument: Bool = false)
     /// `imageLinuxPath` — iSH-visible linux path the image bytes were
     /// persisted to (e.g. `/var/minis/browser/<sid>/screenshot_*.jpg`,
     /// `/var/minis/attachments/uploads/*`). Carried so the request-level
@@ -63,7 +75,29 @@ enum AgentContentPart: @unchecked Sendable {
     /// cumulative payload would exceed the 25MB cap. Defaults to nil for
     /// backward compatibility with existing call sites and persisted
     /// history.
-    case toolResult(id: String, name: String, content: String, isError: Bool, imageData: Data? = nil, imageMimeType: String? = nil, pageURL: String? = nil, imageLinuxPath: String? = nil)
+    ///
+    /// `isOffloadReadback` — [T-offload-readback-loop] GH#343. True when this
+    /// result is the content of a file the offloader itself wrote, fetched back
+    /// by `file_read` against `/var/minis/offloads/…`.
+    ///
+    /// It exists because the two places that decide what to offload cannot tell
+    /// that from the text: the candidate scanner skipped anything starting with
+    /// `[CONTEXT OFFLOADED]`, and a read-BACK carries the original payload with
+    /// no such prefix, so it re-entered as a brand-new candidate and was written
+    /// to a second file, whose stub the model then read, and so on. Reproduced
+    /// on an iPhone 11: context oscillated 123K→108K→124K→109K chars across
+    /// four rounds while `bigInCtx` stayed at 6 — no net progress, one new file
+    /// per lap.
+    ///
+    /// A flag rather than more text-sniffing: the marker travels with the part
+    /// from the moment the read happens, so neither path has to re-derive it
+    /// from a string whose format can change (`file_read` prepends its own
+    /// `[path | N bytes | …]` header, which is exactly what a prefix check
+    /// would trip over).
+    ///
+    /// Defaults to false so every existing call site and all persisted history
+    /// decode unchanged.
+    case toolResult(id: String, name: String, content: String, isError: Bool, imageData: Data? = nil, imageMimeType: String? = nil, pageURL: String? = nil, imageLinuxPath: String? = nil, isOffloadReadback: Bool = false)
     /// `linuxPath` — same semantics as above. Used for user attachments
     /// and read_image results that don't ride through .toolResult.
     case imageData(data: Data, mimeType: String, linuxPath: String? = nil)
@@ -86,6 +120,16 @@ struct ReasoningEcho: @unchecked Sendable {
     /// only safe to echo back to the **same** model id within the same
     /// provider family.
     let modelId: String
+    /// [T-responses-reasoning-inherit issue #368] The upstream that minted these
+    /// items (`OpenAIAgentProvider.reasoningUpstreamIdentity` — the custom base
+    /// URL, or "openai-official"). `encrypted_content` is decryptable only by
+    /// that endpoint, so this — not `modelId` — is what decides whether a replay
+    /// is safe.
+    ///
+    /// Defaulted so every existing construction site and all in-flight history
+    /// keep compiling; an echo with no recorded upstream is replayed on the
+    /// model-id match alone, i.e. the pre-#368 behaviour.
+    var upstreamIdentity: String? = nil
     /// Reasoning items captured in original emission order — must be
     /// re-inserted into the next request's input array in the same order
     /// (Responses API rejects out-of-order reasoning items).
@@ -94,6 +138,62 @@ struct ReasoningEcho: @unchecked Sendable {
     enum Item: @unchecked Sendable {
         /// OpenAI Responses API reasoning item.
         case openaiReasoning(id: String, encryptedContent: String?, summary: [String])
+    }
+}
+
+// MARK: - ReasoningEcho persistence [T-responses-echo-persist]
+
+extension ReasoningEcho {
+    /// Wire form written to `messages.reasoning_echo`.
+    ///
+    /// `encryptedContent` is intentionally absent: it is large, endpoint-bound,
+    /// and cannot be decrypted by any endpoint but the one that minted it, so
+    /// persisting it across a restart would cost bytes for a payload we must
+    /// drop the moment the upstream differs. What DOES need to survive is the
+    /// server-minted `id` — the only value that may legally appear as
+    /// `reasoning.id` in a later request — plus `upstreamIdentity`, without
+    /// which the replay gate cannot tell a same-relay resume from a hop.
+    private struct Wire: Codable {
+        struct Item: Codable {
+            let id: String
+            let summary: [String]
+        }
+        let providerKind: String
+        let modelId: String
+        let upstreamIdentity: String?
+        let items: [Item]
+    }
+
+    /// JSON for persistence, or nil when there is nothing worth storing.
+    var persistableJSON: String? {
+        let wire = Wire(
+            providerKind: providerKind,
+            modelId: modelId,
+            upstreamIdentity: upstreamIdentity,
+            items: items.compactMap { item in
+                if case .openaiReasoning(let id, _, let summary) = item {
+                    return Wire.Item(id: id, summary: summary)
+                }
+                return nil
+            }
+        )
+        guard !wire.items.isEmpty,
+              let data = try? JSONEncoder().encode(wire) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Rebuild from `persistableJSON`. Items come back with no
+    /// `encryptedContent`, which is the documented degradation above.
+    init?(persistedJSON json: String?) {
+        guard let json, let data = json.data(using: .utf8),
+              let wire = try? JSONDecoder().decode(Wire.self, from: data),
+              !wire.items.isEmpty else { return nil }
+        self.init(
+            providerKind: wire.providerKind,
+            modelId: wire.modelId,
+            upstreamIdentity: wire.upstreamIdentity,
+            items: wire.items.map { .openaiReasoning(id: $0.id, encryptedContent: nil, summary: $0.summary) }
+        )
     }
 }
 
@@ -136,6 +236,11 @@ enum AgentStreamEvent: @unchecked Sendable {
     case toolCallComplete(id: String, name: String, args: [String: Any], metadata: ToolCallMetadata?)
     /// Usage stats.
     case usage(LLMUsage)
+    /// [T-agent-model-identity] The model name the API REPORTED for this
+    /// response (Anthropic `message.model`, OpenAI chunk / `response.model`,
+    /// Gemini `modelVersion`). Emitted once per response where the provider
+    /// exposes it; consumers must tolerate its absence.
+    case responseModel(String)
     /// Real-time thinking content delta for live UI display.
     case thinkingDelta(String)
     /// Accumulated reasoning content from thinking models (opaque, must be echoed back).
@@ -161,8 +266,8 @@ enum AgentStopReason: Sendable {
     /// input tokens billed, empty `content`). Distinct from `.endTurn` so the agent loop can
     /// surface an actionable message instead of a generic "empty response" and skip the
     /// pointless transient-retry path (a refusal is deterministic, not transient).
-    /// Fires as a false-positive on Fable 5 for benign turns carrying the large Claude Code
-    /// agentic system prompt + tool set. See [T-ios-fable5-empty-response].
+    /// Fires as a false-positive on Fable 5 for benign turns carrying the large agentic
+    /// system prompt + tool set (OAuth path). See [T-ios-fable5-empty-response].
     case refusal
 }
 

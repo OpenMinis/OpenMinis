@@ -2,6 +2,7 @@ package com.openminis.app.debug
 
 import android.content.Context
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.ui.chat.ChatViewModel
@@ -30,17 +31,45 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 internal object HeadlessChatRunner {
 
-    /** sessionId → ViewModelProvider that owns its single ChatViewModel. */
-    private val providers = mutableMapOf<String, ViewModelProvider>()
+    /**
+     * A cached provider together with the store it was built on, so the cache
+     * can be checked against [ChatViewModelStore] before being trusted.
+     */
+    private class Cached(val store: ViewModelStore, val provider: ViewModelProvider)
+
+    /** sessionId → provider that owns its single ChatViewModel. */
+    private val providers = mutableMapOf<String, Cached>()
 
     private fun app(context: Context): MinisApp =
         context.applicationContext as? MinisApp
             ?: throw RPCException(-32000, "MinisApp not initialized")
 
+    /**
+     * [T-android-vm-evict-orphan] The cached provider for [sessionId], only
+     * while its store is still the one [ChatViewModelStore] holds.
+     *
+     * Eviction (LRU trim, memory pressure) clears a store without telling
+     * this runner — only session delete calls [forget]. A provider kept past
+     * that point would build a fresh ChatViewModel inside the cleared store,
+     * which the shared cache no longer tracks: never evicted, and a second
+     * instance beside the one ChatScreen binds to. Drop the entry instead so
+     * the next lookup goes back through `ownerFor` and shares the live store.
+     */
     @Synchronized
-    private fun providerFor(context: Context, sessionId: String): ViewModelProvider {
-        val cached = providers[sessionId]
-        if (cached != null) return cached
+    private fun liveCached(sessionId: String): Cached? {
+        val cached = providers[sessionId] ?: return null
+        if (ChatViewModelStore.isLiveStore(sessionId, cached.store)) return cached
+        providers.remove(sessionId)
+        return null
+    }
+
+    @Synchronized
+    private fun providerFor(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ViewModelProvider {
+        liveCached(sessionId)?.let { return it.provider }
         val app = app(context)
         // Share the process-wide ChatViewModelStore so the in-flight VM (with
         // its live streamJob + _isStreaming) is the same instance the UI's
@@ -48,7 +77,7 @@ internal object HeadlessChatRunner {
         // private ViewModelStore here split headless and UI into two VMs, so
         // "run now" started streaming on the headless VM while the UI's VM
         // saw only a static snapshot — no thinking indicator, no live text.
-        val owner = ChatViewModelStore.ownerFor(sessionId)
+        val owner = ChatViewModelStore.ownerFor(sessionId, kind)
         val provider = ViewModelProvider(
             owner,
             ChatViewModel.factory(
@@ -61,12 +90,47 @@ internal object HeadlessChatRunner {
                 mcpRepository = app.mcpRepository,
             ),
         )
-        providers[sessionId] = provider
+        providers[sessionId] = Cached(owner.viewModelStore, provider)
         return provider
     }
 
-    private fun viewModel(context: Context, sessionId: String): ChatViewModel =
-        providerFor(context, sessionId)[ChatViewModel::class.java]
+    private fun viewModel(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ChatViewModel = providerFor(context, sessionId, kind)[ChatViewModel::class.java]
+
+    /** [T-p1-delegate-task] The process-wide ViewModel for [sessionId] — the
+     *  same instance ChatScreen binds to. Used by the helper runner (child
+     *  vm) and the helper sheet (read-only mirror). */
+    /**
+     * [T-android-vm-store-dual-pool] [kind] classifies the session's cache pool
+     * on FIRST creation only (ChatViewModelStore.poolKinds is sticky).
+     *
+     * It defaults to NORMAL because this object is NOT child-only: `prompt()`
+     * drives ordinary sessions for the debug RPCs, and ScheduledAgentRunner
+     * acquires a PARENT session's view model through here. Only the two call
+     * sites that actually construct a sub agent pass CHILD. Tagging inside this
+     * function instead was measured to misclassify all 14 plain sessions of the
+     * multi_session baseline scenario as CHILD.
+     */
+    fun viewModelFor(
+        context: Context,
+        sessionId: String,
+        kind: ChatViewModelStore.PoolKind = ChatViewModelStore.PoolKind.NORMAL,
+    ): ChatViewModel = viewModel(context, sessionId, kind)
+
+    /**
+     * [T-sub-agents-v1] The live view model for [sessionId], or null.
+     *
+     * Read-only counterpart to [viewModelFor] for callers that must not CREATE
+     * one: ViewModelProvider is not thread-safe, and constructing off the main
+     * thread can hand back a second instance for the same session, splitting
+     * its state. Callers that only want to observe a run that is already going
+     * use this.
+     */
+    fun existingViewModel(sessionId: String): ChatViewModel? =
+        com.openminis.app.ui.chat.ChatViewModelStore.existing(sessionId)
 
     /**
      * Ensure a session exists in the DB before binding a ViewModel. Mirrors
@@ -158,92 +222,112 @@ internal object HeadlessChatRunner {
         thinkingLevel: ThinkingLevel? = null,
         wait: Boolean,
         timeoutMs: Long,
-    ): PromptResult = withContext(Dispatchers.Main) {
-        val vm = viewModel(context, sessionId)
-        // Apply per-call thinking override BEFORE sendMessage so streamMessage
-        // picks up the new level. Caller passes null to keep the VM's existing
-        // setting (default OFF for a fresh VM, last user-set value otherwise).
-        //
-        // ChatViewModel.setThinkingLevel silently no-ops when the active model
-        // hasn't resolved yet (currentModelSupportsReasoning checks
-        // `currentModel?.supportsReasoning == true`, and `currentModel` is
-        // populated on a viewModelScope coroutine). For a freshly-created VM
-        // bound to a new session, the resolver may not have run by the time we
-        // reach this line — wait until activeEntryId flips non-null so the
-        // override actually applies.
-        if (thinkingLevel != null) {
-            // Wait off Main: ChatViewModel's init coroutine runs on viewModelScope
-            // (Main.immediate), and Flow.first() suspends the calling dispatcher
-            // until the value arrives. If we wait on Main here we deadlock — the
-            // VM's loadSession() never gets to populate _activeEntryId. Hop to
-            // Default for the wait, then come back to Main for setThinkingLevel.
-            // setThinkingLevel itself silently no-ops on a model that doesn't
-            // support reasoning — that gating is intentional UI parity, the
-            // 3 s ceiling here just keeps us from blocking forever if the VM
-            // never resolves a model (no provider configured, etc.).
-            withContext(Dispatchers.Default) {
-                withTimeoutOrNull(3000L) {
+        // [T-scheduled-tool-prefill] Tool calls to execute as the first turn
+        // of the loop this prompt starts, before any model request. Empty =
+        // an ordinary prompt.
+        prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+    ): PromptResult = ChatViewModelStore.holdingForSend(sessionId) {
+        withContext(Dispatchers.Main) {
+            val vm = viewModel(context, sessionId)
+            // Apply per-call thinking override BEFORE sendMessage so streamMessage
+            // picks up the new level. Caller passes null to keep the VM's existing
+            // setting (default OFF for a fresh VM, last user-set value otherwise).
+            //
+            // ChatViewModel.setThinkingLevel silently no-ops when the active model
+            // hasn't resolved yet (currentModelSupportsReasoning checks
+            // `currentModel?.supportsReasoning == true`, and `currentModel` is
+            // populated on a viewModelScope coroutine). For a freshly-created VM
+            // bound to a new session, the resolver may not have run by the time we
+            // reach this line — wait until activeEntryId flips non-null so the
+            // override actually applies.
+            if (thinkingLevel != null) {
+                // Wait off Main: ChatViewModel's init coroutine runs on viewModelScope
+                // (Main.immediate), and Flow.first() suspends the calling dispatcher
+                // until the value arrives. If we wait on Main here we deadlock — the
+                // VM's loadSession() never gets to populate _activeEntryId. Hop to
+                // Default for the wait, then come back to Main for setThinkingLevel.
+                // setThinkingLevel itself silently no-ops on a model that doesn't
+                // support reasoning — that gating is intentional UI parity, the
+                // 3 s ceiling here just keeps us from blocking forever if the VM
+                // never resolves a model (no provider configured, etc.).
+                withContext(Dispatchers.Default) {
+                    withTimeoutOrNull(3000L) {
+                        vm.activeEntryId.first { it != null }
+                    }
+                }
+                vm.setThinkingLevel(thinkingLevel)
+            }
+            // Wait for ChatViewModel.currentProvider to resolve before sendMessage.
+            // The VM populates currentProvider on a viewModelScope (Main.immediate)
+            // coroutine driven by providerRepository.config + the session's bound
+            // entry. activeEntryId flips non-null in the SAME block that assigns
+            // currentProvider (see ChatViewModel.kt ~L2030/2230/2265/2558), so we
+            // use it as the readiness signal. Without this wait, sendMessage hits
+            // its `currentProvider == null` early-return and the RPC returns
+            // status:Completed responseText:null — the bug that blocked Step 2 e2e.
+            //
+            // Hop off Main for the wait: the VM's resolver runs on Main.immediate,
+            // so suspending Main here would deadlock the resolver (same pattern as
+            // the thinkingLevel wait above).
+            val ready = withContext(Dispatchers.Default) {
+                withTimeoutOrNull(5000L) {
                     vm.activeEntryId.first { it != null }
                 }
             }
-            vm.setThinkingLevel(thinkingLevel)
-        }
-        // Wait for ChatViewModel.currentProvider to resolve before sendMessage.
-        // The VM populates currentProvider on a viewModelScope (Main.immediate)
-        // coroutine driven by providerRepository.config + the session's bound
-        // entry. activeEntryId flips non-null in the SAME block that assigns
-        // currentProvider (see ChatViewModel.kt ~L2030/2230/2265/2558), so we
-        // use it as the readiness signal. Without this wait, sendMessage hits
-        // its `currentProvider == null` early-return and the RPC returns
-        // status:Completed responseText:null — the bug that blocked Step 2 e2e.
-        //
-        // Hop off Main for the wait: the VM's resolver runs on Main.immediate,
-        // so suspending Main here would deadlock the resolver (same pattern as
-        // the thinkingLevel wait above).
-        val ready = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(5000L) {
-                vm.activeEntryId.first { it != null }
+            if (ready == null) {
+                return@withContext PromptResult(
+                    status = "Error",
+                    responseText = "no_provider_resolved_in_5s",
+                    timedOut = false,
+                )
             }
-        }
-        if (ready == null) {
-            return@withContext PromptResult(
-                status = "Error",
-                responseText = "no_provider_resolved_in_5s",
-                timedOut = false,
+            for (att in attachments) vm.addAttachment(att)
+            // [T-android-submit-outcome] Ask the funnel what it did instead of
+            // assuming. This used to call sendMessage() (Unit) and report "Running"
+            // unconditionally — a queued prompt, a refused prompt, or one parked
+            // behind the compact dialog all came back as a success.
+            // [T-scheduled-preemptive-insert] Remember where the transcript ended,
+            // so the reply to a scheduled fire can be found after it (below).
+            val rowsBeforeSubmit = if (com.openminis.app.scheduled.ScheduledTaskMarker.isMarkerText(text)) {
+                app(context).chatRepository.dao.loadMessages(sessionId).size
+            } else -1
+            val outcome = vm.submitPrompt(text, prefill)
+            if (outcome is ChatViewModel.SubmitOutcome.Rejected) {
+                return@withContext PromptResult(status = "Rejected", responseText = outcome.reason, timedOut = false)
+            }
+            if (!wait) {
+                val status = if (outcome is ChatViewModel.SubmitOutcome.Queued) "Queued" else "Running"
+                return@withContext PromptResult(status = status, responseText = null, timedOut = false)
+            }
+
+            val finished = withTimeoutOrNull(timeoutMs) {
+                if (outcome is ChatViewModel.SubmitOutcome.Compacting) {
+                    // Compaction first, then the funnel re-enters send. Wait for it
+                    // to finish, then give the follow-on send a moment to claim the
+                    // stream before we look for its end.
+                    vm.isCompacting.first { !it }
+                    withTimeoutOrNull(2_000L) { vm.isStreaming.first { it } }
+                }
+                // A Queued prompt drains INSIDE the running loop's epilogue, before
+                // that loop clears isStreaming — so waiting for the next false
+                // transition covers the drained turn as well.
+                if (vm.isStreaming.value) {
+                    vm.isStreaming.first { !it }
+                }
+                true
+            } ?: false
+
+            // Best-effort: read the last assistant text from the DB so we don't
+            // depend on the in-memory UI list (which may not have flushed yet).
+            val app = app(context)
+            val msgs = app.chatRepository.dao.loadMessages(sessionId)
+            val responseText = responseTextFor(text, msgs.map { it.role to it.partsJson }, rowsBeforeSubmit)
+            PromptResult(
+                status = if (finished) "Completed" else "Timeout",
+                responseText = responseText,
+                timedOut = !finished,
             )
         }
-        for (att in attachments) vm.addAttachment(att)
-        vm.sendMessage(text)
-        if (!wait) return@withContext PromptResult(status = "Running", responseText = null, timedOut = false)
-
-        // Wait for isStreaming to be false (sendMessage flips it true synchronously
-        // before launching its coroutine; if it never flips true the message was
-        // dropped — return immediately as Completed-but-empty).
-        val started = vm.isStreaming.value
-        if (!started) {
-            // Either dropped (e.g. compacting in flight) or completed before we
-            // returned to the suspension point — fall through to drain.
-        }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            // Skip the initial false (if we were called before sendMessage flipped true)
-            if (vm.isStreaming.value) {
-                // Wait for the next false transition.
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
-
-        // Best-effort: read the last assistant text from the DB so we don't
-        // depend on the in-memory UI list (which may not have flushed yet).
-        val app = app(context)
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
-        PromptResult(
-            status = if (finished) "Completed" else "Timeout",
-            responseText = responseText,
-            timedOut = !finished,
-        )
     }
 
     suspend fun retry(
@@ -252,63 +336,65 @@ internal object HeadlessChatRunner {
         messageId: String?,
         wait: Boolean,
         timeoutMs: Long,
-    ): PromptResult = withContext(Dispatchers.Main) {
-        val app = app(context)
-        val vm = viewModel(context, sessionId)
-        val targetMsgId = messageId ?: run {
-            val msgs = app.chatRepository.dao.loadMessages(sessionId)
-            msgs.lastOrNull { it.role == "user" }?.id
-                ?: throw RPCException(-32602, "Session has no user messages")
-        }
-        // Validate it points at a user message.
-        val all = app.chatRepository.dao.loadMessages(sessionId)
-        val target = all.firstOrNull { it.id == targetMsgId }
-            ?: throw RPCException(-32602, "Message not found in session")
-        if (target.role != "user") throw RPCException(-32602, "Target is not a user message")
-        val deletedCount = all.size - all.indexOf(target) - 1
+    ): PromptResult = ChatViewModelStore.holdingForSend(sessionId) {
+        withContext(Dispatchers.Main) {
+            val app = app(context)
+            val vm = viewModel(context, sessionId)
+            val targetMsgId = messageId ?: run {
+                val msgs = app.chatRepository.dao.loadMessages(sessionId)
+                msgs.lastOrNull { it.role == "user" }?.id
+                    ?: throw RPCException(-32602, "Session has no user messages")
+            }
+            // Validate it points at a user message.
+            val all = app.chatRepository.dao.loadMessages(sessionId)
+            val target = all.firstOrNull { it.id == targetMsgId }
+                ?: throw RPCException(-32602, "Message not found in session")
+            if (target.role != "user") throw RPCException(-32602, "Target is not a user message")
+            val deletedCount = all.size - all.indexOf(target) - 1
 
-        // Same readiness gate as prompt() — retryFromMessage hits the same
-        // currentProvider-null early-return if invoked before resolve.
-        val ready = withContext(Dispatchers.Default) {
-            withTimeoutOrNull(5000L) {
-                vm.activeEntryId.first { it != null }
+            // Same readiness gate as prompt() — retryFromMessage hits the same
+            // currentProvider-null early-return if invoked before resolve.
+            val ready = withContext(Dispatchers.Default) {
+                withTimeoutOrNull(5000L) {
+                    vm.activeEntryId.first { it != null }
+                }
             }
-        }
-        if (ready == null) {
-            return@withContext PromptResult(
-                status = "Error",
-                responseText = "no_provider_resolved_in_5s",
-                timedOut = false,
+            if (ready == null) {
+                return@withContext PromptResult(
+                    status = "Error",
+                    responseText = "no_provider_resolved_in_5s",
+                    timedOut = false,
+                    deletedMessageCount = deletedCount,
+                    retriedMessageId = targetMsgId,
+                )
+            }
+            vm.retryFromMessage(targetMsgId)
+            if (!wait) {
+                return@withContext PromptResult(
+                    status = "Retrying",
+                    responseText = null,
+                    timedOut = false,
+                    deletedMessageCount = deletedCount,
+                    retriedMessageId = targetMsgId,
+                )
+            }
+            val finished = withTimeoutOrNull(timeoutMs) {
+                if (vm.isStreaming.value) {
+                    vm.isStreaming.first { !it }
+                }
+                true
+            } ?: false
+            val msgs = app.chatRepository.dao.loadMessages(sessionId)
+            val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
+            val responseText = lastAssistant?.let { extractText(it.partsJson) }
+            PromptResult(
+                status = if (finished) "Completed" else "Timeout",
+                responseText = responseText,
+                timedOut = !finished,
                 deletedMessageCount = deletedCount,
                 retriedMessageId = targetMsgId,
             )
         }
-        vm.retryFromMessage(targetMsgId)
-        if (!wait) {
-            return@withContext PromptResult(
-                status = "Retrying",
-                responseText = null,
-                timedOut = false,
-                deletedMessageCount = deletedCount,
-                retriedMessageId = targetMsgId,
-            )
-        }
-        val finished = withTimeoutOrNull(timeoutMs) {
-            if (vm.isStreaming.value) {
-                vm.isStreaming.first { !it }
-            }
-            true
-        } ?: false
-        val msgs = app.chatRepository.dao.loadMessages(sessionId)
-        val lastAssistant = msgs.lastOrNull { it.role == "assistant" }
-        val responseText = lastAssistant?.let { extractText(it.partsJson) }
-        PromptResult(
-            status = if (finished) "Completed" else "Timeout",
-            responseText = responseText,
-            timedOut = !finished,
-            deletedMessageCount = deletedCount,
-            retriedMessageId = targetMsgId,
-        )
     }
 
     /**
@@ -506,8 +592,8 @@ internal object HeadlessChatRunner {
     }
 
     suspend fun cancel(context: Context, sessionId: String): Boolean = withContext(Dispatchers.Main) {
-        val cached = providers[sessionId] ?: return@withContext false
-        val vm = cached[ChatViewModel::class.java]
+        val cached = liveCached(sessionId) ?: return@withContext false
+        val vm = cached.provider[ChatViewModel::class.java]
         val wasRunning = vm.isStreaming.value
         if (wasRunning) vm.cancelStream()
         wasRunning
@@ -538,7 +624,36 @@ internal object HeadlessChatRunner {
         providers.remove(sessionId)
     }
 
-    private fun extractText(partsJson: String): String? {
+    /**
+     * [T-scheduled-preemptive-insert] The reply to report for a prompt.
+     *
+     * Ordinarily the session's last assistant text. A scheduled fire is
+     * different: in a busy session it is slipped in between tool calls, and
+     * the loop then goes back to the task it was running, so the LAST
+     * assistant text is that task's ending, not the answer to the fire (and
+     * would land in the completion notification and the run record). For a
+     * `<scheduled_task>` prompt, the reply is the first assistant text after
+     * that task's own envelope row. Only rows from [fromIndex] on are
+     * searched, so a fire that has not been delivered yet cannot pick up the
+     * reply to an earlier fire of the same task. [rows] are (role, partsJson)
+     * in transcript order.
+     */
+    internal fun responseTextFor(sentText: String, rows: List<Pair<String, String>>, fromIndex: Int): String? {
+        val marker = com.openminis.app.scheduled.ScheduledTaskMarker.parse(sentText)
+        if (marker == null || fromIndex < 0) {
+            return rows.lastOrNull { it.first == "assistant" }?.let { extractText(it.second) }
+        }
+        val envelopeIdx = (fromIndex until rows.size).lastOrNull { i ->
+            rows[i].first == "user" &&
+                extractText(rows[i].second)?.let { com.openminis.app.scheduled.ScheduledTaskMarker.parse(it)?.taskId } == marker.taskId
+        } ?: return null
+        return (envelopeIdx + 1 until rows.size).asSequence()
+            .filter { rows[it].first == "assistant" }
+            .mapNotNull { extractText(rows[it].second)?.takeIf { t -> t.isNotBlank() } }
+            .firstOrNull()
+    }
+
+    internal fun extractText(partsJson: String): String? {
         return try {
             val arr = org.json.JSONArray(partsJson)
             val sb = StringBuilder()
@@ -550,6 +665,12 @@ internal object HeadlessChatRunner {
         } catch (_: Exception) { partsJson.ifEmpty { null } }
     }
 
+    /**
+     * `status` values: "Running" (loop started, `wait=false`), "Queued" (the
+     * session was busy; the prompt runs when its loop ends, `wait=false`),
+     * "Completed", "Timeout", "Rejected" (`responseText` carries the
+     * snake_case reason — see [ChatViewModel.SubmitOutcome.Rejected]), "Error".
+     */
     data class PromptResult(
         val status: String,
         val responseText: String?,

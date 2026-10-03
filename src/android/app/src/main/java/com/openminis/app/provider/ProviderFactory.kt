@@ -14,8 +14,34 @@ object ProviderFactory {
     /**
      * Create a provider, optionally with OAuth support.
      * [context] is needed for OpenAI OAuth to access encrypted storage for token refresh.
+     *
+     * [sessionId] is the PERSISTED id of the conversation this provider will
+     * serve, and exists only for [OpenCodeSessionHeader] — see there for why
+     * a draft placeholder must never be passed. Null (the default) is correct
+     * for every caller with no single conversation behind it: quick tests,
+     * vision sub-model calls, model-use offload, voice correction.
+     *
+     * Providers are cached per chat ViewModel and reused across turns, so the
+     * id is stored on the provider here and re-read when each request is built
+     * — not baked into a header at construction. That is what lets a draft
+     * chat, whose real id does not exist yet, start sending the header as soon
+     * as `ensureSession()` mints one.
      */
-    fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
+    fun create(
+        instance: ProviderInstance,
+        apiKey: String,
+        model: LLMModel,
+        context: Context? = null,
+        sessionId: String? = null,
+        /**
+         * [T-android-model-custom-params] The user's per-model overrides
+         * (temperature / top_p / custom headers / extra body params) for the
+         * entry being served. Optional and defaulted so every existing caller
+         * compiles unchanged; callers that have a ModelEntry in hand should
+         * pass `entry.overrides` so the settings actually reach the wire.
+         */
+        overrides: com.openminis.app.data.model.ModelOverrides? = null,
+    ): LLMProvider {
         // T174: route through ProviderInstance.effectiveBaseURL instead of
         // re-implementing the trim-+-endsWith dance inline. The previous
         // version did `url.endsWith("/v1")` on the raw, untrimmed string,
@@ -188,6 +214,43 @@ object ProviderFactory {
                     )
                 }
             }
+            ProviderType.githubCopilot -> {
+                // [T-copilot-provider] Chat is plain OpenAI Chat Completions at
+                // api.githubcopilot.com, so the existing provider carries it —
+                // what Copilot adds is auth and headers.
+                //
+                // The token provider hands back the SHORT-LIVED session token
+                // (CopilotOAuthManager refreshes it lazily); the long-lived
+                // GitHub account token never reaches the request layer.
+                //
+                // [T-android-copilot-per-request-headers] The static editor
+                // identity goes on extraHeaders; X-Initiator, X-Request-Id and
+                // the vision flag are derived per request instead.
+                //
+                // They used to be pinned HERE, at construction, to
+                // `isAgentInitiated=false, hasImages=false` and one UUID — so
+                // every agent turn went out labelled as human traffic (the
+                // specific thing GitHub acts on), no request ever carried the
+                // vision flag, and one request id stood for the whole life of
+                // the instance. The factory genuinely cannot see the message
+                // list, which is why the derivation belongs at the request
+                // site; `perRequestHeaders` is that seam.
+                if (context == null) throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                val oauthManager = com.openminis.app.auth.CopilotOAuthManager(context, instance.id)
+                OpenAIProvider.oauthOpenAICompat(
+                    oauthTokenProvider = {
+                        oauthManager.validAccessToken()
+                            ?: throw com.openminis.app.data.model.LLMError.InvalidApiKey()
+                    },
+                    model = model,
+                    basePath = basePath ?: com.openminis.app.auth.CopilotDeviceFlow.API_BASE,
+                    extraHeaders = com.openminis.app.auth.CopilotDeviceFlow.staticChatHeaders(),
+                ).also { p ->
+                    p.perRequestHeaders = { body ->
+                        com.openminis.app.auth.CopilotDeviceFlow.perRequestHeaders(body)
+                    }
+                }
+            }
             // [T-android-provider-type-parity] Types this build can decode and
             // display but not drive. Reaching here means the user selected a
             // model on an instance restored from another platform (or a newer
@@ -204,6 +267,20 @@ object ProviderFactory {
         // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
+        // [T-android-opencode-session-header] Hand the conversation id to the
+        // provider; it derives OpenCode Go's `x-opencode-session` per request
+        // (gated on host + on the id being persisted, so nothing else sees it).
+        // Set here rather than per-branch so every OpenAI-compatible path is
+        // covered by one line, and left null for callers that serve no single
+        // conversation (quick test, vision, model-use offload, voice).
+        (provider as? OpenAIProvider)?.sessionId = sessionId
+        // [T-android-model-custom-params] Per-model request tuning. Set here,
+        // beside the other post-construction wiring, so every OpenAI-compatible
+        // branch is covered by one line. `takeIf { !it.isEmpty }` keeps the
+        // field null in the overwhelmingly common no-override case, so the
+        // merge helpers early-return and the built body stays byte-identical to
+        // before this change.
+        (provider as? OpenAIProvider)?.modelOverrides = overrides?.takeIf { !it.isEmpty }
         return provider
     }
 }

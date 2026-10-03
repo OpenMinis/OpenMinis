@@ -96,9 +96,37 @@ fun ThinkingRuleEditorDialog(
         label = label.trim(),
     )
 
+    // [GH#306] Per-field validation for CustomPath. Previously the only check was
+    // "path is not blank", so a rule with an empty value saved cleanly and then emitted
+    // nothing — indistinguishable, from the chat, from the rule not existing.
+    //
+    // Reserved roots are refused here as well as in the resolver: the resolver's refusal
+    // is the safety net, but catching it in the editor is the only place the user can
+    // still see WHY. Kept in sync with ThinkingRuleResolver.RESERVED_ROOT_KEYS.
+    val reservedRoots = setOf(
+        "messages", "model", "stream", "stream_options", "tools", "tool_choice",
+        "n", "functions", "function_call", "response_format",
+    )
+    val isCustom = choice == FormatChoice.CUSTOM_PATH
+    val pathRoot = path.split(".").firstOrNull()?.trim()?.lowercase().orEmpty()
+    val pathError: String? = when {
+        !isCustom -> null
+        path.isBlank() -> stringResource(R.string.thinking_rules_error_path_required)
+        pathRoot in reservedRoots -> stringResource(R.string.thinking_rules_error_path_reserved, pathRoot)
+        else -> null
+    }
+    val valueError: String? =
+        if (isCustom && highValue.isBlank()) stringResource(R.string.thinking_rules_error_value_required) else null
+    val offValueError: String? =
+        if (isCustom && sendOffValue && offValue.isBlank()) {
+            stringResource(R.string.thinking_rules_error_off_value_required)
+        } else {
+            null
+        }
+
     val isValid = label.isNotBlank() &&
         (allModels || pattern.isNotBlank()) &&
-        (choice != FormatChoice.CUSTOM_PATH || path.isNotBlank())
+        pathError == null && valueError == null && offValueError == null
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -202,11 +230,17 @@ fun ThinkingRuleEditorDialog(
                         )
                     }
                     FormatChoice.CUSTOM_PATH -> {
+                        // [GH#306] `pathError` / `valueError` below: a CustomPath rule with
+                        // a blank path or blank value used to save happily and then emit
+                        // nothing, which reads as "my rule is ignored". Validating at the
+                        // point of entry is the only place the user can still fix it.
                         OutlinedTextField(
                             value = path,
                             onValueChange = { path = it },
                             label = { Text(stringResource(R.string.thinking_rules_dotted_path)) },
                             singleLine = true,
+                            isError = pathError != null,
+                            supportingText = pathError?.let { { Text(it) } },
                             modifier = Modifier.fillMaxWidth(),
                         )
                         OutlinedTextField(
@@ -214,8 +248,33 @@ fun ThinkingRuleEditorDialog(
                             onValueChange = { highValue = it },
                             label = { Text(stringResource(R.string.thinking_rules_value_at_high)) },
                             singleLine = true,
+                            isError = valueError != null,
+                            supportingText = valueError?.let { { Text(it) } },
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        // [GH#306] The off-value row was missing for CustomPath, so
+                        // `sendOffValue` could never become true and the rule's offValue
+                        // was unreachable from the UI — a thinking OFF tier then wrote
+                        // nothing at all, silently leaving the vendor's default in force.
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(stringResource(R.string.thinking_rules_send_off_value))
+                            SettingsSwitch(checked = sendOffValue, onCheckedChange = { sendOffValue = it })
+                        }
+                        if (sendOffValue) {
+                            OutlinedTextField(
+                                value = offValue,
+                                onValueChange = { offValue = it },
+                                label = { Text(stringResource(R.string.thinking_rules_off_value)) },
+                                singleLine = true,
+                                isError = offValueError != null,
+                                supportingText = offValueError?.let { { Text(it) } },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                     else -> {}
                 }

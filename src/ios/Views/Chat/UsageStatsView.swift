@@ -84,6 +84,8 @@ class UsageStatsViewModel: ObservableObject {
     @Published var grandTotalCacheCreation: Int = 0
     @Published var grandTotalCacheRead: Int = 0
     @Published var isLoaded = false
+    /// [T-p2-helper-usage] delegate_task counts + helper token cost.
+    @Published var helperStats: ChatStore.HelperUsageStats?
 
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -93,6 +95,7 @@ class UsageStatsViewModel: ObservableObject {
 
     func load() async {
         let records = await ChatStore.shared.fetchUsageStats()
+        helperStats = await ChatStore.shared.fetchHelperUsage()
 
         // Resolve each model id to a PROVIDER-TYPE group (what the user sees in
         // the Providers list — OpenAI + its compatibles, Anthropic, Gemini, xAI,
@@ -235,6 +238,22 @@ struct UsageStatsView: View {
                     if grandTotalAllInput > 0 && vm.grandTotalCacheRead > 0 {
                         let grandHitRate = Double(vm.grandTotalCacheRead) / Double(grandTotalAllInput) * 100
                         LabeledContent("Cache Hit Rate", value: String(format: "%.1f%%", grandHitRate))
+                    }
+                }
+
+                // [T-p2-helper-usage] Helpers — only once there is something to show.
+                if let h = vm.helperStats, h.delegateCalls > 0 || h.childSessions > 0 {
+                    Section(AppLocalized("Agents")) {
+                        LabeledContent(AppLocalized("Delegations"), value: "\(h.delegateCalls)")
+                        LabeledContent(AppLocalized("Primary / Sub tier"), value: "\(h.primaryRuns) / \(h.subRuns)")
+                        if h.escalations > 0 {
+                            LabeledContent(AppLocalized("Escalation requests"), value: "\(h.escalations)")
+                        }
+                        if h.cancelledOrFailed > 0 {
+                            LabeledContent(AppLocalized("Stopped or failed"), value: "\(h.cancelledOrFailed)")
+                        }
+                        LabeledContent(AppLocalized("Agent input tokens"), value: formatCount(h.helperInputTokens))
+                        LabeledContent(AppLocalized("Agent output tokens"), value: formatCount(h.helperOutputTokens))
                     }
                 }
 

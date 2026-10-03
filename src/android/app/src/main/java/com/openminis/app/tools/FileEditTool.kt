@@ -1,8 +1,10 @@
 package com.openminis.app.tools
 
 import android.content.Context
+import com.openminis.app.data.ContextOffload
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.PRootKernel
 import org.json.JSONObject
 
@@ -37,6 +39,21 @@ object FileEditTool {
             }
             if (oldString.isEmpty()) {
                 return ToolExecutionResult("Error: 'old_string' is required and cannot be empty", false, toolTitle = toolTitle)
+            }
+
+            // [T-offload-placeholder-write-guard] (GH#374) See FileWriteTool.
+            // Only the REPLACEMENT text is checked: a placeholder in
+            // `old_string` is just a search that will not match, which the
+            // "old_string not found" path below already reports clearly.
+            if (ContextOffload.isOffloadPlaceholder(newString)) {
+                AppLogger.warning(
+                    "FileEdit",
+                    "REFUSED offload-placeholder edit path=$path bytes=${newString.length}",
+                )
+                return ToolExecutionResult(
+                    ContextOffload.placeholderWriteRefusal("new_string", path),
+                    false, toolTitle = toolTitle,
+                )
             }
 
             // T219: read-only mount guard — see FileWriteTool for rationale.

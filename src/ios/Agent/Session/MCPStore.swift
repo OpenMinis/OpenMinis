@@ -97,7 +97,6 @@ final class MCPStore: ObservableObject {
         openDatabase()
         createTables()
         load()
-        scheduleLegacyRecordCleanupIfNeeded()
     }
 
     deinit {
@@ -898,28 +897,4 @@ final class MCPStore: ObservableObject {
 
     // MARK: - Legacy whole-file record cleanup
 
-    private static let legacyCleanupKey = "cloudSync.mcp.legacyV2RecordDeleted"
-
-    /// One-time job (mirrors EnvVarStore.scheduleLegacyRecordCleanupIfNeeded):
-    /// re-emit every server as a per-item record, then queue an op=delete for
-    /// the legacy whole-file MCPServersV2 record so it stops occupying cloud
-    /// storage and confusing peers' inbound mergers. CloudKit orders the item
-    /// upserts before the whole-file delete within the batch.
-    private func scheduleLegacyRecordCleanupIfNeeded() {
-        guard !UserDefaults.standard.bool(forKey: Self.legacyCleanupKey) else { return }
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s — let ChatStore/SyncCore finish wiring
-            guard let self else { return }
-            await MainActor.run {
-                self.noteSyncedLocalChange(names: self.servers.map(\.id))
-                Task { await ChatStore.shared.markDirty(
-                    recordType: "MCPServers",
-                    recordId: "mcp-servers",
-                    operation: "delete"
-                ) }
-                UserDefaults.standard.set(true, forKey: Self.legacyCleanupKey)
-                AppLogger(category: "MCPStore").info("[Sync] legacy MCPServersV2 cleanup scheduled (\(self.servers.count) servers re-emitted as MCPServerItem)")
-            }
-        }
-    }
 }

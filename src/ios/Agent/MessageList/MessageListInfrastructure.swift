@@ -1046,6 +1046,19 @@ final class MessageListViewController: UIViewController {
         collectionView.keyboardDismissMode = .onDrag
         collectionView.alwaysBounceVertical = true
         collectionView.contentInsetAdjustmentBehavior = .automatic
+        // [T-chat-statusbar-scrolltotop-mistap] `scrollsToTop` is left at its
+        // default (true) ON PURPOSE — tapping the iOS status bar must still
+        // scroll this list to the top, which is standard platform behaviour
+        // users expect.
+        //
+        // An earlier revision of this fix turned it off here to stop a mis-tap
+        // of the trailing "..." menu (which sits just below the status bar)
+        // from throwing the conversation to its oldest message. That was too
+        // blunt: it removed the deliberate gesture along with the accidental
+        // one. The mis-tap is addressed at its source instead — see
+        // `HitPaddedButton`, which pads the "..." touch target out to the
+        // 44x44pt HIG minimum so a normal tap lands on the button rather than
+        // slipping onto the status bar above it.
         view.addSubview(collectionView)
     }
 

@@ -92,9 +92,11 @@ enum ForceSyncHelper {
         // Providers force-sync button a silent NO-OP — the actual sync surface
         // (the per-record v3 types below) was never re-marked, and the button
         // could not repair a diverged peer. [T-provider-forcesync-v3]
-        await ChatStore.shared.markDirty(recordType: "ProviderConfig",
-                                         recordId: "provider-config")
-        var count = 1
+        // [T-icloud-drop-wholefile-producers] The whole-file ProviderConfig
+        // record is no longer re-marked: a v3 receiver drops it, so it never
+        // contributed to a repair. The per-record v3 rows below are the
+        // entire force-sync surface.
+        var count = 0
         // [T-provider-forcesync-v3] Push side: re-mark EVERY v3 provider row so
         // the next outbound batch re-uploads current local state with a fresh
         // updatedAt. This is what lets a peer whose incremental window missed
@@ -121,6 +123,11 @@ enum ForceSyncHelper {
                 await ChatStore.shared.markDirty(recordType: "ProviderThinkingRuleV3", recordId: rid)
                 count += 1
             }
+        }
+        // [T-subagent-own-store] The roster rides the same manual escape hatch.
+        for def in SubAgentStore.shared.subAgents {
+            await ChatStore.shared.markDirty(recordType: "SubAgentV3", recordId: def.id)
+            count += 1
         }
         // Pull side: forget the per-type "history fully pulled" anchors so the
         // next fetchRecentV2 re-pulls FULL history for provider types instead

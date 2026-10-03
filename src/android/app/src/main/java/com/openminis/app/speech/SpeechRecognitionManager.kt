@@ -280,15 +280,60 @@ object SpeechRecognitionManager {
             if (cb != null) {
                 currentEngine()?.cancel()
                 setState(RecognitionState.IDLE)
-                startRecording(cb.first, cb.second)
+                startRecording(cb.onPartialOrFinal, cb.onError, cb.onFailedAudio)
             }
         }
     }
 
     /** Callbacks from the most recent [startRecording] so [selectLocale] can restart with them. */
-    private var activeCallbacks: Pair<(String, Boolean) -> Unit, (RecognitionError, String?) -> Unit>? = null
+    private class Callbacks(
+        val onPartialOrFinal: (String, Boolean) -> Unit,
+        val onError: (RecognitionError, String?) -> Unit,
+        val onFailedAudio: ((FailedAudio) -> Unit)?,
+    )
+    private var activeCallbacks: Callbacks? = null
+
+    /**
+     * [T-voice-asr-failure-retry-prompt] One utterance whose transcription
+     * failed, with its audio kept so the user can retry instead of repeating
+     * it. [engineId] is the engine that produced it (and will retry it).
+     */
+    class FailedAudio(
+        val wav: ByteArray,
+        val seconds: Double,
+        val error: RecognitionError,
+        val message: String?,
+        val engineId: String,
+    )
+
+    /** Engine running a [retryTranscription], so stop/cancel reach it. */
+    @Volatile
+    private var retryEngine: SpeechRecognitionEngine? = null
 
     fun availableEngines(): List<SpeechRecognitionEngine> = engines.toList()
+
+    private val noAsrStall = MutableStateFlow(false).asStateFlow()
+
+    /**
+     * [T-android-voice-asr-stall-skip] True while a cloud ASR attempt has gone
+     * [ProviderSpeechRecognitionEngine.ASR_STALL_THRESHOLD_MS] without a result
+     * and there is a next voice model to switch to — the voice panel shows its
+     * "Switch Model" pill (and hides transcript delete) exactly while this is
+     * true. Drops as soon as the stall ends: skipped, finished, failed or
+     * cancelled.
+     */
+    fun asrStalled(): StateFlow<Boolean> =
+        engines.filterIsInstance<ProviderSpeechRecognitionEngine>().firstOrNull()?.asrAttempts?.stalled
+            ?: noAsrStall
+
+    /**
+     * [T-android-voice-asr-stall-skip] Skip every stalled attempt to its next
+     * voice model (System last). Returns the model now used, for the toast, or
+     * null when nothing was stalled.
+     */
+    fun skipStalledTranscription(systemName: String, genericName: String): String? =
+        engines.filterIsInstance<ProviderSpeechRecognitionEngine>().firstOrNull()
+            ?.skipStalledTranscription(systemName, genericName)
 
     /**
      * Recompute [isAvailable]. Cheap — the UI may call this before rendering
@@ -315,17 +360,23 @@ object SpeechRecognitionManager {
     fun startRecording(
         onPartialOrFinal: (text: String, isFinal: Boolean) -> Unit,
         onError: (RecognitionError, String?) -> Unit,
+        // [T-voice-asr-failure-retry-prompt] Receives failures whose audio the
+        // engine kept (instead of [onError]). Null keeps the old behaviour.
+        onFailedAudio: ((FailedAudio) -> Unit)? = null,
     ) {
         if (_state.value != RecognitionState.IDLE) {
             Log.d(TAG, "startRecording ignored; state=${_state.value}")
+            VoicePipelineLog.event("manager.start.rejected", "state" to _state.value)
             return
         }
         val engine = currentEngine()
         if (engine == null) {
             _lastError.value = RecognitionError.OEM_NO_SERVICE
+            VoicePipelineLog.event("manager.start.noEngine")
             onError(RecognitionError.OEM_NO_SERVICE, "No recognition engine available")
             return
         }
+        VoicePipelineLog.event("manager.start", "engine" to engine.id)
 
         // [T-android-tts-stop-on-capture] Silence read-aloud BEFORE the engine
         // opens the mic. Done here rather than at the UI call sites so every
@@ -341,36 +392,9 @@ object SpeechRecognitionManager {
         _recognizedText.value = ""
         _lastError.value = null
         resetLevels()
-        activeCallbacks = onPartialOrFinal to onError
+        activeCallbacks = Callbacks(onPartialOrFinal, onError, onFailedAudio)
 
-        val listener = object : SpeechRecognitionEngine.Listener {
-            override fun onReadyForSpeech() {
-                setState(RecognitionState.RECORDING)
-            }
-
-            override fun onPartial(text: String) {
-                _recognizedText.value = text
-                onPartialOrFinal(text, false)
-            }
-
-            override fun onFinal(text: String) {
-                if (text.isNotEmpty()) _recognizedText.value = text
-                onPartialOrFinal(text, true)
-                setState(RecognitionState.IDLE)
-                resetLevels()
-                refreshAvailability()
-            }
-
-            override fun onError(error: RecognitionError, message: String?) {
-                _lastError.value = error
-                setState(RecognitionState.IDLE)
-                resetLevels()
-                onError(error, message)
-                refreshAvailability()
-            }
-
-            override fun onRmsDb(rms: Float) { pushLevel(rms) }
-        }
+        val listener = makeListener(engine.id, onPartialOrFinal, onError, onFailedAudio)
 
         try {
             engine.start(_locale.value, listener)
@@ -381,13 +405,121 @@ object SpeechRecognitionManager {
         }
     }
 
+    /**
+     * [T-voice-asr-failure-retry-prompt] Re-transcribe audio kept from a failed
+     * take. Runs as a FINISHING session (so the panel shows "Recognizing…" and
+     * voice mode still owes text), and reports through the same callbacks as a
+     * capture; a second failure comes back through [onFailedAudio] again.
+     *
+     * @return false when another session is in flight — the caller keeps the
+     *   utterance queued and asks again later.
+     */
+    fun retryTranscription(
+        failed: FailedAudio,
+        onPartialOrFinal: (text: String, isFinal: Boolean) -> Unit,
+        onError: (RecognitionError, String?) -> Unit,
+        onFailedAudio: (FailedAudio) -> Unit,
+    ): Boolean {
+        if (_state.value != RecognitionState.IDLE) {
+            VoicePipelineLog.event("manager.retry.rejected", "state" to _state.value)
+            return false
+        }
+        val engine = engines.firstOrNull { it.id == failed.engineId } ?: currentEngine()
+        if (engine == null) {
+            onFailedAudio(failed)
+            return true
+        }
+        VoicePipelineLog.event("manager.retry", "engine" to engine.id, "seconds" to "%.1f".format(failed.seconds))
+        setState(RecognitionState.FINISHING)
+        _lastError.value = null
+        retryEngine = engine
+        val listener = makeListener(engine.id, onPartialOrFinal, onError, onFailedAudio)
+        try {
+            engine.transcribeRetained(failed.wav, _locale.value, listener)
+        } catch (e: Throwable) {
+            retryEngine = null
+            setState(RecognitionState.IDLE)
+            onFailedAudio(FailedAudio(failed.wav, failed.seconds, RecognitionError.UNKNOWN, e.message, engine.id))
+        }
+        return true
+    }
+
+    private fun makeListener(
+        engineId: String,
+        onPartialOrFinal: (text: String, isFinal: Boolean) -> Unit,
+        onError: (RecognitionError, String?) -> Unit,
+        onFailedAudio: ((FailedAudio) -> Unit)?,
+    ): SpeechRecognitionEngine.Listener {
+        // [T-voice-asr-failure-retry-prompt] Audio the engine handed back just
+        // before its terminal onError.
+        var retained: ByteArray? = null
+        return object : SpeechRecognitionEngine.Listener {
+            override fun onReadyForSpeech() {
+                setState(RecognitionState.RECORDING)
+            }
+
+            override fun onPartial(text: String) {
+                _recognizedText.value = text
+                onPartialOrFinal(text, false)
+            }
+
+            override fun onFinal(text: String) {
+                // Length only — never the recognised text itself.
+                VoicePipelineLog.event("manager.final", "chars" to text.length, "state" to _state.value)
+                retained = null
+                retryEngine = null
+                if (text.isNotEmpty()) _recognizedText.value = text
+                onPartialOrFinal(text, true)
+                setState(RecognitionState.IDLE)
+                resetLevels()
+                refreshAvailability()
+            }
+
+            override fun onRetainedAudio(wav: ByteArray) {
+                retained = wav
+            }
+
+            override fun onError(error: RecognitionError, message: String?) {
+                VoicePipelineLog.event("manager.error", "kind" to error.name, "state" to _state.value)
+                _lastError.value = error
+                retryEngine = null
+                val audio = retained
+                retained = null
+                val seconds = audio?.let { VoiceAsrWatchdog.wavSeconds(it) } ?: 0.0
+                // [T-voice-asr-failure-retry-prompt] A failure with kept audio
+                // goes to the retry prompt instead of the error pill, and the
+                // state reaches IDLE only AFTER the caller has queued it — so a
+                // send waiting on IDLE sees the failure, not a clean finish.
+                val failed = if (audio != null && onFailedAudio != null &&
+                    VoiceAsrFailurePolicy.shouldPromptRetry(error, seconds)
+                ) FailedAudio(audio, seconds, error, message, engineId) else null
+                if (failed != null) onFailedAudio?.invoke(failed)
+                setState(RecognitionState.IDLE)
+                resetLevels()
+                if (failed == null) onError(error, message)
+                refreshAvailability()
+            }
+
+            override fun onRmsDb(rms: Float) { pushLevel(rms) }
+        }
+    }
+
     fun stopRecording() {
-        if (_state.value != RecognitionState.RECORDING && _state.value != RecognitionState.STARTING) return
+        if (_state.value != RecognitionState.RECORDING && _state.value != RecognitionState.STARTING) {
+            VoicePipelineLog.event("manager.stop.ignored", "state" to _state.value)
+            return
+        }
+        VoicePipelineLog.event("manager.stop", "state" to _state.value)
         setState(RecognitionState.FINISHING)
         currentEngine()?.stop()
     }
 
     fun cancelRecording() {
+        VoicePipelineLog.event("manager.cancel", "state" to _state.value)
+        // [T-voice-asr-failure-retry-prompt] A retry may run on an engine other
+        // than the current selection; cancel that one too.
+        retryEngine?.let { if (it !== currentEngine()) it.cancel() }
+        retryEngine = null
         currentEngine()?.cancel()
         setState(RecognitionState.IDLE)
         _recognizedText.value = ""

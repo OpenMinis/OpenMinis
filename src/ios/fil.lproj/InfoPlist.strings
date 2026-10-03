@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Filipino */
+
+"NSLocationWhenInUseUsageDescription" = "Ginagamit ng Minis ang iyong lokasyon para itala kung saan sinimulan ang mga agent session sa iyong session history.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Ginagamit ng Minis ang lokasyon sa background para makapagpatuloy ang mga agent task kahit nakasara ang app. Ginagamit lang ang datos ng lokasyon para itala ang session history.";
+"NSCalendarsUsageDescription" = "Ina-access ng Minis ang Kalendaryo para matingnan ng AI agent ang iyong iskedyul, masuri ang bakanteng oras, at makagawa ng mga event para sa iyo.";
+"NSCalendarsFullAccessUsageDescription" = "Ina-access ng Minis ang Kalendaryo para matingnan ng AI agent ang iyong iskedyul, masuri ang bakanteng oras, at makagawa ng mga event para sa iyo.";
+"NSRemindersUsageDescription" = "Ina-access ng Minis ang Reminders para makahanap at makagawa ang AI agent ng mga paalala para sa iyo.";
+"NSRemindersFullAccessUsageDescription" = "Ina-access ng Minis ang Reminders para makahanap at makagawa ang AI agent ng mga paalala para sa iyo.";
+"NSCameraUsageDescription" = "Kailangan ng Minis ng access sa camera para kumuha ng litrato para sa mga usapan sa AI.";
+"NSPhotoLibraryUsageDescription" = "Kailangan ng Minis ng access sa Photo Library para makapaglakip ng mga larawan sa mga usapan sa AI.";
+"NSPhotoLibraryAddUsageDescription" = "Kailangan ng Minis ng pahintulot para mag-save ng mga video at larawan sa iyong Photo Library.";
+"NSHealthShareUsageDescription" = "Ina-access ng Minis ang HealthKit para mabasa ng AI agent ang datos ng kalusugan gaya ng hakbang, tibok ng puso, tulog, at workout para sa iyo.";
+"NSHealthUpdateUsageDescription" = "Nagsusulat ang Minis sa HealthKit para maitala ng AI agent ang datos ng kalusugan gaya ng hakbang, timbang, at inom ng tubig para sa iyo.";
+"NSContactsUsageDescription" = "Ina-access ng Minis ang Contacts para makahanap, makapagpakita, at makapamahala ang AI agent ng iyong mga contact para sa iyo.";
+"NSAppleMusicUsageDescription" = "Ina-access ng Minis ang media library para makapaghanap ang AI agent sa iyong music library at makontrol ang pag-playback.";
+"NSMicrophoneUsageDescription" = "Kailangan ng Minis ng access sa mikropono para sa voice input sa chat.";
+"NSSpeechRecognitionUsageDescription" = "Gumagamit ang Minis ng speech recognition para gawing text message ang iyong boses.";
+"NSHomeKitUsageDescription" = "Ina-access ng Minis ang HomeKit para masuri at makontrol ng AI agent ang iyong mga smart home device para sa iyo.";
+"NSAlarmKitUsageDescription" = "Gumagamit ang Minis ng AlarmKit para makapag-set ang AI agent ng mga alarm at timer para sa iyo.";
+"NSLocalNetworkUsageDescription" = "Kailangan ng virtual machine ng access sa network para sa mga koneksyong SLIRP.";

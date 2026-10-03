@@ -351,6 +351,10 @@ class AnthropicProviderTest {
         // 5-series single-segment ids — were null pre-fix, now (5,0).
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-fable-5"))
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-opus-5"))
+        // [T-anthropic-fable51-android] Fable 5.1 parses as the PAIR (5,1),
+        // not (5,0) — a different branch of the optional-minor group than the
+        // single-segment ids above, so it is worth asserting separately.
+        assertTrue(AnthropicProvider.modelRejectsTemperature("claude-fable-5-1"))
         // major=5 with a date suffix in the minor slot — major wins.
         assertTrue(AnthropicProvider.modelRejectsTemperature("claude-sonnet-5-20260301"))
         // Existing 4.6+ pairs — unchanged.
@@ -370,9 +374,36 @@ class AnthropicProviderTest {
         assertTrue(AnthropicProvider.modelUsesAdaptiveThinking("claude-fable-5"))
         assertTrue(AnthropicProvider.supportsThinking("claude-fable-5"))
         assertTrue(AnthropicProvider.supportsThinking("claude-opus-5"))
+        // [T-anthropic-fable51-android] Fable 5.1 is adaptive-thinking only —
+        // it must take the SAME branch as the rest of the 5-series. If it ever
+        // fell through to the hybrid path, a manual thinking budget would be
+        // sent and the server would reject the request.
+        assertTrue(AnthropicProvider.modelUsesAdaptiveThinking("claude-fable-5-1"))
+        assertTrue(AnthropicProvider.supportsThinking("claude-fable-5-1"))
         // Unchanged below the cutoffs.
         assertEquals(false, AnthropicProvider.modelUsesAdaptiveThinking("claude-3-5-sonnet"))
         assertEquals(false, AnthropicProvider.supportsThinking("claude-3-5-sonnet"))
+    }
+
+    // -- Fable 5.1 catalog entry --
+
+    @Test
+    fun `Fable 5point1 is catalogued with Fable 5's specs and listed first`() {
+        // [T-anthropic-fable51-android] The id is what every capability check
+        // derives from (parseClaudeVersion), so a typo here would silently
+        // disable adaptive thinking and re-enable temperature.
+        val m = LLMModel.claudeFable51
+        assertEquals("claude-fable-5-1", m.id)
+        assertEquals("Claude Fable 5.1", m.displayName)
+        assertEquals("Anthropic", m.provider)
+        // Same spec as Fable 5 — pinned against that entry rather than
+        // repeating literals, so the two cannot drift apart.
+        assertEquals(LLMModel.claudeFable5.contextWindow, m.contextWindow)
+        assertEquals(LLMModel.claudeFable5.maxOutputTokens, m.maxOutputTokens)
+        assertEquals(LLMModel.claudeFable5.supportsReasoning, m.supportsReasoning)
+        // Must be reachable from the picker, newest first (iOS ordering).
+        assertTrue(LLMModel.allAnthropic.contains(m))
+        assertEquals(m, LLMModel.allAnthropic.first())
     }
 
     // -- Provider metadata --
@@ -620,7 +651,7 @@ class AnthropicProviderTest {
             "anthropic-beta must not contain redact-thinking; was: $beta",
             !beta.contains("redact-thinking"),
         )
-        // Sanity: the OAuth mimicry betas we DO expect are still present.
+        // Sanity: the OAuth OAuth betas we DO expect are still present.
         assertTrue("oauth beta present", beta.contains("oauth-2025-04-20"))
     }
 }

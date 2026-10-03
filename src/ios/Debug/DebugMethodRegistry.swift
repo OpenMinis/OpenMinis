@@ -1235,9 +1235,19 @@ enum DebugMethodRegistry {
                 ParamSpec(name: "modelGroupId", type: "string", required: false, default: nil, description: "Pin to a specific group. Mutually exclusive with modelEntryId."),
                 ParamSpec(name: "wait", type: "bool", required: false, default: false, description: "Block until completion."),
                 ParamSpec(name: "waitTimeout", type: "int", required: false, default: 600, description: "Seconds when wait=true. Clamped to [1, 1800]."),
+                ParamSpec(name: "pastedTexts", type: "[string]", required: false, default: nil, description: "Stash each string as a long-paste placeholder before sending; its [Pasted#N] literal replaces a {{PASTE<i>}} token in prompt, or is appended."),
             ],
             returns: "{sessionId, isNewSession, modelName, status, prompt, responseText, userMessageId, tokenUsage?}",
             example: ["prompt": "Say hi", "wait": true]
+        ),
+        MethodSpec(
+            name: "chat.title.regenerate",
+            description: "Regenerate a session's title (manual long-press action equivalent). With auto-grouping ON and the session unfiled, may also file it into a matching existing folder.",
+            params: [
+                ParamSpec(name: "sessionId", type: "string", required: true, default: nil, description: "Target session ID."),
+            ],
+            returns: "{sessionId, title, folderId}",
+            example: ["sessionId": "6D0F…"]
         ),
         MethodSpec(
             name: "chat.session.status",

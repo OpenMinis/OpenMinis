@@ -143,7 +143,23 @@ struct BackupFileTreeExporter {
             options: [.skipsHiddenFiles]
         ) else { return result }
 
+        // [T-backup-stop-during-upload] Cancellation checkpoint per file.
+        // `BackupExporter` only checks between CATEGORIES, so once a category
+        // with a large tree started (chats, with every session's files) Stop
+        // did nothing until the whole tree finished — the user's "the button
+        // does nothing" report. A file boundary is a safe place to stop: each
+        // file is copied and indexed atomically, so an abort leaves the
+        // already-written entries consistent and simply omits the rest.
+        var scanned = 0
+
         for case let url as URL in enumerator {
+            // Checked every 32 entries rather than every one: this is a hot
+            // loop over potentially tens of thousands of files, and 32 keeps
+            // the response to Stop well under a human-perceptible delay while
+            // costing nothing measurable.
+            scanned += 1
+            if scanned % 32 == 0 { try Task.checkCancellation() }
+
             let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
             // Relative path via path-prefix strip: the enumerator yields
             // absolute URLs, and `url.relativePath` is not meaningful here.

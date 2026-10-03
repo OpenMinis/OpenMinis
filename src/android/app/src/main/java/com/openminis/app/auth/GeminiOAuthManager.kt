@@ -188,7 +188,8 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      *
      *  - `INVALID_GRANT` — Google returned 400/401/403 or `invalid_grant`/
      *    `invalid_token`: refresh token is revoked/expired. Stored credentials
-     *    are cleared (`logout()`), user must re-run OAuth.
+     *    are kept and the instance is marked for re-login
+     *    (`markNeedsReauth`); user must re-run OAuth.
      *  - `TRANSIENT` — network/5xx: credentials kept; caller may retry.
      *  - `NO_TOKEN` — no stored refresh token (not logged in).
      *  - `SUCCESS` — new access token persisted.
@@ -251,8 +252,9 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     bodyLower.contains("invalid_grant") ||
                     bodyLower.contains("invalid_token")
                 if (isInvalidGrant) {
-                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — clearing credentials")
-                    logout()
+                    // [T-oauth-keep-credentials] Never delete: mark for re-login.
+                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — marking for re-login")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 Log.w(TAG, "Gemini token refresh transient failure ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — keeping token")

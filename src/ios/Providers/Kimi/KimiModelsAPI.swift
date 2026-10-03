@@ -13,7 +13,6 @@ import Foundation
 /// only `kimi-k3`, the current flagship confirmed present in a live fetch
 /// (logged as the first model), plus the prior `kimi-k2` id. We do NOT hardcode
 /// a guessed catalog — the live fetch fills in the rest (e.g. "Kimi K2.7 Code").
-/// See the Kimi Code OAuth design notes §5.
 enum KimiModelsAPI {
     /// Default pick before the first live fetch — current flagship.
     static let defaultModelId = "kimi-k3"

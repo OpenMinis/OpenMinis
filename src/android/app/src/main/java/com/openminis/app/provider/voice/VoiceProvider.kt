@@ -200,11 +200,19 @@ open class VoiceProvider(
         return base + p
     }
 
+    /**
+     * Whether an error response means the credential itself was rejected,
+     * which surfaces as "check the API key". Default: any 401/403. Vendors
+     * whose 401 also covers other failures override this so those keep
+     * their own message ([T-openrouter-voice-catalog]).
+     */
+    open fun isAuthFailure(code: Int, body: ByteArray?): Boolean = code == 401 || code == 403
+
     suspend fun executeRequest(request: Request): ByteArray = withContext(Dispatchers.IO) {
         httpClient.newCall(request).execute().use { response ->
             val body = response.body?.bytes()
             if (!response.isSuccessful) {
-                if (response.code == 401 || response.code == 403) {
+                if (isAuthFailure(response.code, body)) {
                     Log.e(TAG, "Voice auth failed: HTTP ${response.code}")
                     throw VoiceProviderException.Auth()
                 }

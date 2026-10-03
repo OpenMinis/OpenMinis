@@ -28,12 +28,41 @@ struct GroupSlotPicker: View {
 
     var body: some View {
         Menu {
-            Picker(selection: $selection) {
-                Text("None", comment: "No group selected").tag(String?.none)
-                ForEach(store.modelGroups) { group in
-                    Text(group.name).tag(Optional(group.id))
+            // [T-ios-groupslot-ipad-submenu] The group list is emitted as plain
+            // Buttons, NOT as a nested `Picker`.
+            //
+            // A `Picker` inside a `Menu` is rendered by the idiom, not by us:
+            // on iPhone UIKit inlines its options into the parent menu, but on
+            // iPad and Mac it becomes a SUBMENU whose title comes from the
+            // Picker's own label. This one passed `EmptyView()` as that label
+            // (it is never meant to be seen -- the row's own label is drawn in
+            // the `Menu`'s label below), so the submenu was titled with nothing:
+            // an unnamed row that has to be opened before the groups appear.
+            //
+            // Buttons carry no such label requirement and are inlined
+            // identically on every idiom, so the list looks the same
+            // everywhere. The checkmark that `Picker` drew for the current
+            // value is reproduced explicitly.
+            Button {
+                selection = nil
+            } label: {
+                if selection == nil {
+                    Label(AppLocalized("None", comment: "No group selected"), systemImage: "checkmark")
+                } else {
+                    Text("None", comment: "No group selected")
                 }
-            } label: { EmptyView() }
+            }
+            ForEach(store.modelGroups) { group in
+                Button {
+                    selection = group.id
+                } label: {
+                    if selection == group.id {
+                        Label(group.name, systemImage: "checkmark")
+                    } else {
+                        Text(group.name)
+                    }
+                }
+            }
 
             Divider()
             Button {

@@ -6,7 +6,14 @@ enum LLMError: LocalizedError {
     case providerError(message: String)
     /// Transient server-side errors (HTTP 500/502/503/504/529) that should be
     /// retried on the same model rather than triggering a group fallback.
-    case transientError(message: String)
+    ///
+    /// [T-fallback-503-budget] `statusCode` is the HTTP status the mapping site
+    /// actually saw, and is nil for transient conditions with no HTTP response
+    /// of their own (stall/TTFB timeouts, empty responses, compaction breaches).
+    /// It exists so the fallback planner can tell "the upstream answered 503,
+    /// this model has no capacity" from "our link/stream misbehaved" WITHOUT
+    /// substring-matching a body that may legitimately contain "503".
+    case transientError(message: String, statusCode: Int? = nil)
     case decodingError(underlying: Error)
     case rateLimited
     case cancelled
@@ -20,7 +27,7 @@ enum LLMError: LocalizedError {
             return "Network error: \(error.localizedDescription)"
         case .providerError(let message):
             return "Provider error: \(message)"
-        case .transientError(let message):
+        case .transientError(let message, _):
             return "Service temporarily unavailable: \(message)"
         case .decodingError(let error):
             return "Decoding error: \(error.localizedDescription)"
@@ -71,5 +78,21 @@ enum LLMError: LocalizedError {
         case .transientError, .networkError, .decodingError, .cancelled, .unknown:
             return false
         }
+    }
+
+    /// [T-fallback-503-budget] The HTTP status this error was mapped from, when
+    /// the mapping site had one. nil for every non-HTTP condition.
+    var httpStatusCode: Int? {
+        if case .transientError(_, let code) = self { return code }
+        return nil
+    }
+
+    /// A transient error the SERVER produced with a 5xx status — i.e. this
+    /// model/deployment has no capacity right now, which another group member
+    /// may well have. Distinct from a local/link transient (nil status), where
+    /// switching models fixes nothing.
+    var isServerCapacityTransient: Bool {
+        guard let code = httpStatusCode else { return false }
+        return (500...599).contains(code)
     }
 }

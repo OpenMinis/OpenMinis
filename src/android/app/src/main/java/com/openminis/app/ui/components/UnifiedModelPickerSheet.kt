@@ -38,6 +38,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -50,6 +51,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -106,6 +109,13 @@ fun UnifiedModelPickerSheet(
      * navigation route (the floating capsule) simply don't show it.
      */
     onEditGroups: (() -> Unit)? = null,
+    /**
+     * [T-android-picker-provider-edit] Edit button on each provider section
+     * header, as in the chat picker and iOS UnifiedModelPicker (698cc65c6).
+     * Only stored instances have sections here; the built-in System card has
+     * no detail page and never gets the button. Null hides it.
+     */
+    onEditProvider: ((instanceId: String) -> Unit)? = null,
 ) {
     val config by providerRepository.config.collectAsState()
     var quickTestEntry by remember { mutableStateOf<ModelEntry?>(null) }
@@ -134,8 +144,11 @@ fun UnifiedModelPickerSheet(
         onDismiss()
     }
 
-    fun matches(text: String): Boolean =
-        searchText.isBlank() || text.contains(searchText.trim(), ignoreCase = true)
+    // [T-picker-search-debounce] [T-picker-search-relevance] Same search as
+    // the chat picker: debounced, and scored (exact > prefix > word prefix >
+    // substring > subsequence) instead of a plain `contains`.
+    val query = rememberDebouncedQuery(searchText)
+    fun matches(text: String): Boolean = query.isEmpty() || ModelSearch.score(text, query) > 0
 
     // [T-android-voice-picker-active] Which group member actually serves the
     // next request — recomputed whenever the config changes so the badge can't
@@ -272,10 +285,15 @@ fun UnifiedModelPickerSheet(
                 },
             )
 
+            // [T-android-picker-scroll-guard] See rememberSheetScrollGuard: fling
+            // momentum is absorbed, a deliberate drag still dismisses.
+            val unifiedPickerScrollGuard = rememberSheetScrollGuard()
+
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f, fill = false),
+                    .weight(1f, fill = false)
+                    .nestedScroll(unifiedPickerScrollGuard),
             ) {
                 // ── Model Groups card ──
                 if (boundGroup != null && matches(boundGroupName ?: "")) {
@@ -652,11 +670,28 @@ fun UnifiedModelPickerSheet(
                 val entriesByInstance = config.instances
                     .filter { it.isEnabled }
                     .mapNotNull { inst ->
-                        val entries = config.modelEntries.filter { e ->
-                            e.providerInstanceId == inst.id && !e.isHidden &&
-                                modalityFilter.matches(e.model) &&
-                                (matches(e.model.displayName) || matches(e.model.id))
-                        }
+                        // [T-model-release-ranking] Provider sections follow the
+                        // user's arrangement; models INSIDE a section follow
+                        // release date. This list is built from the config
+                        // snapshot rather than ProviderRepository.entriesFor(),
+                        // so it does not inherit that accessor's sort — without
+                        // this call the picker shows models in raw config order
+                        // (instance cluster, then id alphabetically) while the
+                        // provider-detail list right next to it shows them
+                        // newest-first. iOS fixed the same divergence in
+                        // UnifiedModelPicker.swift.
+                        val sectionEntries = com.openminis.app.data.repository.ModelEntryRanking
+                            .sortedByReleaseRank(
+                                config.modelEntries.filter { e ->
+                                    e.providerInstanceId == inst.id && !e.isHidden &&
+                                        modalityFilter.matches(e.model)
+                                },
+                            )
+                        // A provider-name hit shows the whole section (iOS
+                        // T-picker-search-provider-name); otherwise matches,
+                        // most relevant first — ties keep newest-first.
+                        val entries = if (matches(inst.label.ifEmpty { inst.providerType.displayName })) sectionEntries
+                            else ModelSearch.rank(sectionEntries, query)
                         if (entries.isEmpty()) null else inst to entries
                     }
                 entriesByInstance.forEach { (inst, entries) ->
@@ -677,13 +712,37 @@ fun UnifiedModelPickerSheet(
                                     .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
+                                val providerName = inst.label.ifEmpty { inst.providerType.displayName }
                                 Text(
-                                    inst.label.ifEmpty { inst.providerType.displayName },
+                                    providerName,
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                     modifier = Modifier.weight(1f),
                                 )
+                                if (onEditProvider != null) {
+                                    // [T-android-picker-provider-edit-text] A text "Edit" link,
+                                    // styled like the Model Groups "Edit" (iOS a0acb1c0f replaced its
+                                    // icon button with this). Compact rather than a MinisTextButton so
+                                    // the header row keeps its height; still its own tap target, so it
+                                    // never folds the section.
+                                    val editLabel = stringResource(R.string.model_picker_edit_provider, providerName)
+                                    Text(
+                                        stringResource(R.string.model_picker_groups_edit),
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier
+                                            .padding(end = 4.dp)
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable { onEditProvider(inst.id) }
+                                            .semantics { contentDescription = editLabel }
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    )
+                                }
                                 Box(
                                     modifier = Modifier
                                         .size(24.dp)

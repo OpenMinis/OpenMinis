@@ -227,12 +227,84 @@ class SelectionController {
      */
     private val shards = mutableStateMapOf<TextShardId, TextShard>()
 
+    /**
+     * [T-android-selection-offscreen-order] (GH#296) Where each shard sits in
+     * the document, whether or not it is composed. The chat supplies
+     * [chatDocumentOrder]; null (every other surface) keeps the on-screen-y
+     * ordering those surfaces always had. See SelectionDocumentOrder.kt.
+     */
+    var documentOrder: ((TextShardId) -> DocOrder?)? = null
+
+    /** Text + position of every registered shard ([ShardText] view of [shards]). */
+    private val liveTexts = HashMap<TextShardId, ShardText>()
+
+    /**
+     * [T-android-selection-offscreen-order] (GH#296) Shards that unregistered
+     * while a selection was active — scrolled out of the LazyColumn by the
+     * handle's edge auto-scroll, typically the selection's own start. Their
+     * text is frozen here so ordering and copy still see the whole selected
+     * span; before, a copy walked registered shards only and returned just
+     * the tail of the last one. Emptied when a selection begins or is
+     * cleared, so it only ever holds what the current selection scrolled
+     * past.
+     */
+    private val retired = HashMap<TextShardId, ShardText>()
+
     fun register(shard: TextShard) {
         shards[shard.id] = shard
+        registerText(
+            ShardText(shard.id, shard.plainText, shard.rawMarkdown) {
+                // A shard's coordinates can detach before its dispose runs.
+                runCatching { shard.positionInWindow().y }.getOrNull()
+            },
+        )
+    }
+
+    /** Test seam for the ordering / copy logic, which needs no TextLayoutResult. */
+    internal fun registerText(text: ShardText) {
+        liveTexts[text.id] = text
+        retired.remove(text.id)
     }
 
     fun unregister(id: TextShardId) {
         shards.remove(id)
+        val live = liveTexts.remove(id) ?: return
+        if (selection.value != null) {
+            val lastY = live.y()
+            retired[id] = ShardText(live.id, live.plainText, live.rawMarkdown) { lastY }
+        }
+    }
+
+    /** Number of frozen off-screen shards (tests / diagnostics). */
+    internal fun retiredCount(): Int = retired.size
+
+    /** Text of a shard: composed, then frozen off-screen, then [registry]. */
+    private fun textOf(id: TextShardId, registry: Map<TextShardId, String> = emptyMap()): String? =
+        liveTexts[id]?.plainText ?: retired[id]?.plainText ?: registry[id]
+
+    private fun yOf(id: TextShardId): Float? = liveTexts[id]?.y?.invoke() ?: retired[id]?.y?.invoke()
+
+    /**
+     * [T-android-selection-offscreen-order] Order of two shards: document
+     * order when the surface provides it for both, else on-screen y (a
+     * retired shard answers with the y it had when it left). Null when
+     * neither is known, i.e. the order genuinely cannot be decided.
+     */
+    internal fun compareShards(a: TextShardId, b: TextShardId): Int? {
+        if (a == b) return 0
+        documentOrder?.let { order ->
+            val oa = order(a)
+            val ob = order(b)
+            if (oa != null && ob != null) return oa.compareTo(ob)
+        }
+        // The id-embedded index that `shardOrderKey` used to provide, kept as
+        // a fallback for surfaces without document order — now scoped to one
+        // message AND one parent block (an index means nothing across
+        // parents) and aware of the `#subIndex` suffix it choked on.
+        sameBlockOrder(a, b)?.let { return it }
+        val ya = yOf(a) ?: return null
+        val yb = yOf(b) ?: return null
+        return ya.compareTo(yb)
     }
 
     /** Read-only snapshot of currently-composed shards. */
@@ -314,6 +386,7 @@ class SelectionController {
 
     /** Begin a fresh selection collapsed at [pos] (long-press start). */
     fun beginSelection(pos: TextPosition) {
+        retired.clear()
         selection.value = TextSelection(start = pos, end = pos)
     }
 
@@ -325,6 +398,7 @@ class SelectionController {
      * shard isn't registered or the character isn't part of a word.
      */
     fun beginSelectionWord(pos: TextPosition) {
+        retired.clear()
         val shard = currentShards()[pos.shard]
         if (shard == null) {
             beginSelection(pos)
@@ -435,6 +509,7 @@ class SelectionController {
 
     fun clearSelection() {
         selection.value = null
+        retired.clear()
         messageMarkdownCache.clear()
         contextMenuRequest.value = null
     }
@@ -824,19 +899,13 @@ class SelectionController {
         if (a.shard == b.shard) {
             return if (a.charOffset <= b.charOffset) a to b else b to a
         }
-        // Prefer stable document-order index when both endpoints have one,
-        // because that survives a shard being off-screen / unregistered.
-        // Fall back to y-comparison if we can't get an index for either.
-        val ka = shardOrderKey(a.shard)
-        val kb = shardOrderKey(b.shard)
-        if (ka != null && kb != null && a.shard.messageId == b.shard.messageId) {
-            return if (ka <= kb) a to b else b to a
-        }
-        val sA = shards[a.shard] ?: return null
-        val sB = shards[b.shard] ?: return null
-        val yA = sA.positionInWindow().y
-        val yB = sB.positionInWindow().y
-        return if (yA <= yB) a to b else b to a
+        // [T-android-selection-offscreen-order] (GH#296) Document order
+        // first, so an endpoint that scrolled off-screen still orders; y only
+        // on surfaces without one. This used to try `shardOrderKey`, which is
+        // null for every chat shard since the `#subIndex` suffix, so it fell
+        // straight to y and returned null the moment an endpoint unregistered.
+        val c = compareShards(a.shard, b.shard) ?: return null
+        return if (c <= 0) a to b else b to a
     }
 
     /**
@@ -869,9 +938,7 @@ class SelectionController {
         // shard selection is a normal short/partial-paragraph copy and must
         // stay an exact substring.
         if (first.shard == last.shard) {
-            val txt = shards[first.shard]?.plainText
-                ?: documentRegistry[first.shard]
-                ?: return ""
+            val txt = textOf(first.shard, documentRegistry) ?: return ""
             val a = first.charOffset.coerceIn(0, txt.length)
             val b = last.charOffset.coerceIn(0, txt.length)
             return txt.substring(minOf(a, b), maxOf(a, b))
@@ -905,10 +972,15 @@ class SelectionController {
         documentRegistry: Map<TextShardId, String>,
     ): String {
         val sb = StringBuilder()
-        val visitedOrder = registeredShardsInOrder()
+        // [T-android-selection-offscreen-order] (GH#296) Walk every shard the
+        // selection has seen — composed AND retired (scrolled away) — in
+        // document order. Walking registered shards only is what dropped the
+        // start: once it scrolled off, `first.shard` was never met, `started`
+        // never turned true, and only the tail of `last.shard` was emitted.
+        val visitedOrder = knownShardsInOrder(documentRegistry)
         var started = false
         for (id in visitedOrder) {
-            val txt = shards[id]?.plainText ?: documentRegistry[id] ?: continue
+            val txt = textOf(id, documentRegistry) ?: continue
             when (id) {
                 first.shard -> {
                     sb.append(txt.substring(first.charOffset.coerceIn(0, txt.length), txt.length))
@@ -953,8 +1025,8 @@ class SelectionController {
     ): String? {
         val md = messageMarkdownCache[first.shard.messageId]?.takeIf { it.isNotEmpty() } ?: return null
 
-        val firstText = shards[first.shard]?.plainText ?: documentRegistry[first.shard] ?: return null
-        val lastText = shards[last.shard]?.plainText ?: documentRegistry[last.shard] ?: return null
+        val firstText = textOf(first.shard, documentRegistry) ?: return null
+        val lastText = textOf(last.shard, documentRegistry) ?: return null
 
         // Head anchor: a run of the selected text right after the start offset.
         val headSel = firstText.substring(first.charOffset.coerceIn(0, firstText.length))
@@ -1017,17 +1089,23 @@ class SelectionController {
     }
 
     private fun collapsedFallback(sel: TextSelection): String {
-        val txt = shards[sel.start.shard]?.plainText ?: return ""
+        val txt = textOf(sel.start.shard) ?: return ""
         val a = sel.start.charOffset.coerceIn(0, txt.length)
         val b = sel.end.charOffset.coerceIn(0, txt.length)
         return txt.substring(minOf(a, b), maxOf(a, b))
     }
 
-    /** Currently-composed shards in visual top-to-bottom order. */
-    private fun registeredShardsInOrder(): List<TextShardId> =
-        shards.values
-            .sortedBy { it.positionInWindow().y }
-            .map { it.id }
+    /**
+     * Every shard the current selection has seen (composed + retired + the
+     * caller's registry), in document order where the surface provides one,
+     * else by y. Nulls sort first, so on a surface without document order
+     * this is exactly the old y ordering.
+     */
+    private fun knownShardsInOrder(registry: Map<TextShardId, String>): List<TextShardId> {
+        val order = documentOrder
+        return (liveTexts.keys + retired.keys + registry.keys)
+            .sortedWith(compareBy<TextShardId>({ order?.invoke(it) }, { yOf(it) }))
+    }
 }
 
 /**
@@ -1087,9 +1165,12 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
     if (maxOffset == 0 || lineCount == 0) return
 
     val ordered = controller?.orderedEndpoints(selection) ?: run {
+        // [T-android-selection-offscreen-order] (GH#296) When the order is
+        // unknown, keep the user's own direction (start, end). This used to
+        // return (end, start) for ANY cross-shard pair, inverting the range.
         val a = selection.start
         val b = selection.end
-        if (a.shard == b.shard && a.charOffset <= b.charOffset) a to b else b to a
+        if (a.shard == b.shard && a.charOffset > b.charOffset) b to a else a to b
     }
     val (first, last) = ordered
 
@@ -1150,68 +1231,51 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
 }
 
 /**
- * Tells whether shard [middle] lies (in visual top-to-bottom order) between
- * shards [a] and [b], using their current registered positions. Used by the
- * highlight code to decide whether a shard with no selection endpoint
- * inside it should still be filled (it lies in the middle of a multi-shard
- * range).
+ * Order of two `mdblock:<parent>:<index>[#sub]` shards of the same message and
+ * the same parent block, by (index, sub); null for any other pair.
  */
-/**
- * Best-effort document-order index for a shard, extracted from the
- * trailing integer in its shardId string. Returns null if the shardId
- * doesn't carry a parseable index. Use case: ordering shards even when
- * one of them isn't currently registered with the SelectionController
- * (e.g. it scrolled off-screen and got disposed by LazyColumn).
- *
- * Convention from ChatScreen.kt: shard ids look like
- *   "mdblock:<parentBlockId>:<blockIndex>"   ← splitMarkdownIntoBlockTexts
- *   "text:<blockId>"                          ← single AssistantText block
- *   "legacy"                                  ← whole-message legacy path
- * The mdblock case is the only one that needs ordering today; the others
- * are single-shard so the comparison never has to disambiguate.
- */
-private fun shardOrderKey(id: TextShardId): Int? {
-    val s = id.shardId
-    val lastColon = s.lastIndexOf(':')
-    if (lastColon < 0) return null
-    return s.substring(lastColon + 1).toIntOrNull()
+internal fun sameBlockOrder(a: TextShardId, b: TextShardId): Int? {
+    if (a.messageId != b.messageId) return null
+    fun parse(id: TextShardId): Triple<String, Int, Int>? {
+        val s = id.shardId
+        if (!s.startsWith("mdblock:")) return null
+        val hash = s.lastIndexOf('#')
+        val base = if (hash >= 0) s.substring(0, hash) else s
+        val colon = base.lastIndexOf(':')
+        if (colon <= "mdblock:".length - 1) return null
+        val index = base.substring(colon + 1).toIntOrNull() ?: return null
+        return Triple(base.substring(0, colon), index, shardSubIndex(s))
+    }
+    val pa = parse(a) ?: return null
+    val pb = parse(b) ?: return null
+    if (pa.first != pb.first) return null
+    return compareValuesBy(pa, pb, { it.second }, { it.third })
 }
 
+/**
+ * Tells whether shard [middle] lies between shards [a] and [b] (either order).
+ * Used by the highlight code to decide whether a shard with no selection
+ * endpoint inside it should still be filled.
+ *
+ * [T-android-selection-offscreen-order] (GH#296) Decided by
+ * [SelectionController.compareShards] — document order where the surface
+ * provides it, y otherwise — so it keeps answering after an endpoint scrolled
+ * off-screen. It used to rely on `shardOrderKey` (the integer after the last
+ * ':' of the shard id), which was null for every chat shard once MdText ids
+ * gained their `#subIndex` suffix, and then on y, which fails as soon as an
+ * endpoint is unregistered: every paragraph between the endpoints lost its
+ * highlight mid-drag.
+ */
 internal fun SelectionController.isShardBetween(
     a: TextShardId,
     b: TextShardId,
     middle: TextShardId,
 ): Boolean {
-    // First try the document-order index baked into the shardId string —
-    // mdblock:<parent>:<index> / text:<blockId>. The numeric index is a
-    // stable document position, immune to a/b having scrolled off-screen
-    // (which would leave their TextShard entries unregistered and the
-    // y-comparison below unable to position them). The "messageId" axis
-    // is compared first so cross-message selections still slot correctly:
-    // a shard from message M1 only lies "between" two endpoints if they
-    // straddle M1 in the registered-shards' visual order.
-    val orderA = shardOrderKey(a)
-    val orderB = shardOrderKey(b)
-    val orderM = shardOrderKey(middle)
-    if (orderA != null && orderB != null && orderM != null &&
-        a.messageId == b.messageId && middle.messageId == a.messageId
-    ) {
-        val lo = minOf(orderA, orderB)
-        val hi = maxOf(orderA, orderB)
-        return orderM in lo..hi
-    }
-    // Fall back to y-based comparison when index parsing fails or the
-    // selection spans multiple messages.
-    val shards = currentShards()
-    val sa = shards[a] ?: return false
-    val sb = shards[b] ?: return false
-    val sm = shards[middle] ?: return false
-    val ya = sa.positionInWindow().y
-    val yb = sb.positionInWindow().y
-    val ym = sm.positionInWindow().y
-    val lo = minOf(ya, yb)
-    val hi = maxOf(ya, yb)
-    return ym in lo..hi
+    val ab = compareShards(a, b) ?: return false
+    val (lo, hi) = if (ab <= 0) a to b else b to a
+    val loToMiddle = compareShards(lo, middle) ?: return false
+    val middleToHi = compareShards(middle, hi) ?: return false
+    return loToMiddle <= 0 && middleToHi <= 0
 }
 
 /**

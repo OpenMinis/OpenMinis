@@ -275,6 +275,18 @@ import com.openminis.app.ui.components.MinisTextButton
 
 // ─── Bordered Markdown Table (iOS style: bordered cells with grid lines) ─────
 
+/**
+ * [T-android-longsession-regex-hoist / GH#326] Markdown table separator row
+ * (`|---|:--:|`), compiled once for this file.
+ *
+ * Character-identical to `tableSeparatorRegex` in StreamingMarkdownText.kt;
+ * duplicated rather than shared because that one is `private` (file-scoped in
+ * Kotlin), and widening its visibility would touch the streaming renderer for
+ * no benefit. What matters is only that it is hoisted out of the per-line loop
+ * in the table fallback below.
+ */
+private val tableSeparatorLineRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BorderedMarkdownTable(
@@ -337,8 +349,17 @@ private fun BorderedMarkdownTable(
             .filter { it.isNotBlank() }
         for ((index, line) in lines.withIndex()) {
             val trimmed = line.trim()
-            // Skip separator lines (e.g., |---|---|)
-            if (trimmed.matches(Regex("^\\|?[\\s\\-:|]+\\|?$"))) continue
+            // Skip separator lines (e.g., |---|---|).
+            // [T-android-longsession-regex-hoist / GH#326] Reuse the hoisted
+            // `tableSeparatorRegex` (StreamingMarkdownText.kt, same package)
+            // instead of compiling this identical pattern inside the loop. A
+            // fresh Regex per LINE per render allocates a Pattern and an ICU
+            // Matcher each time, and a long session re-renders wide tables
+            // often — the field crash for this class of bug is a self-abort
+            // inside `Matcher.usePattern` when the native allocator cannot map
+            // more memory. The pattern is character-identical, so behaviour is
+            // unchanged.
+            if (trimmed.matches(tableSeparatorLineRegex)) continue
             val cells = trimmed.split("|")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }

@@ -47,7 +47,7 @@ object LLMRequestLog {
         // OOM the HONOR PTP-AN00 user hit. Debug builds still record, with
         // each entry truncated to MAX_BODY_CHARS so even a single retained
         // entry can't push a memory-tight device over the line.
-        if (!BuildConfig.DEBUG) return
+        if (!BuildConfig.DEV_TOOLS) return
         val safeEntry = if (entry.requestBody.length > MAX_BODY_CHARS) {
             entry.copy(
                 requestBody = entry.requestBody.take(MAX_BODY_CHARS) +

@@ -410,7 +410,7 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
                 // [T-ish-bg-cpu-governor] Closed-loop governor replaces the
                 // old fixed 80% duty cycle (which sat exactly on the iOS
                 // background kill line and still measured 91% — see
-                // docs/ish-bg-cpu-governor-design.md).
+                // docs/internal/ish-bg-cpu-governor-design.md).
                 ISHKernel.shared.beginBackgroundCPUGovernor()
                 logger.info("[BKA] iSH background CPU governor STARTED")
                 self.logLifecycleSnapshot("Background")
@@ -475,13 +475,21 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
             }
             .store(in: &cancellables)
 
-        // Re-evaluate keep-alive whenever sessions or toggle change
-        Publishers.CombineLatest(
+        // Re-evaluate keep-alive whenever sessions or toggle change.
+        //
+        // [T-scheduled-bka-keepalive] The job registry is a THIRD input. A
+        // conversation that armed a scheduled job leaves `activeSessions` as
+        // soon as its turn ends, but it is not finished — it is waiting to be
+        // woken. Without this the app could be suspended between arming and
+        // firing, and ScheduledJobRunner drives fires from an in-process
+        // Task/sleep, so a suspended process never fires at all.
+        Publishers.CombineLatest3(
             SessionActivityTracker.shared.$activeSessions,
-            $enhancedBackgroundEnabled
+            $enhancedBackgroundEnabled,
+            AgentJobRegistry.shared.$jobs
         )
         .receive(on: DispatchQueue.main)
-        .sink { [weak self] sessions, enabled in
+        .sink { [weak self] sessions, enabled, _ in
             guard let self else { return }
             self.reevaluate(sessions: sessions, enabled: enabled)
         }
@@ -762,6 +770,11 @@ final class BackgroundKeepAliveManager: NSObject, ObservableObject, CLLocationMa
             return
         }
 
+        // [T-scheduled-bka-keepalive] Union the sessions that are actively
+        // processing with those merely WAITING for a timer they armed. Both
+        // need the app alive; only the first is in `activeSessions`.
+        let awaitingScheduled = AgentJobRegistry.shared.sessionsAwaitingScheduledFire
+        let sessions = sessions.union(awaitingScheduled)
         let shouldBeActive = !sessions.isEmpty && enabled
         let sessionList = sessions.prefix(5).joined(separator: ",")
         // [T-ios-log-noise-reduction] INFO→DEBUG: reevaluate runs on every

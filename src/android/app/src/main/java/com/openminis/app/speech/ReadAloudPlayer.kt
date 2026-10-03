@@ -183,10 +183,23 @@ class ReadAloudPlayer(context: Context) {
         if (tail.isNotEmpty()) enqueue(tail)
     }
 
-    /** Speak [text] as a single utterance, after stopping anything in flight. */
+    /**
+     * Speak [text] after stopping anything in flight, one sentence per queued
+     * utterance.
+     *
+     * [T-android-readaloud-split] It used to be ONE utterance. "Read from
+     * Start" passes a whole reply, and the system engine refuses input longer
+     * than `TextToSpeech.getMaxSpeechInputLength()` (~4000 chars): speak()
+     * returns ERROR and nothing plays, so a long reply was silent even with
+     * read-replies on. iOS `readReplyFromStart` splits into sentences first
+     * and queues each; this does the same through the streaming path's own
+     * splitter and [flush], so a menu read and live reply TTS cut text the
+     * same way (and provider TTS gets request-sized pieces too).
+     */
     fun speak(text: String) {
         stop()
-        enqueue(text)
+        sentenceBuffer.append(text)
+        flush()
     }
 
     /**
@@ -419,6 +432,7 @@ class ReadAloudPlayer(context: Context) {
                         input = text,
                         model = modelEntry.model.id,
                         voice = modelEntry.model.id,
+                        resolvedModel = modelEntry.model,
                     ),
                 )
             }

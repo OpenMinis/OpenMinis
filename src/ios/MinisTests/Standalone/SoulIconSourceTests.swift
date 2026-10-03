@@ -201,18 +201,23 @@ check("SoulSettingsView no longer branches on .opaque",
 
 print("\nRounded-corner rendering — the shared component decides the shape")
 check("SoulIconView clips images to a continuous rounded rect",
-      soulSource.contains("RoundedRectangle(cornerRadius: Self.cornerRadius(for: size)")
+      soulSource.contains("RoundedRectangle(cornerRadius: resolvedCornerRadius")
       && soulSource.contains("style: .continuous"))
 check("the image branch is NOT clipped to a circle any more",
       !soulSource.contains(".clipShape(Circle())"))
-check("the radius is derived from size (one shape at every call site)",
+check("the proportional default still exists for call sites that don't pin one",
       soulSource.contains("static func cornerRadius(for size: CGFloat)"))
+check("an explicit radius falls back to the proportional default when nil",
+      soulSource.contains("cornerRadius ?? Self.cornerRadius(for: size)"))
 // Proportion check, so a future tweak that makes the header look boxy fails here.
-let r18 = 18.0 * 0.22, r32 = 32.0 * 0.22
-check("18pt header radius is visibly rounded (\(String(format: "%.1f", r18))pt)", r18 >= 3.5)
+// The chat header now PINS its radius (see CollectionViewMessageListV3); the
+// settings card still derives it from size.
+let rHeader = 5.0, headerSize = 22.0, r32 = 32.0 * 0.22
+check("22pt header radius is visibly rounded (\(String(format: "%.1f", rHeader))pt)", rHeader >= 3.5)
 check("32pt card radius stays proportional (\(String(format: "%.1f", r32))pt)", r32 >= 6.5)
-// A radius of size/2 would BE a circle; assert the shipping factor stays under it.
-check("radius never reaches a full circle (would be size/2)", r32 < 32.0 / 2)
+// A radius of size/2 would BE a circle; assert both shapes stay under it.
+check("header radius never reaches a full circle", rHeader < headerSize / 2)
+check("card radius never reaches a full circle (would be size/2)", r32 < 32.0 / 2)
 
 print("\nData URI parsing")
 func parseDataURI(_ s: String) -> Data? {

@@ -130,6 +130,39 @@ NSString *noff_format_date(NSDate *date) {
     return [fmt stringFromDate:date];
 }
 
+// ── All-day event helpers ──  [T-calendar-all-day]
+
+BOOL noff_is_date_only_string(NSString *_Nullable str) {
+    if (str.length != 10) return NO;
+    // Positional check rather than a formatter: a formatter is lenient about
+    // trailing text and would also accept "2026-12-01" as the prefix of a
+    // datetime, which is exactly the case this must reject.
+    for (NSUInteger i = 0; i < 10; i++) {
+        unichar c = [str characterAtIndex:i];
+        if (i == 4 || i == 7) {
+            if (c != '-') return NO;
+        } else if (c < '0' || c > '9') {
+            return NO;
+        }
+    }
+    return noff_parse_date(str) != nil;
+}
+
+void noff_all_day_bounds(NSDate *start, NSDate *end,
+                         NSDate *_Nonnull *_Nonnull outStart,
+                         NSDate *_Nonnull *_Nonnull outEnd) {
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *startDay = [cal startOfDayForDate:start];
+    NSDate *endDay = [cal startOfDayForDate:end ?: start];
+    if ([endDay compare:startDay] == NSOrderedAscending) endDay = startDay;
+    // 23:59:59 of the last day = (next midnight) - 1s, via calendar units so a
+    // 23h/25h DST day still lands on its own last second.
+    NSDate *nextMidnight = [cal dateByAddingUnit:NSCalendarUnitDay value:1 toDate:endDay options:0];
+    NSDate *endOfDay = [nextMidnight dateByAddingTimeInterval:-1];
+    *outStart = startDay;
+    *outEnd = endOfDay ?: endDay;
+}
+
 // ── JSON output ──
 
 NSDictionary *noff_json_envelope(NSString *tool, NSString *action, id data) {

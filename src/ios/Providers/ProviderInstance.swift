@@ -146,7 +146,10 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         switch providerType {
         case .openAI, .openAIResponses, .openRouter, .xAI, .kimiCode, .anthropic:
             return true
-        case .gemini, .antigravity, .unsupported:
+        // [T-copilot-provider] Copilot's User-Agent is part of the protocol —
+        // the API rejects requests that do not look like the editor plugin — so
+        // it must not be user-overridable the way a proxy's UA is.
+        case .gemini, .antigravity, .githubCopilot, .unsupported:
             return false
         }
     }
@@ -160,6 +163,33 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
     // models" is computed dynamically by `ProviderConfigStore.hasVoiceModels(for:)`
     // (union of its model entries' modalities), and Voice Services shows a
     // read-only SHADOW view of any instance that has audio-modality models.
+
+    /// [T-opencode-dedicated-channel] Whether this instance is served by the
+    /// dedicated OpenCode Go channel (`OpenCodeChannel`).
+    ///
+    /// OpenCode Go rejects any request without `x-opencode-session`, so
+    /// membership of this channel is what makes the header unconditional for
+    /// the whole life of a conversation rather than something inferred per
+    /// request.
+    ///
+    /// Only OpenAI-family types can be OpenCode: the service speaks the OpenAI
+    /// protocol, and Anthropic/Gemini/Antigravity providers have no
+    /// `extraHeaders`/`perRequestHeaders` seam to carry it. Asking the type
+    /// first also means a relay hostname can never pull, say, a Gemini instance
+    /// into this channel.
+    ///
+    /// The base-URL test is the AUTO-TAG seed, not the per-request question:
+    /// once a request is being built, the only thing consulted is channel
+    /// membership, so a user's own relay in front of OpenCode Go keeps working
+    /// without the URL having to look like anything in particular.
+    var isOpenCodeChannel: Bool {
+        switch providerType {
+        case .openAI, .openAIResponses, .openRouter, .xAI, .kimiCode, .githubCopilot:
+            return OpenCodeChannel.looksLikeOpenCodeBaseURL(effectiveCustomBaseURL)
+        case .anthropic, .gemini, .antigravity, .unsupported:
+            return false
+        }
+    }
 
     /// [T-ios-azure-openai] Whether the Azure toggle applies to this instance —
     /// only OpenAI / OpenAI-Responses instances using an API key (Azure auths
@@ -292,6 +322,10 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
         )?.isEmpty == false {
             return true
         }
+        // [T-oauth-keep-credentials] A credential whose refresh was rejected is
+        // kept (not deleted) but is not usable, so routing must skip it exactly
+        // as it skipped the deleted credential before.
+        if ProviderKeychainHelper.oauthNeedsReauth(instanceId: id) { return false }
         // Provider-specific OAuth storage (Claude Code login, Codex login, …).
         // Mirrors the diagnostic in MinisApp.swift scenePhase=active.
         switch providerType {
@@ -315,6 +349,12 @@ struct ProviderInstance: Identifiable, Codable, Hashable {
             return ProviderKeychainHelper.loadOAuthToken(
                 instanceId: id, as: KimiTokenStorage.self, caller: "hasAnyCredential"
             ) != nil
+        case .githubCopilot:
+            // [T-copilot-provider] The GitHub token is the credential; the
+            // session token is derived and may legitimately be absent.
+            return ProviderKeychainHelper.loadOAuthToken(
+                instanceId: id, as: CopilotTokenStorage.self, caller: "hasAnyCredential"
+            )?.githubToken.isEmpty == false
         case .antigravity, .openRouter, .unsupported:
             // unsupported = synced from a newer build; no usable credential here.
             // antigravity stores its token via AntigravityOAuthManager (no

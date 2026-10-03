@@ -398,18 +398,23 @@ final class AntigravityProvider: LLMProvider {
         return (text, functionCalls)
     }
 
+    /// [GH#384] Antigravity speaks the same Gemini `usageMetadata` protocol, so
+    /// it shares GeminiProvider's parser rather than keeping the copy-pasted
+    /// version that had the same two defects (thinking tokens dropped, cache
+    /// never read). See `GeminiProvider.parseUsageMetadata` for the reasoning.
     private func extractUsage(_ json: [String: Any]) -> LLMUsage? {
         let effective = unwrapResponse(json)
         guard let usage = effective["usageMetadata"] as? [String: Any] else { return nil }
-        let input = usage["promptTokenCount"] as? Int ?? 0
-        let output = usage["candidatesTokenCount"] as? Int ?? 0
-        return LLMUsage(inputTokens: input, outputTokens: output,
-                        cacheCreationInputTokens: nil, cacheReadInputTokens: nil)
+        return GeminiProvider.parseUsageMetadata(usage)
     }
 
     private func parseStreamChunk(_ json: [String: Any]) -> [GeminiStreamEvent] {
         var events: [GeminiStreamEvent] = []
         let effective = unwrapResponse(json)
+        // [T-agent-model-identity] The served model, as the API names it.
+        if let mv = effective["modelVersion"] as? String, !mv.isEmpty {
+            events.append(.responseModel(mv))
+        }
 
         guard let candidates = effective["candidates"] as? [[String: Any]],
               let first = candidates.first,
@@ -498,7 +503,7 @@ final class AntigravityProvider: LLMProvider {
         }
         let transientStatusCodes: Set<Int> = [500, 502, 503, 504, 529]
         if transientStatusCodes.contains(http.statusCode) {
-            throw LLMError.transientError(message: "Antigravity API error \(http.statusCode): \(body.prefix(200))")
+            throw LLMError.transientError(message: "Antigravity API error \(http.statusCode): \(body.prefix(200))", statusCode: http.statusCode)
         }
         throw LLMError.providerError(message: "Antigravity API error \(http.statusCode): \(body.prefix(500))")
     }
@@ -528,7 +533,7 @@ final class AntigravityProvider: LLMProvider {
             #endif
             let transientStatusCodes: Set<Int> = [500, 502, 503, 504, 529]
             if transientStatusCodes.contains(http.statusCode) {
-                throw LLMError.transientError(message: "Antigravity API error \(http.statusCode): \(body.prefix(200))")
+                throw LLMError.transientError(message: "Antigravity API error \(http.statusCode): \(body.prefix(200))", statusCode: http.statusCode)
             }
             throw LLMError.providerError(message: "Antigravity API error \(http.statusCode): \(body.prefix(200))")
         }

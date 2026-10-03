@@ -6,7 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * §2.2's compatibility rules, which the design doc says to "写进代码注释与测试".
+ * §2.2's compatibility rules, which the design doc says to
+ * "write into code comments and tests".
  *
  * These are the rules that decide whether a package written by a future build —
  * or by the other platform — still restores. A parser that throws on an unknown

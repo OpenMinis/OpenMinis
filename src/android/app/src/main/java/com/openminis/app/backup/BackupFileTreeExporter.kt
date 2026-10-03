@@ -31,6 +31,14 @@ class BackupFileTreeExporter(
      * failure this feature exists to prevent.
      */
     private val snapshotAtMillis: Long = Long.MAX_VALUE,
+    /**
+     * [T-android-backup-webdav-deadline] Stop. Polled every
+     * [CANCEL_CHECK_EVERY] entries: a file boundary is a safe place to stop
+     * (each file is stored and indexed whole), and checking every 32 keeps
+     * Stop prompt without costing anything measurable in a walk over tens of
+     * thousands of files. Mirrors iOS c82fe8eb4.
+     */
+    private val isCancelled: () -> Boolean = { false },
 ) {
 
     data class Result(
@@ -62,7 +70,11 @@ class BackupFileTreeExporter(
         if (!root.exists() || !root.isDirectory) return result
 
         val base = root.canonicalFile
+        var scanned = 0
         for (entry in base.walkTopDown()) {
+            if (++scanned % CANCEL_CHECK_EVERY == 0 && isCancelled()) {
+                throw kotlinx.coroutines.CancellationException("Backup stopped")
+            }
             // walkTopDown yields the root itself first; it is the prefix, not
             // an entry inside the package.
             if (entry == base) continue
@@ -160,6 +172,8 @@ class BackupFileTreeExporter(
     }
 
     companion object {
+        internal const val CANCEL_CHECK_EVERY = 32
+
         private const val TAG = "Backup"
 
         /** Sibling of `shared`/`skills`/`memory`, matching iOS's delivery directory. */

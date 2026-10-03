@@ -265,7 +265,28 @@ class MCPPool:
     def _make_session(self, name, cfg):
         if config.is_stdio(cfg):
             session = MCPServerProcess(name, cfg)
-            session.start()
+            try:
+                session.start()
+            except BaseException:
+                # [T-mcp-failed-handshake-orphan] start() has already spawned
+                # the child by the time _handshake() can time out or fail. The
+                # exception propagates past get()'s `self._pool[name] = session`
+                # assignment, so nothing ever owns this session: evict(), gc()'s
+                # TTL scan and on_empty all iterate the pool and cannot see it.
+                # The child is spawned with start_new_session=True, so it is not
+                # in the daemon's process group either and does not die with it.
+                #
+                # Result: one orphan per failed handshake, forever. Reproduced
+                # on macOS with a server that never answers initialize — 1 leak
+                # became 4 after 3 more pings, and call_with_retry() retries
+                # TIMEOUT once, so one user-visible call leaks two.
+                #
+                # stop() is the owner's cleanup; run it here since no owner will.
+                try:
+                    session.stop()
+                except Exception:
+                    log.warning("[%s] failed-start cleanup did not complete", name)
+                raise
             return session
         return MCPHTTPSession(name, cfg)
 

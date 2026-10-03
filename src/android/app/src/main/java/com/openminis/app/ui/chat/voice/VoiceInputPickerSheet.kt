@@ -28,6 +28,7 @@ import com.openminis.app.ui.components.UnifiedModelPickerSheet
 fun VoiceInputPickerSheet(
     providerRepository: ProviderRepository,
     onDismiss: () -> Unit,
+    onEditProvider: ((instanceId: String) -> Unit)? = null,
 ) {
     val config by providerRepository.config.collectAsState()
     UnifiedModelPickerSheet(
@@ -41,6 +42,7 @@ fun VoiceInputPickerSheet(
         selectedId = providerRepository.voiceInputOverrideEntryId,
         onSelect = { providerRepository.voiceInputOverrideEntryId = it },
         onDismiss = onDismiss,
+        onEditProvider = onEditProvider,
     )
 }
 
@@ -55,6 +57,7 @@ fun VoiceInputPickerSheet(
 fun VoiceOutputPickerSheet(
     providerRepository: ProviderRepository,
     onDismiss: () -> Unit,
+    onEditProvider: ((instanceId: String) -> Unit)? = null,
 ) {
     val config by providerRepository.config.collectAsState()
     UnifiedModelPickerSheet(
@@ -68,5 +71,6 @@ fun VoiceOutputPickerSheet(
         selectedId = providerRepository.voiceOutputOverrideEntryId,
         onSelect = { providerRepository.voiceOutputOverrideEntryId = it },
         onDismiss = onDismiss,
+        onEditProvider = onEditProvider,
     )
 }

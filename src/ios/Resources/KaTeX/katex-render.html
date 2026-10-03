@@ -18,6 +18,33 @@
     padding: 2px 4px;
     color: #000;
   }
+
+  /* [T-ios-latex-tag-overlap] Equation numbers (\tag, \tag*, and the
+     auto-numbering of \begin{align}) render as
+     `.katex-html > .tag { position: absolute; right: 0 }` — see katex.min.css.
+     `right: 0` resolves against the containing block, and #math is
+     `inline-block`, i.e. shrink-to-fit: the container collapses to the width
+     of the formula itself, so "the right edge" IS the end of the formula and
+     the number is painted directly on top of it. Measured in WebKit on
+     `E = mc^2 \tag{1}`: tag box at x=49..73 while the body ran to x=73 — 24px
+     of overlap, which is the reported "E = m(1)c²" mash-up. \tag* overlapped
+     by 10px and a two-line align by 26px.
+
+     Giving the row a real width fixes it without touching KaTeX: min-width
+     stops the collapse so `right: 0` has somewhere to go, and the
+     padding-right reserves a gutter for the number to sit in. Scoped to
+     `.has-tag`, set by renderMath() only when a tag is actually present, so
+     every untagged formula keeps its existing shrink-to-fit geometry and its
+     cached bitmap size is unchanged.
+
+     A class rather than `:has()`: `:has()` needs a recent WebKit, and this
+     must behave identically on the older iOS versions the app still targets.
+
+     Mirrors the Android fix (1a52d6e59) — both platforms ship this same file. */
+  #math.has-tag .katex-display > .katex > .katex-html {
+    min-width: 100%;
+    padding-right: 3.5em;
+  }
 </style>
 </head>
 <body>
@@ -38,6 +65,16 @@ function renderMath(latex, displayMode, fontSize) {
     var el = document.getElementById('math');
     el.style.fontSize = fontSize + 'px';
     el.innerHTML = html;
+    // [T-ios-latex-tag-overlap] Flag rows that carry an equation number so the
+    // CSS above can reserve a gutter for it. Done here rather than with a
+    // `:has()` selector for WebKit-version independence (see the stylesheet).
+    //
+    // Set BEFORE the measurement below, and it matters more here than on
+    // Android: this width is used twice — getBoundingClientRect() reports it,
+    // and KaTeXRenderer then resizes the WKWebView to exactly that size and
+    // crops takeSnapshot() to it. Measuring first would bake the pre-fix,
+    // narrower box into both, cropping the number straight back off the bitmap.
+    el.classList.toggle('has-tag', !!el.querySelector('.katex-html > .tag'));
     document.fonts.ready.then(function() {
       var rect = el.getBoundingClientRect();
       if (rect.width < 3 || rect.height < 3) {

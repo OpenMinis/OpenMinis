@@ -63,6 +63,13 @@ interface VoiceActivityListener {
     fun onCaptureError(message: String) {}
 
     /**
+     * [T-voice-mic-preempted] Capture failed or was silenced because another
+     * app holds the microphone (see [MicInUse]). Capture has stopped. Defaults
+     * to [onCaptureError] for listeners that do not tell the two apart.
+     */
+    fun onMicInUse(detail: String) { onCaptureError(detail) }
+
+    /**
      * A session guard fired and capture has stopped. Distinct from
      * [onCaptureError]: nothing went wrong, the session simply ran out of its
      * allowance, so the UI should settle rather than show a failure.
@@ -121,6 +128,10 @@ class VoiceActivityDetector(
 
     companion object {
         private const val TAG = "VAD"
+
+        /** [T-voice-mic-preempted] First silenced-capture check, then the period. */
+        private const val SILENCE_CHECK_FIRST_MS = 400L
+        private const val SILENCE_CHECK_INTERVAL_MS = 1_000L
 
         /** Capture rate. 48 kHz matches iOS and the APM resamples to 16 kHz for Silero. */
         const val SAMPLE_RATE = 48_000
@@ -181,6 +192,19 @@ class VoiceActivityDetector(
          */
         private const val START_BACKFILL_SECONDS = 1.5f
 
+        /**
+         * [T-android-vad-manual-stop] How much pre-confirmation audio flush()
+         * prepends. Silero's own start window is a few hundred ms; 1.0 s
+         * covers it with margin while staying far short of the 2 s minimum
+         * segment, so a flush can never be mostly pre-roll.
+         */
+        private const val PREROLL_SECONDS = 1.0f
+
+        /** [T-android-vad-manual-stop] Post-endpoint hold; see tailFramesRemaining. */
+        private const val TAIL_SECONDS = 1.0f
+        private val TAIL_FRAMES =
+            VadCaptureWindow.tailFrames(SAMPLE_RATE, FRAME_SAMPLES, TAIL_SECONDS)
+
         // ── Session-level timers (iOS VoiceInputPanel.swift:180, 227, 229) ──
         /** No speech at all for this long → stop, so a forgotten mic can't run on. */
         const val IDLE_TIMEOUT_MS = 30_000L
@@ -210,12 +234,14 @@ class VoiceActivityDetector(
     var maxSegmentSeconds: Int = 59
 
     /**
-     * Guards every use of [vad]'s native side. Held across `processAudio` on
-     * the capture thread and across `release()` on whichever thread stops us,
-     * so the native object can never be freed mid-call. See the call site in
-     * [captureLoop] for the crash this prevents.
+     * Owns [VADWrapper]'s native side. Every `processAudio` runs through
+     * [ReentrantSafeRelease.call] and every release through
+     * [ReentrantSafeRelease.tearDown], so the native object is never freed
+     * while a call into it is on the stack — neither by stop() on another
+     * thread, nor by a listener that stops us from inside the library's own
+     * onVoiceEnd callback. See the call site in [captureLoop].
      */
-    private val vadLock = Any()
+    private val vad = ReentrantSafeRelease<VADWrapper> { it.release() }
 
     /**
      * [T-android-vad] Optional tap on the RAW captured PCM16, before AGC.
@@ -237,8 +263,6 @@ class VoiceActivityDetector(
     @Volatile
     var rawAudioSink: ((ByteArray, Int) -> Unit)? = null
 
-    @Volatile
-    private var vad: VADWrapper? = null
     private var recorder: AudioRecord? = null
     private var captureJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO)
@@ -263,6 +287,68 @@ class VoiceActivityDetector(
     private val backfill = ArrayDeque<FloatArray>()
     private var backfillSamples = 0
     private val backfillCapacity = (SAMPLE_RATE * START_BACKFILL_SECONDS).toInt()
+
+    /**
+     * [T-android-vad-manual-stop] PCM of the segment currently OPEN, i.e. the
+     * speech the library has confirmed but not yet closed.
+     *
+     * The library owns segmentation and exposes no flush entry point
+     * (VADWrapper: setVADModel / setVADSampleRate / setVADThreshold /
+     * processAudio / release / setVADCallback — that is the whole API), so a
+     * user who taps stop mid-sentence would otherwise lose the sentence: it
+     * lives inside the library, `onVoiceEnd` never fires, and tearing the
+     * wrapper down discards it. `onVoiceDidContinue` streams exactly that
+     * audio frame by frame, already at [WAV_SAMPLE_RATE] PCM16, so mirroring it
+     * here costs one copy per frame and makes [flush] possible.
+     *
+     * Fed from [captureLoop] with the PRE-AGC microphone bytes — the same
+     * source [rawAudioSink] exposes, and for the same reason its own comment
+     * gives: the AGC's `tanh` soft-clip exists to help the VAD on quiet input
+     * and is not something a recogniser's front-end should have to undo. A
+     * first attempt mirrored the library's `onVoiceDidContinue` instead; that
+     * stream is post-AGC and a distant voice came back gain-pinned to ~80 % FS
+     * with a flat envelope (mean |Δ| 10232 against a 27528 peak — near-square,
+     * not speech), which the ASR duly transcribed as unrelated words.
+     *
+     * Held at the CAPTURE rate ([SAMPLE_RATE], 48 kHz) and downsampled once in
+     * [flush], since the library's own segments are 16 kHz and the two kinds
+     * get concatenated by WavSegmentMerger.
+     *
+     * Guarded by [openLock]: written from the capture thread, read by whichever
+     * thread calls [flush].
+     */
+    private val openSegment = java.io.ByteArrayOutputStream()
+    private val openLock = Any()
+
+    /**
+     * [T-android-vad-manual-stop] Pre-AGC pre-roll, [PREROLL_SECONDS] deep.
+     *
+     * Silero only reports speech once it is CONFIRMED, so the first syllables
+     * — the run-up it needed to make that decision — are already spoken by the
+     * time `onVoiceStart` fires. Recording [openSegment] from that moment
+     * therefore loses the head of the utterance: "看看附近的天气情况" reached
+     * the recogniser without its first two characters, which is the reported
+     * symptom. The existing [backfill] ring solves the same problem for the
+     * VAD itself but holds AGC-processed FloatArrays; this keeps the raw PCM16
+     * bytes the recogniser should get.
+     *
+     * Bounded to [prerollCapacityBytes]; oldest frames fall off the front.
+     */
+    private val preroll = ArrayDeque<ByteArray>()
+    private var prerollBytes = 0
+    private val prerollCapacityBytes =
+        VadCaptureWindow.prerollCapacityBytes(SAMPLE_RATE, PREROLL_SECONDS)
+
+    /**
+     * [T-android-vad-manual-stop] Frames still to be appended AFTER the VAD
+     * called the utterance finished.
+     *
+     * The endpoint fires as soon as the silence window is satisfied, which cuts
+     * the decay of the final syllable — the mirror image of the onset problem
+     * the pre-roll solves. Counted in frames so the capture loop can decrement
+     * without consulting a clock.
+     */
+    private var tailFramesRemaining = 0
 
     /** Wall clock of capture start and of the last confirmed speech, for the timers. */
     @Volatile private var captureStartedAtMs = 0L
@@ -303,7 +389,7 @@ class VoiceActivityDetector(
             Log.e(TAG, "VAD init failed", t)
             return "Voice detection unavailable: ${t.javaClass.simpleName}"
         }
-        vad = wrapper
+        vad.attach(wrapper)
 
         val minBuf = AudioRecord.getMinBufferSize(
             SAMPLE_RATE,
@@ -358,10 +444,20 @@ class VoiceActivityDetector(
             rec.startRecording()
         } catch (t: Throwable) {
             Log.e(TAG, "startRecording failed", t)
-            listener.onCaptureError("Microphone unavailable: ${t.message}")
+            val detail = "Microphone unavailable: ${t.message}"
+            if (MicInUse.captureFailure(context, rec.audioSessionId) == RecognitionError.MIC_IN_USE) {
+                listener.onMicInUse(detail)
+            } else {
+                listener.onCaptureError(detail)
+            }
             stopInternal()
             return
         }
+        // [T-voice-mic-preempted] While a call or another recorder owns the
+        // input, Android 10+ starts this recording anyway and feeds it silence.
+        // Checked shortly after start (the config is listed asynchronously) and
+        // then about once a second, so a call arriving mid-take is caught too.
+        var nextSilenceCheckAtMs = System.currentTimeMillis() + SILENCE_CHECK_FIRST_MS
 
         val maxSamples = SAMPLE_RATE.toLong() * maxSegmentSeconds
         captureStartedAtMs = System.currentTimeMillis()
@@ -389,6 +485,15 @@ class VoiceActivityDetector(
                 break
             }
 
+            if (now >= nextSilenceCheckAtMs) {
+                nextSilenceCheckAtMs = now + SILENCE_CHECK_INTERVAL_MS
+                if (MicInUse.isSilenced(context, rec.audioSessionId)) {
+                    Log.w(TAG, "recording silenced by the system — another app holds the microphone")
+                    listener.onMicInUse("Recording silenced by the system (another app holds the microphone)")
+                    break
+                }
+            }
+
             val n = try {
                 rec.read(shorts, 0, FRAME_SAMPLES)
             } catch (t: Throwable) {
@@ -400,14 +505,38 @@ class VoiceActivityDetector(
 
             // Hand the RAW frame to any consumer sharing this capture (the
             // recogniser pipe) before AGC touches the samples.
-            rawAudioSink?.let { sink ->
-                var b = 0
-                for (i in 0 until n) {
-                    val s = shorts[i].toInt()
-                    sinkBytes[b++] = (s and 0xFF).toByte()
-                    sinkBytes[b++] = ((s shr 8) and 0xFF).toByte()
+            // [T-android-vad-manual-stop] Stage the PRE-AGC bytes once and use
+            // them for both consumers: the optional rawAudioSink (System
+            // engine) and the open-segment mirror that backs flush().
+            // Stage unconditionally: the pre-roll ring needs frames exactly
+            // when `isSpeaking` is FALSE (that is the audio Silero is still
+            // deciding on), and gating on it left the ring permanently empty —
+            // the onset was still lost after the ring was added.
+            var staged = 0
+            for (i in 0 until n) {
+                val v = shorts[i].toInt()
+                sinkBytes[staged++] = (v and 0xFF).toByte()
+                sinkBytes[staged++] = ((v shr 8) and 0xFF).toByte()
+            }
+            rawAudioSink?.let { sink -> runCatching { sink(sinkBytes, staged) } }
+            if (staged > 0) {
+                synchronized(openLock) {
+                    if (isSpeaking || tailFramesRemaining > 0) {
+                        // Segment OPEN — or within the tail hold just after it
+                        // closed, so a trailing syllable clipped by the VAD's
+                        // endpoint still reaches the recogniser.
+                        openSegment.write(sinkBytes, 0, staged)
+                        if (!isSpeaking) tailFramesRemaining--
+                    } else {
+                        // Not yet confirmed — hold it as pre-roll so the onset
+                        // survives if speech starts on a later frame.
+                        preroll.addLast(sinkBytes.copyOf(staged))
+                        prerollBytes += staged
+                        while (prerollBytes > prerollCapacityBytes && preroll.isNotEmpty()) {
+                            prerollBytes -= preroll.removeFirst().size
+                        }
+                    }
                 }
-                runCatching { sink(sinkBytes, b) }
             }
 
             // PCM16 -> float [-1,1], then noise-aware AGC.
@@ -454,16 +583,17 @@ class VoiceActivityDetector(
             // the in-flight frame instead of pulling the object out from under
             // it. Frames are ~10 ms of audio and inference is well under that,
             // so the wait is bounded and stop() stays responsive.
+            //
+            // [T-android-vad-reentrant-release] The lock alone did not cover
+            // the SAME thread: onVoiceEnd fires inside processAudio, and a
+            // listener that stops the take there reached release() through
+            // the re-entrant monitor — freeing RealTimeCutVAD while
+            // algorithm() was still on the stack (SIGSEGV, fault addr 0x38).
+            // ReentrantSafeRelease defers that free until processAudio has
+            // returned, and reports the take as torn down.
             var failure: Throwable? = null
-            val alive = synchronized(vadLock) {
-                val w = vad
-                when {
-                    w == null -> false // torn down; the stopper owns the state
-                    else -> {
-                        try { w.processAudio(frame) } catch (t: Throwable) { failure = t }
-                        true
-                    }
-                }
+            val alive = vad.call { w ->
+                try { w.processAudio(frame) } catch (t: Throwable) { failure = t }
             }
             if (!alive) break
             val err = failure
@@ -535,14 +665,37 @@ class VoiceActivityDetector(
 
     private val vadCallback = object : VADCallback {
         override fun onVoiceStart() {
-            isSpeaking = true
             segmentSamples = 0
+            synchronized(openLock) {
+                openSegment.reset()
+                // Seed with the pre-roll: Silero confirms speech only after the
+                // onset has been spoken, so without this the utterance reaches
+                // the recogniser with its first syllables missing.
+                for (chunk in preroll) openSegment.write(chunk, 0, chunk.size)
+                preroll.clear()
+                prerollBytes = 0
+                tailFramesRemaining = 0
+                // Set INSIDE the lock so the capture thread cannot append a
+                // frame to openSegment between the reset and the seed.
+                isSpeaking = true
+            }
             listener.onVoiceStart()
         }
 
         override fun onVoiceEnd(wav: ByteArray?) {
             isSpeaking = false
             segmentSamples = 0
+            // The library closed this segment and is handing over its own
+            // finished WAV, so the mirror's copy is redundant for THIS segment
+            // — but keep capturing briefly: `flush()` is not involved here, and
+            // arming the tail means a manual stop moments later still carries
+            // the decay rather than starting from nothing.
+            synchronized(openLock) {
+                openSegment.reset()
+                preroll.clear()
+                prerollBytes = 0
+                tailFramesRemaining = TAIL_FRAMES
+            }
             lastSpeechAtMs = System.currentTimeMillis()
             val reason = pendingReason ?: SegmentEndReason.SILENCE_DETECTED
             pendingReason = null
@@ -562,6 +715,67 @@ class VoiceActivityDetector(
         }
     }
 
+    /**
+     * [T-android-vad-manual-stop] Cut the segment that is open right now and
+     * return it as a WAV, or null when no speech is in flight.
+     *
+     * This is the flush the library does not provide, reconstructed from the
+     * PCM mirrored in [onVoiceDidContinue]. It is what a manual stop needs:
+     * the user tapped stop mid-sentence, so the library will never emit this
+     * audio on its own and destroying the wrapper would discard it.
+     *
+     * Does NOT stop capture — the caller decides what happens next — but it
+     * does consume the buffer, so a following [stop] cannot hand the same
+     * audio out twice.
+     */
+    fun flush(): ByteArray? {
+        val pcm = synchronized(openLock) {
+            val bytes = openSegment.toByteArray()
+            openSegment.reset()
+            bytes
+        }
+        if (pcm.isEmpty()) return null
+        isSpeaking = false
+        segmentSamples = 0
+        // 48 kHz in, 16 kHz out — matching the library's own segments so the
+        // merger can concatenate the two kinds and the ASR hears real time.
+        return com.openminis.app.provider.voice.VoiceProvider.wrapPcm16InWav(
+            downsampleTo16k(pcm),
+            WAV_SAMPLE_RATE,
+        )
+    }
+
+    /**
+     * [T-android-vad-manual-stop] 48 kHz → 16 kHz PCM16, mono.
+     *
+     * Plain 3:1 decimation with a 3-sample box average. The capture path
+     * already low-passes nothing, so averaging the samples that are dropped is
+     * what keeps aliasing out of the band the recogniser listens to; picking
+     * every third sample instead measurably degraded recognition of sibilants
+     * in local testing. The ratio is fixed because both rates are compile-time
+     * constants — [SAMPLE_RATE] is what we open AudioRecord with and
+     * [WAV_SAMPLE_RATE] is what the library emits.
+     */
+    private fun downsampleTo16k(pcm48: ByteArray): ByteArray {
+        val ratio = SAMPLE_RATE / WAV_SAMPLE_RATE // 3
+        val inSamples = pcm48.size / 2
+        val outSamples = inSamples / ratio
+        val out = ByteArray(outSamples * 2)
+        var si = 0
+        for (o in 0 until outSamples) {
+            var acc = 0
+            for (k in 0 until ratio) {
+                val b = si * 2
+                acc += ((pcm48[b + 1].toInt() shl 8) or (pcm48[b].toInt() and 0xFF)).toShort().toInt()
+                si++
+            }
+            val v = (acc / ratio).coerceIn(-32768, 32767)
+            out[o * 2] = (v and 0xFF).toByte()
+            out[o * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
     /** Stop capture. Any segment already delivered stands; nothing new is emitted. */
     fun stop() {
         stopInternal()
@@ -576,6 +790,12 @@ class VoiceActivityDetector(
     private fun stopInternal() {
         running.set(false)
         isSpeaking = false
+        synchronized(openLock) {
+            openSegment.reset()
+            preroll.clear()
+            prerollBytes = 0
+            tailFramesRemaining = 0
+        }
         backfill.clear()
         backfillSamples = 0
         captureStartedAtMs = 0
@@ -583,14 +803,39 @@ class VoiceActivityDetector(
         backgroundedAtMs = 0
         captureJob?.let { runCatching { it.cancel() } }
         captureJob = null
-        recorder = null
-        // Null the reference and free the native object under the same lock the
-        // capture thread holds while inside processAudio, so release() waits for
-        // any in-flight frame instead of freeing underneath it.
-        synchronized(vadLock) {
-            val w = vad
-            vad = null
-            w?.let { runCatching { it.release() } }
+
+        // [T-android-vad-recorder-release] Release the mic HERE rather than
+        // trusting captureLoop's tail to do it.
+        //
+        // `captureJob = scope.launch { captureLoop(rec) }` dispatches
+        // asynchronously, so a stop() arriving before the coroutine body has
+        // started cancels it before its first line runs — and the
+        // `rec.stop(); rec.release()` at the end of captureLoop, which was the
+        // only release for the running case, then never executes. AudioRecord
+        // holds a native input session, so losing it leaks the microphone for
+        // the life of the process: the mic indicator stays lit and the NEXT
+        // start() gets an AudioRecord that never reaches STATE_INITIALIZED,
+        // i.e. voice input is dead until the app restarts.
+        //
+        // That window is widest in exactly the situation this teardown exists
+        // for — a provider/relay failure tearing the session down milliseconds
+        // after start(). Releasing from the owner closes it.
+        //
+        // Double release is safe and is the normal path: captureLoop's own
+        // tail may still run and call stop()/release() again, and AudioRecord
+        // tolerates release-after-release (the second is a no-op on an already
+        // released object); both sides are wrapped so neither can throw into
+        // its caller. stop() on a non-recording instance throws
+        // IllegalStateException, which is why it is guarded rather than
+        // conditioned on a state read that could race.
+        recorder?.let { rec ->
+            runCatching { rec.stop() }
+            runCatching { rec.release() }
         }
+        recorder = null
+        // Detach and free the native object. From another thread this waits for
+        // any in-flight frame; from inside a VAD callback (same thread, already
+        // in processAudio) the free is deferred until processAudio returns.
+        vad.tearDown()
     }
 }

@@ -96,14 +96,38 @@ enum ShortcutRunTracker {
     /// Write a pending record. Returns the record's id so the caller can pass
     /// it to `markCompleted` once the agent loop settles. Safe to call from
     /// any actor; UserDefaults itself is thread-safe.
+    ///
+    /// Returns an empty id — and writes nothing — when `waitForResult` is false.
+    ///
+    /// [T-shortcut-async-orphan-nag] In async mode the ONLY thing that clears a
+    /// record is a `Task { for await vm.$isProcessing … }` living in the
+    /// short-lived AppIntent process. Once perform() returns, that process can be
+    /// suspended or reaped at any moment, so the await never resumes and the
+    /// record is stranded — even though the agent answered normally. The next
+    /// foreground scan then reads it as an orphan and nags the user.
+    ///
+    /// The DB fallback in `sessionDidComplete` cannot rescue these: a new-session
+    /// run records the placeholder id `intent-eager:<UUID>`, which that check
+    /// explicitly refuses to look up. So for the most common async flow the
+    /// false positive is not merely likely, it is structural.
+    ///
+    /// Async mode is fire-and-forget by definition — the user asked not to wait.
+    /// Tracking a run whose completion signal is unreliable buys nothing and
+    /// costs a wrong "may not have completed" alert, so we simply don't track it.
+    /// `markCompleted("")` is a no-op, so callers need no branching.
     @discardableResult
     @MainActor
     static func markPending(
         intent: String,
         sessionId: String,
+        waitForResult: Bool,
         eagerKeepAliveArmed: Bool,
         eagerKeepAliveSkippedReason: String?
     ) -> String {
+        guard waitForResult else {
+            logger.info("[ShortcutDiag] pending SKIPPED intent=\(intent) session=\(sessionId.prefix(8)) reason=asyncMode(waitForResult=false)")
+            return ""
+        }
         let bka = BackgroundKeepAliveManager.shared
         let record = PendingRecord(
             id: UUID().uuidString,
@@ -125,7 +149,11 @@ enum ShortcutRunTracker {
     /// Clear a pending record. Called from the completion-observer path once
     /// the agent loop's `isProcessing` returns to false (the same signal the
     /// existing "Follow-up Done" notification uses).
+    ///
+    /// A no-op for the empty id that `markPending` returns in async mode, so the
+    /// async completion paths can call this unconditionally.
     static func markCompleted(recordId: String, reason: String) {
+        guard !recordId.isEmpty else { return }
         var records = loadRecords()
         guard let removed = records.removeValue(forKey: recordId) else { return }
         saveRecords(records)

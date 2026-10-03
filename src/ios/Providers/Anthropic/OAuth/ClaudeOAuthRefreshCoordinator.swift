@@ -24,20 +24,20 @@ extension ClaudeTokenStorage: RefreshableOAuthToken {}
 /// now what?", split out from `ClaudeOAuthManager` so it has NO UIKit / network
 /// dependency and can be unit-tested against the exact concurrent ordering seen
 /// on-device (A=200 rotates + writes the new token, stale B=400 must NOT delete
-/// it). All I/O is injected (`loadCurrent`, `deleteCredentials`) so the test
+/// it). All I/O is injected (`loadCurrent`, `markNeedsReauth`) so the test
 /// drives the keychain state deterministically without touching the real
 /// Keychain.
 enum ClaudeOAuthRefreshCoordinator {
 
-    /// Decide what storage to use (or whether to clear credentials) after a
+    /// Decide what storage to use (or whether to mark the instance for re-login) after a
     /// refresh attempt threw `error`.
     ///
     /// The critical guard is *compare-before-delete*: on a token-invalid error
-    /// (`invalid_grant` / HTTP 400) we clear the stored credentials ONLY when the
+    /// (`invalid_grant` / HTTP 400) we mark the instance for re-login ONLY when the
     /// currently-persisted refresh token is still the one we failed with. If a
     /// concurrent refresh already rotated it to a new value, this request is
     /// stale and returning `current` preserves the freshly-written token instead
-    /// of wiping it (the bug that logged users out ~45 min post-login).
+    /// of flagging it (the bug that logged users out ~45 min post-login).
     ///
     /// - Parameters:
     ///   - staleRefreshToken: the refresh token this caller failed with.
@@ -45,7 +45,7 @@ enum ClaudeOAuthRefreshCoordinator {
     ///   - error: the thrown refresh error.
     ///   - isFatal: classifies `error` as "refresh token itself invalid" vs transient.
     ///   - loadCurrent: reads the latest persisted storage (may reflect a concurrent rotation).
-    ///   - deleteCredentials: clears persisted credentials.
+    ///   - markNeedsReauth: flags the instance as needing re-login (credentials are kept).
     ///   - log: optional sink for human-readable trace (kept out of the pure path).
     /// - Returns: the storage to continue with.
     /// - Throws: `LLMError.invalidAPIKey` when credentials are genuinely gone /
@@ -56,7 +56,7 @@ enum ClaudeOAuthRefreshCoordinator {
         error: Error,
         isFatal: (LLMError) -> Bool,
         loadCurrent: () -> ClaudeTokenStorage?,
-        deleteCredentials: () -> Void,
+        markNeedsReauth: () -> Void,
         log: ((String) -> Void)? = nil
     ) throws -> ClaudeTokenStorage {
         // Re-load the latest persisted state — a concurrent winner may have
@@ -68,8 +68,14 @@ enum ClaudeOAuthRefreshCoordinator {
                 log?("Stale invalid_grant ignored — token already rotated; keeping new credentials")
                 return current
             }
-            log?("Refresh token invalid, clearing credentials: \(llmError)")
-            deleteCredentials()
+            // [T-oauth-keep-credentials] Never delete on a rejected refresh:
+            // the classifier can misread a transient reply, and a wiped
+            // credential cannot be recovered. Mark the instance so the UI shows
+            // it red and routing skips it; the mark lapses on its own once a
+            // new credential is stored (re-login, or a Keychain sync from a
+            // peer), and only an explicit Sign Out removes the blob.
+            log?("Refresh token invalid, marking instance for re-login (credentials kept): \(llmError)")
+            markNeedsReauth()
             throw LLMError.invalidAPIKey(detail: "Claude: refresh token invalid — \(llmError)")
         }
 

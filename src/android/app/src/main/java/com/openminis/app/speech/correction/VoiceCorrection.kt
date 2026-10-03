@@ -128,14 +128,69 @@ object VoiceCorrection {
     fun buildConversationContext(
         context: Context,
         messages: List<com.openminis.app.ui.chat.ChatMessage>,
+        screen: ScreenContextBuilder.Snapshot? = null,
     ): ConversationContext {
         ensureInitialized(context)
         val seg = segment ?: return ConversationContext.EMPTY
         val rnk = rank ?: return ConversationContext.EMPTY
 
+        // [T-android-voice-viewport-context] The on-screen blocks, next to (not
+        // instead of) the history-mined ones below.
+        val screenContext = runCatching {
+            ScreenContextBuilder.build(screen, latestReply(messages))
+        }.onFailure { Log.w(TAG, "screen context failed", it) }.getOrNull()
+        screenContext?.let { logScreenContext(it) }
+
         val source = toSourceMessages(messages)
-        if (source.isEmpty()) return ConversationContext.EMPTY
-        return CorrectionContextBuilder.build(source, seg, rnk)
+        if (source.isEmpty()) {
+            return if (screenContext == null) ConversationContext.EMPTY
+            else ConversationContext(screen = screenContext)
+        }
+        return CorrectionContextBuilder.build(source, seg, rnk).copy(screen = screenContext)
+    }
+
+    /**
+     * [T-android-voice-viewport-context] The newest assistant reply's text,
+     * read the same way [toSourceMessages] reads assistant turns (text blocks
+     * first, `content` as fallback, attachment markup stripped). Its message id
+     * lets the screen block drop the same reply's on-screen rows.
+     */
+    internal fun latestReply(
+        messages: List<com.openminis.app.ui.chat.ChatMessage>,
+    ): ScreenContextBuilder.LatestReply? {
+        for (msg in messages.asReversed()) {
+            if (msg.role != "assistant") continue
+            var text = msg.content
+            if (msg.toolBlocks.isNotEmpty()) {
+                val blockText = msg.toolBlocks.filter { it.isText }.joinToString("\n") { it.content }
+                if (blockText.isNotBlank()) text = blockText
+            }
+            val stripped = TypedVocabularyBuilder.stripAttachmentMarkup(text).trim()
+            if (stripped.isNotEmpty()) return ScreenContextBuilder.LatestReply(msg.id, stripped)
+        }
+        return null
+    }
+
+    /**
+     * Debug builds print the exact text the screen blocks carry, so extraction
+     * can be checked against what is on the phone: filter logcat on
+     * `CorrectionContext` and look for `[Screen:viewport]` / `[Screen:latest]`.
+     * Release builds keep only the counts line from [ScreenContextBuilder.build]:
+     * this is conversation content. Chunked because logcat truncates long lines.
+     */
+    private fun logScreenContext(screen: ScreenContext) {
+        if (!com.openminis.app.BuildConfig.DEBUG) return
+        fun chunked(prefix: String, text: String) {
+            text.chunked(800).forEachIndexed { i, part ->
+                Log.d("CorrectionContext", "$prefix${if (i > 0) " (cont.)" else ""} $part")
+            }
+        }
+        screen.viewportLines.forEachIndexed { i, line ->
+            chunked("[Screen:viewport] #${i + 1}/${screen.viewportLines.size} len=${line.length}", line)
+        }
+        screen.latestReply?.let {
+            chunked("[Screen:latest] onScreen=${screen.latestReplyOnScreen} len=${it.length}", it)
+        }
     }
 
     /**

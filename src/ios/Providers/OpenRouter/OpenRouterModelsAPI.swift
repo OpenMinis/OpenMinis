@@ -14,12 +14,45 @@ enum OpenRouterModelsAPI {
             return cached
         }
 
-        var request = URLRequest(url: URL(string: URLBuilding.join(baseURL, "/models"))!)
+        // [T-openrouter-voice-catalog] OpenMinis#280. The default list holds
+        // only chat models; speech and transcription models are listed solely
+        // by their output_modalities filters. Fetch all three at once and tag
+        // each model with the list it came from.
+        async let defaultList = fetchList(path: "/models", apiKey: apiKey)
+        async let speechList = fetchList(path: "/models?output_modalities=speech", apiKey: apiKey)
+        async let transcriptionList = fetchList(path: "/models?output_modalities=transcription", apiKey: apiKey)
+
+        // The chat catalog is required, so its failure propagates exactly as
+        // before. A failed filter endpoint only costs its voice models.
+        let chatModels = try await defaultList
+        let speech: [LLMModel]
+        let transcription: [LLMModel]
+        do { speech = try await speechList } catch {
+            logger.warning("OpenRouter speech catalog unavailable: \(error.localizedDescription)")
+            speech = []
+        }
+        do { transcription = try await transcriptionList } catch {
+            logger.warning("OpenRouter transcription catalog unavailable: \(error.localizedDescription)")
+            transcription = []
+        }
+
+        let merged = mergeVoiceCatalogs(
+            defaultModels: ModelsDevAPI.enrichModels(chatModels),
+            speech: speech,
+            transcription: transcription)
+        logger.info("Fetched OpenRouter models: chat=\(chatModels.count) speech=\(speech.count) transcription=\(transcription.count)")
+        OpenRouterModelsCache.save(merged, credential: apiKey)
+        return merged
+    }
+
+    /// Fetch and parse one `/models` listing.
+    private static func fetchList(path: String, apiKey: String) async throws -> [LLMModel] {
+        var request = URLRequest(url: URL(string: URLBuilding.join(baseURL, path))!)
         request.httpMethod = "GET"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("https://github.com/OpenMinis/OpenMinis", forHTTPHeaderField: "HTTP-Referer")
         request.setValue("Minis App", forHTTPHeaderField: "X-Title")
-        logger.info("Fetching OpenRouter models")
+        logger.info("Fetching OpenRouter models \(path)")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let http = response as? HTTPURLResponse
@@ -27,7 +60,7 @@ enum OpenRouterModelsAPI {
 
         guard (200..<300).contains(statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? ""
-            logger.error("OpenRouter models API error — status \(statusCode)")
+            logger.error("OpenRouter models API error — status \(statusCode) path=\(path)")
             if statusCode == 401 || statusCode == 403 {
                 throw LLMError.invalidAPIKey(detail: "OpenRouter HTTP \(statusCode): \(String(body.prefix(200)))")
             }
@@ -40,7 +73,7 @@ enum OpenRouterModelsAPI {
                 userInfo: [NSLocalizedDescriptionKey: "Missing data array in response"]))
         }
 
-        let models = modelsArray.compactMap { item -> LLMModel? in
+        return modelsArray.compactMap { item -> LLMModel? in
             guard let id = item["id"] as? String else { return nil }
 
             let displayName = (item["name"] as? String) ?? modelDisplayName(from: id)
@@ -88,11 +121,42 @@ enum OpenRouterModelsAPI {
                 supportsReasoning: supportsReasoning
             )
         }
+    }
 
-        let enriched = ModelsDevAPI.enrichModels(models)
-        logger.info("Fetched \(modelsArray.count) total OpenRouter models, \(enriched.count) returned")
-        OpenRouterModelsCache.save(enriched, credential: apiKey)
-        return enriched
+    /// [T-openrouter-voice-catalog] Tag every model with the catalog it came
+    /// from and give voice models their exact dedicated shape. The filtered
+    /// lists declare `speech` / `transcription` rather than `audio`, so without
+    /// the shape they would show no audio at all.
+    ///
+    ///   default list         → voiceRole "none", modalities as declared
+    ///   speech filter        → voiceRole "tts",  text in → audio out
+    ///   transcription filter → voiceRole "stt",  audio in → text out
+    ///
+    /// The filtered lists win an id collision (none today): the filter IS the
+    /// authoritative "this is a voice model" signal. Order: chat catalog, then
+    /// TTS, then ASR, each as OpenRouter returned it. Mirrors Android
+    /// `OpenRouterModelsApi.mergeVoiceCatalogs`.
+    static func mergeVoiceCatalogs(defaultModels: [LLMModel],
+                                   speech: [LLMModel],
+                                   transcription: [LLMModel]) -> [LLMModel] {
+        var order: [String] = []
+        var byId: [String: LLMModel] = [:]
+        func put(_ m: LLMModel) {
+            if byId[m.id] == nil { order.append(m.id) }
+            byId[m.id] = m
+        }
+        for var m in defaultModels { m.voiceRole = VoiceRole.none; put(m) }
+        for var m in speech {
+            m.modalityOverride = [.textInput, .audioOutput]
+            m.voiceRole = VoiceRole.tts
+            put(m)
+        }
+        for var m in transcription {
+            m.modalityOverride = [.audioInput, .textOutput]
+            m.voiceRole = VoiceRole.stt
+            put(m)
+        }
+        return order.compactMap { byId[$0] }
     }
 
     /// Strip `_input` / `_output` suffix and lowercase. Provider APIs are inconsistent —
@@ -119,7 +183,11 @@ private enum OpenRouterModelsCache {
 
     private static var cacheDir: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("com.openminis.app.openrouter-models-cache", isDirectory: true)
+            // [T-openrouter-voice-catalog] "-v2": entries saved before the
+            // speech / transcription catalogs were merged in hold no voice
+            // models and no voiceRole, and would otherwise be served for up to
+            // 7 more days — the fix would look like it did nothing.
+            .appendingPathComponent("com.openminis.app.openrouter-models-cache-v2", isDirectory: true)
     }
 
     private static func cacheKey(for credential: String) -> String {

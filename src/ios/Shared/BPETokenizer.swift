@@ -53,7 +53,7 @@ final class BPETokenizer: @unchecked Sendable {
         switch part {
         case .text(let text):
             return countTokens(text)
-        case .toolUse(_, let name, let input):
+        case .toolUse(_, let name, let input, _):
             // tool_use: name + JSON-serialized input
             var total = countTokens(name)
             if let data = try? JSONSerialization.data(withJSONObject: input),
@@ -61,7 +61,7 @@ final class BPETokenizer: @unchecked Sendable {
                 total += countTokens(json)
             }
             return total + 4 // overhead for tool_use structure
-        case .toolResult(_, let name, let content, _, let imageData, _, _, _):
+        case .toolResult(_, let name, let content, _, let imageData, _, _, _, _):
             var total = countTokens(name) + countTokens(content)
             if let imgData = imageData {
                 total += countImageTokens(imgData)

@@ -12,13 +12,14 @@ private let logger = AppLogger(category: "VoiceCorrection")
 /// logs (`[CorrectionContext]` / `[CorrectionPrompt]` tags).
 ///
 /// All budgets are in CHARACTERS, not tokens: the content is CJK-heavy, the
-/// user-facing spec is stated in characters ("消息上下文预算不超过 5k 字符"),
-/// and characters are what we can count deterministically without a tokenizer.
+/// user-facing spec is stated in characters ("the message-context budget must
+/// not exceed 5k characters"), and characters are what we can count
+/// deterministically without a tokenizer.
 ///
 /// | block                        | budget | why                                   |
 /// |------------------------------|--------|---------------------------------------|
 /// | message context (total)      | 5000   | user-specified hard cap                |
-/// | ├─ rare-content digest       | 200    | "top 200 字" of the rarest terms       |
+/// | ├─ rare-content digest       | 200    | "top 200 chars" of the rarest terms    |
 /// | └─ message excerpts          | 4800   | expand message COUNT until spent       |
 /// |    ├─ per-message cap        | 600    | one long message can't eat the budget  |
 /// |    └─ grounding cap          | 500    | newest turns keep plain lead-in text   |
@@ -42,9 +43,9 @@ enum CorrectionContextBudget {
     static let perMessageScanCap = 2000
 }
 
-// MARK: - Rarity scoring (生僻内容算法)
+// MARK: - Rarity scoring
 
-/// Scores how "rare" (生僻) a segmented term is, 0–100. Higher = rarer = more
+/// Scores how "rare" a segmented term is, 0–100. Higher = rarer = more
 /// likely to be exactly the kind of content ASR mishears and the corrector
 /// needs to see.
 ///
@@ -53,9 +54,9 @@ enum CorrectionContextBudget {
 ///    signal only: presence ⇒ ordinary word ⇒ score 0. Absence proves nothing
 ///    (the list is tiny), so OOV alone never makes a term rare.
 /// 2. Character-level rarity against an inline ~900-char common-hanzi set —
-///    this is the core of the algorithm, matching the spec's "每句中出现的
-///    生僻字情况": the fraction of a term's CJK characters that fall OUTSIDE
-///    the common set scales its score.
+///    this is the core of the algorithm, matching the spec's "the rare
+///    characters occurring in each sentence": the fraction of a term's CJK
+///    characters that fall OUTSIDE the common set scales its score.
 /// 3. Shape heuristics for technical tokens (camelCase, digits, mixed script,
 ///    ALL-CAPS, dashed/dotted identifiers) — `WGHome`, `dns-server`,
 ///    `LiveActivity` are prime correction targets regardless of script.
@@ -72,7 +73,7 @@ enum RareContentScorer {
 
     /// ≈900 highest-frequency modern Chinese characters (order irrelevant —
     /// membership prior only). Inlined so the scorer works with zero resource
-    /// plumbing; a char outside this set is treated as a 生僻字.
+    /// plumbing; a char outside this set is treated as a rare character.
     static let commonHanzi: Set<Character> = Set(
         "的一是了我不人在他有这个上们来到时大地为子中你说生国年着就那和要她出也得里后自以会家可下而过天去能对小多然于心学么之都好看起发当没成只如事把还用第样道想作种开美总从无情己面最女但现前些所同日手又行意动方期它头经长儿回位分爱老因很给名法间知世什两次使身者被高已亲其进此话常与活正感" +
         "见明问力理点文几定本公特做外孩相西果走将月十实向声车全信重三机工物气每并别真打太新比才便夫再书部水像眼等体却加电主界门利海受听表德少克代员许先口由死安写性马光白或住难望教命花结乐色更拉东神记处让母父应直字场平报友关放至张认接告入笑内英军候民岁往何度山觉路带万男边风解叫任金快原吃妈变通师立象数四失满战远格士音轻目条呢" +
@@ -129,11 +130,11 @@ enum RareContentScorer {
 
         let rareCount = cjkChars.filter { !commonHanzi.contains($0) }.count
         if cjkChars.count == 1 {
-            // A lone hanzi: only interesting if it IS a 生僻字.
+            // A lone hanzi: only interesting if it IS a rare character.
             return rareCount == 1 ? 75 : 0
         }
         // Multi-char CJK word not in the common-word list: baseline 40 (domain
-        // word made of common chars — 闪退), scaled up to 90 as its 生僻字
+        // word made of common chars — 闪退), scaled up to 90 as its rare-character
         // fraction rises.
         let ratio = Double(rareCount) / Double(cjkChars.count)
         return 40 + Int((ratio * 50.0).rounded())
@@ -155,7 +156,7 @@ enum RareContentScorer {
 struct ConversationContext: Sendable, Equatable {
     var lastUserMessage: String?
     var lastAgentReply: String?
-    /// Rare-content digest ("top 200 字") from `CorrectionContextBuilder`.
+    /// Rare-content digest ("top 200 chars") from `CorrectionContextBuilder`.
     var rareTermsDigest: String? = nil
     /// Budgeted per-message excerpts, oldest→newest, already role-labeled.
     var recentExcerpts: [String] = []
@@ -214,7 +215,7 @@ struct CorrectionSourceMessage: Sendable {
 /// (same jieba/NLTokenizer strategy as typed-vocabulary), score every term's
 /// rarity, then emit
 ///   1. a rare-content digest — the rarest terms across all scanned messages,
-///      capped at `rareDigest` characters ("top 200 字"), and
+///      capped at `rareDigest` characters ("top 200 chars"), and
 ///   2. per-message excerpts — sentences that carry rare content (plus plain
 ///      lead-in grounding for the newest turns), expanding the number of
 ///      messages included until the excerpt budget is spent.

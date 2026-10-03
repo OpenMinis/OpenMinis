@@ -399,6 +399,13 @@ final class MessageListLayout: UICollectionViewLayout {
                     if abs(preferred - original) > 0.5 {
                         deferredHeights[index] = preferred
                     }
+                    // [T-video-squish-evidence] Only worth a line when a REAL
+                    // correction is being parked (large deltas are the media
+                    // placeholder→loaded case). Token-by-token streaming
+                    // produces sub-30pt shrinks constantly; those stay quiet.
+                    if abs(preferred - original) > 30 {
+                        AppLogger(category: "CellSizing").info("[CellSizing][DEFER-PARKED] idx=\(index) pref=\(String(format: "%.0f", preferred)) orig=\(String(format: "%.0f", original)) — deferSelfSizing, not growing, correction parked")
+                    }
                     return false
                 }
                 // Growing while deferred + has cache — allow through
@@ -414,6 +421,14 @@ final class MessageListLayout: UICollectionViewLayout {
         // .contextMenu modifiers inflate the measured height), causing an
         // infinite oscillation loop.
         if geometryReaderConfirmed.contains(index) {
+            // [T-video-squish-evidence] This is the exit that can silently
+            // discard a media placeholder→loaded growth: GR confirmed the
+            // 200pt height BEFORE the thumbnail landed, and now the real
+            // 437pt measurement is ignored as "GR already knows". Log it
+            // only for large deltas so streaming stays quiet.
+            if abs(preferred - original) > 30 {
+                AppLogger(category: "CellSizing").info("[CellSizing][GR-IGNORED] idx=\(index) pref=\(String(format: "%.0f", preferred)) orig=\(String(format: "%.0f", original)) — geometryReaderConfirmed, self-sizing discarded")
+            }
             return false
         }
 

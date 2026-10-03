@@ -111,6 +111,7 @@ struct QuickTaskIntent: AppIntent {
         let pendingId = ShortcutRunTracker.markPending(
             intent: "QuickTaskIntent",
             sessionId: placeholderSid,
+            waitForResult: waitForResult,
             eagerKeepAliveArmed: eagerResult.armed,
             eagerKeepAliveSkippedReason: eagerResult.skipReason
         )
@@ -119,6 +120,23 @@ struct QuickTaskIntent: AppIntent {
         vm.sessionSource = "shortcut"
         // [T-shortcut-duplicate-completion-notification] See SendPromptIntent.
         vm.suppressGeneralCompletionNotification = true
+        // [T-headless-mount-activation] Resolve external folder mounts and
+        // WAIT for them before any agent work (issue #335).
+        //
+        // `activateAll()` runs from the root view's `.onAppear`, which a headless
+        // intent (`openAppWhenRun = false`) never builds — so on a cold or
+        // force-quit launch nothing acquired the security scopes, `activeURLs`
+        // stayed empty, and the external-mount snapshot the agent reads was
+        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // opened the app once.
+        //
+        // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the
+        // pass keeps running and publishes late (the mount becomes usable
+        // mid-run) instead of being abandoned. 12s because a cold iCloud
+        // FileProvider takes ~5s per bookmark on device and the resolves run
+        // concurrently, so this clears a realistic mount set with headroom
+        // without ever being the thing that hangs a Shortcut.
+        await MountedFoldersManager.shared.ensureActivated(timeout: 12)
         await vm.ensureSessionReturningId()
         // [T-shortcuts-eager-keepalive] Real id now known — re-arm with it and
         // drop the placeholder.
@@ -145,8 +163,10 @@ struct QuickTaskIntent: AppIntent {
             }
         }
 
-        vm.inputText = task.prompt
-        vm.send()
+        // [T-programmatic-prompt-no-composer] Always a fresh draft session
+        // here, so there is no draft to lose — but keep the composer out of
+        // the send path anyway, so it stays true for every caller.
+        vm.send(overrideText: task.prompt)
 
         let sid = vm.sessionId ?? "unknown"
 

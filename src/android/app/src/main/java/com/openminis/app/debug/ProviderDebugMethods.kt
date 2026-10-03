@@ -84,6 +84,7 @@ internal object ProviderDebugMethods {
         ProviderType.openRouter -> "https://openrouter.ai/api/v1"
         ProviderType.xAI -> "https://api.x.ai/v1"
         ProviderType.kimiCode -> "https://api.kimi.com/coding/v1"
+        ProviderType.githubCopilot -> com.openminis.app.auth.CopilotDeviceFlow.API_BASE
         // [T-android-provider-type-parity] Responses API shares the OpenAI
         // host; undrivable types have no canonical base to report.
         ProviderType.openAIResponses -> "https://api.openai.com"

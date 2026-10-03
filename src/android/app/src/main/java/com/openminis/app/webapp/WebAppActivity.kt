@@ -505,6 +505,20 @@ class WebAppActivity : ComponentActivity() {
             .build()
 
         webView.webViewClient = object : WebViewClient() {
+            // [T-android-webview-render-process-gone] (GH#341) This Activity IS
+            // the WebView — there is no other content to fall back to, so a
+            // dead renderer means finishing rather than leaving the user on a
+            // blank screen with no way to tell what happened.
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?,
+            ): Boolean {
+                val handled = com.openminis.app.ui.webview.WebViewRenderProcess
+                    .handle("WebAppActivity", detail)
+                runCatching { finish() }
+                return handled
+            }
+
             override fun shouldInterceptRequest(
                 view: WebView,
                 request: WebResourceRequest,

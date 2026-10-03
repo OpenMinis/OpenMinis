@@ -335,4 +335,69 @@ final class ContextPolicyTests: XCTestCase {
         XCTAssertEqual(policy.check(estimatedTokens: 7_372, contextWindow: 8_192), .exhausted)
         XCTAssertEqual(policy.check(estimatedTokens: 7_371, contextWindow: 8_192), .ok)
     }
+
+    // MARK: - [T-ctx-user-cap] User-chosen group caps
+
+    /// The reported bug: a 32K group cap landed in the 32K–64K tier, whose
+    /// `compactThreshold = 0` made `.needsCompact` unreachable, so the session
+    /// ran past the cap with no compaction and no block.
+    func testUserCap_32K_autoCompactIsAvailable() {
+        let policy = ContextPolicy(contextWindow: 32_000, isUserCap: true)
+        XCTAssertEqual(policy.compactThreshold, 27_200, "85% of 32K")
+        XCTAssertEqual(policy.offloadThreshold, 22_400, "70% of 32K")
+        XCTAssertEqual(policy.offloadTarget, 17_600, "55% of 32K")
+        XCTAssertFalse(policy.exhaustedOnly)
+        XCTAssertTrue(policy.manualCompactAllowed)
+        XCTAssertEqual(policy.check(estimatedTokens: 27_200, contextWindow: 32_000), .needsCompact)
+        XCTAssertEqual(policy.check(estimatedTokens: 27_199, contextWindow: 32_000), .ok)
+    }
+
+    /// Same window, but as a model's NATIVE size — the old tier must be intact,
+    /// because a genuinely small model still cannot pay for a summary.
+    func testNativeWindow_32K_keepsLegacyTier() {
+        let policy = ContextPolicy(contextWindow: 32_000)
+        XCTAssertEqual(policy.compactThreshold, 0, "native 32K: unchanged, no auto-compact")
+        XCTAssertTrue(policy.exhaustedOnly)
+    }
+
+    func testUserCap_128K_proportional() {
+        let policy = ContextPolicy(contextWindow: 128_000, isUserCap: true)
+        XCTAssertEqual(policy.compactThreshold, 108_800, "85% of 128K")
+        XCTAssertEqual(policy.check(estimatedTokens: 108_800, contextWindow: 128_000), .needsCompact)
+    }
+
+    /// The screenshot case: 138.8k used against a 128k cap = 108%.
+    func testUserCap_128K_overCapCompacts() {
+        let policy = ContextPolicy(contextWindow: 128_000, isUserCap: true)
+        XCTAssertEqual(policy.check(estimatedTokens: 138_800, contextWindow: 128_000), .needsCompact)
+    }
+
+    // MARK: - [T-ctx-overflow-hard-stop] Past the ceiling
+
+    /// Previously `.ok`: an exhausted-only tier answered `.ok` right up to its
+    /// advisory line and kept answering `.ok` past 100%, so oversized requests
+    /// went out anyway.
+    func testOverflow_exhaustedOnlyTier_compactsWhenItCan() {
+        let policy = ContextPolicy(contextWindow: 48_000)
+        XCTAssertEqual(policy.compactThreshold, 0, "precondition: tier has auto-compact off")
+        XCTAssertTrue(policy.manualCompactAllowed, "precondition: a summary is viable here")
+        XCTAssertEqual(policy.check(estimatedTokens: 48_000, contextWindow: 48_000), .needsCompact)
+        XCTAssertEqual(policy.check(estimatedTokens: 60_000, contextWindow: 48_000), .needsCompact)
+    }
+
+    /// Below 32K a summary is not viable at all, so overflow must report
+    /// exhausted (prompt the user) rather than attempt a compaction.
+    func testOverflow_tinyWindow_reportsExhausted() {
+        let policy = ContextPolicy(contextWindow: 8_192)
+        XCTAssertFalse(policy.manualCompactAllowed, "precondition: compaction not viable")
+        XCTAssertEqual(policy.check(estimatedTokens: 9_000, contextWindow: 8_192), .exhausted)
+    }
+
+    /// Overflow handling must not disturb the normal large-window path.
+    func testOverflow_largeWindow_stillCompactsViaThreshold() {
+        let policy = ContextPolicy(contextWindow: 200_000)
+        XCTAssertEqual(policy.check(estimatedTokens: 180_000, contextWindow: 200_000), .needsCompact)
+        XCTAssertEqual(policy.check(estimatedTokens: 250_000, contextWindow: 200_000), .needsCompact)
+        XCTAssertEqual(policy.check(estimatedTokens: 179_999, contextWindow: 200_000), .ok)
+    }
 }

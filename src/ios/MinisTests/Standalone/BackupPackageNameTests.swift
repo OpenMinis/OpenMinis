@@ -149,7 +149,7 @@ do {
     // The real question: does a directory listing sorted by NAME come out in
     // time order for one device? The date field and the id field must agree,
     // including across a midnight rollover.
-    let device = "Ethans iPhone"
+    let device = "Alexs iPhone"
     var names: [String] = []
     var t = Date(timeIntervalSince1970: 1_787_000_000)
     for _ in 0..<50 {
@@ -206,7 +206,7 @@ do {
 
 print("\n▸ device token is filename-safe")
 do {
-    checkEq("apostrophe + space", filenameDeviceToken("Ethan's iPhone"), "Ethans-iPhone")
+    checkEq("apostrophe + space", filenameDeviceToken("Alex's iPhone"), "Alexs-iPhone")
     checkEq("plain model name", filenameDeviceToken("iPhone"), "iPhone")
     checkEq("multi-word", filenameDeviceToken("iPad Pro 11"), "iPad-Pro-11")
     checkEq("slash is not a path separator",
@@ -239,7 +239,7 @@ do {
     // filesystem the user may back up to.
     let illegal = CharacterSet(charactersIn: "/\\:*?\"<>|\0")
     var allSafe = true
-    for raw in ["Ethan's iPhone", "a/b\\c:d*e?f\"g<h>i|j", "小王的 iPad", "🚀 phone", "   "] {
+    for raw in ["Alex's iPhone", "a/b\\c:d*e?f\"g<h>i|j", "小王的 iPad", "🚀 phone", "   "] {
         if filenameDeviceToken(raw).rangeOfCharacter(from: illegal) != nil { allSafe = false }
     }
     check("tokens contain no filesystem-illegal characters", allSafe)
@@ -248,8 +248,8 @@ do {
 print("\n▸ full filename shape")
 do {
     let t = Date(timeIntervalSince1970: 1_787_000_000)
-    let name = packageFileName(backupId: "F69C0012-3456", at: t, deviceName: "Ethan's iPhone")
-    check("starts with the device", name.hasPrefix("Ethans-iPhone-"))
+    let name = packageFileName(backupId: "F69C0012-3456", at: t, deviceName: "Alex's iPhone")
+    check("starts with the device", name.hasPrefix("Alexs-iPhone-"))
     check("ends with the extension", name.hasSuffix(".minisbak"))
     check("no 'backup-' prefix any more", !name.hasPrefix("backup-"))
     // Date present, clock time absent.
@@ -266,8 +266,8 @@ do {
 
     // Different devices, same instant → different names, which is the whole
     // point of the change.
-    let a = packageFileName(backupId: "same", at: t, deviceName: "Ethan's iPhone")
-    let b = packageFileName(backupId: "same", at: t, deviceName: "Ethan's iPad")
+    let a = packageFileName(backupId: "same", at: t, deviceName: "Alex's iPhone")
+    let b = packageFileName(backupId: "same", at: t, deviceName: "Alex's iPad")
     check("two devices at one instant produce different names", a != b)
 }
 
@@ -326,10 +326,10 @@ do {
     // two iPhones both tokenise to "iPhone" (iOS 16+ returns the model unless
     // the app holds the user-assigned-device-name entitlement).
     let t = Date(timeIntervalSince1970: 1_787_000_000)
-    let a = packageFileName(backupId: "same-id", at: t, deviceName: "Ethan Work iPhone")
-    let b = packageFileName(backupId: "same-id", at: t, deviceName: "Ethan Home iPhone")
+    let a = packageFileName(backupId: "same-id", at: t, deviceName: "Alex Work iPhone")
+    let b = packageFileName(backupId: "same-id", at: t, deviceName: "Alex Home iPhone")
     check("two custom names → different filenames", a != b)
-    check("custom name leads the filename", a.hasPrefix("Ethan-Work-iPhone-"))
+    check("custom name leads the filename", a.hasPrefix("Alex-Work-iPhone-"))
 
     // A custom name gets exactly the same hardening as an automatic one —
     // it is free text the user typed and still ends up in a path.

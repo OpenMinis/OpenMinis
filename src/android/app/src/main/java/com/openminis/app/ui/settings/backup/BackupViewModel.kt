@@ -10,12 +10,17 @@ import com.openminis.app.backup.BackupHistory
 import com.openminis.app.backup.BackupImporter
 import com.openminis.app.backup.BackupManifest
 import com.openminis.app.backup.BackupPackageReader
+import com.openminis.app.backup.BackupRunController
 import com.openminis.app.backup.BackupZip
+import com.openminis.app.R
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -55,64 +60,56 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     private val _maxFileSizeMB = MutableStateFlow(prefs.getInt(KEY_MAX_FILE_MB, MAX_FILE_UNLIMITED))
     val maxFileSizeMB: StateFlow<Int> = _maxFileSizeMB.asStateFlow()
 
+    /**
+     * Busy flag for the RESTORE side (open / list / download / import). The
+     * backup run's own flag lives in [BackupRunController]; [isRunning] is the
+     * union, so neither can start while the other is in flight.
+     */
     private val _isRunning = MutableStateFlow(false)
-    val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
     /**
-     * [T-android-backup-stop] The in-flight export, held so it can be
-     * cancelled. iOS keeps the same handle in BackupRunController for the same
-     * reason: "a running task nobody holds is one nobody can stop" — and the
-     * screen can be left mid-backup.
+     * [T-android-backup-run-controller] The export itself is owned by
+     * [BackupRunController], a process singleton — NOT this ViewModel. It used
+     * to run on `viewModelScope`, and this ViewModel is scoped to the Backup
+     * nav entry, so leaving the screen cancelled the backup mid-package. The
+     * flows below just read the controller; any number of screen visits can
+     * come and go while one run proceeds.
      */
-    private var exportJob: kotlinx.coroutines.Job? = null
+    private val runner = BackupRunController
+
+    /** True while a backup runs (restore excluded — see [isRunning]). */
+    val exportRunning: StateFlow<Boolean> = runner.isRunning
+
+    val isRunning: StateFlow<Boolean> = combine(_isRunning, runner.isRunning) { restore, export ->
+        restore || export
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, runner.isRunning.value)
+
+    /** Stop the running backup (at its next suspension point). */
+    fun stopExport() = runner.stop()
 
     /**
-     * Stop the running backup.
+     * Enabled rclone / folder destinations, refreshed whenever the screen
+     * appears (the user may have just added one and come back). Mirrors iOS
+     * `BackupSettingsView.hasDestination`.
      *
-     * Cancels at the next suspension point rather than killing mid-write. The
-     * package under construction is left where it is; Start Backup begins a
-     * NEW run of the data as it stands then, matching iOS (which only resumes
-     * a stopped run from its own history row).
-     */
-    fun stopExport() {
-        val job = exportJob ?: return
-        AppLogger.info(TAG, "[Backup] user requested stop")
-        job.cancel()
-    }
-
-    /**
-     * [T-android-backup-destination-gate] Enabled rclone destinations, refreshed
-     * whenever the screen appears (the user may have just added one and come
-     * back). Mirrors iOS `BackupSettingsView.hasDestination`.
-     *
-     * This exists because a backup with NO destination only ever reaches the
-     * app's own sandbox — where it dies with the very app it exists to protect.
-     * iOS refuses to produce one and says so; Android used to run the export
-     * anyway and show "Backup ready", which reads as success.
+     * [T-android-backup-local-export] No longer gates Start: a run with no
+     * destination is allowed and ends in Save to Device / Share. It still
+     * drives the hint under the button, which tells the user where the
+     * package will (not) go before they start.
      */
     private val _destinations =
         MutableStateFlow<List<com.openminis.app.backup.remote.RcloneRemoteStore.Remote>>(emptyList())
     val destinations: StateFlow<List<com.openminis.app.backup.remote.RcloneRemoteStore.Remote>> =
         _destinations.asStateFlow()
 
-    /**
-     * True when at least one ENABLED destination can receive the package.
-     *
-     * Note the difference from [destinations], which lists every configured
-     * server: a user who switched all of them off has destinations but nowhere
-     * for the package to go, so the Start button must still refuse.
-     */
+    /** True when at least one ENABLED destination can receive the package. */
     val hasDestination: Boolean get() = _destinations.value.any { it.enabled }
 
     /**
      * Re-read configured destinations. Call on screen resume.
      *
-     * Lists ALL remotes, not just the enabled ones (iOS parity). Filtering to
-     * `enabledRemotes` here made a disabled destination vanish from the screen
-     * entirely — the user could neither see that it still existed nor switch it
-     * back on, which is the opposite of what disabling is for: it keeps the
-     * server and its credential precisely so skipping one for a while costs
-     * nothing to undo.
+     * Lists ALL remotes, not just the enabled ones (iOS parity): a disabled
+     * destination must stay visible so it can be switched back on.
      */
     fun refreshDestinations() {
         _destinations.value = runCatching {
@@ -129,57 +126,32 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         refreshDestinations()
     }
 
+    /** Restore-side status; merged with the backup's in [statusText]. */
     private val _statusText = MutableStateFlow<String?>(null)
-    val statusText: StateFlow<String?> = _statusText.asStateFlow()
+    val statusText: StateFlow<String?> = combine(_statusText, runner.statusText) { restore, export ->
+        export ?: restore
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Non-null once an export finished and its package is ready to share/save. */
-    private val _exportReady = MutableStateFlow<ExportResult?>(null)
-    val exportReady: StateFlow<ExportResult?> = _exportReady.asStateFlow()
+    val exportReady: StateFlow<BackupRunController.ExportResult?> = runner.exportReady
 
+    /** Progress of a Save to Device copy. */
+    val saveState: StateFlow<BackupRunController.SaveState?> = runner.saveState
+
+    /** Restore-side / validation errors; merged with the backup's in [errorText]. */
     private val _errorText = MutableStateFlow<String?>(null)
-    val errorText: StateFlow<String?> = _errorText.asStateFlow()
+    val errorText: StateFlow<String?> = combine(_errorText, runner.errorText) { local, export ->
+        local ?: export
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
-     * [T-android-backup-transient-success] The run that just finished, shown
-     * under the Start button until the user next arrives on this screen.
-     *
-     * Deliberately transient: the same facts live permanently in Backup
-     * History, so keeping the card forever would make every later visit open
-     * onto a stale result. Cleared by [clearSettledSuccess] on appear.
+     * The run that just finished, shown under the Start button. Transient: the
+     * same facts live permanently in Backup History.
      */
-    private val _lastResult = MutableStateFlow<RunResult?>(null)
-    val lastResult: StateFlow<RunResult?> = _lastResult.asStateFlow()
+    val lastResult: StateFlow<BackupRunController.RunResult?> = runner.lastResult
 
-    data class RunResult(
-        val totalBytes: Long,
-        val skippedFiles: Int,
-        val destinations: List<BackupHistory.DestinationOutcome>,
-        val localCopyRemoved: Boolean = false,
-    ) {
-        val allDelivered: Boolean
-            get() = destinations.isNotEmpty() && destinations.all { it.succeeded }
-    }
-
-    /**
-     * Drop the finished card, but ONLY when it reports a settled, fully
-     * successful run.
-     *
-     * A run still in flight obviously stays. A run with a failed destination
-     * stays too: that is the one result a user actually needs to come back
-     * to, and it is the case where "it vanished before I read it" costs them
-     * something. Mirrors iOS `clearIfSettledAndSuccessful`.
-     */
-    fun clearSettledSuccess() {
-        if (_isRunning.value) return
-        val r = _lastResult.value ?: return
-        if (r.allDelivered) _lastResult.value = null
-    }
-
-    data class ExportResult(
-        val packageFile: File,
-        val totalBytes: Long,
-        val skippedFiles: Int,
-    )
+    /** Drop the finished card when it settled outside the app. */
+    fun clearSettledSuccess() = runner.clearSettledSuccess()
 
     fun toggleCategory(category: BackupCategory, on: Boolean) {
         _selected.value = _selected.value.toMutableSet().apply {
@@ -208,222 +180,48 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         else -> mb.toLong() * 1024L * 1024L
     }
 
-    fun clearError() { _errorText.value = null }
-    fun clearExportReady() { _exportReady.value = null }
+    fun clearError() {
+        _errorText.value = null
+        runner.clearError()
+    }
+    fun clearExportReady() = runner.clearExportReady()
 
     /**
      * Run an export. [passphrase] must be non-empty when [encrypt] is on.
      *
-     * [T-backup-credentials-without-encryption] Credentials are ALWAYS
-     * included — `includeCredentials = true` unconditionally, no longer
-     * derived from [encrypt]. Deriving it meant the default (unencrypted)
-     * export restored a half-working device: providers with no key, env vars
-     * with no value, and nothing anywhere saying so. A backup exists to
-     * reconstitute a device, so it carries what that takes; the encryption
-     * footer states plainly what an unencrypted package contains.
-     *
-     * Only the PASSPHRASE still depends on [encrypt] — that is what "not
-     * encrypted" means. Matches iOS 08904c7b1; the two sides must agree or
-     * packages stop being interchangeable.
+     * Credentials are ALWAYS included (T-backup-credentials-without-
+     * encryption); only the passphrase depends on [encrypt]. The run itself is
+     * handed to [BackupRunController] so it survives this screen.
      */
     fun startExport(passphrase: String?) {
-        if (_isRunning.value) return
+        if (isRunning.value) return
         val cats = _selected.value
         if (cats.isEmpty()) { _errorText.value = "Choose at least one thing to include."; return }
-        // [T-android-backup-destination-gate] Refuse to produce a package that
-        // can only land in our own sandbox. Re-read here rather than trusting
-        // the cached list: the user may have removed the last destination in
-        // another screen since this one was composed.
-        refreshDestinations()
-        if (!hasDestination) {
-            _errorText.value = getApplication<Application>()
-                .getString(com.openminis.app.R.string.backup_needs_destination)
-            return
-        }
         val encrypting = _encrypt.value
         if (encrypting && passphrase.isNullOrEmpty()) {
             _errorText.value = "Set a passphrase to encrypt this backup."
             return
         }
-        _isRunning.value = true
-        _lastResult.value = null
-        _statusText.value = "Starting…"
-        _exportReady.value = null
-        // [T-android-backup-history] Open the record BEFORE any work, so a run
-        // killed mid-flight still leaves evidence. BackupHistory reconciles a
-        // record left RUNNING into FAILED on next launch.
-        val log = mutableListOf<BackupHistory.LogEntry>()
-        var record = BackupHistory.Record(
-            backupId = "",
-            startedAt = System.currentTimeMillis(),
-            status = BackupHistory.Status.RUNNING,
-            categories = cats.map { it.key }.sorted(),
-            encrypted = encrypting,
+        _errorText.value = null
+        refreshDestinations()
+        runner.start(
+            getApplication(),
+            BackupRunController.Request(
+                categories = cats,
+                maxFileBytes = maxFileBytesOption(),
+                passphrase = passphrase?.takeIf { encrypting },
+            ),
         )
-        history.upsert(record)
-        _historyRecords.value = history.records()
-
-        fun note(line: String, problem: Boolean = false) {
-            log.add(BackupHistory.LogEntry(System.currentTimeMillis(), line, problem))
-        }
-        exportJob = viewModelScope.launch {
-            try {
-                val summary = withContext(Dispatchers.IO) {
-                    BackupExporter(getApplication(), db).export(
-                        BackupExporter.Options(
-                            categories = cats,
-                            maxFileBytes = maxFileBytesOption(),
-                            // Unconditional — see the KDoc above. Only the
-                            // passphrase tracks `encrypting`.
-                            includeCredentials = true,
-                            passphrase = passphrase?.takeIf { encrypting },
-                        ),
-                    ) { line ->
-                        _statusText.value = line
-                        note(line)
-                        // Push the live line into the record so the history row
-                        // can show it. iOS does the same: the running row's
-                        // subtitle IS `record.log.last`, so progress lives with
-                        // the run rather than inside the button.
-                        publishRunning(record, log)
-                    }
-                }
-
-                // Deliver to every enabled rclone remote. Failures are surfaced
-                // but do NOT discard the local package — the user can still
-                // Share / Save it, and re-run delivery later. Mirrors iOS's
-                // "package is ready even if a destination failed" behaviour.
-                val outcomes = withContext(Dispatchers.IO) {
-                    deliverToRemotes(summary.packageFile, summary.backupId) { line ->
-                        _statusText.value = line
-                        note(line)
-                        publishRunning(record, log)
-                    }
-                }
-                outcomes.forEach {
-                    note(
-                        if (it.succeeded) "Delivered to ${it.name}"
-                        else "Delivery to ${it.name} failed: ${it.detail}",
-                        problem = !it.succeeded,
-                    )
-                }
-                // [T-android-backup-local-cleanup] The local package is a
-                // FALLBACK, not an archive. Once every enabled destination
-                // holds a verified copy, a third one on the phone just spends
-                // the user's storage — this device was accumulating 32 MB a
-                // run, permanently. Any failure, or having no destinations at
-                // all, keeps it, so the backup always exists somewhere.
-                var localRemoved = false
-                if (outcomes.isNotEmpty() && outcomes.all { it.succeeded }) {
-                    val freed = summary.packageFile.length()
-                    if (withContext(Dispatchers.IO) { summary.packageFile.delete() }) {
-                        localRemoved = true
-                        // Say so. Deleting the package is the right call once
-                        // every destination is verified, but doing it silently
-                        // is the wrong way: the user has no way to tell
-                        // "cleaned up" from "the backup is gone". The line
-                        // also lands in the record, because "did it clean up
-                        // after itself?" is asked long after the card is gone.
-                        val msg = getApplication<Application>().getString(
-                            com.openminis.app.R.string.backup_local_removed,
-                            humanBytesPlain(freed),
-                        )
-                        AppLogger.info(TAG, "[Backup] $msg")
-                        note(msg)
-                    }
-                } else if (outcomes.isNotEmpty()) {
-                    note(
-                        getApplication<Application>()
-                            .getString(com.openminis.app.R.string.backup_local_kept),
-                    )
-                }
-
-                _exportReady.value = ExportResult(
-                    packageFile = summary.packageFile,
-                    totalBytes = summary.totalBytes,
-                    skippedFiles = summary.skippedFiles,
-                )
-                _lastResult.value = RunResult(
-                    totalBytes = summary.totalBytes,
-                    skippedFiles = summary.skippedFiles,
-                    destinations = outcomes,
-                    localCopyRemoved = localRemoved,
-                )
-                val failed = outcomes.filterNot { it.succeeded }
-                if (failed.isNotEmpty()) {
-                    _errorText.value = "Saved locally, but delivery failed for: " +
-                        failed.joinToString("; ") { "${it.name}: ${it.detail ?: "failed"}" }
-                }
-                record = record.copy(
-                    backupId = summary.backupId,
-                    finishedAt = System.currentTimeMillis(),
-                    // A run that produced a package but couldn't reach every
-                    // destination, or dropped files at the cap, is neither a
-                    // clean success nor a failure — that distinction is the
-                    // whole point of the record.
-                    status = if (failed.isEmpty() && summary.skippedFiles == 0) {
-                        BackupHistory.Status.SUCCEEDED
-                    } else {
-                        BackupHistory.Status.COMPLETED_WITH_ISSUES
-                    },
-                    totalBytes = summary.totalBytes,
-                    skippedFiles = summary.skippedFiles,
-                    skippedEntries = summary.skippedPaths.map {
-                        BackupHistory.SkippedEntry(it.path, it.size)
-                    },
-                    packageName = summary.packageFile.name,
-                    destinations = outcomes,
-                    log = log.toList(),
-                )
-                _statusText.value = null
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // Stopped by the user. Recorded as a real outcome rather than
-                // vanishing: a run that was cancelled deliberately still
-                // explains where the time went, and leaving it RUNNING would
-                // render as a permanent spinner.
-                AppLogger.info(TAG, "[Backup] export cancelled by user")
-                note(STOPPED_MARKER, problem = true)
-                record = record.copy(
-                    finishedAt = System.currentTimeMillis(),
-                    status = BackupHistory.Status.FAILED,
-                    errorMessage = STOPPED_MARKER,
-                    log = log.toList(),
-                )
-                _statusText.value = null
-                throw e
-            } catch (e: Exception) {
-                AppLogger.error(TAG, "[Backup] export failed: ${e.message}")
-                _errorText.value = e.message ?: "Backup failed."
-                note(e.message ?: "Backup failed.", problem = true)
-                record = record.copy(
-                    finishedAt = System.currentTimeMillis(),
-                    status = BackupHistory.Status.FAILED,
-                    errorMessage = e.message,
-                    log = log.toList(),
-                )
-                _statusText.value = null
-            } finally {
-                exportJob = null
-                history.upsert(record)
-                _historyRecords.value = history.records()
-                _isRunning.value = false
-            }
-        }
     }
 
     /**
-     * Write the in-flight record so the history list reflects it live.
-     *
-     * Cheap enough per progress line (one small JSON file), and the alternative
-     * — updating only at the end — is what left a running backup invisible in
-     * the very list that exists to report it.
+     * [T-android-backup-local-export] Save the finished package to a document
+     * the user picked (SAF `CreateDocument`). Runs on the controller's process
+     * scope, so a large copy survives leaving the screen.
      */
-    private fun publishRunning(base: BackupHistory.Record, log: List<BackupHistory.LogEntry>) {
-        val snapshot = base.copy(log = log.toList())
-        history.upsert(snapshot)
-        _historyRecords.value = history.records()
-    }
+    fun saveExportTo(target: Uri) = runner.saveTo(getApplication(), target)
 
+    fun clearSaveState() = runner.clearSaveState()
     // -- History ----------------------------------------------------------
 
     private val history by lazy { BackupHistory.get(getApplication()) }
@@ -432,6 +230,15 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     val historyRecords: StateFlow<List<BackupHistory.Record>> = _historyRecords.asStateFlow()
 
     fun refreshHistory() { _historyRecords.value = history.records() }
+
+    init {
+        // [T-android-backup-run-controller] The run writes history from the
+        // controller, which outlives this screen; re-read on every write so a
+        // screen opened mid-run shows the live record and its log.
+        viewModelScope.launch {
+            runner.historyVersion.collect { _historyRecords.value = history.records() }
+        }
+    }
 
     /**
      * [T-backup-delete-files-too] Delete the package from every destination
@@ -443,87 +250,126 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
      * worse state to reason about than no entry at all. Failures are logged
      * rather than surfaced, since the screen is leaving anyway.
      */
-    fun removeHistoryRecordWithFiles(id: String) {
+    /**
+     * [T-android-backup-delete-files-feedback] Outcome of a
+     * "delete record and files" run, so the screen can tell the user what
+     * actually happened instead of silently popping.
+     */
+    sealed interface DeleteWithFilesResult {
+        /** Every destination that held the package accepted the delete. */
+        data class Success(val destinations: Int) : DeleteWithFilesResult
+
+        /**
+         * At least one destination refused. [failures] is "name: reason" per
+         * destination; the history record is KEPT so the user can retry
+         * rather than losing the only pointer to an orphaned remote file.
+         */
+        data class Failed(val failures: List<String>) : DeleteWithFilesResult
+    }
+
+    /**
+     * Delete the backup package from every destination that received it, then
+     * drop the history record.
+     *
+     * [T-android-backup-delete-files-feedback] Returns the outcome rather than
+     * firing and forgetting. Three things were wrong before:
+     *
+     *  1. the caller popped the screen on the same frame it invoked this, and
+     *     the ViewModel is scoped to that nav entry — so `viewModelScope` was
+     *     cancelled before the IO block ran and NOTHING was deleted. That is
+     *     the reported "button does nothing";
+     *  2. a destination that refused the delete was only logged, so a network
+     *     or permission failure looked identical to success;
+     *  3. the record was removed unconditionally, which on failure threw away
+     *     the only record naming the file left behind on the remote.
+     *
+     * This is a `suspend` function so the caller can await it, keep the screen
+     * up while it runs, and act on the result. The record is removed only when
+     * every destination succeeded.
+     */
+    suspend fun removeHistoryRecordWithFiles(id: String): DeleteWithFilesResult {
         val record = history.records().firstOrNull { it.id == id }
         val name = record?.packageName
         if (record == null || name.isNullOrEmpty()) {
+            // Nothing nameable to delete remotely — dropping the record is the
+            // whole operation, and it succeeded.
             removeHistoryRecord(id)
-            return
+            return DeleteWithFilesResult.Success(destinations = 0)
         }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                runCatching {
-                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+        val targets = record.destinations.filter { it.succeeded }
+        val failures = withContext(Dispatchers.IO) {
+            val failed = mutableListOf<String>()
+            try {
+                val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                // [T-android-backup-local-folder-delete] Mirror deliverToRemotes:
+                // only pay for the rclone config sync when a destination
+                // actually needs it. A record whose only destination is a
+                // folder on this phone must not start rclone at all.
+                val hasNonLocalDest = targets.any { outcome ->
+                    val remote = store.remotes.firstOrNull { it.name == outcome.name }
+                    remote != null &&
+                        !com.openminis.app.backup.remote.RcloneRemoteStore.isLocalFolder(remote.backend)
+                }
+                if (hasNonLocalDest) {
                     store.syncToRclone()
-                    val uploader =
-                        com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-                    for (outcome in record.destinations.filter { it.succeeded }) {
-                        val remote = store.remotes.firstOrNull { it.name == outcome.name }
-                            ?: continue
-                        runCatching { uploader.deletePackage(remote, name) }
-                            .onFailure {
-                                AppLogger.error(
-                                    TAG,
-                                    "[Backup] deleting '$name' from '${outcome.name}' failed: ${it.message}",
+                }
+                val uploader =
+                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
+                val localDelivery =
+                    com.openminis.app.backup.remote.LocalFolderDelivery(getApplication())
+                for (outcome in targets) {
+                    val remote = store.remotes.firstOrNull { it.name == outcome.name }
+                    if (remote == null) {
+                        // The destination was deleted since the backup ran, so
+                        // its copy is unreachable from here. Report it instead
+                        // of skipping silently — the file may still exist.
+                        failed += "${outcome.name}: ${getApplication<android.app.Application>()
+                            .getString(R.string.backup_delete_files_dest_missing)}"
+                        continue
+                    }
+                    runCatching {
+                        // [T-android-backup-local-folder-delete] Issue #367
+                        // root cause B: this branch did not exist, so a local
+                        // folder's copy was handed to rclone, which has no
+                        // remote by that name — the delete could never work.
+                        if (com.openminis.app.backup.remote.RcloneRemoteStore.isLocalFolder(remote.backend)) {
+                            val treeUri = remote.params[
+                                com.openminis.app.backup.remote.RcloneRemoteStore.PARAM_TREE_URI,
+                            ].orEmpty()
+                            if (treeUri.isEmpty()) {
+                                throw IllegalStateException(
+                                    "This folder destination is missing its location.",
                                 )
                             }
+                            localDelivery.delete(treeUri, name)
+                        } else {
+                            uploader.deletePackage(remote, name)
+                        }
                     }
+                        .onFailure {
+                            AppLogger.error(
+                                TAG,
+                                "[Backup] deleting '$name' from '${outcome.name}' failed: ${it.message}",
+                            )
+                            failed += "${outcome.name}: ${it.message ?: it::class.java.simpleName}"
+                        }
                 }
+            } catch (t: Throwable) {
+                // syncToRclone / store construction blew up: no destination was
+                // even attempted, so attribute it to the whole operation.
+                AppLogger.error(TAG, "[Backup] delete-with-files setup failed: ${t.message}")
+                failed += t.message ?: t::class.java.simpleName
             }
-            removeHistoryRecord(id)
+            failed
         }
+        if (failures.isNotEmpty()) return DeleteWithFilesResult.Failed(failures)
+        removeHistoryRecord(id)
+        return DeleteWithFilesResult.Success(destinations = targets.size)
     }
 
     fun removeHistoryRecord(id: String) {
         history.remove(id)
         _historyRecords.value = history.records()
-    }
-
-    /**
-     * Upload the produced package to every enabled rclone remote as a single
-     * verified `.minisbak` (see RcloneChunkedUpload, which no longer chunks).
-     * Returns a list of "name: reason"
-     * strings for remotes that failed; empty when all succeeded (or none are
-     * configured). Never throws — a failed remote must not lose the local copy.
-     */
-    private fun deliverToRemotes(
-        packageFile: File,
-        backupId: String,
-        onProgress: (String) -> Unit,
-    ): List<BackupHistory.DestinationOutcome> {
-        val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
-        val enabled = store.enabledRemotes
-        if (enabled.isEmpty()) return emptyList()
-        store.syncToRclone()
-        val uploader = com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication())
-        // [T-android-backup-history] Report EVERY destination, not just the
-        // failures. "Which servers did last night's backup actually reach?"
-        // was unanswerable while only errors were returned.
-        val outcomes = mutableListOf<BackupHistory.DestinationOutcome>()
-        for (remote in enabled) {
-            try {
-                onProgress("Sending to ${remote.name}…")
-                uploader.upload(packageFile, remote, backupId) { p ->
-                    val pct = if (p.totalBytes > 0) (p.bytesSent * 100 / p.totalBytes) else 0
-                    onProgress("Sending to ${remote.name}… $pct%")
-                }
-                outcomes.add(
-                    BackupHistory.DestinationOutcome(
-                        remote.name, succeeded = true,
-                        kind = remote.backend, path = remote.path,
-                    ),
-                )
-            } catch (e: Exception) {
-                AppLogger.error(TAG, "[Backup] delivery to ${remote.name} failed: ${e.message}")
-                outcomes.add(
-                    BackupHistory.DestinationOutcome(
-                        remote.name, succeeded = false, detail = e.message ?: "failed",
-                        kind = remote.backend, path = remote.path,
-                    ),
-                )
-            }
-        }
-        return outcomes
     }
 
     // -- Restore state ----------------------------------------------------
@@ -683,6 +529,46 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * [T-restore-browse-swipe-delete] Delete a package seen in the restore
+     * browser, then re-list the same folder so the row reflects the server,
+     * not an assumption. The caller confirms first; a failure leaves the list
+     * as it was and says why.
+     */
+    fun deleteBrowsedPackage(
+        remote: com.openminis.app.backup.remote.RcloneRemoteStore.Remote,
+        entry: com.openminis.app.backup.remote.RcloneChunkedUpload.RemoteEntry,
+    ) {
+        if (entry.isDirectory) return
+        val folder = _browsePath.value.ifEmpty { remote.path }
+        _browsing.value = true
+        _errorText.value = null
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
+                    store.syncToRclone()
+                    com.openminis.app.backup.remote.RcloneChunkedUpload(getApplication()).deletePackage(
+                        remote,
+                        com.openminis.app.backup.remote.RcloneChunkedUpload.RemotePackage(
+                            key = entry.path,
+                            displayName = entry.name,
+                            size = entry.size,
+                            modified = entry.modified,
+                            partCount = 1,
+                        ),
+                    )
+                }
+            } catch (e: Exception) {
+                AppLogger.error(TAG, "[Restore] delete '${entry.path}' failed: ${e.message}")
+                _browsing.value = false
+                _errorText.value = e.message ?: "Could not delete that backup."
+                return@launch
+            }
+            browseDestination(remote, folder)
+        }
+    }
+
     fun clearBrowse() {
         _browseEntries.value = emptyList()
         _browsePath.value = ""
@@ -748,6 +634,27 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _restoreProgress = MutableStateFlow<BackupImporter.Progress?>(null)
     val restoreProgress: StateFlow<BackupImporter.Progress?> = _restoreProgress.asStateFlow()
+
+    /**
+     * [T-android-restore-ui] Remaining-time estimate, in seconds, or null when
+     * one cannot be made yet (first sample, a stall, or a category with no
+     * declared total).
+     *
+     * A separate flow from [restoreProgress] on purpose: the two change on the
+     * same tick, but keeping them apart lets the button observe only the
+     * counter and the subtitle only the estimate, so neither recomposes for
+     * the other's sake.
+     */
+    private val _restoreEtaSeconds = MutableStateFlow<Long?>(null)
+    val restoreEtaSeconds: StateFlow<Long?> = _restoreEtaSeconds.asStateFlow()
+
+    private val restoreEta = RestoreEta()
+
+    /**
+     * The running restore, held so [stopRunningRestore] can cancel it. Null
+     * whenever no restore is in flight.
+     */
+    private var restoreJob: kotlinx.coroutines.Job? = null
 
     private var openJob: kotlinx.coroutines.Job? = null
 
@@ -911,7 +818,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     /** Confirm + run the restore of the currently pending package. */
     fun startRestore(passphrase: String?) {
         val pending = _pending.value ?: return
-        if (_isRunning.value) return
+        if (isRunning.value) return
         val cats = _restoreSelected.value
         if (cats.isEmpty()) { _errorText.value = "Choose at least one thing to restore."; return }
         if (pending.manifest.encryption != null && passphrase.isNullOrEmpty()) {
@@ -920,29 +827,87 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         }
         _isRunning.value = true
         _statusText.value = "Restoring…"
-        viewModelScope.launch {
+        restoreEta.reset()
+        _restoreEtaSeconds.value = null
+        restoreJob = viewModelScope.launch {
             try {
                 val report = withContext(Dispatchers.IO) {
                     BackupImporter(getApplication(), db).import(
                         pending.extractedRoot,
                         BackupImporter.Options(categories = cats, passphrase = passphrase),
                         onProgress = { line -> _statusText.value = line },
-                        onCount = { _restoreProgress.value = it },
+                        onCount = { p ->
+                            _restoreProgress.value = p
+                            _restoreEtaSeconds.value = restoreEta.update(p.categoryKey, p.done, p.total)
+                        },
                     )
                 }
                 _report.value = report
                 _restoreProgress.value = null
+                _restoreEtaSeconds.value = null
                 _pending.value?.extractedRoot?.deleteRecursively()
                 _pending.value = null
                 _statusText.value = null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // [T-android-restore-ui] The user pressed Stop. NOT an error:
+                // rethrow so the coroutine machinery sees a normal
+                // cancellation, and leave the UI copy to stopRunningRestore()
+                // — which has already set it, and would otherwise be overwritten
+                // here by the generic failure path below.
+                //
+                // This clause exists only because the generic failure handler
+                // beneath it would otherwise swallow the cancellation and
+                // report it to the user as "Restore failed".
+                AppLogger.info(TAG, "[Restore] cancelled by user")
+                throw e
             } catch (e: Exception) {
                 AppLogger.error(TAG, "[Restore] failed: ${e.message}")
                 _errorText.value = e.message ?: "Restore failed."
                 _statusText.value = null
+                _restoreProgress.value = null
+                _restoreEtaSeconds.value = null
             } finally {
-                _isRunning.value = false
+                // [T-restore-stale-finally] Stop re-enables the button at once, so
+                // a new restore can start before this (cancelled) job's finally
+                // runs — withContext waits for the IO block to wind down. Only the
+                // job that still owns the slot may clear it; a stale finally must
+                // not null the newer job's handle or flip isRunning off under it.
+                if (restoreJob === coroutineContext[kotlinx.coroutines.Job]) {
+                    _isRunning.value = false
+                    restoreJob = null
+                    restoreEta.reset()
+                }
             }
         }
+    }
+
+    /**
+     * [T-android-restore-ui] Stops a running restore at the user's request.
+     *
+     * What survives: the importer writes into the live database and runs its
+     * bulk loops inside transactions, so the one in flight rolls back whole
+     * rather than leaving half-written rows — cancellation lands on a
+     * `ensureActive()` check inside the loop, which throws out of the
+     * transaction block. Earlier categories and batches stay written, with one
+     * exception: [T-android-restore-cancel-empty-sessions] sessions the run
+     * newly inserted whose messages were rolled back are deleted on the way
+     * out, so a Stop mid-messages does not leave empty "No messages yet" rows.
+     *
+     * The UI copy is set HERE rather than in the job's catch clause, because
+     * cancelling a coroutine does not guarantee its handlers run before this
+     * method returns, and the user has to see the button change state on the
+     * same frame they tapped.
+     */
+    fun stopRunningRestore() {
+        val job = restoreJob ?: return
+        AppLogger.info(TAG, "[Restore] stop requested by user")
+        job.cancel()
+        restoreJob = null
+        _isRunning.value = false
+        _restoreProgress.value = null
+        _restoreEtaSeconds.value = null
+        restoreEta.reset()
+        _statusText.value = null
     }
 
     // -- Persistence helpers ---------------------------------------------
@@ -954,13 +919,6 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         return restored.ifEmpty { BackupCategory.backupable.toSet() }
     }
 
-    /** Bytes as "32.0 MB", for a message rather than a UI row. */
-    private fun humanBytesPlain(bytes: Long): String = when {
-        bytes >= 1_000_000_000 -> String.format(java.util.Locale.US, "%.1f GB", bytes / 1e9)
-        bytes >= 1_000_000 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1e6)
-        bytes >= 1_000 -> String.format(java.util.Locale.US, "%.0f kB", bytes / 1e3)
-        else -> "$bytes B"
-    }
 
     companion object {
         private const val TAG = "BackupViewModel"
@@ -975,7 +933,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
          * [BackupHistory.INTERRUPTED_MARKER], and for the same reason: it is
          * persisted, so it must not be locale-dependent.
          */
-        const val STOPPED_MARKER = "stopped"
+        const val STOPPED_MARKER = BackupRunController.STOPPED_MARKER
 
         private const val KEY_CATEGORIES = "selectedCategories"
         private const val KEY_ENCRYPT = "encrypt"

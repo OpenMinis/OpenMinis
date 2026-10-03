@@ -69,9 +69,68 @@ enum EnvVarRedactor {
         return (masked + "\n\n" + systemReminder, hits)
     }
 
+    /// [T-envvar-redactor-main-thread-keychain] Cached values + the lock that
+    /// guards them.
+    ///
+    /// `loadAllValues()` was re-running on EVERY tool result: re-read
+    /// env-vars.json, JSON-decode it, then one synchronous `SecItemCopyMatching`
+    /// per variable. A crash report caught that whole chain on **Thread 0**
+    /// (EnvVarEntry.init(from:) ← loadAllValues ← redactIfEnabled ←
+    /// executeSingleToolUse), despite the comment below promising it "can run
+    /// from any thread" — nothing forced it off the main actor, so a chatty
+    /// tool ran a disk+keychain round-trip per output chunk on the main thread.
+    ///
+    /// Keychain reads can block indefinitely (the item is
+    /// `WhenUnlockedThisDeviceOnly`, and `SecItemCopyMatching` talks to
+    /// securityd over XPC), which on the main thread is a watchdog kill
+    /// waiting to happen.
+    ///
+    /// The values change only when the user edits them in Settings, so cache
+    /// them and let `invalidateCache()` clear it. NSLock rather than actor
+    /// isolation because callers are deliberately nonisolated.
+    nonisolated(unsafe) private static var cachedValues: [String]?
+    private static let cacheLock = NSLock()
+    /// [T-envvar-redactor-fill-race] Bumped by every `invalidateCache()`.
+    /// The load runs outside the lock, so an invalidate can land while it is
+    /// in flight; the loader only publishes its result if the generation it
+    /// started at is still current, otherwise its (possibly stale) list would
+    /// overwrite the invalidation and a just-added secret would stay unmasked.
+    nonisolated(unsafe) private static var cacheGeneration: UInt64 = 0
+
+    /// Drop the cached values. Called whenever the env-var set changes, so a
+    /// newly added secret is masked from the very next tool result.
+    static func invalidateCache() {
+        cacheLock.withLock {
+            cachedValues = nil
+            cacheGeneration &+= 1
+        }
+    }
+
     /// Read every env-var value directly off disk + keychain. Mirrors
     /// `EnvVarStore.allAsDict()` but stays nonisolated.
+    ///
+    /// Cached — see `cachedValues`. The load itself is unchanged.
     private static func loadAllValues() -> [String] {
+        cacheLock.lock()
+        if let cachedValues {
+            cacheLock.unlock()
+            return cachedValues
+        }
+        let generationAtStart = cacheGeneration
+        cacheLock.unlock()
+
+        let loaded = loadAllValuesUncached()
+
+        // [T-envvar-redactor-fill-race] Publish only if no invalidate raced
+        // this load. The caller still gets `loaded`; a racing invalidate just
+        // means the next call reloads fresh values.
+        cacheLock.withLock {
+            if cacheGeneration == generationAtStart { cachedValues = loaded }
+        }
+        return loaded
+    }
+
+    private static func loadAllValuesUncached() -> [String] {
         let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
         let fileURL = libraryURL.appendingPathComponent("MinisChat/env-vars.json")
         guard let data = try? Data(contentsOf: fileURL),

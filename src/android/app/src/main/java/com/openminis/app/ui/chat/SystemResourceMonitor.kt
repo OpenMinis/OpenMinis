@@ -1,5 +1,7 @@
 package com.openminis.app.ui.chat
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Debug
@@ -45,21 +47,34 @@ import java.io.File
  *   ptrace, so foreign syscalls run inside the app's own PID anyway and
  *   `/proc/self/stat` does cover hf-render etc. (verified: `top` reports
  *   the same ~110% on com.openminis.app while hf-render runs).
- * - **Memory**: `Debug.getMemoryInfo().totalPss * 1024` for "used" (matches
- *   what task_info(TASK_VM_INFO) reports on iOS — proportional set size,
- *   the closest cross-platform equivalent to "what this process owns now");
- *   `ActivityManager.MemoryInfo.totalMem` for the device cap.
+ * - **Memory**: total PSS for "used" (matches what task_info(TASK_VM_INFO)
+ *   reports on iOS — proportional set size, the closest cross-platform
+ *   equivalent to "what this process owns now"); `ActivityManager.MemoryInfo
+ *   .totalMem` for the device cap.
+ *
+ *   [T-android-resource-hud-offmain] Read from `/proc/self/smaps_rollup`
+ *   (`Pss` + `SwapPss`, the same total `Debug.MemoryInfo.getTotalPss()`
+ *   reports), falling back to `Debug.getMemoryInfo()` where the rollup file
+ *   is missing. `Debug.getMemoryInfo()` parses the FULL `/proc/self/smaps`,
+ *   one record per mapping, and Minis maps a lot (WebView, the ONNX runtime,
+ *   the proot loaders): profiled on a Pixel 6 perf build it cost ~20-25 ms
+ *   per call — 5% of all app CPU during a shell run — and it ran on the main
+ *   thread every 2 s, dropping a frame or two each time. The rollup is the
+ *   kernel's pre-summed version: a few lines, well under a millisecond. The
+ *   sampling also moved off the main thread (see [rememberSystemResourceMonitor]).
  *
  * The class itself is stateful (last-tick baselines) but doesn't push state
  * into Compose — pair it with [rememberSystemResourceMonitor] to drive a
  * recompose loop while the caller wants live numbers.
  */
 class SystemResourceMonitor {
-    var cpuUsage: Float = 0f          // top-style IRIX %; 100% = 1 core, up to numCores * 100
+    // [T-android-resource-hud-offmain] Written by the IO sampler, read by the
+    // UI — volatile so the UI sees each completed sample.
+    @Volatile var cpuUsage: Float = 0f          // top-style IRIX %; 100% = 1 core, up to numCores * 100
         private set
-    var memUsedBytes: Long = 0L
+    @Volatile var memUsedBytes: Long = 0L
         private set
-    var memTotalBytes: Long = 0L
+    @Volatile var memTotalBytes: Long = 0L
         private set
 
     private var prevCpuTicks: Long? = null
@@ -90,6 +105,8 @@ class SystemResourceMonitor {
         Os.sysconf(OsConstants._SC_CLK_TCK)
     }.getOrNull()?.takeIf { it > 0 } ?: 100L
 
+    // Sampled on IO while reset() can run on Main; one lock keeps the window consistent.
+    @Synchronized
     fun sampleOnce(context: Context) {
         sampleCpu()
         sampleMemory(context)
@@ -99,6 +116,7 @@ class SystemResourceMonitor {
      * Reset baselines so a freshly-(re)started monitor reports 0% on its
      * first sample rather than averaging across a long idle gap.
      */
+    @Synchronized
     fun reset() {
         prevCpuTicks = null
         prevSampleNanos = null
@@ -173,13 +191,19 @@ class SystemResourceMonitor {
     } catch (_: Throwable) { null }
 
     private fun sampleMemory(context: Context) {
-        try {
-            val mi = Debug.MemoryInfo()
-            Debug.getMemoryInfo(mi)
-            // totalPss is in KiB; bring to bytes for the formatter.
-            memUsedBytes = mi.totalPss.toLong() * 1024L
-        } catch (_: Throwable) { /* keep prior value */ }
-        try {
+        val pssKb = try {
+            parseTotalPssKb(File("/proc/self/smaps_rollup").readText())
+        } catch (_: Throwable) { null }
+            ?: try {
+                // Fallback for kernels without smaps_rollup (pre-4.14).
+                val mi = Debug.MemoryInfo()
+                Debug.getMemoryInfo(mi)
+                mi.totalPss.toLong()
+            } catch (_: Throwable) { null }
+        // PSS is in KiB; bring to bytes for the formatter.
+        if (pssKb != null) memUsedBytes = pssKb * 1024L
+        // Device RAM never changes: ask once.
+        if (memTotalBytes == 0L) try {
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
             if (am != null) {
                 val sysMem = ActivityManager.MemoryInfo()
@@ -187,6 +211,28 @@ class SystemResourceMonitor {
                 memTotalBytes = sysMem.totalMem
             }
         } catch (_: Throwable) { /* keep prior value */ }
+    }
+
+    companion object {
+        /**
+         * [T-android-resource-hud-offmain] Total PSS in KiB from the text of
+         * `/proc/<pid>/smaps_rollup`: `Pss` + `SwapPss`, the same total
+         * `Debug.MemoryInfo.getTotalPss()` reports. Null when there is no
+         * `Pss` line (not a rollup file).
+         */
+        internal fun parseTotalPssKb(rollup: String): Long? {
+            var pss: Long? = null
+            var swapPss = 0L
+            for (line in rollup.lineSequence()) {
+                val t = line.trim()
+                val value = t.substringAfter(':', "").trim().substringBefore(' ').toLongOrNull() ?: continue
+                when (t.substringBefore(':')) {
+                    "Pss" -> pss = value
+                    "SwapPss" -> swapPss = value
+                }
+            }
+            return pss?.let { it + swapPss }
+        }
     }
 
     fun formattedCpu(): String =
@@ -226,11 +272,14 @@ fun rememberSystemResourceMonitor(active: Boolean): SystemResourceMonitor {
         // Prime the baseline; first read returns 0% by design (no prior
         // tick snapshot to subtract). Two seconds later we have a real
         // delta, matching iOS's first-tick behavior.
-        monitor.sampleOnce(context)
+        // [T-android-resource-hud-offmain] Sample on IO; only the tick that
+        // publishes the result runs on the main thread. This used to sample
+        // right here, on Main, every 2 s.
+        withContext(Dispatchers.IO) { monitor.sampleOnce(context) }
         tick++
         while (isActive) {
             delay(2000)
-            monitor.sampleOnce(context)
+            withContext(Dispatchers.IO) { monitor.sampleOnce(context) }
             tick++
         }
     }

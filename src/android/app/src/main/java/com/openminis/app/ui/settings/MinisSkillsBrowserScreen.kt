@@ -147,6 +147,14 @@ fun MinisSkillsBrowserScreen(
                         settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
 
                         webViewClient = object : WebViewClient() {
+                            // [T-android-webview-render-process-gone] (GH#341)
+                            // AndroidView factory rebuilds on recomposition.
+                            override fun onRenderProcessGone(
+                                view: WebView?,
+                                detail: android.webkit.RenderProcessGoneDetail?,
+                            ): Boolean = com.openminis.app.ui.webview.WebViewRenderProcess
+                                .handle("MinisSkillsBrowserScreen", detail)
+
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 url?.let { currentUrl = it }
                             }

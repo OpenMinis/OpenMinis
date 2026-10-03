@@ -16,10 +16,13 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.openminis.app.MinisApp
+import com.openminis.app.agent.SoulMetadata
+import com.openminis.app.agent.SoulStore
 import com.openminis.app.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
@@ -55,6 +58,35 @@ class AgentForegroundService : Service() {
         private const val CHANNEL_NAME = "Agent Status"
         private const val NOTIFICATION_ID = 9001
 
+        /**
+         * [T-android-notification-chronometer] Convert a
+         * `SystemClock.elapsedRealtime()` instant into the wall-clock instant
+         * `Notification.setWhen()` expects.
+         *
+         * Extracted as a pure function for one reason: it is the only piece of
+         * real arithmetic in this change, and it fails SILENTLY and hugely if
+         * dropped. elapsedRealtime counts from BOOT; setWhen is interpreted as
+         * System.currentTimeMillis(). Pass the former straight through and the
+         * chronometer's origin lands at the epoch plus the device's uptime — a
+         * phone up five days renders "120:00:00" and climbing, on a task that
+         * started two seconds ago. Nothing crashes, nothing logs; it just reads
+         * as a nonsense clock.
+         *
+         * `buildNotification` needs a Context and a live tracker, so the
+         * conversion cannot be exercised there from a JVM test. Here it can.
+         *
+         * @param instantElapsedMs the instant to convert, in elapsedRealtime.
+         * @param nowElapsedMs elapsedRealtime "now".
+         * @param nowWallMs currentTimeMillis "now". Both nows are passed in
+         *   (rather than read inside) so a test can pin them and so the two
+         *   conversions in one rebuild share a single consistent instant.
+         */
+        internal fun elapsedRealtimeToWallClock(
+            instantElapsedMs: Long,
+            nowElapsedMs: Long,
+            nowWallMs: Long,
+        ): Long = nowWallMs - (nowElapsedMs - instantElapsedMs)
+
         // [T-bg-overlay phase 2 fix] Separate channel + notification id
         // for the SYSTEM_ALERT_WINDOW permission nudge so it can have a
         // higher importance than the ongoing FGS status row (which is
@@ -62,13 +94,24 @@ class AgentForegroundService : Service() {
         private const val OVERLAY_NUDGE_CHANNEL_ID = "overlay_permission_nudge"
         private const val OVERLAY_NUDGE_NOTIFICATION_ID = 9002
 
+        /**
+         * [T-android-overlay-completion-survives-stop] How long a completed
+         * capsule may hold the foreground service alive waiting to be tapped.
+         * Long enough that a user who glances at their phone within a few
+         * minutes still sees the result; short enough that a forgotten task
+         * cannot pin an FGS + wake lock indefinitely.
+         */
+        private const val COMPLETION_LINGER_TIMEOUT_MS = 5 * 60 * 1000L
+
         private const val EXTRA_SESSION_COUNT = "session_count"
         private const val EXTRA_TOOL_STATUS = "tool_status"
+        // [T-android-live-update-chip] Chip timer refresh period.
+        private const val CHIP_TICK_MS = 1_000L
 
         // [T-android-dynamic-island] Framework extras key read by
         // Notification.isRequestPromotedOngoing() (Android 16). Not exported as
-        // a public SDK constant; value verified by decompiling the on-device
-        // framework.jar (const-string "android.requestPromotedOngoing").
+        // a public SDK constant; this is the extras key the Android 16
+        // framework reads ("android.requestPromotedOngoing").
         private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         private const val ACTION_STOP = "com.openminis.app.STOP_AGENT_SERVICE"
 
@@ -124,6 +167,9 @@ class AgentForegroundService : Service() {
      */
     private var overlayController: ToolOverlayController? = null
     private val overlayScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    // [T-android-live-update-chip] See ensureChipTicker().
+    private var chipTickerJob: Job? = null
     private var lingerJob: Job? = null
 
     // [T-android-overlay-completion-pending] X9: linger a completed-state
@@ -214,6 +260,55 @@ class AgentForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // [T-android-fgs-start-after-stop] GH#329 backstop.
+        //
+        // The tracker now refuses to dispatch a start once the stop has been
+        // decided (SessionActivityTracker.serviceLock), which removes the race
+        // at its source. This is the second line of defence, for a start that
+        // reaches us anyway — a queued Intent the system had already accepted
+        // before the stop landed, or a future caller that bypasses the tracker.
+        //
+        // Android's rule is absolute: an instance created by
+        // startForegroundService() MUST call startForeground() within ~5s or the
+        // system kills the PROCESS with
+        // ForegroundServiceDidNotStartInTimeException. "There is nothing to do"
+        // is not an exemption — returning or calling stopSelf() without ever
+        // promoting is precisely what trips it. So satisfy the contract first,
+        // then unwind.
+        //
+        // The notification is removed in the same breath via
+        // STOP_FOREGROUND_REMOVE, so the user sees nothing: the promote/demote
+        // pair completes within one main-thread message, well under the frame
+        // the shade would need to draw it. This is the pattern Android's own
+        // docs prescribe for "started, but no longer needed".
+        if (intent != null && intent.action != ACTION_STOP && !SessionActivityTracker.shouldRunServiceNow()) {
+            Log.d(TAG, "start with nothing to run — satisfying the FG contract, then stopping")
+            try {
+                val stub = buildNotification(0, "Idle")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        stub,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, stub)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
+            } catch (t: Throwable) {
+                // Never let the backstop itself be the thing that crashes: a
+                // failure here is strictly better than the process death it
+                // exists to prevent.
+                Log.w(TAG, "FG-contract stub failed: ${t.message}")
+            }
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             // T50: the notification's Stop action — also cancel every
             // running agent loop. Without this, stopSelf() alone leaves
@@ -241,6 +336,7 @@ class AgentForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        ensureChipTicker()
 
         return START_STICKY
     }
@@ -374,6 +470,16 @@ class AgentForegroundService : Service() {
                 // flipping it must appear/hide the overlay live (mutual
                 // exclusion) without an app restart.
                 backgroundRepo.dynamicIslandEnabled,
+                // [T-android-overlay-soul-identity] Editing the Soul name or
+                // icon must repaint the capsule without an app restart. The
+                // controller reads SoulStore.cachedMetadata.value directly when
+                // it renders, so this flow is here purely to make an edit COUNT
+                // as a state change and push a refresh — its value is not read
+                // out of the array below.
+                SoulStore.cachedMetadata,
+                // [T-android-live-update-content] Thinking vs generating for
+                // the capsule's streaming row.
+                SessionActivityTracker.isThinking,
             ) { values: Array<Any?> ->
                 @Suppress("UNCHECKED_CAST")
                 val activeSessions = values[13] as Set<String>
@@ -393,6 +499,8 @@ class AgentForegroundService : Service() {
                     lastToolStatus = values[12] as String?,
                     hasActiveStream = activeSessions.isNotEmpty(),
                     dynamicIslandEnabled = values[14] as Boolean,
+                    soulIdentity = (values[15] as SoulMetadata).let { it.name to it.icon },
+                    isThinking = values[16] as Boolean,
                 )
             }.distinctUntilChanged().collect { state -> applyOverlayState(state) }
         }
@@ -423,6 +531,22 @@ class AgentForegroundService : Service() {
         // floating overlay is suppressed (see applyOverlayState) so the two
         // status UIs never render simultaneously.
         val dynamicIslandEnabled: Boolean,
+        /**
+         * [T-android-overlay-soul-identity] The Soul (name, icon), carried as a
+         * VALUE rather than merely combined in.
+         *
+         * The controller reads SoulStore.cachedMetadata itself when it renders,
+         * so this field is never read back out. It exists because the collector
+         * is distinctUntilChanged over this data class: a Soul edit that is
+         * absent from it produces an equal state and gets dropped, leaving the
+         * capsule showing the old name and icon until something unrelated
+         * happened to change. Holding the identity here is what makes that edge
+         * survive the filter.
+         */
+        val soulIdentity: Pair<String, String>,
+        // [T-android-live-update-content] Model is emitting reasoning, no
+        // visible text yet for this turn.
+        val isThinking: Boolean,
     )
 
     private fun applyOverlayState(state: OverlayState) {
@@ -441,11 +565,34 @@ class AgentForegroundService : Service() {
         // capability is re-probed here, so toggling either the app switch or
         // the system Live-Updates grant hides/reveals the overlay live.
         if (DynamicIslandSupport.isDynamicIslandActive(this, state.dynamicIslandEnabled)) {
-            if (controller.isShown) controller.hide()
+            hideOverlay()
             lingerJob?.cancel()
             lingerJob = null
             hasCompletionPending = false
-            wasBusy = state.hasActiveStream || state.isRunning
+            // [T-android-overlay-completion-survives-stop] The latch and the
+            // tracker keep-alive must move together. Clearing only the local
+            // field (as this branch did between b628f31aa and this change)
+            // strands `overlayCompletionPending = true` with no capsule left to
+            // dismiss it — nothing clears it until the app is foregrounded
+            // again, so the service and its wake lock stay pinned.
+            //
+            // But the release cannot be unconditional either, which is what
+            // b628f31aa was right to remove: `setOverlayCompletionPending(false)`
+            // calls `stopService()` when nothing else justifies the service, and
+            // on a background transition this branch runs WHILE a stream is
+            // still going — killing the very work the user backgrounded the app
+            // to let finish.
+            //
+            // Both hold if the release is conditioned on there being no work: a
+            // dynamic-island session that is still busy keeps the service alive
+            // through its own `activeSessions` entry (so the keep-alive is
+            // redundant), and an idle one has nothing to protect. The capsule is
+            // suppressed on this path regardless, so no UI depends on the flag.
+            val stillWorking = state.hasActiveStream || state.isRunning
+            if (!stillWorking) {
+                SessionActivityTracker.setOverlayCompletionPending(false)
+            }
+            wasBusy = stillWorking
             // [T-android-dynamic-island] The overlay hid reactively above; make
             // the notification switch to the promoted ProgressStyle promptly too
             // (rather than waiting for the next tool/status tick that rebuilds
@@ -479,6 +626,12 @@ class AgentForegroundService : Service() {
             hasPerm && !state.cameraSuppress
         ) {
             hasCompletionPending = true
+            // [T-android-overlay-completion-survives-stop] Tell the tracker the
+            // service still has a job to do. Otherwise the very next
+            // setInactive() — which is what produced this edge — finds no
+            // active session and no presence (Activity already destroyed) and
+            // stops the service, taking the capsule with it.
+            SessionActivityTracker.setOverlayCompletionPending(true)
         }
         wasBusy = isBusy
         val shouldShow = state.enabled && hasPerm && !state.isForeground &&
@@ -497,6 +650,19 @@ class AgentForegroundService : Service() {
         // deep-links to the system overlay-permission screen.
         if (state.enabled && !hasPerm && isBusy && !state.isForeground) {
             maybePostOverlayPermissionNudge()
+        } else if (hasPerm) {
+            // [T-android-overlay-nudge-stale] Clear the nudge once the grant
+            // actually lands. The notification is setAutoCancel(true), so it
+            // disappears if the user taps IT — but the grant is just as often
+            // given from Settings > Display over other apps, or from the
+            // in-app toggle's own deep-link (BackgroundSettingsScreen sends
+            // the user to the same system screen and returns them here). In
+            // those paths nothing dismissed it, so a stale "permission needed"
+            // notification sat in the shade contradicting a now-working
+            // overlay. Also re-arm the once-per-service latch so a LATER
+            // revocation can nudge again — without this, one grant/revoke
+            // cycle silenced the nudge for the rest of the service's life.
+            clearOverlayPermissionNudge()
         }
         // Foreground / toggle-off / no-perm → hide immediately, cancel
         // any (legacy) linger timer. [T-android-overlay-foreground-hide]
@@ -515,29 +681,71 @@ class AgentForegroundService : Service() {
             // Toggle-off / no-perm / camera-suppress keep the flag, same
             // as they leave tracker state alone (see comment above): a
             // re-enable picks up where we left off.
-            if (state.isForeground) hasCompletionPending = false
+            if (state.isForeground) {
+                hasCompletionPending = false
+                SessionActivityTracker.setOverlayCompletionPending(false)
+            }
             lingerJob?.cancel()
             lingerJob = null
-            if (controller.isShown) controller.hide()
+            hideOverlay()
             return
         }
 
         if (shouldShow) {
-            lingerJob?.cancel()
-            lingerJob = null
+            // [T-android-overlay-completion-survives-stop] Only a BUSY state
+            // cancels the linger timer. This cancel used to sit here
+            // unconditionally, which was harmless when the linger was
+            // unbounded — but the completion branch below now arms a timeout
+            // job, and every subsequent emission re-enters this block, so an
+            // unconditional cancel here would kill the timer on the very next
+            // tick and restore the unbounded (now FGS-pinning) behaviour.
+            if (isBusy) {
+                lingerJob?.cancel()
+                lingerJob = null
+            }
             // [T-android-overlay-show-if-busy] When a tool is active the
             // tracker has live toolName/toolTitle/toolStatus; otherwise
             // (stream-only, no tool yet) those may be null/Idle, in which
             // case we fall back to the lastTool* snapshot from the most
             // recent tool of THIS turn so the capsule isn't a bare
             // spinner.
-            val effectiveToolName = state.toolName ?: state.lastToolName
-            val effectiveToolTitle = state.toolTitle ?: state.lastToolTitle
+            // [T-android-overlay-stale-tool] Only fall back to the finished
+            // tool's identity while the model is still WORKING on the same
+            // turn — a streaming stretch between two tool calls, which is what
+            // the fallback was added for.
+            //
+            // It used to apply unconditionally, and the capsule passes
+            // isRunning=true on this branch, so a tool that had already
+            // finished kept rendering as running: observed on device at
+            // 10:57:55 with `toolRunning=false toolName=null` in the state and
+            // the previous tool's glyph and title still on screen, then still
+            // there minutes later on the launcher. Worse, at 10:58:01 the
+            // bound session had moved on while the title had not, so the
+            // capsule showed one task's tool above another task's id.
+            //
+            // Gating on isThinking/hasActiveStream keeps the no-bare-spinner
+            // behaviour for the case it was written for and drops the snapshot
+            // the moment the turn stops producing anything.
+            val stillWorkingThisTurn = state.isRunning || state.isThinking || state.hasActiveStream
+            val effectiveToolName =
+                state.toolName ?: state.lastToolName?.takeIf { stillWorkingThisTurn }
+            val effectiveToolTitle =
+                state.toolTitle ?: state.lastToolTitle?.takeIf { stillWorkingThisTurn }
             val effectiveStatus = if (!state.toolStatus.equals("Idle", ignoreCase = true)) {
                 state.toolStatus
             } else {
                 state.lastToolStatus ?: state.toolStatus
             }
+            // [T-android-overlay-multitask] Resolve the focused slot ONCE per
+            // render and pass both halves down together, so the title and the
+            // index can never describe different tasks.
+            //
+            // Read here rather than added to the combine() above: that call is
+            // already at 17 flows (its positional `values[n]` indexing is the
+            // reason this file renumbers so badly), and the slot list changes
+            // only on session start/stop — both of which already push a state
+            // emission through activeSessions.
+            val slot = SessionActivityTracker.focusedTaskSlot()
             if (isBusy) {
                 controller.show(
                     toolName = effectiveToolName,
@@ -547,6 +755,18 @@ class AgentForegroundService : Service() {
                     replyExcerpt = null,
                     targetSessionId = state.currentSessionId,
                     toolTitle = effectiveToolTitle,
+                    // [T-android-overlay-streaming-state] isBusy is
+                    // hasActiveStream || isRunning, so passing it alone told
+                    // the capsule only "something is happening". Forward the
+                    // tool half separately so it can distinguish an executing
+                    // tool from the model merely streaming text — the latter
+                    // must not show the previous tool's glyph and title, which
+                    // effectiveToolName/-Title still carry by design.
+                    isToolRunning = state.isRunning,
+                    isThinking = state.isThinking,
+                    sessionTitle = slot?.first?.title,
+                    taskIndex = slot?.second ?: 0,
+                    taskTotal = slot?.third ?: 0,
                 )
             } else {
                 // [T-android-overlay-completion-pending] Completion linger:
@@ -555,6 +775,27 @@ class AgentForegroundService : Service() {
                 // completion word + reply excerpt row + visible X); it stays
                 // until tap-to-open / X clears hasCompletionPending via
                 // onDismissByUser, or a foreground transition does.
+                // [T-android-overlay-completion-survives-stop] Cap the
+                // linger. Before, an un-tapped capsule cost nothing once the
+                // service had stopped for other reasons; now the pending flag
+                // is itself a keep-alive reason, so an unbounded linger would
+                // pin a foreground service (and its wake lock) forever on a
+                // user who simply never came back. After the cap we clear the
+                // latch, which drops the last keep-alive reason and lets the
+                // tracker stop the service normally.
+                if (lingerJob == null) {
+                    lingerJob = overlayScope.launch {
+                        delay(COMPLETION_LINGER_TIMEOUT_MS)
+                        Log.d(TAG, "completion linger expired — releasing overlay keep-alive")
+                        hasCompletionPending = false
+                        lingerJob = null
+                        SessionActivityTracker.setOverlayCompletionPending(false)
+                        // Last: hideOverlay() also drops the finished slots, which
+                        // were kept (and kept their numbers) only while the
+                        // capsule was visible to show them.
+                        hideOverlay()
+                    }
+                }
                 controller.show(
                     toolName = effectiveToolName,
                     statusText = effectiveStatus,
@@ -563,6 +804,13 @@ class AgentForegroundService : Service() {
                     replyExcerpt = state.lastReplyExcerpt,
                     targetSessionId = state.currentSessionId,
                     toolTitle = effectiveToolTitle,
+                    // [T-android-overlay-multitask] A finished task still on
+                    // screen keeps its index and its place in the total — "① of
+                    // 2" must not start pointing at nothing the moment one of
+                    // the two ends.
+                    sessionTitle = slot?.first?.title,
+                    taskIndex = slot?.second ?: 0,
+                    taskTotal = slot?.third ?: 0,
                 )
             }
             return
@@ -574,7 +822,28 @@ class AgentForegroundService : Service() {
         // the user already dismissed the completion (or none was pending,
         // e.g. the turn ended in foreground), so the old "task finished →
         // proactively hide" semantics still hold for those cases.
-        if (controller.isShown) controller.hide()
+        hideOverlay()
+    }
+
+    /**
+     * [T-android-overlay-multitask] Takes the capsule down AND drops the
+     * finished task slots it was holding open. Running tasks keep theirs
+     * ([T-android-overlay-hide-keeps-running-slots]).
+     *
+     * These two must not be separable. Finished slots are kept deliberately —
+     * a task the user can still see has to stay numbered — but that only holds
+     * while the capsule is up. Originally only the linger-expiry path cleared
+     * them, so every other route down (this branch, the foreground
+     * transition, the dynamic-island swap) left them behind, and the NEXT run
+     * counted them: one task on screen reporting "3 of 3" after two earlier
+     * runs. Reported as "实际执行的只有一个任务，怎么展示 2 of 2".
+     */
+    private fun hideOverlay() {
+        overlayController?.let { if (it.isShown) it.hide() }
+        // [T-android-overlay-hide-keeps-running-slots] Finished slots only: a
+        // hide is often a foreground/camera/island transition while tasks
+        // still run, and their slots are never re-registered mid-run.
+        SessionActivityTracker.dropFinishedOverlayTasks()
     }
 
     /**
@@ -585,6 +854,45 @@ class AgentForegroundService : Service() {
      * service is already in the foreground for this id, so this updates it in
      * place rather than posting a duplicate.
      */
+    /**
+     * [T-android-live-update-chip] Once-a-second re-post of the promoted
+     * notification while a run is in flight, so the status-bar chip's
+     * `shortCriticalText` carries a live elapsed timer.
+     *
+     * Why not the chronometer: AOSP's chip shows the chronometer when there
+     * is no short text, but at least one OEM skin (ColorOS 16 "fluid cloud")
+     * ignores it and falls back to the content title — producing the
+     * stretched "Minis is usin…" pill in the user's recording. A short text
+     * is honoured everywhere, and the only way to keep it live is to
+     * re-post. One LOW-importance, only-alert-once notify per second is
+     * well under the platform's per-package enqueue rate limit and matches
+     * what system recorder / timer chips do. Not used on the compat branch
+     * (API < 36 or island off): there the system Chronometer view already
+     * ticks locally with no notify() traffic.
+     */
+    private fun ensureChipTicker() {
+        if (chipTickerJob?.isActive == true) return
+        if (!isPromotedChipActive()) return
+        chipTickerJob = overlayScope.launch {
+            while (true) {
+                delay(CHIP_TICK_MS)
+                if (!isPromotedChipActive()) break
+                val finished = SessionActivityTracker.lastTaskFinishedAtMs.value != null &&
+                    SessionActivityTracker.activeSessions.value.isEmpty()
+                if (finished) break
+                if (!SessionActivityTracker.shouldRunServiceNow()) break
+                refreshOngoingNotification()
+            }
+        }
+    }
+
+    private fun isPromotedChipActive(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return false
+        val minisApp = (applicationContext as? MinisApp)?.takeIf { it.subsystemsReady() }
+        val userEnabled = minisApp?.backgroundSettingsRepository?.dynamicIslandEnabled?.value == true
+        return DynamicIslandSupport.isDynamicIslandActive(this, userEnabled)
+    }
+
     private fun refreshOngoingNotification() {
         try {
             val notification = buildNotification(
@@ -670,6 +978,24 @@ class AgentForegroundService : Service() {
      */
     private var overlayNudgePosted: Boolean = false
 
+    /**
+     * [T-android-overlay-nudge-stale] Drop a previously posted nudge and re-arm
+     * the latch. Called from the overlay observer as soon as the grant is
+     * observed, so the shade never keeps a "grant this permission" prompt for a
+     * permission the user already granted.
+     */
+    private fun clearOverlayPermissionNudge() {
+        if (!overlayNudgePosted) return
+        overlayNudgePosted = false
+        try {
+            getSystemService(NotificationManager::class.java)
+                ?.cancel(OVERLAY_NUDGE_NOTIFICATION_ID)
+            Log.d(TAG, "overlay permission nudge cleared (SAW now granted)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "overlay permission nudge cancel failed: ${e.message}")
+        }
+    }
+
     private fun maybePostOverlayPermissionNudge() {
         if (overlayNudgePosted) return
         overlayNudgePosted = true
@@ -725,10 +1051,25 @@ class AgentForegroundService : Service() {
         // chat having never run anything), where no run anchor exists.
         val anchorMs = SessionActivityTracker.currentRunStartedAtMs.value ?: startTimeMs
         val elapsedMs = (endMs - anchorMs).coerceAtLeast(0L)
-        val elapsedSeconds = (elapsedMs / 1000).toInt()
-        val minutes = elapsedSeconds / 60
-        val seconds = elapsedSeconds % 60
-        val timeString = String.format("%d:%02d", minutes, seconds)
+        val timeString = chipTimerText(elapsedMs)
+
+        // [T-android-notification-chronometer] Wall-clock instant this run
+        // began, for setWhen()/setUsesChronometer().
+        //
+        // The conversion is NOT optional. Every anchor in this file is
+        // SystemClock.elapsedRealtime() (SessionActivityTracker stamps both
+        // currentRunStartedAtMs and lastTaskFinishedAtMs from it), which counts
+        // from BOOT. setWhen() is interpreted as System.currentTimeMillis().
+        // Feeding an elapsedRealtime value straight in would place the timer's
+        // origin at the epoch plus the device's uptime — on a phone up for five
+        // days the chip would read "120:00:00" and climb. So rebase: take how
+        // long ago the anchor was, and subtract that from the wall clock.
+        val nowElapsedMs = SystemClock.elapsedRealtime()
+        val nowWallMs = System.currentTimeMillis()
+        val runStartWallMs = elapsedRealtimeToWallClock(anchorMs, nowElapsedMs, nowWallMs)
+        // Completed: freeze at the finish instant so `when` reads as the moment
+        // the task ended rather than continuing to tick.
+        val finishedWallMs = elapsedRealtimeToWallClock(endMs, nowElapsedMs, nowWallMs)
 
         val mainIntent = Intent(this, Class.forName("com.openminis.app.MainActivity")).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -761,33 +1102,70 @@ class AgentForegroundService : Service() {
         // Progress: indeterminate while a tool is in flight (isToolRunning), hidden otherwise
         // The system Doze-friendly setOnlyAlertOnce keeps repeated rebuilds silent.
         val toolName = SessionActivityTracker.currentToolName.value
+        val toolTitle = SessionActivityTracker.currentToolTitle.value
         val isToolRunning = SessionActivityTracker.isToolRunning.value
+        val hasActiveSessions = SessionActivityTracker.activeSessions.value.isNotEmpty()
 
-        // [T-android-live-update-completed] In the completed resting state the
-        // title/status must stop describing work in progress. `toolName` is
-        // already null by then (setInactive clears it), so the old code fell
-        // through to the generic "Minis is running" title while the icon fell
-        // through to the wrench (toolSmallIconRes' else branch) — a finished
-        // task rendered exactly like a running one.
-        val titleText = when {
-            isCompleted -> getString(R.string.bg_service_notification_title_completed)
-            toolName != null -> toolDisplayLabel(toolName)
-            else -> getString(R.string.bg_service_notification_title)
+        // [T-android-live-update-content] One phase drives icon, title and
+        // text, resolved by the same pure function the unit tests cover.
+        // Phases: COMPLETED (resting, checkmark, frozen time) / TOOL (tool
+        // glyph + tool title) / THINKING (reasoning, no text yet) /
+        // GENERATING (visible reply streaming) / IDLE (presence only).
+        // Previously a finished task, a running tool and plain streaming
+        // shared the generic "Minis Agent Active" title and a grey wrench,
+        // and the tool title was the sentence "Minis is using Shell", which
+        // OEM chips truncated to "Minis is usin…".
+        val phase = resolveAgentPhase(
+            isCompleted = isCompleted,
+            toolName = toolName,
+            isThinking = SessionActivityTracker.isThinking.value,
+            hasActiveSessions = hasActiveSessions,
+        )
+        val smallIcon = notificationSmallIconFor(phase, toolName)
+        val soulName = SoulStore.cachedMetadata.value.name.ifBlank { SoulMetadata.DEFAULT.name }
+        val titleText = when (phase) {
+            AgentPhase.COMPLETED -> getString(R.string.bg_service_notification_title_completed)
+            AgentPhase.TOOL -> toolRowTitle(toolName!!, toolTitle)
+            AgentPhase.THINKING, AgentPhase.GENERATING -> soulName
+            AgentPhase.IDLE -> getString(R.string.bg_service_notification_title)
         }
-        val collapsedText = if (isCompleted) {
-            getString(R.string.bg_service_notification_text_completed, sessionLabel, timeString)
-        } else {
-            getString(
-                R.string.bg_service_notification_text, sessionLabel, toolStatus, timeString,
+        val collapsedText = when (phase) {
+            // Completed is a RESTING state: the chronometer is off, so the
+            // total run time has to stay in the text or it would vanish.
+            AgentPhase.COMPLETED ->
+                getString(R.string.bg_service_notification_text_completed, sessionLabel, timeString)
+            // [T-android-notification-chronometer] No baked-in time while
+            // running — the system Chronometer (compat branch) or the ticked
+            // shortCriticalText (promoted branch) renders the clock.
+            AgentPhase.TOOL -> getString(
+                R.string.bg_service_notification_text_running,
+                sessionLabel,
+                humanizeToolStatus(toolStatus, toolName),
             )
+            AgentPhase.THINKING -> getString(
+                R.string.bg_service_notification_text_running,
+                sessionLabel,
+                getString(R.string.overlay_thinking),
+            )
+            AgentPhase.GENERATING -> getString(
+                R.string.bg_service_notification_text_running,
+                sessionLabel,
+                getString(R.string.overlay_streaming),
+            )
+            AgentPhase.IDLE -> getString(R.string.bg_service_notification_text_running, sessionLabel, toolStatus)
         }
 
-        // [T-android-dynamic-island] Short critical text — the ~7-char glyph
-        // the system shows on the always-on / compact chip. Available since
-        // Android 12 (API 31) on the native Builder, so we compute it for all
-        // branches and apply it wherever the API exists. Prefer the elapsed
-        // time (most glanceable); fall back to a tool hint.
-        val shortCritical = timeString
+        // [T-android-live-update-chip] Short critical text — the ≤7-char
+        // string the Android 16 status-bar chip shows next to the small icon.
+        // Always the elapsed timer: while running it is refreshed once a
+        // second by ensureChipTicker(), when completed it freezes at the run
+        // duration. It used to be null while running so the chronometer
+        // could own the clock; ColorOS 16 then fell back to rendering the
+        // full content title in the chip, which is the stretched pill the
+        // user recorded. With the timer always present the chip is
+        // [tool glyph][m:ss] on every skin — the same compact shape as the
+        // iOS Dynamic Island and the system screen-recorder chip.
+        val shortCritical = chipTimerText(elapsedMs)
 
         // [T-android-dynamic-island] Tier 3: Android 16 (Baklava) Live Updates.
         // When the device is capable AND the user enabled the toggle, build the
@@ -818,21 +1196,31 @@ class AgentForegroundService : Service() {
                 titleText = titleText,
                 collapsedText = collapsedText,
                 shortCritical = shortCritical,
-                smallIcon = smallIconRes(toolName, isCompleted),
+                smallIcon = smallIcon,
                 isToolRunning = isToolRunning,
                 isCompleted = isCompleted,
+                runStartWallMs = runStartWallMs,
+                finishedWallMs = finishedWallMs,
                 contentIntent = pendingIntent,
                 stopIntent = stopPendingIntent,
             )
         }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(smallIconRes(toolName, isCompleted))
+            .setSmallIcon(smallIcon)
             .setContentTitle(titleText)
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(collapsedText))
             .setOngoing(true)
-            .setShowWhen(false)
+            // [T-android-notification-chronometer] Let the system render the
+            // clock. SystemUI binds a real Chronometer view for this, so it
+            // ticks once a second locally — no notify() per second, which would
+            // be rate-limited as a notification flood and cost wakeups.
+            // Completed freezes at the finish instant (chronometer off, `when`
+            // pinned there); running counts up from the run's start.
+            .setShowWhen(true)
+            .setWhen(if (isCompleted) finishedWallMs else runStartWallMs)
+            .setUsesChronometer(!isCompleted)
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -877,6 +1265,8 @@ class AgentForegroundService : Service() {
         smallIcon: Int,
         isToolRunning: Boolean,
         isCompleted: Boolean,
+        runStartWallMs: Long,
+        finishedWallMs: Long,
         contentIntent: PendingIntent,
         stopIntent: PendingIntent,
     ): Notification {
@@ -913,13 +1303,22 @@ class AgentForegroundService : Service() {
             .setContentText(collapsedText)
             .setStyle(progressStyle)
             .setOngoing(true)
-            .setShowWhen(false)
+            // [T-android-notification-chronometer] Same rule as the compat
+            // branch — the promoted chip is precisely where a frozen clock was
+            // most visible, since it stays on screen for the whole run.
+            .setShowWhen(true)
+            .setWhen(if (isCompleted) finishedWallMs else runStartWallMs)
+            .setUsesChronometer(!isCompleted)
             .setOnlyAlertOnce(true)
             .setContentIntent(contentIntent)
             // Explicitly NOT colorized and NOT a group summary — both would
             // disqualify the notification from promotion.
             .setColorized(false)
-            .setShortCriticalText(shortCritical)
+
+        // [T-android-notification-chronometer] Only when non-null: while
+        // running the chronometer owns the clock, and a second stale copy of
+        // the same number would contradict it.
+        builder.setShortCriticalText(shortCritical)
 
         // [T-android-live-update-completed] "Stop" is meaningless once the task
         // has finished — there is nothing left to stop, and offering it invites
@@ -939,12 +1338,12 @@ class AgentForegroundService : Service() {
         // promotion. The public builder method `setRequestPromotedOngoing(true)`
         // is NOT in the android-36 SDK stubs yet (@FlaggedApi / not exported),
         // and — importantly — this is NOT the same as FLAG_PROMOTED_ONGOING:
-        // decompiling the on-device framework showed
+        // the framework's
         // Notification.hasPromotableCharacteristics() gates on
         // isRequestPromotedOngoing(), which reads the extras boolean
         // "android.requestPromotedOngoing" — the FLAG is what the *system* sets
         // AFTER it decides to promote, not the request. So we set the extras
-        // key directly (verified against the decompiled getBoolean call).
+        // key directly (verified on device).
         builder.addExtras(android.os.Bundle().apply {
             putBoolean(EXTRA_REQUEST_PROMOTED_ONGOING, true)
         })
@@ -969,51 +1368,5 @@ class AgentForegroundService : Service() {
             Log.d(TAG, "promoted notification OK — hasPromotableCharacteristics=true")
         }
         return notification
-    }
-
-    /**
-     * T-bg-overlay phase 1: human-readable label per tool, mirroring
-     * `ChatScreen.kt:5974 toolTitleLabel` so the notification's title
-     * matches what the in-app FloatingToolStatusBar shows. Falls back
-     * to the raw tool name for unknowns rather than a generic string,
-     * so the user still gets a hint about what's running.
-     */
-    private fun toolDisplayLabel(toolName: String): String = when (toolName) {
-        "shell_execute" -> "Minis is using Shell"
-        "file_read" -> "Minis is reading File"
-        "file_write" -> "Minis is using Editor"
-        "file_edit" -> "Minis is editing File"
-        "browser_use" -> "Minis is using Browser"
-        "read_image" -> "Minis is reading Image"
-        "memory_write", "memory_get" -> "Minis is using Memory"
-        "web_search" -> "Minis is using Search"
-        else -> "Minis is using $toolName"
-    }
-
-    /**
-     * T-bg-overlay phase 1: pick a system small-icon hint per tool kind.
-     * Notification small icons must be tintable monochrome — we use
-     * built-in framework drawables instead of pulling in app icon
-     * resources to avoid the Android < 24 "white square" fallback for
-     * vector drawables. The default (`ic_menu_manage`) preserves the
-     * pre-T pixel-identical look for idle / between-turn rebuilds.
-     */
-    /**
-     * [T-android-live-update-completed] Small icon for the ongoing notification.
-     * Once the task has finished, show a checkmark instead of a tool glyph — the
-     * icon is the most glanceable part of the Live Update chip, and leaving the
-     * generic wrench there made a completed task read as still-running.
-     */
-    private fun smallIconRes(toolName: String?, isCompleted: Boolean): Int =
-        if (isCompleted) R.drawable.ic_notification_completed else toolSmallIconRes(toolName)
-
-    private fun toolSmallIconRes(toolName: String?): Int = when (toolName) {
-        "shell_execute" -> android.R.drawable.ic_menu_edit
-        "file_read", "read_image" -> android.R.drawable.ic_menu_view
-        "file_write", "file_edit" -> android.R.drawable.ic_menu_edit
-        "browser_use" -> android.R.drawable.ic_menu_compass
-        "memory_write", "memory_get" -> android.R.drawable.ic_menu_save
-        "web_search" -> android.R.drawable.ic_menu_search
-        else -> android.R.drawable.ic_menu_manage
     }
 }

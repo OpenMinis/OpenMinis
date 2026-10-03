@@ -84,11 +84,16 @@ object ClaudeCliVersion {
         "https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags"
 
     /**
-     * Compiled-in floor, used only until the first successful fetch on a
-     * fresh install. Kept current with the newest known CLI at release time
-     * so even a fully offline install clears the gates known at that point.
+     * Compiled-in floor, used until the first successful fetch on a fresh
+     * install. Read from the `User-Agent` literal in
+     * [com.openminis.app.auth.ClaudeCliMimicryHeaders.ALL] rather than kept
+     * as a second constant: that literal is the value the gate tests pin
+     * (`>= 2.1.280`), and two copies of one floor are free to drift.
      */
-    const val FALLBACK_VERSION = "2.1.284"
+    val FALLBACK_VERSION: String =
+        com.openminis.app.auth.ClaudeCliMimicryHeaders.ALL
+            .first { it.first == "User-Agent" }.second
+            .removePrefix("claude-cli/").substringBefore(' ')
 
     /** Re-check at most once per day; the gate moves on release cadence. */
     private val REFRESH_TTL_MS = TimeUnit.DAYS.toMillis(1)
@@ -162,9 +167,7 @@ object ClaudeCliVersion {
                     // Only ever move forward: a registry hiccup or a yanked
                     // release must not walk the fingerprint backwards past a
                     // gate we already satisfy.
-                    if (compareVersions(fetched, cachedVersion) > 0) {
-                        cachedVersion = fetched
-                    }
+                    accept(fetched)
                     appContext?.let { ctx ->
                         prefs(ctx).edit()
                             .putString(KEY_VERSION, cachedVersion)
@@ -228,6 +231,18 @@ object ClaudeCliVersion {
             if (na != nb) return na.compareTo(nb)
         }
         return 0
+    }
+
+    /**
+     * Apply a resolved version under the same rule a fetch follows: only
+     * plausible values, and only forward. Shared by [refreshAsync] and the
+     * tests, so the tests exercise the real rule instead of restating it.
+     */
+    internal fun accept(version: String): Boolean {
+        if (!VERSION_PATTERN.matches(version)) return false
+        if (compareVersions(version, cachedVersion) <= 0) return false
+        cachedVersion = version
+        return true
     }
 
     /** Test seam: reset all state so each test starts from a known baseline. */

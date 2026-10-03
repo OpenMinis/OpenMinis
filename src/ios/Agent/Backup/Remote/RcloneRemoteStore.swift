@@ -248,14 +248,17 @@ enum RcloneRemoteStore {
     /// so the mapping is explicit rather than guessed.
     /// Whether this backend's secret is a password rclone will de-obscure,
     /// as opposed to a key it uses literally.
-    private static func secretNeedsObscuring(_ backend: String) -> Bool {
+    /// `nonisolated`: pure mapping, and `applySyncToRclone` needs it off-main
+    /// ([T-backup-sync-offmain]).
+    private nonisolated static func secretNeedsObscuring(_ backend: String) -> Bool {
         switch backend {
         case "s3": return false
         default: return true
         }
     }
 
-    private static func secretKey(for backend: String) -> String {
+    /// `nonisolated`: pure mapping, see `secretNeedsObscuring`.
+    private nonisolated static func secretKey(for backend: String) -> String {
         switch backend {
         case "s3": return "secret_access_key"
         case "sftp", "smb", "webdav", "ftp": return "pass"
@@ -263,25 +266,74 @@ enum RcloneRemoteStore {
         }
     }
 
+    /// One remote plus the secret read for it, ready to hand to a background
+    /// thread. `Sendable` because the blocking rclone work runs off-main.
+    private struct PreparedRemote: Sendable {
+        let remote: Remote
+        let secret: String?
+    }
+
     /// Push every configured remote into rclone's in-memory config.
     ///
     /// Runs per launch. rclone is told to use a config path under tmp/ so it
     /// never writes credentials to a file we would then have to protect —
     /// the Keychain stays the only copy.
+    ///
+    /// [T-backup-sync-offmain] The rclone calls do NOT run on the main thread.
+    ///
+    /// This type is `@MainActor` (the store backs SwiftUI state), and this
+    /// function used to be plain-synchronous, so every caller paid for
+    /// `config/setpath` + `options/set` + one `core/obscure` and one
+    /// `config/create` PER REMOTE — all of them blocking `MinisRcloneRPC` cgo
+    /// calls — on the main thread. `config/create` for webdav/s3 can touch DNS
+    /// and the network, so this was a real hang risk, and the worst caller was
+    /// `BackupSettingsView`'s `.onAppear`: merely opening the Backup screen
+    /// rebuilt the whole rclone config synchronously.
+    ///
+    /// The split is: read `remotes` and their Keychain secrets here (both need
+    /// the main actor), then hand the plain values to a detached task. Callers
+    /// that must observe the result before continuing — notably the upload path
+    /// in `BackupDestinations` — use `syncToRcloneAndWait()`.
     static func syncToRclone() {
+        let prepared = prepareForSync()
+        Task.detached(priority: .utility) {
+            applySyncToRclone(prepared)
+        }
+    }
+
+    /// Same work, but the caller waits for it. Still off the main thread.
+    ///
+    /// Used where the very next step talks to rclone and would otherwise race
+    /// a half-written config (the backup upload path).
+    static func syncToRcloneAndWait() async {
+        let prepared = prepareForSync()
+        await Task.detached(priority: .utility) {
+            applySyncToRclone(prepared)
+        }.value
+    }
+
+    /// Main-actor half: snapshot the remotes and their secrets.
+    private static func prepareForSync() -> [PreparedRemote] {
+        remotes.map { PreparedRemote(remote: $0, secret: loadSecret(for: $0.name)) }
+    }
+
+    /// Off-main half: every blocking rclone RPC lives here.
+    ///
+    /// `nonisolated` on purpose — it must not hop back to the main actor, and
+    /// it deliberately takes only `Sendable` values so it cannot.
+    private nonisolated static func applySyncToRclone(_ prepared: [PreparedRemote]) {
         let configPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("rclone-ephemeral.conf").path
         _ = try? RcloneBridge.rpc("config/setpath", ["path": configPath])
-
-
 
         // Global TLS relaxation is all-or-nothing (WebDAV and S3 expose no
         // per-remote option), so it goes on only when a configured server
         // actually asks for it — one NAS with a self-signed certificate must
         // not quietly lower the bar for every other destination the user has.
-        RcloneBridge.setInsecureTLS(remotes.contains { $0.allowInsecureTLS })
+        RcloneBridge.setInsecureTLS(prepared.contains { $0.remote.allowInsecureTLS })
 
-        for r in remotes {
+        for entry in prepared {
+            let r = entry.remote
             var params: [String: Any] = r.params
             params["type"] = r.backend
 
@@ -335,13 +387,13 @@ enum RcloneRemoteStore {
             // an anonymous bucket wants no key rather than an obscured blank.
             if r.backend != "s3",
                (params["pass"] as? String)?.isEmpty ?? true,
-               loadSecret(for: r.name)?.isEmpty ?? true {
+               entry.secret?.isEmpty ?? true {
                 if let blank = try? RcloneBridge.rpc("core/obscure", ["clear": ""]),
                    let value = blank["obscured"] as? String {
                     params["pass"] = value
                 }
             }
-            if let secret = loadSecret(for: r.name), !secret.isEmpty {
+            if let secret = entry.secret, !secret.isEmpty {
                 // Obscure is rclone's expected on-the-wire form for PASSWORD
                 // fields, and rclone reveals them again on use. It is NOT
                 // encryption — the real protection is that the plaintext
@@ -373,7 +425,7 @@ enum RcloneRemoteStore {
                 logger.error("[Rclone] config/create failed for '\(r.name)': \(error.localizedDescription)")
             }
         }
-        logger.info("[Rclone] synced \(remotes.count) remote(s) into rclone config")
+        logger.info("[Rclone] synced \(prepared.count) remote(s) into rclone config")
     }
 
     /// Remotes that new backups should actually be delivered to.

@@ -77,11 +77,18 @@ without setting this.
 |---|---|
 | macOS | Apple Silicon strongly recommended (see the simulator note below) |
 | Xcode | With the iOS SDK; the project targets **iOS 26.2** and **Swift 6.0** |
+| Metal Toolchain | `xcodebuild -downloadComponent MetalToolchain` — recent Xcode ships it as a separate component |
 | Homebrew packages | `brew install ninja llvm libarchive pkg-config` |
 | Python 3 + Meson | `pip3 install meson` |
+| Go | **1.25+** (`brew install go`), for rclone |
 
 `llvm` is needed to compile the guest VDSO, `libarchive` to unpack the rootfs,
 and Meson/Ninja to build the iSH kernel.
+
+The Metal Toolchain matters even though the build succeeds without it: FFmpeg's
+`configure` probes for the `metal` compiler and, when it is missing, **silently
+drops** the Metal-backed `yadif_videotoolbox` deinterlace filter. Check with
+`xcrun -sdk iphoneos metal --version` before running `build_ffmpeg.sh`.
 
 ### 1. Build the native dependencies
 
@@ -93,6 +100,7 @@ LAME, so LAME must exist first or MP3 encoding is silently dropped:
 ./deps/build_ffmpeg.sh        # → deps/frameworks/*.framework  (LGPL config)
 ./deps/build_ish.sh           # → deps/libs/*.a, deps/include/, deps/resources/
 ./deps/prepare_alpine_rootfs.sh   # → deps/resources/alpine-rootfs.zip
+./deps/build_rclone_ios.sh    # → deps/frameworks/Rclone.xcframework
 ```
 
 What each produces:
@@ -105,6 +113,10 @@ What each produces:
   submodule, plus headers and the VDSO.
 - **`prepare_alpine_rootfs.sh`** — downloads Alpine aarch64 minirootfs and
   converts it to iSH's fakefs format.
+- **`build_rclone_ios.sh`** — rclone as a static-library XCFramework (device
+  and simulator slices) for the backup feature's remote destinations (SMB /
+  WebDAV / SFTP / S3 / FTP). Needs only the Go toolchain, not gomobile. The
+  linked backends are listed in `deps/rclone-mobile/backends/backends.go`.
 
 The Xcode project references `deps/libs/`, `deps/include/`, `deps/frameworks/`
 and `deps/resources/` relative to the project, so nothing needs to be copied
@@ -151,6 +163,7 @@ xcodebuild -project src/ios/Minis.xcodeproj -scheme Minis \
 | Android SDK | **compileSdk 36**, targetSdk 35, **minSdk 26** |
 | Android NDK | **r28+** — set `$ANDROID_NDK_HOME`, or install via Android Studio |
 | CMake | 3.22.1 (install through the SDK Manager) |
+| Go + gomobile | Go **1.25+**, then `go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init` — for rclone |
 | Shell tools | `curl`, `tar`, `make`, `awk`, `sed` |
 
 Gradle itself comes from the wrapper (Gradle 8.11.1, AGP 8.7.3, Kotlin 2.1.0) —
@@ -164,6 +177,8 @@ image.
 ```sh
 ./deps/build_proot.sh              # → assets/proot-aarch64, jniLibs/arm64-v8a/*.so
 ./scripts/prepare_android_sandbox.sh   # → assets/alpine-minirootfs.tar.gz
+./deps/build_rclone_android.sh     # → deps/build/rclone/rclone.aar
+mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
 ```
 
 - **`build_proot.sh`** cross-compiles a static `libtalloc` and the
@@ -187,9 +202,13 @@ image.
   checksums to match someone else's build.
 - **`prepare_android_sandbox.sh`** downloads the Alpine aarch64 minirootfs into
   `assets/`.
+- **`build_rclone_android.sh`** binds rclone with gomobile into an `.aar` for
+  the backup feature's remote destinations. It needs `ANDROID_NDK_HOME` (or
+  `ANDROID_HOME`) set, and it writes to `deps/build/rclone/`; Gradle reads the
+  `.aar` from `src/android/app/libs/`, so copy it there as shown above.
 
-Both write into `src/android/app/src/main/`, and their outputs are gitignored —
-they are build artifacts, so rerun the scripts rather than committing them.
+All of these outputs are gitignored — they are build artifacts, so rerun the
+scripts rather than committing them.
 
 The small JNI libraries in `src/main/cpp/` (`pty_bridge`, the crash handler,
 `jieba_jni`) are built by CMake as part of the normal Gradle build; no separate
@@ -229,6 +248,18 @@ the simulator note above.
 
 **iOS: MP3 encoding unavailable** — `build_lame.sh` did not run before
 `build_ffmpeg.sh`. Rerun both in order.
+
+**iOS: `There is no XCFramework found at '…/deps/frameworks/Rclone.xcframework'`**
+— rclone was not built. Run `./deps/build_rclone_ios.sh`.
+
+**iOS: `cannot execute tool 'metal' due to missing Metal Toolchain`** in the
+FFmpeg build log, or the `yadif_videotoolbox` filter is absent — install it with
+`xcodebuild -downloadComponent MetalToolchain`, then rerun
+`./deps/build_ffmpeg.sh`.
+
+**Android: `Could not find :rclone:`** — `rclone.aar` is not in
+`src/android/app/libs/`. Run `./deps/build_rclone_android.sh` and copy
+`deps/build/rclone/rclone.aar` there.
 
 **Android: `Android NDK not found`** — set `ANDROID_NDK_HOME` to your NDK r28+
 installation, e.g.

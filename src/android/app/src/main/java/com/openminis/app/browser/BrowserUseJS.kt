@@ -378,7 +378,12 @@ object BrowserUseJS {
                 if (el.tagName === 'A' && el.href && el.href.indexOf('javascript:') !== 0) {
                     try { var u = new URL(el.href); info.href = u.pathname + (u.search ? u.search.substring(0, 40) : ''); } catch(e) { info.href = el.href.substring(0, 80); }
                 }
-                if (['INPUT','TEXTAREA','SELECT'].indexOf(el.tagName) >= 0) { info.inputType = el.type || null; if (el.value) info.value = el.value.substring(0, 60); if (el.placeholder) info.placeholder = el.placeholder.substring(0, 60); }
+                // [T-android-browser-password-redact] A password field's value is
+                // redacted at capture, so the plaintext never enters the node tree
+                // (and never reaches the model). Whether it is filled is still
+                // reported: the agent needs that to drive a login form. iOS parity
+                // (BrowserUseJavaScript.swift).
+                if (['INPUT','TEXTAREA','SELECT'].indexOf(el.tagName) >= 0) { info.inputType = el.type || null; if (el.value) info.value = (el.type === 'password') ? '[redacted]' : el.value.substring(0, 60); if (el.placeholder) info.placeholder = el.placeholder.substring(0, 60); }
                 var role = el.getAttribute('role'); if (role) info.role = role;
                 return info;
             });

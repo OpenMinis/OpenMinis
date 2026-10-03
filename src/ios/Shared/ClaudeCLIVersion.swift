@@ -63,10 +63,14 @@ enum ClaudeCLIVersion {
         string: "https://registry.npmjs.org/-/package/@anthropic-ai/claude-code/dist-tags"
     )!
 
-    /// Compiled-in floor, used only until the first successful fetch on a
-    /// fresh install. Kept current with the newest known CLI at release time
-    /// so even a fully offline install clears the gates known at that point.
-    static let fallbackVersion = "2.1.284"
+    /// Compiled-in floor, used until the first successful fetch on a fresh
+    /// install. Read from the `User-Agent` literal in `ClaudeCLIMimicry.headers`
+    /// rather than kept as a second constant: that literal is what the gate
+    /// tests pin (`>= 2.1.280`), and two copies of one floor are free to drift.
+    static let fallbackVersion: String = {
+        let ua = ClaudeCLIMimicry.headers["User-Agent"] ?? ""
+        return String(ua.dropFirst("claude-cli/".count).prefix { $0 != " " })
+    }()
 
     /// Re-check at most once per day; the gate moves on release cadence.
     private static let refreshTTL: TimeInterval = 24 * 60 * 60
@@ -129,13 +133,8 @@ enum ClaudeCLIVersion {
                   let data,
                   let parsed = parseDistTags(data) else { return }
 
-            lock.lock()
-            // Only ever move forward: a registry hiccup or a yanked release
-            // must not walk the fingerprint backwards past a gate we already
-            // satisfy.
-            if compare(parsed, cached) > 0 { cached = parsed }
-            let resolved = cached
-            lock.unlock()
+            accept(parsed)
+            let resolved = current()
 
             UserDefaults.standard.set(resolved, forKey: defaultsKey)
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: fetchedAtKey)
@@ -173,6 +172,20 @@ enum ClaudeCLIVersion {
             if na != nb { return na < nb ? -1 : 1 }
         }
         return 0
+    }
+
+    /// Apply a resolved version under the rule a fetch follows: only plausible
+    /// values, and only forward — a registry hiccup or a yanked release must
+    /// not walk the fingerprint back past a gate already satisfied. Shared by
+    /// `refresh()` and the tests, so the tests exercise the real rule.
+    @discardableResult
+    static func accept(_ version: String) -> Bool {
+        guard isPlausible(version) else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        guard compare(version, cached) > 0 else { return false }
+        cached = version
+        return true
     }
 
     /// Test seam: reset all state so each test starts from a known baseline.

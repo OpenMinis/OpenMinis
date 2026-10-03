@@ -34,10 +34,10 @@ object VoiceProviderFactory {
             // completion path differs, which voice never uses.
             ProviderType.openAI, ProviderType.openRouter, ProviderType.openAIResponses -> {
                 if (instance.providerType == ProviderType.openRouter) {
-                    // OpenRouter. TTS goes through chat.completions + the audio
-                    // modality, NOT /v1/audio/speech — that endpoint does not
-                    // exist there and 400s for every model id. ASR is split per
-                    // model between chat.completions and /v1/audio/transcriptions.
+                    // OpenRouter. Routed per model by catalog voice role:
+                    // speech models → /v1/audio/speech, transcription models →
+                    // /v1/audio/transcriptions, gpt-audio → chat.completions.
+                    // [T-openrouter-voice-catalog]
                     return OpenRouterVoiceProvider(
                         instance.id,
                         custom ?: "https://openrouter.ai/api",
@@ -49,6 +49,11 @@ object VoiceProviderFactory {
                         GroqVoiceProvider(instance.id, custom ?: "https://api.groq.com/openai", apiKey)
                     normalizedBase.contains("dashscope") ->
                         AlibabaVoiceProvider(instance.id, custom ?: "https://dashscope.aliyuncs.com/compatible-mode", apiKey)
+                    // [T-android-zhipu-tts] Zhipu serves voice under
+                    // /api/paas/v4/audio/*, not {base}/v1/audio/* — the generic
+                    // provider built …/api/paas/v4/v1/audio/speech and 404'd.
+                    ZhipuVoiceProvider.matches(normalizedBase) ->
+                        ZhipuVoiceProvider(instance.id, custom ?: ZhipuVoiceProvider.DEFAULT_ORIGIN, apiKey)
                     normalizedBase.contains("minimax") ->
                         MiniMaxVoiceProvider(instance.id, custom ?: "https://api.minimax.io", apiKey)
                     // Doubao / Volcano v3: single API Key (new console).
@@ -103,6 +108,8 @@ object VoiceProviderFactory {
 
             // [T-kimi-oauth] Kimi Coding Plan serves no voice models.
             ProviderType.kimiCode -> null
+            // [T-copilot-provider] Copilot is chat-only — no TTS/STT endpoints.
+            ProviderType.githubCopilot -> null
             // [T-android-provider-type-parity] No voice support for types this
             // build cannot drive.
             ProviderType.antigravity, ProviderType.unsupported -> null

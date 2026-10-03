@@ -10,6 +10,68 @@ import os.log
 // into streamMessage. They are the same request. [diag-0800 Q2]
 private let logger = AppLogger(category: "AnthropicStreamTransport")
 
+/// [T-oauth-cloudflare-403 issue #360] The Claude CLI mimicry headers, in ONE
+/// place.
+///
+/// Cloudflare Bot Management fronts the Anthropic endpoints and decides whether
+/// a caller looks like the official CLI from this header set. The chat path has
+/// sent them since the OAuth transport was written; the TOKEN path (exchange and
+/// silent refresh, `ClaudeOAuthManager.postTokenRequest`) sent none of them, so
+/// a client whose network egress Cloudflare scores as suspicious got a 403 and
+/// an HTML "Just a moment…" challenge instead of JSON — an OAuth login that
+/// could never complete and a refresh that could never succeed.
+///
+/// Both call sites read this dictionary rather than each spelling the values
+/// out, because the failure mode of a drift between them is exactly #360: one
+/// path passes the bot check and the other does not, which reads to the user as
+/// "chat works but login is broken".
+///
+/// Deliberately NOT included: `anthropic-beta`. That is a chat-feature
+/// negotiation header (it names message-API betas), meaningless on a token
+/// request and a gratuitous difference from what the real CLI sends there.
+///
+/// On bumping: `User-Agent` tracks the CLI release. The `X-Stainless-*` values
+/// do NOT move with it — `X-Stainless-Package-Version` tracks the Anthropic
+/// TypeScript SDK and `X-Stainless-Runtime-Version` the Node runtime, both on
+/// cadences independent of the CLI.
+enum ClaudeCLIMimicry {
+    static let headers: [String: String] = [
+        "User-Agent": "claude-cli/2.1.280 (external, cli)",
+        "X-Stainless-Lang": "js",
+        "X-Stainless-Package-Version": "0.106.0",
+        "X-Stainless-OS": "Linux",
+        "X-Stainless-Arch": "arm64",
+        "X-Stainless-Runtime": "node",
+        "X-Stainless-Runtime-Version": "v24.18.0",
+        "X-Stainless-Retry-Count": "0",
+        "X-Stainless-Timeout": "600",
+        "X-App": "cli",
+        "Anthropic-Dangerous-Direct-Browser-Access": "true",
+    ]
+
+    /// [T-anthropic-cli-version] What actually goes on the wire: `headers`
+    /// with the `User-Agent` version resolved at runtime by
+    /// `ClaudeCLIVersion`. The literal above stays the compiled-in floor (what
+    /// an offline fresh install sends; the resolver never goes below it), and
+    /// every other header passes through unchanged. Both `apply` overloads
+    /// read this, so the chat and token paths get a runtime bump together.
+    static func current() -> [String: String] {
+        var out = headers
+        out["User-Agent"] = ClaudeCLIVersion.userAgent()
+        return out
+    }
+
+    /// Apply every mimicry header to `request`.
+    static func apply(to request: NSMutableURLRequest) {
+        for (field, value) in current() { request.setValue(value, forHTTPHeaderField: field) }
+    }
+
+    /// Apply every mimicry header to `request`.
+    static func apply(to request: inout URLRequest) {
+        for (field, value) in current() { request.setValue(value, forHTTPHeaderField: field) }
+    }
+}
+
 /// Replaces `x-api-key` with `Authorization: Bearer` via a custom URLProtocol.
 ///
 /// Since `HTTPRequest` properties are module-internal in SwiftAnthropic,
@@ -59,10 +121,19 @@ final class LastAPIErrorBody: @unchecked Sendable {
     static let shared = LastAPIErrorBody()
     private let lock = NSLock()
     private var _body: String?
+    private var _statusCode: Int?
 
-    func set(_ body: String?) {
+    /// [T-anthropic-status-not-substring] The status is captured ALONGSIDE the
+    /// body because the SwiftAnthropic SDK surfaces only a description string,
+    /// and classifying by searching that string for "500"/"503"/… matches any
+    /// digits anywhere in it — a 400 whose body mentions `max_tokens: 8500`
+    /// read as a transient 5xx and was retried on a model that could never
+    /// succeed. Every capture site already holds the real `HTTPURLResponse`,
+    /// so the true status only needed carrying across.
+    func set(_ body: String?, statusCode: Int? = nil) {
         lock.lock()
         _body = body
+        _statusCode = statusCode
         lock.unlock()
     }
 
@@ -72,6 +143,18 @@ final class LastAPIErrorBody: @unchecked Sendable {
         defer { lock.unlock() }
         let val = _body
         _body = nil
+        return val
+    }
+
+    /// Atomically read and clear the last error body together with the HTTP
+    /// status it arrived with. Use this instead of `take()` when the status
+    /// drives a classification decision.
+    func takeWithStatus() -> (body: String?, statusCode: Int?) {
+        lock.lock()
+        defer { lock.unlock() }
+        let val = (_body, _statusCode)
+        _body = nil
+        _statusCode = nil
         return val
     }
 }
@@ -570,15 +653,12 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         // Remove API key
         mutable.setValue(nil, forHTTPHeaderField: "x-api-key")
 
-        // Mimic the real Claude Code CLI as closely as possible. Anthropic's
-        // backend uses the *combination* of `anthropic-beta`, `User-Agent`,
-        // and `X-Stainless-*` headers to decide whether an OAuth-scoped
-        // (Claude Code) credential is being used by the official CLI or by a
-        // third-party client; non-CLI requests get downgraded (e.g. extra-
-        // usage billing, silently-disabled `thinking`/`adaptive`).
-        // The full beta set + Stainless headers below align with sub2api's
-        // FullClaudeCodeMimicryBetas / DefaultHeaders (see
-        // Wei-Shaw/sub2api backend/internal/pkg/claude/constants.go).
+        // Claude Code OAuth credentials are served with the Claude CLI's
+        // request profile: the `anthropic-beta` set, `User-Agent` and
+        // `X-Stainless-*` headers below. Without it some features (e.g.
+        // `thinking`/`adaptive`) are not enabled for these credentials.
+        // Values tracked from Wei-Shaw/sub2api
+        // backend/internal/pkg/claude/constants.go.
         let existing = mutable.value(forHTTPHeaderField: "anthropic-beta") ?? ""
         // [T-anthropic-redact-thinking] `redact-thinking-2026-02-12` is
         // intentionally OMITTED. With it, the server returns thinking content
@@ -586,12 +666,12 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         // populated — so Claude 4.6+ adaptive-thinking models (sonnet-5,
         // opus-4-8, …) reason (usage.thinking_tokens > 0) but the plaintext is
         // never shown in the UI. Claude Code's official CLI only pushes this beta
-        // when `showThinkingSummaries !== true` (de-obfuscated; anthropics/
+        // when `showThinkingSummaries !== true` (anthropics/
         // claude-code#31326; code.claude.com/docs model-config notes interactive
         // API sessions get redacted thinking by default unless
         // showThinkingSummaries: true). Dropping it = always the
         // showThinkingSummaries:true behavior, so thinking text is visible. The
-        // other 7 mimicry betas are unchanged.
+        // other 7 OAuth betas are unchanged.
         let mimicryBetas = [
             "claude-code-20250219",
             "oauth-2025-04-20",
@@ -607,25 +687,37 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
         }
         mutable.setValue(flags.joined(separator: ","), forHTTPHeaderField: "anthropic-beta")
 
-        // Stainless / CLI fingerprint headers.
+        // Stainless / CLI fingerprint headers. Versions intentionally pinned —
+        // bump in lockstep with sub2api when the real CLI version moves.
         //
-        // [T-anthropic-cli-version] The claude-cli version is resolved at
-        // runtime by `ClaudeCLIVersion` instead of being hardcoded: Anthropic
-        // gates new models on a minimum CLI version (Fable 5.1 needed
-        // >= 2.1.251, Opus 5.5 needs >= 2.1.280) and rejects older clients
-        // with `claude_code_version_too_old`. A constant means every model
-        // launch breaks OAuth users until the next app release (#301).
-        mutable.setValue(ClaudeCLIVersion.userAgent(), forHTTPHeaderField: "User-Agent")
-        mutable.setValue("js", forHTTPHeaderField: "X-Stainless-Lang")
-        mutable.setValue("0.106.0", forHTTPHeaderField: "X-Stainless-Package-Version")
-        mutable.setValue("Linux", forHTTPHeaderField: "X-Stainless-OS")
-        mutable.setValue("arm64", forHTTPHeaderField: "X-Stainless-Arch")
-        mutable.setValue("node", forHTTPHeaderField: "X-Stainless-Runtime")
-        mutable.setValue("v24.18.0", forHTTPHeaderField: "X-Stainless-Runtime-Version")
-        mutable.setValue("0", forHTTPHeaderField: "X-Stainless-Retry-Count")
-        mutable.setValue("600", forHTTPHeaderField: "X-Stainless-Timeout")
-        mutable.setValue("cli", forHTTPHeaderField: "X-App")
-        mutable.setValue("true", forHTTPHeaderField: "Anthropic-Dangerous-Direct-Browser-Access")
+        // [T-anthropic-fable51-ua-gate] 2.1.195 → 2.1.251 for Claude Fable 5.1.
+        // Anthropic gates model access on this version: requesting
+        // `claude-fable-5-1` from an older client is rejected with
+        // "Claude Code <ver> does not support this model; version 2.1.251 or
+        // newer is required."
+        //
+        // [T-anthropic-opus55] 2.1.251 → 2.1.280 for Claude Opus 5.5, which
+        // gates the same way. The bump is monotonic, so every id that cleared
+        // 2.1.251 (Fable 5.1 and everything older) still clears it — a version
+        // gate is a floor, not an exact match.
+        //
+        // The chosen value is the *minimum* that clears the gate, deliberately
+        // over the newest release. The rest of this
+        // fingerprint — the beta-header set and ordering above, the Stainless
+        // values below — was measured against older CLI wire behavior, so
+        // claiming a version whose real wire shape we have not measured widens
+        // the gap between what we advertise and what we actually send. The
+        // smallest sufficient bump keeps that gap minimal.
+        //
+        // The X-Stainless-* values are NOT bumped alongside this:
+        // `X-Stainless-Package-Version` tracks the Anthropic TypeScript SDK and
+        // `X-Stainless-Runtime-Version` the Node runtime, both on cadences
+        // independent of the CLI. Upstream references confirm this — two
+        // projects pinning the same SDK 0.94.0 while differing on OS/Node.
+        // [issue #360] Single source of truth, shared with the token path. The
+        // values used to be spelled out here; a second copy in
+        // ClaudeOAuthManager would be free to drift, and a drift IS the bug.
+        ClaudeCLIMimicry.apply(to: mutable)
 
         // Materialize httpBodyStream → httpBody so patchers and debug capture can read it.
         #if DEBUG
@@ -638,6 +730,10 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
 
         // Normalize key ordering first so all patchers produce deterministic output
         // (critical for Anthropic prompt cache prefix matching)
+        // [T-anthropic-toolimages-cross-request] Claim this request's token
+        // BEFORE any patcher runs, so patchToolResultsWithImages below can
+        // look up the images that belong to it.
+        RequestBodyPatcher.stampRequestToken(onto: mutable)
         RequestBodyPatcher.normalizeKeyOrder(in: mutable)
         // Cache: mark last tool definition for caching (stable prefix)
         RequestBodyPatcher.injectToolsCacheControl(into: mutable)
@@ -801,7 +897,7 @@ private final class OAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
                     #else
                     logger.error("[URLProtocol] Error body (\(http.statusCode))")
                     #endif
-                    LastAPIErrorBody.shared.set(body)
+                    LastAPIErrorBody.shared.set(body, statusCode: http.statusCode)
                     #if DEBUG
                     AgentRequestTrace.shared.setHTTPResponse(status: http.statusCode, body: body)
                     AgentRequestTrace.shared.step("urlprotocol.errorBody", detail: String(body.prefix(500)))
@@ -891,10 +987,43 @@ enum RequestBodyPatcher {
         request.httpBody = normalized
     }
 
+    /// [T-ios-listsessions-perf] Cheap pre-check for the tool-patching
+    /// injectors below. Each of them parses the ENTIRE request body — system
+    /// prompt, full message history, every tool schema — and re-serialises it,
+    /// but then does nothing unless a "tools" key is present. A request with no
+    /// tools (title generation, the compaction summariser, any plain
+    /// completion) therefore paid two full JSON passes to reach a `return`.
+    ///
+    /// A byte scan for the key is orders of magnitude cheaper than
+    /// JSONSerialization and cannot produce a false NEGATIVE: if the body
+    /// really has a top-level "tools" key, those exact bytes are in it. A false
+    /// positive (the string appearing inside message text) merely falls through
+    /// to the parse that would have happened anyway.
+    private static func bodyMentionsTools(_ body: Data) -> Bool {
+        let needle = Array("\"tools\"".utf8)
+        let n = needle.count
+        guard body.count >= n else { return false }
+        return body.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return true }
+            let limit = body.count - n
+            var i = 0
+            while i <= limit {
+                if base[i] == needle[0] {
+                    var k = 1
+                    while k < n, base[i + k] == needle[k] { k += 1 }
+                    if k == n { return true }
+                }
+                i += 1
+            }
+            return false
+        }
+    }
+
     /// Inject cache_control on the last tool definition so that tools + system
-    /// form a stable cached prefix (matching Claude Code's strategy).
+    /// form a stable cached prefix.
     static func injectToolsCacheControl(into request: NSMutableURLRequest) {
         guard let body = request.httpBody,
+              bodyMentionsTools(body),
               var json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               var tools = json["tools"] as? [[String: Any]],
               !tools.isEmpty else { return }
@@ -911,6 +1040,7 @@ enum RequestBodyPatcher {
 
     static func injectEagerInputStreaming(into request: NSMutableURLRequest) {
         guard let body = request.httpBody,
+              bodyMentionsTools(body),
               var json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               var tools = json["tools"] as? [[String: Any]] else { return }
 
@@ -935,20 +1065,97 @@ enum RequestBodyPatcher {
     private static let imageLock = NSLock()
     private static var _toolResultImages: [String: (data: Data, mimeType: String)] = [:]
 
-    /// Set pending tool result images (called from AnthropicAgentProvider before streaming).
-    static func setToolResultImages(_ images: [String: (data: Data, mimeType: String)]) {
+    /// [T-anthropic-toolimages-cross-request] Set pending tool result images for
+    /// the next outgoing request (called from AnthropicAgentProvider before the
+    /// SDK builds the body).
+    ///
+    /// This is process-global state consumed by whichever request reaches
+    /// `URLProtocol.startLoading` next — exactly the hazard already documented
+    /// for the thinking flags below ([T-ios-thinking-flag-cross-request]), and
+    /// this pair had no equivalent guard.
+    ///
+    /// With several chat sessions streaming at once (device log 2026-09-17:
+    /// 4 sessions, 14 concurrent AnthropicStreamTransport threads) the set/take
+    /// handoff interleaves:
+    ///
+    ///     session A  setToolResultImages(A)
+    ///     session B  setToolResultImages(B)      <- overwrites A's entry
+    ///     session A  request goes out, take()    <- gets B's images
+    ///     session B  request goes out, take()    <- gets nothing
+    ///
+    /// The result is A's request being patched with B's image payload: tool_result
+    /// blocks rewritten against `tool_use_id`s that belong to a different
+    /// conversation, and B's own images silently dropped.
+    ///
+    /// Images are now keyed by the request they were computed for. The token is
+    /// only a correlation id, so a request that carries none (legacy callers,
+    /// non-agent paths) simply finds nothing and is left unpatched rather than
+    /// consuming someone else's payload.
+    static func setToolResultImages(_ images: [String: (data: Data, mimeType: String)],
+                                    requestToken: String) {
+        guard !images.isEmpty else { return }
         imageLock.lock()
-        _toolResultImages = images
+        _toolResultImagesByToken[requestToken] = images
+        // Bound the table: a request that is built but never sent (cancelled
+        // mid-turn, provider fallback picking another vendor) would otherwise
+        // leave its entry behind forever. Entries are tiny, but this is a
+        // process-global dictionary on a path that runs every turn.
+        if _toolResultImagesByToken.count > maxPendingImageEntries {
+            let excess = _toolResultImagesByToken.count - maxPendingImageEntries
+            for key in _toolResultImagesByToken.keys.sorted().prefix(excess) {
+                _toolResultImagesByToken.removeValue(forKey: key)
+            }
+        }
         imageLock.unlock()
     }
 
-    /// Atomically take and clear the pending images.
-    private static func takeToolResultImages() -> [String: (data: Data, mimeType: String)] {
+    /// [T-anthropic-toolimages-cross-request] Header the request token travels
+    /// on. Stripped before the request leaves the device, the same way
+    /// `X-Minis-OAuth-UUID` is.
+    static let requestTokenHeader = "X-Minis-Request-Token"
+
+    private static let tokenLock = NSLock()
+    private static var _pendingRequestToken: String?
+
+    /// Hand the next Anthropic request a correlation token. Consumed by
+    /// `stampRequestToken`, which writes it onto the actual URLRequest.
+    static func setRequestToken(_ token: String) {
+        tokenLock.lock()
+        _pendingRequestToken = token
+        tokenLock.unlock()
+    }
+
+    /// Move the pending token onto this request's headers.
+    ///
+    /// This handoff is still last-writer-wins, but the window is the one the
+    /// SDK needs to build a body — and unlike the image payload it is
+    /// self-correcting: a request that picks up the wrong token simply finds
+    /// no images under it and goes out unpatched, instead of being patched
+    /// with another conversation's data.
+    static func stampRequestToken(onto request: NSMutableURLRequest) {
+        tokenLock.lock()
+        let token = _pendingRequestToken
+        _pendingRequestToken = nil
+        tokenLock.unlock()
+        if let token {
+            request.setValue(token, forHTTPHeaderField: requestTokenHeader)
+        }
+    }
+
+    /// Cap on un-consumed image payloads; see `setToolResultImages`.
+    private static let maxPendingImageEntries = 16
+    private static var _toolResultImagesByToken: [String: [String: (data: Data, mimeType: String)]] = [:]
+
+    /// Atomically take and clear the pending images for ONE request.
+    ///
+    /// Returns empty when the request carries no token or its entry is gone —
+    /// both mean "this request has no images of its own", which is the correct
+    /// answer. Never falls back to another request's payload.
+    private static func takeToolResultImages(requestToken: String?) -> [String: (data: Data, mimeType: String)] {
+        guard let requestToken else { return [:] }
         imageLock.lock()
         defer { imageLock.unlock() }
-        let images = _toolResultImages
-        _toolResultImages.removeAll()
-        return images
+        return _toolResultImagesByToken.removeValue(forKey: requestToken) ?? [:]
     }
 
     /// Rewrites tool_result blocks that have associated images (looked up by tool_use_id)
@@ -958,7 +1165,9 @@ enum RequestBodyPatcher {
     /// accepts an array of content blocks for vision. This replaces the string content
     /// using structured image data passed via `setToolResultImages()`.
     static func patchToolResultsWithImages(into request: NSMutableURLRequest) {
-        let images = takeToolResultImages()
+        let token = request.value(forHTTPHeaderField: requestTokenHeader)
+        request.setValue(nil, forHTTPHeaderField: requestTokenHeader)   // never send it
+        let images = takeToolResultImages(requestToken: token)
         guard !images.isEmpty else { return }
 
         guard let body = request.httpBody,
@@ -1459,7 +1668,7 @@ private final class EagerStreamingURLProtocol: URLProtocol, URLSessionDataDelega
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         if let http = dataTask.response as? HTTPURLResponse, http.statusCode >= 400 {
             if let body = String(data: data, encoding: .utf8) {
-                LastAPIErrorBody.shared.set(body)
+                LastAPIErrorBody.shared.set(body, statusCode: http.statusCode)
             }
         }
         #if DEBUG
@@ -1646,7 +1855,7 @@ private final class DualAuthURLProtocol: URLProtocol, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         if let http = dataTask.response as? HTTPURLResponse, http.statusCode >= 400 {
             if let body = String(data: data, encoding: .utf8) {
-                LastAPIErrorBody.shared.set(body)
+                LastAPIErrorBody.shared.set(body, statusCode: http.statusCode)
             }
         }
         #if DEBUG

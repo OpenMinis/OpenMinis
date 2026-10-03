@@ -16,6 +16,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import com.openminis.app.sandbox.PRootKernel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -32,6 +33,28 @@ class AccessibilityOffloadHandler(private val context: Context) : NativeOffloadH
     companion object {
         private const val TAG = "A11yOffload"
         private const val TOOL = "android-a11y-cli"
+
+        /**
+         * [T-android-a11y-screenshot-mount] Where `ui screenshot` writes its PNG.
+         *
+         * It must be a path PRoot bind-mounts into the guest, or the agent
+         * cannot read back what it just captured. The previous location,
+         * `getExternalFilesDir("a11y_screenshots")`, is mounted nowhere:
+         * `ExecutionCoordinator.buildSessionBindMounts` only exposes
+         * `/var/minis/{attachments,offloads,workspace,browser}` (per session)
+         * and `/var/minis/{memory,skills,shared,mcp-servers}` (global), so the
+         * returned host path resolved through `resolveHostPath`'s rootfs
+         * fallback to a file that does not exist and `read_image` answered
+         * "File not found".
+         *
+         * `attachments` is the right namespace rather than `workspace`: it is
+         * session-scoped, it is what the system prompt already documents for
+         * media the model may render inline, and it is where the sibling
+         * producers write (`ImageBudget` spillover, user uploads). The
+         * `screenshots/` subdir keeps captures separate from those.
+         */
+        private const val VAR_MINIS_ATTACHMENTS = "/var/minis/attachments"
+        private const val A11Y_SHOT_SUBDIR = "screenshots"
 
         private const val TOP_HELP = """android-a11y-cli — UI-layer automation via Android AccessibilityService.
 
@@ -66,8 +89,12 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
     --display <int>            Display id to capture (default 0 = default).
     --inline | -b              Return base64 PNG inline instead of writing
                                to a file. Otherwise the PNG is written to
-                               <externalFilesDir>/a11y_screenshots/<ts>.png
-                               and the path is returned.
+                               /var/minis/attachments/screenshots/a11y_<ts>.png
+                               and the reply carries `path` (that Linux path,
+                               ready for read_image), `minis_url`
+                               (minis://attachments/screenshots/<file>) and
+                               `host_path` (the Android-side path, for
+                               debugging only — tools cannot read it).
 """
         private const val TAP_HELP = "tap node <id> | tap xy <x> <y> | tap text <s> | tap id <res>\n"
         private const val INPUT_HELP = "input text <s> [--node id] [--clear|--append] | input clear | input key BACK|HOME|RECENTS|NOTIFICATIONS\n"
@@ -172,7 +199,18 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         )
         return try {
             when (sub) {
-                "ui"        -> uiSub(args)
+                // [T-android-a11y-helper-mount] Resolve screenshots against the
+                // session whose attachments dir the guest has MOUNTED: for a
+                // helper that is its parent (ExecutionCoordinator binds
+                // `fsSessionId ?: sessionId`), not the MINIS_CHAT_SESSION_ID it
+                // exports. Otherwise the PNG lands where neither the helper's
+                // shell nor read_image can find it.
+                "ui"        -> uiSub(
+                    args,
+                    request.sessionId?.let {
+                        com.openminis.app.sandbox.ExecutionCoordinator.mountedSessionIdFor(it)
+                    },
+                )
                 "tap"       -> tapSub(args)
                 "input"     -> inputSub(args)
                 "scroll"    -> scrollSub(args)
@@ -237,14 +275,21 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     // ── ui ───────────────────────────────────────────────────────────────
 
-    private fun uiSub(args: OffloadArgs): NativeOffloadResult {
+    /**
+     * [T-android-a11y-screenshot-mount] `sessionId` is threaded in only for
+     * `screenshot`, which must resolve the calling chat's own
+     * `/var/minis/attachments` rather than whichever session wrote the global
+     * bind-mount map last. Null when the call did not come from an agent shell
+     * (e.g. the interactive terminal).
+     */
+    private fun uiSub(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
         return when (args.positional.getOrNull(1)) {
             null         -> NativeOffloadResult(2, UI_HELP)
             "dump"       -> uiDump(args)
             "find"       -> uiFind(args)
             "info"       -> uiInfo(args)
             "node"       -> uiNode(args)
-            "screenshot" -> uiScreenshot(args)
+            "screenshot" -> uiScreenshot(args, sessionId)
             else         -> NativeOffloadResult(2, "$TOOL ui: unknown action\n$UI_HELP")
         }
     }
@@ -395,7 +440,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         return ok(args, data)
     }
 
-    private fun uiScreenshot(args: OffloadArgs): NativeOffloadResult {
+    private fun uiScreenshot(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return err(args, "NOT_SUPPORTED",
                 "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
@@ -442,12 +487,50 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             return ok(args, data)
         }
 
-        val dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
+        // [T-android-a11y-screenshot-mount] Resolve the SESSION's attachments
+        // directory, not the global bind-mount map's current answer.
+        //
+        // PRootKernel.bindMounts is process-global mutable state that
+        // ExecutionCoordinator.buildSessionBindMounts overwrites every time ANY
+        // session boots a shell, so resolveHostPath is last-writer-wins. Using
+        // it alone would drop this chat's screenshot into a different chat's
+        // attachments directory whenever two sessions are active — the capture
+        // would then be unreadable here and would leak into an unrelated
+        // conversation. resolveSessionHostPath bypasses that map for the
+        // per-session subdirs and is the API the chat link resolver and
+        // read_image already use for exactly this reason.
+        //
+        // The global map remains the fallback for a call with no session (the
+        // interactive terminal), where last-writer-wins is the only answer
+        // available and nothing is being attributed to a chat.
+        val attachmentsHostDir: java.io.File? = sessionId
+            ?.let { PRootKernel.resolveSessionHostPath(it, VAR_MINIS_ATTACHMENTS, context) }
+            ?: PRootKernel.resolveHostPath(VAR_MINIS_ATTACHMENTS)
+
+        if (attachmentsHostDir == null) {
+            // Do NOT silently fall back to a private directory the way the old
+            // `?: cacheDir` chain did: that produced a path the agent cannot
+            // read and reported success, which is the whole bug. Fail loudly
+            // and name the one flag that still works without a mount.
+            return err(args, "NO_ATTACHMENTS_MOUNT",
+                "cannot resolve $VAR_MINIS_ATTACHMENTS; run from an agent shell, or pass --inline for base64")
+        }
+
+        val dir = java.io.File(attachmentsHostDir, A11Y_SHOT_SUBDIR)
         if (!dir.exists()) dir.mkdirs()
-        val file = java.io.File(dir, "a11y_${System.currentTimeMillis()}.png")
+        val filename = "a11y_${System.currentTimeMillis()}.png"
+        val file = java.io.File(dir, filename)
         return try {
             java.io.FileOutputStream(file).use { it.write(pngBytes) }
-            data.put("path", file.absolutePath)
+            val linuxPath = "$VAR_MINIS_ATTACHMENTS/$A11Y_SHOT_SUBDIR/$filename"
+            // `path` is the guest path so it can be handed straight to
+            // read_image / the shell. This replaces the host absolute path the
+            // old code returned, which no agent-side tool could open.
+            data.put("path", linuxPath)
+            data.put("minis_url", "minis://attachments/$A11Y_SHOT_SUBDIR/$filename")
+            // Kept for debugging and for any caller that genuinely wants the
+            // Android-side location; it is NOT readable from the sandbox.
+            data.put("host_path", file.absolutePath)
             ok(args, data)
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "screenshot write failed: ${t.message}")

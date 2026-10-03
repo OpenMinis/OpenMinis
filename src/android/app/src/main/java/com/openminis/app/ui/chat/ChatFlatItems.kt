@@ -312,6 +312,40 @@ internal sealed class FlatChatItem {
     }
 
     /**
+     * [T-p2-agent-callback] An <agent_callback> user-role message rendered as
+     * a compact callback card rather than a right-aligned user bubble. Only
+     * emitted when the transcript has NO delegate block for that child
+     * session (a scheduled child-of-current run); when the block exists it
+     * already carries the final result in place and the callback is hidden.
+     */
+    /**
+     * [T-android-scheduled-task-card] A fired scheduled task. Carries the
+     * parsed marker so the card can show the next fire time and offer to
+     * cancel, neither of which the raw message text can express.
+     */
+    class ScheduledTaskCardItem(
+        val message: ChatMessage,
+        val marker: com.openminis.app.scheduled.ScheduledTaskMarker,
+    ) : FlatChatItem() {
+        override val key = "scheduled:${message.id}"
+        override val contentType = "scheduled"
+        override fun equals(other: Any?): Boolean =
+            this === other || (other is ScheduledTaskCardItem && message == other.message)
+        override fun hashCode(): Int = message.hashCode()
+    }
+
+    class AgentCallbackCard(
+        val message: ChatMessage,
+        val callback: com.openminis.app.agent.jobs.AgentCallback,
+    ) : FlatChatItem() {
+        override val key = "callback:${message.id}"
+        override val contentType = "callback"
+        override fun equals(other: Any?): Boolean =
+            this === other || (other is AgentCallbackCard && message == other.message)
+        override fun hashCode(): Int = message.hashCode()
+    }
+
+    /**
      * Equality on this class previously compared every field including
      * `messageMarkdown` — a CONCATENATED markdown of the entire parent
      * assistant message — char-by-char. During streaming, LazyColumn called
@@ -454,6 +488,20 @@ internal sealed class FlatChatItem {
     }
 
     /**
+     * [T-android-usage-capsule-time] Token usage + finish time for a completed
+     * assistant turn. Emitted last so the flat path ends a turn exactly the way
+     * AssistantMessageView does, keeping the two renderers in step.
+     */
+    data class AssistantUsage(
+        val messageId: String,
+        val usage: ChatTokenUsage,
+        val completedAt: Long?,
+    ) : FlatChatItem() {
+        override val key = "usage:$messageId"
+        override val contentType = "usage"
+    }
+
+    /**
      * See [AssistantText] — same cheap-equals rationale.
      */
     class AssistantLegacyContent(
@@ -507,6 +555,69 @@ internal fun mergeStreamingOverlay(
     }
 }
 
+/**
+ * [T-android-stream-overlay-subset] The streaming-overlaid messages ONLY —
+ * every message whose id is in [streaming], with the live delta applied, in
+ * their original order. Nothing else is copied.
+ *
+ * Why this exists. [mergeStreamingOverlay] rebuilds the ENTIRE message list on
+ * every streaming emission: `messages.map { it.copy() }`. On a 577-message
+ * session with a token delta every ~50 ms that allocated a fresh 577-element
+ * list of ChatMessage copies dozens of times a second — measured on a Pixel 6
+ * as ~74 MB/s of churn, GC freeing 244 MB every 3.3 s, and the DefaultDispatch
+ * + ReferenceQueueD + HeapTaskDaemon trio pinned near 200% of a core while a
+ * live shell tile was on screen.
+ *
+ * Most consumers of the merge do not need the untouched prefix at all — they
+ * immediately reduce to `lastOrNull { role == "assistant" }` or "does ANY
+ * assistant block have a live status". For those, the streaming subset is
+ * sufficient and is at most a handful of messages regardless of history size,
+ * so the per-delta allocation stops scaling with the conversation.
+ *
+ * The full [mergeStreamingOverlay] is kept for the one caller that genuinely
+ * rebuilds the flat item list (which needs every message, and already runs off
+ * the main thread on a split suffix).
+ */
+internal fun streamingOverlaySubset(
+    messages: List<ChatMessage>,
+    streaming: Map<String, StreamingDelta>,
+): List<ChatMessage> {
+    if (streaming.isEmpty()) return emptyList()
+    val out = ArrayList<ChatMessage>(streaming.size)
+    for (m in messages) {
+        val delta = streaming[m.id] ?: continue
+        out.add(
+            m.copy(
+                content = delta.content,
+                isStreaming = true,
+                toolBlocks = delta.toolBlocks,
+                isAwaitingModelResponse = delta.isAwaitingModelResponse,
+            )
+        )
+    }
+    return out
+}
+
+/**
+ * [T-android-fab-up-target] True when this message renders as a real user
+ * bubble — something the user actually typed and can navigate back to.
+ *
+ * `role == "user"` is NOT that test. Two kinds of system-written message also
+ * carry the user role and are rendered as their own cards instead of a bubble:
+ * a scheduled task's prompt ([ScheduledTaskCardItem]) and a sub agent callback
+ * ([AgentCallbackCard]). Anything walking "the user's turns" has to agree with
+ * what [buildFlatChatItems] actually emitted, or it will aim at a turn that has
+ * no `user:` row to land on.
+ *
+ * Kept beside the branch it mirrors so the two cannot drift apart.
+ */
+internal fun ChatMessage.rendersAsUserBubble(): Boolean {
+    if (role != "user") return false
+    if (com.openminis.app.scheduled.ScheduledTaskMarker.parse(content) != null) return false
+    if (com.openminis.app.agent.jobs.AgentCallback.isCallbackText(content)) return false
+    return true
+}
+
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
@@ -535,6 +646,8 @@ internal fun buildFlatChatItems(
         while (!usedKeys.add("${item.key}#$n")) n++
         return when (item) {
             is FlatChatItem.UserBubble -> FlatChatItem.UserBubble(item.message.copy(id = "${item.message.id}#$n"), item.precededByUser)
+            is FlatChatItem.AgentCallbackCard -> FlatChatItem.AgentCallbackCard(item.message.copy(id = "${item.message.id}#$n"), item.callback)
+            is FlatChatItem.ScheduledTaskCardItem -> FlatChatItem.ScheduledTaskCardItem(item.message.copy(id = "${item.message.id}#$n"), item.marker)
             is FlatChatItem.AssistantHeader -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantText -> FlatChatItem.AssistantText(
                 messageId = "${item.messageId}#$n",
@@ -556,6 +669,7 @@ internal fun buildFlatChatItems(
             is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantError -> item.copy(messageId = "${item.messageId}#$n")
+            is FlatChatItem.AssistantUsage -> item.copy(messageId = "${item.messageId}#$n")
             is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
                 messageId = "${item.messageId}#$n",
                 content = item.content,
@@ -578,6 +692,39 @@ internal fun buildFlatChatItems(
             )
         }
         if (message.role == "user") {
+            // [T-android-scheduled-task-card] A task's own prompt, not the
+            // user's typing. Checked before the callback branch: the two
+            // markers are disjoint, and this keeps the plain-bubble fallthrough
+            // in one place.
+            val sched = com.openminis.app.scheduled.ScheduledTaskMarker.parse(message.content)
+            if (sched != null) {
+                out.add(dedupe(FlatChatItem.ScheduledTaskCardItem(message, sched)))
+                continue
+            }
+            // [T-p2-agent-callback] A system-written agent callback renders as
+            // its own card — every one of them, progress and final alike.
+            //
+            // [T-android-subagent-callback-visible] This used to be deduped:
+            // a callback was hidden whenever the transcript still held the
+            // delegate block for that child, since the block already shows
+            // status, tier, elapsed and opens the same detail. Defensible on
+            // its own terms, but it left the parent transcript with no record
+            // that the sub agent reported back AT ALL — a block quietly
+            // changing state is not the same as seeing the hand-off happen
+            // where it happened, in order, among the other turns. With the
+            // block present (the normal case for a delegate_task run) neither
+            // the progress reports nor the final result had any entry in the
+            // conversation, which is the report: "子任务汇报消息没有像 iOS
+            // 一样落一个 UI 入口在消息中". iOS dropped the same dedup in
+            // 8417eb68f (progress) and 7985d161e (final); this is the port.
+            // The child-id scan that fed the dedup walked every message and
+            // block on each flatten and nothing reads it now, so it goes too.
+            val callback = if (com.openminis.app.agent.jobs.AgentCallback.isCallbackText(message.content))
+                com.openminis.app.agent.jobs.AgentCallback.parse(message.content) else null
+            if (callback != null) {
+                out.add(dedupe(FlatChatItem.AgentCallbackCard(message, callback)))
+                continue
+            }
             // [T-android-candidate-bubble-gap] Flag when the previous message
             // is also a user message so the bubble can add a separating top
             // gap — back-to-back candidate / queued sends otherwise have no
@@ -605,9 +752,13 @@ internal fun buildFlatChatItems(
         // dividers, not as separate speaker turns. iOS achieves this by
         // reusing the existing ChatMessage in runAgentLoop(resumingAt:);
         // we reach the same end-result at the render layer.
+        // [T-assistant-header-dedup] An agent callback is written by the
+        // system, not typed by the person, so it does not restart the
+        // speaker sequence: the reply to it sits under the (updated) block
+        // or the callback card without a second avatar header.
         val prevNonSystem = (idx - 1 downTo 0).asSequence()
             .map { messages[it] }
-            .firstOrNull { it.role != "system" }
+            .firstOrNull { it.role != "system" && !com.openminis.app.agent.jobs.AgentCallback.isCallbackText(it.content) }
         val isResumeContinuation = prevNonSystem?.role == "assistant"
         if (!isSystem && !isResumeContinuation) {
             out.add(dedupe(FlatChatItem.AssistantHeader(message.id)))
@@ -648,6 +799,44 @@ internal fun buildFlatChatItems(
                         // paragraph re-parses per token (Pattern A jank
                         // optimization preserved). Code fences stay standalone
                         // either way.
+                        // [T-android-largecontent-guard-position] Apply the
+                        // 32K large-content guard HERE, on the whole block,
+                        // before it is split.
+                        //
+                        // The guard (LargeContentGuard / shouldCollapse) runs
+                        // per FlatChatItem, but for assistant text the items
+                        // are post-split fragments capped at 2000 chars by
+                        // coalesceMarkdownFragments — so for ordinary prose
+                        // nothing reaching it was ever large enough and the
+                        // protection never engaged, no matter how big the
+                        // message. (It still fired for one shape: a single
+                        // >32K paragraph with no blank line, which coalesce
+                        // keeps whole. See LargeContentGuardThresholdTest.)
+                        //
+                        // Emitting ONE un-split item for an oversized frozen
+                        // block is what lets the guard see the real size and
+                        // show its collapsed badge, and it also skips the
+                        // split/coalesce allocation storm over a 200KB string
+                        // that the user has not asked to expand.
+                        //
+                        // Frozen only: collapsing mid-stream would flicker as
+                        // the buffer grows past the threshold, which is the
+                        // same reason shouldCollapse() ignores streaming.
+                        val blockIsStreaming = message.isStreaming && isLastText
+                        if (!blockIsStreaming &&
+                            block.content.length > LARGE_MESSAGE_THRESHOLD_CHARS
+                        ) {
+                            out.add(dedupe(FlatChatItem.AssistantMarkdownBlock(
+                                messageId = message.id,
+                                parentBlockId = block.id,
+                                rawText = block.content,
+                                blockIndex = 0,
+                                isLastBlockOfMessage = isLastText,
+                                messageIsStreaming = false,
+                                messageMarkdown = joinedMarkdown,
+                            )))
+                            return@forEachIndexed
+                        }
                         val rawFragments = splitMarkdownIntoBlockTexts(block.content)
                         // [T-android-stream-end-reflow-flicker-v18] Preserve
                         // per-fragment FlatChatItem keys across the
@@ -776,6 +965,17 @@ internal fun buildFlatChatItems(
         // Inline error banner
         message.error?.let {
             out.add(dedupe(FlatChatItem.AssistantError(message.id, it)))
+        }
+
+        // [T-android-usage-capsule-time] Usage capsule closes the turn. Gated on
+        // !isStreaming as well as on usage being present: a merged bubble whose
+        // LAST row is still streaming carries the PREVIOUS turn's usage, and
+        // showing that mid-stream would report a finish time for a turn that has
+        // not finished.
+        message.tokenUsage?.let { u ->
+            if (!message.isStreaming) {
+                out.add(dedupe(FlatChatItem.AssistantUsage(message.id, u, message.completedAt)))
+            }
         }
     }
     return out

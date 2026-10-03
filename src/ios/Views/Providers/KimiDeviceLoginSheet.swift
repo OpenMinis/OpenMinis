@@ -72,7 +72,17 @@ struct KimiDeviceLoginSheet: View {
         }
         .interactiveDismissDisabled(phase == .starting)
         .onAppear { start() }
-        .onDisappear { loginTask?.cancel() }
+        // [T-copilot-safari-cancels-poll] Same defect as the Copilot sheet, and
+        // the same fix. `presentSafari` presents on the TOP view controller,
+        // i.e. over this sheet, so opening the verification page covered the
+        // sheet, SwiftUI sent `onDisappear`, and the poll was cancelled at the
+        // precise moment the user left to authorize. Diagnosed on Copilot from a
+        // device log (a "polling START" line with no poll following it); this
+        // file has the identical structure, so it is corrected together rather
+        // than left as a known-broken twin.
+        //
+        // Real exits still cancel: `finish()` and `start()`'s retry.
+        .onDisappear { }
     }
 
     @ViewBuilder
@@ -145,8 +155,26 @@ struct KimiDeviceLoginSheet: View {
 
     private func finish(_ success: Bool) {
         loginTask?.cancel()
+        // [T-copilot-safari-cancels-poll] See the Copilot sheet: now that the
+        // poll survives Safari covering this sheet, authorization completes with
+        // Safari still on screen, so it has to be dismissed too.
+        dismissPresentedSafari()
         onFinish(success)
         dismiss()
+    }
+
+    /// Dismiss the `SFSafariViewController` this sheet presented, if present.
+    /// Type-checked so an unrelated presentation is never torn down.
+    private func dismissPresentedSafari() {
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene }).first,
+              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else { return }
+        var topVC = root
+        while let presented = topVC.presentedViewController { topVC = presented }
+        if topVC is SFSafariViewController {
+            topVC.dismiss(animated: true)
+        }
     }
 
     /// Open the verification page in an in-app SFSafariViewController — matching

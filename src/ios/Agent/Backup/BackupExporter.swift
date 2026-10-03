@@ -130,18 +130,26 @@ actor BackupExporter {
                             onBackupId: (@Sendable (String) -> Void)? = nil,
                             progress: (@Sendable (String) -> Void)?,
                             progressDetailed: (@Sendable (String, Bool) -> Void)? = nil) async throws -> Summary {
-        // §3.3 / §5.4: a package that carries credentials MUST be encrypted.
-        // Enforced here rather than only in the UI, so no caller — debug RPC,
-        // a future scheduler, anything — can produce a plaintext copy of the
-        // user's API keys by omitting a passphrase.
-        let wantsCredentials = options.includeCredentials
-            && options.categories.contains(.providers)
+        // [T-backup-credentials-without-encryption] Credentials ship whether or
+        // not the package is encrypted.
+        //
+        // This used to refuse the combination outright (§3.3 / §5.4: "a package
+        // that carries credentials MUST be encrypted"). The rule cost more than
+        // it bought: a backup taken without a passphrase — which is the default
+        // — restored 19 providers with no keys and 38 environment variables
+        // with no values, so the thing a user most needs a backup FOR was the
+        // one thing it did not carry. The product decision is that a backup
+        // should restore a working device by default; a user who wants a
+        // shareable copy without keys can still say so explicitly, via
+        // `includeCredentials: false`.
+        //
+        // What replaces the rule is disclosure, not enforcement: the export UI
+        // states plainly that an unencrypted package contains readable keys
+        // (BackupSettingsView's encryption footer), and `exportProviders` logs
+        // the same at warning level. Base64 is an encoding, not protection —
+        // that has to be said where the user chooses, not enforced by silently
+        // dropping their data.
         let hasPassphrase = !(options.passphrase ?? "").isEmpty
-        guard !wantsCredentials || hasPassphrase else {
-            throw BackupError.writeFailed(
-                "Refusing to export credentials without a passphrase. Set one, or pass includeCredentials=false for a share copy.",
-                underlying: nil)
-        }
 
         let started = Date()
 
@@ -215,7 +223,7 @@ actor BackupExporter {
         //   - encryption still works by rewriting the staged tree in place
         //     after every category has run, so its members have to BE there.
         //     Moving encryption into the write path is the next step in
-        //     docs/backup-streaming-package-design.md;
+        //     docs/internal/backup-streaming-package-design.md;
         //   - a resume adopts staging written by the previous attempt, which
         //     may predate this build.
         // Both keep the old path, which is unchanged and still correct.
@@ -328,6 +336,25 @@ actor BackupExporter {
         try await run(.environmentVariables,
                       AppLocalized("Exporting environment variables…")) {
             try await exportEnvironmentVariables(dataDir: dataDir)
+        }
+        // [T-backup-credentials-without-encryption] `secrets.json` for a
+        // selection that carries credentials but NOT `.providers`.
+        //
+        // The file used to be written only inside `exportProviders`, so a user
+        // who backed up environment variables without also selecting providers
+        // got `env_vars.json` — names, no values — and no warning that the
+        // values had been dropped. That held even WITH a passphrase, because
+        // the old guard also keyed off `.providers`, so the one combination
+        // that should obviously have worked silently did not.
+        //
+        // Runs after the three category stages so it sees the same store state
+        // they exported, and skips itself when `.providers` already wrote the
+        // file (`writeSecrets` is idempotent on the path, but doing the
+        // Keychain reads twice is pure waste).
+        if options.includeCredentials,
+           !options.categories.contains(.providers),
+           options.categories.contains(where: Self.credentialBearingCategories.contains) {
+            try await writeSecrets(staging: staging)
         }
         // [2026-08-15] Not reached in normal use: `.voiceCorrections` is absent
         // from `BackupCategory.backupable`, so it never appears in
@@ -693,7 +720,13 @@ actor BackupExporter {
         var count = 0
         var bytes: Int64 = 0
         let names = (try? fm.contentsOfDirectory(atPath: src.path)) ?? []
-        for name in names where name.hasSuffix(".md") {
+        // [T-soul-icon-sidecar] `.md` alone would silently drop SOUL.icon.png,
+        // so a restore would bring the persona back with its avatar missing —
+        // the frontmatter would still name a sidecar that no longer exists.
+        // The icon is the one non-Markdown file this directory holds; matching
+        // it by name rather than widening to every extension keeps stray files
+        // (editor swap files, .DS_Store) out of the package.
+        for name in names where name.hasSuffix(".md") || name == SoulIconImage.sidecarName {
             let from = src.appendingPathComponent(name)
             guard (try? from.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
             else { continue }
@@ -740,6 +773,18 @@ actor BackupExporter {
             bytes += (try? fm.attributesOfItem(atPath: rulesURL.path)[.size] as? Int64) ?? 0
         }
 
+        // [T-subagent-own-store] Sub agents used to be a field of the
+        // ProviderConfig serialized above, so they rode along for free. They
+        // now live in their own store, which means this export would silently
+        // lose them — exactly the [T-backup-thinking-rules] failure recorded
+        // above, for the same structural reason. Written as their own JSONL
+        // file, alongside the rules.
+        let subAgentCount = try await exportSubAgents(dataDir: dataDir)
+        if subAgentCount > 0 {
+            let agentsURL = dataDir.appendingPathComponent("sub_agents.jsonl")
+            bytes += (try? fm.attributesOfItem(atPath: agentsURL.path)[.size] as? Int64) ?? 0
+        }
+
         guard includeCredentials else {
             // The "export copy without credentials" path (§3.3/§5.4). A reader
             // is told plainly that this package cannot restore working keys.
@@ -751,24 +796,55 @@ actor BackupExporter {
                 includesCredentials: false)
         }
 
-        let secrets = await MainActor.run {
-            BackupSecretsCollector.collect(instances: config.instances)
-        }
-        // Named `secrets.json`, not `secrets.enc`: the §5.4 filename implies
-        // encryption, and this stage does not encrypt. Calling it .enc would
-        // misrepresent the file to anyone inspecting the package, which is
-        // exactly the "thought it was protected" failure the design warns about.
-        // The encryption stage renames it and the importer accepts both.
-        let secretsURL = staging.appendingPathComponent("secrets.json")
-        try BackupJSONFile.write(secrets, to: secretsURL)
-        bytes += (try? fm.attributesOfItem(atPath: secretsURL.path)[.size] as? Int64) ?? 0
-
-        logger.warning("[Backup] package contains UNENCRYPTED credentials (stage 3a): providers=\(secrets.providers.count) envVars=\(secrets.envVars.count) mcpOAuth=\(secrets.mcpOAuth.count)")
+        bytes += try await writeSecrets(staging: staging,
+                                        instances: config.instances)
 
         return BackupManifest.CategoryStat(
             entries: config.instances.count, bytes: bytes, encrypted: false,
             thinkingRules: ruleCount > 0 ? ruleCount : nil,
             includesCredentials: true)
+    }
+
+    /// [T-backup-credentials-without-encryption] Categories whose data is
+    /// incomplete without `secrets.json`.
+    ///
+    /// `.providers` is deliberately absent: it writes the file itself, and
+    /// listing it here would only invite a second Keychain pass.
+    private static let credentialBearingCategories: Set<BackupCategory> = [
+        .environmentVariables, .mcpServers,
+    ]
+
+    /// Collect credentials from the Keychain and write `secrets.json`.
+    /// Returns the bytes written, so a category stat can count them.
+    ///
+    /// Named `secrets.json`, not `secrets.enc`: the §5.4 filename implies
+    /// encryption, and this stage does not encrypt. Calling it .enc would
+    /// misrepresent the file to anyone inspecting the package, which is exactly
+    /// the "thought it was protected" failure the design warns about. The
+    /// encryption stage renames it and the importer accepts both.
+    ///
+    /// `instances` defaults to the live config so the standalone caller (a
+    /// selection without `.providers`) still restores MCP OAuth tokens — those
+    /// are keyed by server, not by provider instance, and the env-var half of
+    /// the collector does not consult the list at all.
+    @discardableResult
+    private func writeSecrets(staging: URL,
+                              instances: [ProviderInstance]? = nil) async throws -> Int64 {
+        let secrets = await MainActor.run {
+            let list = instances
+                ?? ProviderConfigStore.shared.config.instances
+            return BackupSecretsCollector.collect(instances: list)
+        }
+        let secretsURL = staging.appendingPathComponent("secrets.json")
+        try BackupJSONFile.write(secrets, to: secretsURL)
+
+        // Warning level on purpose: an unencrypted package now really does
+        // contain readable keys, and this line is what a support thread needs
+        // in order to tell "the backup lost my keys" apart from "the backup
+        // carried them in the clear".
+        logger.warning("[Backup] credentials written: providers=\(secrets.providers.count) envVars=\(secrets.envVars.count) mcpOAuth=\(secrets.mcpOAuth.count)")
+
+        return (try? fm.attributesOfItem(atPath: secretsURL.path)[.size] as? Int64) ?? 0
     }
 
     /// [T-backup-thinking-rules] Write every user-authored thinking rule to
@@ -783,6 +859,38 @@ actor BackupExporter {
     ///
     /// Nothing is written when the user has authored no rules, so an ordinary
     /// package gains no file at all.
+    /// [T-subagent-own-store] Write the custom sub agent roster.
+    ///
+    /// The built-in is filtered out: it is recreated by
+    /// `SubAgentRoster.normalize` on every load, and restoring a package's copy
+    /// onto a newer build would reinstate stale canonical name/description.
+    private func exportSubAgents(dataDir: URL) async throws -> Int {
+        let roster = await MainActor.run { SubAgentStore.shared.subAgents }
+        let custom = roster.filter { !$0.isBuiltIn && $0.id != SubAgentDefinition.builtInId }
+        guard !custom.isEmpty else { return 0 }
+
+        let writer = BackupJSONLWriter(directory: dataDir, baseName: "sub_agents")
+        defer { try? writer.close() }
+        var written = 0
+        for def in custom {
+            let record = BackupSubAgentRecord(
+                id: def.id,
+                name: def.name,
+                subAgentDescription: def.description,
+                instructions: def.instructions,
+                modelGroupId: def.modelGroupId,
+                thinkingLevelOverride: def.thinkingLevelOverride?.rawValue,
+                sortOrder: def.sortOrder,
+                updatedAt: def.updatedAt
+            )
+            try writer.write(BackupRecordEnvelope(t: "SubAgentV1", d: record))
+            written += 1
+        }
+        try writer.close()
+        logger.info("[Backup] exported \(written) sub agent(s)")
+        return written
+    }
+
     private func exportThinkingRules(dataDir: URL) async throws -> Int {
         guard let db = await MainActor.run(body: { ProviderConfigStore.shared.db }) else { return 0 }
         let ids = await db.allCustomThinkingRuleIds()   // WHERE is_builtin = 0
@@ -1088,9 +1196,11 @@ actor BackupExporter {
             guard !rel.isEmpty else { continue }
             members.append((url, rel))
         }
-        for (url, name) in members.sorted(by: { $0.1 < $1.1 }) {
-            try writer.addFile(at: url, name: name)
-        }
+        // [T-backup-zip-parallel-pack] One batch call rather than a loop:
+        // hashing runs across cores, writing stays in this sorted order, and
+        // the resulting package is byte-identical either way.
+        try writer.addFiles(members.sorted(by: { $0.1 < $1.1 })
+                                   .map { (source: $0.0, name: $0.1) })
     }
 
     private func archive(staging: URL, backupId: String,
@@ -1107,20 +1217,34 @@ actor BackupExporter {
                 encrypted: encrypted))
         try? fm.removeItem(at: out)
 
-        return try await withCheckedThrowingContinuation { cont in
-            let coordinator = NSFileCoordinator()
-            var nsError: NSError?
-            coordinator.coordinate(readingItemAt: staging, options: .forUploading,
-                                   error: &nsError) { zipped in
-                do {
-                    try self.fm.copyItem(at: zipped, to: out)
-                    cont.resume(returning: out)
-                } catch {
-                    cont.resume(throwing: BackupError.archiveFailed(error))
-                }
-            }
-            if let nsError { cont.resume(throwing: BackupError.archiveFailed(nsError)) }
-        }
+        // [T-backup-zip-stored-only] Pack with our own writer instead of
+        // NSFileCoordinator(.forUploading).
+        //
+        // This branch runs for encrypted and resumed exports, where the whole
+        // tree is already staged on disk. NSFileCoordinator was the original
+        // packer here, and it has three problems this replaces:
+        //
+        //   1. It deflates, and the caller cannot say otherwise — it is a
+        //      system black box. That is the compression this change exists to
+        //      remove, and it applied to exactly the packages least able to
+        //      afford it (an encrypted backup is already high-entropy, so
+        //      deflating it burns CPU on both ends for nearly nothing).
+        //   2. It builds the ZIP in its own temp location and hands it back to
+        //      be COPIED out, so a third full copy of the data exists at once —
+        //      the free-space problem the type comment on BackupZipWriter
+        //      describes.
+        //   3. It wraps everything in an outer `minisbak-<uuid>/` directory,
+        //      so readers need a special case to look inside it.
+        //
+        // Writing it ourselves fixes all three: STORED, one copy, and entry
+        // names relative to the staging root — the SAME flat layout the
+        // streaming path already produces. Both layouts stay readable on the
+        // Android side (`BackupZip.packageRoot` handles either), but from here
+        // on iOS only emits the flat one.
+        let writer = try BackupZipWriter(url: out)
+        try appendStagedMembers(from: staging, to: writer)
+        try writer.close()
+        return out
     }
 
     /// [T-backup-package-name-parity] The one place a package filename is
@@ -1132,7 +1256,7 @@ actor BackupExporter {
     ///
     /// [T-backup-package-name-device] Shape is
     /// `<device>-<yyyyMMdd>-<sortable-id>.minisbak`, e.g.
-    /// `Ethans-iPhone-20260823-mf3k9q2phz.minisbak`. Three deliberate changes
+    /// `Alexs-iPhone-20260823-mf3k9q2phz.minisbak`. Three deliberate changes
     /// from the old `backup-20260823-1259-f69c00.minisbak`:
     ///
     ///  - **Device first.** Several devices back up into one NAS folder and
@@ -1147,7 +1271,7 @@ actor BackupExporter {
     ///
     /// [T-backup-package-name-encrypted] An encrypted package additionally
     /// carries `-encrypted` before the extension, e.g.
-    /// `Ethans-iPhone-20260823-mf3k9q2phz-encrypted.minisbak`. Whether a
+    /// `Alexs-iPhone-20260823-mf3k9q2phz-encrypted.minisbak`. Whether a
     /// package needs its passphrase is otherwise invisible until someone tries
     /// to open it — which, for a backup found on a NAS months later, is
     /// exactly the wrong moment to find out. It goes AFTER the id rather than
@@ -1210,7 +1334,7 @@ actor BackupExporter {
         return time + encode(h, width: 3)
     }
 
-    /// A filename-safe, ASCII device token, e.g. `Ethans-iPhone`.
+    /// A filename-safe, ASCII device token, e.g. `Alexs-iPhone`.
     ///
     /// `UIDevice.current.name` is user-controlled and lands on SMB/exFAT
     /// shares, so it cannot go into a filename as-is: it may hold spaces,
@@ -1237,14 +1361,14 @@ actor BackupExporter {
                 lastWasSeparator = false
             } else if ch == "'" || ch == "\u{2019}" {
                 // Elide apostrophes rather than treating them as separators:
-                // the overwhelmingly common device name is "Ethan's iPhone",
-                // and splitting on the apostrophe yields `Ethan-s-iPhone`,
+                // the overwhelmingly common device name is "Alex's iPhone",
+                // and splitting on the apostrophe yields `Alex-s-iPhone`,
                 // which reads as three words. Both the ASCII quote and the
                 // curly one iOS substitutes are handled.
                 continue
             } else if !out.isEmpty && !lastWasSeparator {
                 // Collapse any run of spaces/punctuation/dropped non-ASCII into
-                // a single dash instead of emitting `Ethan--s---iPhone`.
+                // a single dash instead of emitting `Alex--s---iPhone`.
                 out.append("-")
                 lastWasSeparator = true
             }

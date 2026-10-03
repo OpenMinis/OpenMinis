@@ -23,6 +23,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.model.ModelOverrides
+import com.openminis.app.data.model.effectiveInputModalities
+import com.openminis.app.data.model.effectiveOutputModalities
 import com.openminis.app.data.model.normalizeModalityName
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.components.RowLabel
@@ -63,11 +65,16 @@ fun ModelEntryDetailScreen(
 
     var modelId by remember { mutableStateOf(baseModel.id) }
     var displayName by remember { mutableStateOf(overrides.displayName ?: baseModel.displayName) }
+    var displayNameTouched by remember { mutableStateOf(false) }
     var maxOutputTokensText by remember { mutableStateOf(overrides.maxOutputTokens?.toString() ?: "") }
     var contextWindowText by remember { mutableStateOf(overrides.contextWindow?.toString() ?: "") }
     var thinkingEnabled by remember {
         mutableStateOf(overrides.supportsReasoning ?: baseModel.supportsReasoning ?: false)
     }
+    // [T-model-override-silent-drop] "Did the user touch this control?" — the
+    // only thing that distinguishes a deliberate choice from an untouched
+    // default on a control with no empty state. See the save block below.
+    var thinkingTouched by remember { mutableStateOf(false) }
     var isHidden by remember { mutableStateOf(entry.isHidden) }
     var showQuickTest by remember { mutableStateOf(false) }
 
@@ -79,16 +86,32 @@ fun ModelEntryDetailScreen(
     // Defensive normalization: pre-T213 SharedPreferences may hold suffixed strings
     // (`image_input`) saved before the parse-boundary fix, which would silently fail
     // the bare-name `"image" in effectiveInput` checks below.
-    val effectiveInput = (overrides.inputModalities ?: baseModel.inputModalities ?: emptyList())
-        .map { it.normalizeModalityName() }
-    val effectiveOutput = (overrides.outputModalities ?: baseModel.outputModalities ?: emptyList())
-        .map { it.normalizeModalityName() }
+    // [T-android-modality-provider-fallback] Fall back to the provider default
+    // when the model declares nothing, so a model models.dev has not catalogued
+    // yet (Fable 5.1 on its release day) shows its real capabilities instead of
+    // every switch OFF. Precedence is unchanged above that: a user override
+    // still wins, then the model's own list, and only then the provider table.
+    val effectiveInput = (
+        overrides.inputModalities
+            ?: baseModel.effectiveInputModalities
+            ?: emptyList()
+        ).map { it.normalizeModalityName() }
+    val effectiveOutput = (
+        overrides.outputModalities
+            ?: baseModel.effectiveOutputModalities
+            ?: emptyList()
+        ).map { it.normalizeModalityName() }
     var imageInput by remember { mutableStateOf("image" in effectiveInput) }
     var pdfInput by remember { mutableStateOf("pdf" in effectiveInput) }
     var audioInput by remember { mutableStateOf("audio" in effectiveInput) }
     var videoInput by remember { mutableStateOf("video" in effectiveInput) }
     var imageOutput by remember { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember { mutableStateOf("audio" in effectiveOutput) }
+    // One flag per dimension, not per switch: the override is a LIST covering
+    // the whole dimension, so touching any one switch is a statement about the
+    // whole set and the entire list must then be recorded.
+    var inputModalitiesTouched by remember { mutableStateOf(false) }
+    var outputModalitiesTouched by remember { mutableStateOf(false) }
 
     SettingsScaffold(
         title = stringResource(R.string.model_entry_model_detail),
@@ -112,8 +135,16 @@ fun ModelEntryDetailScreen(
         actions = {
             MinisButton(
                 onClick = {
-                    val baseInputs = baseModel.inputModalities ?: emptyList()
-                    val baseOutputs = baseModel.outputModalities ?: emptyList()
+                    // No baseline is computed here any more. It used to be
+                    // `baseModel.effective*Modalities`, and [T-android-modality-provider-fallback]
+                    // had already had to move it once — from the raw lists to the
+                    // provider-fallback ones — because opening an un-catalogued model
+                    // and pressing Save untouched compared {image,pdf} against {} and
+                    // persisted a pointless override, freezing the entry so it no
+                    // longer tracked the real modalities. The touched flag removes the
+                    // comparison altogether, so that class of mismatch cannot recur:
+                    // an untouched Save now writes nothing regardless of which
+                    // baseline would have been chosen.
                     val newInputs = buildList {
                         if (imageInput) add("image")
                         if (pdfInput) add("pdf")
@@ -124,17 +155,18 @@ fun ModelEntryDetailScreen(
                         if (imageOutput) add("image")
                         if (audioOutput) add("audio")
                     }
-                    val newOverrides = ModelOverrides(
-                        displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
-                        maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
-                        contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
-                        // supportsReasoning: persist only when user diverged from base.
-                        supportsReasoning = thinkingEnabled.takeIf { it != (baseModel.supportsReasoning ?: false) },
-                        // Modality lists: persist only when user-edited set differs
-                        // from baseModel's set; otherwise leave null so the entry
-                        // tracks future provider updates to the base modalities.
-                        inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
-                        outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
+                    val newOverrides = buildModelOverrides(
+                        existing = overrides,
+                        displayNameText = displayName,
+                        displayNameTouched = displayNameTouched,
+                        maxOutputTokensText = maxOutputTokensText,
+                        contextWindowText = contextWindowText,
+                        thinkingEnabled = thinkingEnabled,
+                        thinkingTouched = thinkingTouched,
+                        inputModalities = newInputs,
+                        inputModalitiesTouched = inputModalitiesTouched,
+                        outputModalities = newOutputs,
+                        outputModalitiesTouched = outputModalitiesTouched,
                     )
                     val updated = if (entry.isCustom) {
                         entry.copy(baseModel = baseModel.copy(id = modelId), overrides = newOverrides, isHidden = isHidden)
@@ -167,7 +199,7 @@ fun ModelEntryDetailScreen(
                 RowLabel(text = stringResource(R.string.model_entry_display_name))
                 SectionTextField(
                     value = displayName,
-                    onValueChange = { displayName = it },
+                    onValueChange = { displayName = it; displayNameTouched = true },
                     singleLine = true,
                 )
             }
@@ -220,7 +252,7 @@ fun ModelEntryDetailScreen(
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_thinking),
                 checked = thinkingEnabled,
-                onCheckedChange = { thinkingEnabled = it },
+                onCheckedChange = { thinkingEnabled = it; thinkingTouched = true },
                 showDivider = false,
             )
         }
@@ -246,22 +278,22 @@ fun ModelEntryDetailScreen(
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_image_input),
                 checked = imageInput,
-                onCheckedChange = { imageInput = it },
+                onCheckedChange = { imageInput = it; inputModalitiesTouched = true },
             )
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_pdf_input),
                 checked = pdfInput,
-                onCheckedChange = { pdfInput = it },
+                onCheckedChange = { pdfInput = it; inputModalitiesTouched = true },
             )
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_audio_input),
                 checked = audioInput,
-                onCheckedChange = { audioInput = it },
+                onCheckedChange = { audioInput = it; inputModalitiesTouched = true },
             )
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_video_input),
                 checked = videoInput,
-                onCheckedChange = { videoInput = it },
+                onCheckedChange = { videoInput = it; inputModalitiesTouched = true },
                 showDivider = false,
             )
         }
@@ -274,12 +306,12 @@ fun ModelEntryDetailScreen(
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_image_output),
                 checked = imageOutput,
-                onCheckedChange = { imageOutput = it },
+                onCheckedChange = { imageOutput = it; outputModalitiesTouched = true },
             )
             SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_audio_output),
                 checked = audioOutput,
-                onCheckedChange = { audioOutput = it },
+                onCheckedChange = { audioOutput = it; outputModalitiesTouched = true },
                 showDivider = false,
             )
         }
@@ -326,3 +358,80 @@ fun ModelEntryDetailScreen(
         )
     }
 }
+
+/**
+ * Decides which override fields the model detail screen persists on Save.
+ *
+ * [T-model-override-silent-drop] Record an override when the USER EXPRESSED AN
+ * INTENT, not when the value happens to differ from today's API value. iOS fixed
+ * the same defect in `ProviderInstanceDetailView` (4ef8a48d7).
+ *
+ * The old rule compared each field against `baseModel` while the controls LOAD
+ * from override-or-base. That asymmetry closes a loop which drops intent two ways:
+ *
+ *  1. Setting a value equal to today's auto value records no override at all, so
+ *     the next vendor bump shows straight through. This is the reported case: a
+ *     context window typed as 400000 while the vendor also said 400000, which
+ *     later read 1048576 after a refresh.
+ *  2. An EXISTING override is cleared the moment the vendor catches up to it,
+ *     because a no-op re-save then compares equal — and a later vendor flip
+ *     loses the user's choice entirely.
+ *
+ * Two different mechanisms express intent, because the controls differ:
+ *
+ *  - `contextWindow` / `maxOutputTokens` are text fields, which HAVE an empty
+ *    state, so "filled in" is expressible directly: any parsed value is recorded
+ *    and empty means back to auto-detection, exactly as the footer promises.
+ *    These were already correct and are deliberately unchanged — iOS adopted
+ *    this behaviour from Android rather than the other way round.
+ *  - Switches and modality lists have no empty state, so intent is carried by an
+ *    explicit `touched` flag set from their change callbacks.
+ *
+ * An untouched control keeps whatever override already existed. It neither
+ * invents one — so a never-touched field still inherits vendor updates, which is
+ * what keeps [ModelOverrides.isEmpty] meaningful and preserves the fast path in
+ * `ProviderConfig.model` — nor clears one, which is failure mode 2 above.
+ *
+ * This is marginally stronger than the iOS rule, which has no touched flag and
+ * so still drops one case: toggling a switch away and back, ending on a value
+ * equal to base with no prior override, records nothing there but is recorded
+ * here. Every other case agrees across the two platforms. No serialized field
+ * name or type changes, so the cross-platform wire format is untouched.
+ */
+internal fun buildModelOverrides(
+    existing: ModelOverrides,
+    displayNameText: String,
+    displayNameTouched: Boolean,
+    maxOutputTokensText: String,
+    contextWindowText: String,
+    thinkingEnabled: Boolean,
+    thinkingTouched: Boolean,
+    inputModalities: List<String>,
+    inputModalitiesTouched: Boolean,
+    outputModalities: List<String>,
+    outputModalitiesTouched: Boolean,
+): ModelOverrides = ModelOverrides(
+    displayName = if (displayNameTouched) {
+        displayNameText.trim().takeIf { it.isNotEmpty() }
+    } else {
+        existing.displayName
+    },
+    maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
+    contextWindow = contextWindowText.trim().toIntOrNull()?.takeIf { it > 0 },
+    supportsReasoning = if (thinkingTouched) thinkingEnabled else existing.supportsReasoning,
+    inputModalities = if (inputModalitiesTouched) inputModalities else existing.inputModalities,
+    outputModalities = if (outputModalitiesTouched) outputModalities else existing.outputModalities,
+    // Carried through verbatim: this screen has no editor for any of them, so
+    // every one is by definition untouched and the rule above applies. The
+    // previous inline construction simply omitted them, which let them default
+    // to null — a save from this screen silently wiped per-model tuning that
+    // had arrived via backup import or iCloud sync (ProviderRepository reads
+    // and writes all five). Naming them explicitly also means adding a sixth
+    // field to ModelOverrides fails to compile here rather than quietly
+    // resurrecting that wipe.
+    maxThinkingLevel = existing.maxThinkingLevel,
+    temperature = existing.temperature,
+    topP = existing.topP,
+    customHeaders = existing.customHeaders,
+    extraBodyParams = existing.extraBodyParams,
+)

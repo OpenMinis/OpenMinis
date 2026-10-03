@@ -14,7 +14,12 @@ import java.util.UUID
 
 /**
  * Manages Android TextToSpeech engine for reading assistant responses aloud.
- * Supports en-US and zh-CN with automatic language detection.
+ *
+ * [T-android-tts-locale GH#324] Language is resolved per utterance by
+ * [TtsLocaleResolver]: an identifying script wins, else the user's in-app
+ * language, else the system locale. This class used to support only en-US and
+ * zh-CN, which meant every other shipped language was read aloud in American
+ * English.
  */
 class TextToSpeechManager : TextToSpeech.OnInitListener {
 
@@ -28,7 +33,6 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
          * is what turns that into a detectable failure instead of a hang.
          */
         const val INIT_TIMEOUT_MS = 4_000L
-        private val HAN_REGEX = Regex("[\\u4e00-\\u9fff\\u3400-\\u4dbf]")
         // [T-android-tts-intranumber-guard] The sentence-boundary set moved to
         // SpeechSentenceSplitter.SENTENCE_ENDERS — a single source of truth
         // shared with ReadAloudPlayer, so the two TTS paths can't drift.
@@ -39,6 +43,26 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     // seeing a torn-down engine rather than a stale non-null.
     @Volatile
     private var tts: TextToSpeech? = null
+
+    /**
+     * [T-android-tts-locale GH#324] Application context, kept for reading the
+     * saved UI language. Application-scoped, so no Activity is leaked.
+     */
+    @Volatile
+    private var appContext: Context? = null
+
+    /**
+     * [T-android-tts-locale GH#324] Set when a caller picked the language
+     * explicitly via [setLanguage] — today `android-speak --voice <tag>`.
+     *
+     * Without this the explicit choice was silently discarded: SpeakOffloadHandler
+     * calls `setLanguage(...)` and then `speak(text)`, and `speak` re-ran the
+     * detector, overwriting the caller's locale microseconds later. So
+     * `--voice es-ES` has never actually worked. Cleared by [stop]/[shutdown]
+     * so one explicit utterance cannot pin every later one.
+     */
+    @Volatile
+    private var explicitLocale: Locale? = null
     @Volatile
     var isInitialized = false
         private set
@@ -106,8 +130,29 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      * Initializes the TTS engine. Must be called before speaking.
      */
     fun init(context: Context) {
+        // [T-android-tts-locale GH#324] Retained so the per-utterance locale
+        // resolution can read the user's in-app language choice. The manager
+        // previously kept no Context at all, which is part of why the language
+        // decision could only ever look at the text's script.
+        appContext = context.applicationContext
         tts = TextToSpeech(context.applicationContext, this)
     }
+
+    /**
+     * [T-android-tts-locale GH#324] The user's saved in-app language tag, or
+     * null when they follow the system. Read fresh each utterance rather than
+     * cached: the Appearance screen writes this preference and the user can
+     * change it without the TTS engine being re-created.
+     */
+    private fun savedAppLanguageTag(): String? = runCatching {
+        appContext
+            ?.getSharedPreferences(
+                com.openminis.app.ui.settings.PREF_APPEARANCE,
+                Context.MODE_PRIVATE,
+            )
+            ?.getString(com.openminis.app.ui.settings.KEY_LANGUAGE, "")
+            ?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -115,7 +160,13 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
             tts?.apply {
                 setSpeechRate(speechRate)
                 setPitch(speechPitch)
-                setLanguage(Locale.US)
+                // [T-android-tts-locale GH#324] Was `setLanguage(Locale.US)`.
+                // Every utterance re-resolves the language anyway, so this only
+                // ever decided the engine's resting state — but on a device
+                // whose first utterance raced init, that resting state WAS the
+                // voice. Seed from the user's own language instead of pinning
+                // American English for everyone.
+                applyResolvedLocale(TtsLocaleResolver.resolve("", savedAppLanguageTag()))
                 setOnUtteranceProgressListener(createProgressListener())
             }
             Log.d(TAG, "TTS initialized successfully")
@@ -300,6 +351,9 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      */
     fun stop() {
         tts?.stop()
+        // [T-android-tts-locale GH#324] One explicit `--voice` utterance must
+        // not pin the language for every later one.
+        explicitLocale = null
         isPaused = false
         pendingTexts.clear()
         pausedAtIndex = 0
@@ -341,6 +395,9 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
      */
     fun setLanguage(locale: Locale) {
         if (!isInitialized) return
+        // [T-android-tts-locale GH#324] Remember it, or the very next speak()
+        // would re-run detection and throw this away.
+        explicitLocale = locale
         val result = tts?.setLanguage(locale)
         if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
             Log.w(TAG, "Language not supported: ${locale.toLanguageTag()}")
@@ -355,6 +412,8 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     fun shutdown() {
         stop()
         tts?.shutdown()
+        explicitLocale = null
+        appContext = null
         tts = null
         isInitialized = false
         Log.d(TAG, "TTS shut down")
@@ -384,12 +443,46 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
                 Log.w(TAG, "preferred voice '$wanted' not found on this engine — falling back to auto language")
             }
         }
-        val locale = if (HAN_REGEX.containsMatchIn(text)) {
-            Locale.SIMPLIFIED_CHINESE
-        } else {
-            Locale.US
+        // [T-android-tts-locale GH#324] An explicit caller choice outranks
+        // detection — see [explicitLocale] for why this guard has to exist.
+        explicitLocale?.let { applyResolvedLocale(it); return }
+
+        applyResolvedLocale(TtsLocaleResolver.resolve(text, savedAppLanguageTag()))
+    }
+
+    /**
+     * [T-android-tts-locale GH#324] Hand [wanted] to the engine, degrading to
+     * the bare language when the region-qualified form has no voice data.
+     *
+     * The degradation is the point: a device may ship `pt` but not `pt-BR`, and
+     * `setLanguage` with an unsupported locale is a no-op that leaves whatever
+     * was set last in place. Before this change that leftover was English, so
+     * an unsupported locale produced exactly the reported bug rather than an
+     * approximation. When nothing matches we log and leave the engine alone —
+     * a wrong-but-present voice beats silence, and the log says which language
+     * the device is missing.
+     */
+    private fun applyResolvedLocale(wanted: Locale) {
+        val engine = tts ?: return
+        for (candidate in TtsLocaleResolver.candidates(wanted)) {
+            val availability = runCatching { engine.isLanguageAvailable(candidate) }
+                .getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
+            if (availability == TextToSpeech.LANG_MISSING_DATA ||
+                availability == TextToSpeech.LANG_NOT_SUPPORTED
+            ) {
+                continue
+            }
+            val rc = runCatching { engine.setLanguage(candidate) }
+                .getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
+            if (rc != TextToSpeech.LANG_MISSING_DATA && rc != TextToSpeech.LANG_NOT_SUPPORTED) {
+                return
+            }
         }
-        tts?.setLanguage(locale)
+        Log.w(
+            TAG,
+            "no voice data for ${wanted.toLanguageTag()} — keeping the engine's " +
+                "current language (install the language's TTS data to fix)",
+        )
     }
 
     private fun buildSpeechParams(): android.os.Bundle {

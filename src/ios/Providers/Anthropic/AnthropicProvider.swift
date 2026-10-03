@@ -69,16 +69,38 @@ final class AnthropicProvider: LLMProvider {
     /// The minor segment is optional: a single-segment version (`claude-fable-5`,
     /// `claude-opus-5`) parses as `(major, 0)`. Returns nil for non-Claude ids or
     /// ids without any version segment.
+    ///
+    /// TWO POSITIONAL BUGS FIXED (mirrored on Android AnthropicProvider.kt):
+    ///
+    /// 1. The minor group is capped at 1-2 digits. It was uncapped and greedy, so
+    ///    a SINGLE-segment version followed by a snapshot stamp swallowed the
+    ///    stamp: `claude-sonnet-4-20250514` (Claude Sonnet 4.0) parsed as
+    ///    (4, 20250514) and was therefore treated as >= 4.6 — temperature
+    ///    dropped, adaptive effort sent, `thinking.type=disabled` sent, none of
+    ///    which a 4.0 model accepts. Two shipping catalog ids hit this
+    ///    (claude-sonnet-4-20250514, claude-opus-4-20250514, plus their
+    ///    `anthropic/` forms). No real Claude version has ever had a 3+ digit
+    ///    minor, and a version PAIR is unaffected either way
+    ///    (`claude-opus-4-8-20260115` -> (4,8)) because the pair consumes the
+    ///    separator first.
+    ///
+    /// 2. The search STARTS AFTER the word "claude". It used to take the first
+    ///    version-shaped run anywhere in the id, so a namespace carrying digits
+    ///    before the family name won: `v2-gateway/claude-opus-5` parsed as (2, 0),
+    ///    and `inst-53/claude-haiku-4-5` as (53, 0). Both would then take
+    ///    `temperature` plus legacy budget thinking — the exact 400 and silent
+    ///    no-op this commit family exists to prevent. Only digits AFTER the
+    ///    family name can be the version.
     static func parseClaudeVersion(_ modelId: String) -> (major: Int, minor: Int)? {
         let lower = modelId.lowercased()
-        guard lower.contains("claude") else { return nil }
+        guard let claudeRange = lower.range(of: "claude") else { return nil }
         // Accepts `claude-opus-4-7`, `claude-sonnet-4-6-thinking`,
         // `anthropic/claude-opus-4.7`, `claude-fable-5`, `claude-opus-5`, etc.
         // The minor group is optional but greedy, so `claude-3-5-sonnet` still
         // parses its first PAIR as (3,5) — never (3,0).
-        let pattern = #"[-/]?(\d+)(?:[-.](\d+))?(?:\b|[^0-9])"#
+        let pattern = #"[-/]?(\d+)(?:[-.](\d{1,2}))?(?:\b|[^0-9])"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(lower.startIndex..., in: lower)
+        let range = NSRange(claudeRange.upperBound..<lower.endIndex, in: lower)
         guard let match = regex.firstMatch(in: lower, range: range),
               match.numberOfRanges >= 3,
               let majorRange = Range(match.range(at: 1), in: lower),
@@ -382,8 +404,20 @@ final class AnthropicProvider: LLMProvider {
             parts.append("  system: nil")
         }
 
-        // Tools — encode to JSON to read names
-        if let data = try? JSONEncoder().encode(parameter),
+        // [T-ios-listsessions-perf] Encode the parameter ONCE and reuse it for
+        // both the tool-name list and the full-body dump. This used to run
+        // JSONEncoder over the entire request — system prompt, every tool
+        // schema and the whole message history — twice per logged request, on
+        // the send path. 4 G cycles in the profiled trace.
+        //
+        // Note this whole function is already `#if DEBUG`, as are both of its
+        // call sites, so none of it exists in a Release build; the trace that
+        // measured it was a Debug build. This change is for developers running
+        // Debug, not for shipped performance.
+        let encodedParameter = try? JSONEncoder().encode(parameter)
+
+        // Tools — read names out of the encoded form
+        if let data = encodedParameter,
            let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let tools = dict["tools"] as? [[String: Any]] {
             let names = tools.compactMap { $0["name"] as? String }
@@ -391,7 +425,7 @@ final class AnthropicProvider: LLMProvider {
         }
 
         // Full request body as pretty JSON (for detailed debugging)
-        if let data = try? JSONEncoder().encode(parameter),
+        if let data = encodedParameter,
            let json = try? JSONSerialization.jsonObject(with: data),
            let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
            let str = String(data: pretty, encoding: .utf8) {
@@ -500,24 +534,63 @@ final class AnthropicProvider: LLMProvider {
         }
 
         // Check for captured error body from URLProtocol (has the full JSON error)
-        let capturedBody = LastAPIErrorBody.shared.take()
+        // [T-anthropic-status-not-substring] Take the STATUS along with the
+        // body: it is the real `HTTPURLResponse.statusCode` recorded at the
+        // capture site, so classification no longer depends on what digits
+        // happen to appear in the SDK's description string.
+        let captured = LastAPIErrorBody.shared.takeWithStatus()
+        let capturedBody = captured.body
         let description = String(describing: error)
 
-        if description.contains("authentication") || description.contains("401") {
-            let detail = Self.extractMessageFromBody(capturedBody)
+        func detail() -> String {
+            Self.extractMessageFromBody(capturedBody)
                 ?? Self.extractAPIErrorMessage(from: description)
-            return .invalidAPIKey(detail: detail)
-        }
-        if description.contains("429") || description.lowercased().contains("rate") {
-            return .rateLimited
         }
 
-        // Transient server errors (5xx): retry same model, do not trigger group fallback.
-        let transientCodes = ["500", "502", "503", "504", "529"]
-        if transientCodes.contains(where: { description.contains($0) }) {
-            let detailedMessage = Self.extractMessageFromBody(capturedBody)
-                ?? Self.extractAPIErrorMessage(from: description)
-            return .transientError(message: detailedMessage)
+        // Preferred path: a real status code. Classify purely from it.
+        if let status = captured.statusCode {
+            switch status {
+            case 401, 403:
+                return .invalidAPIKey(detail: detail())
+            case 429:
+                return .rateLimited
+            case 500, 502, 503, 504, 529:
+                return .transientError(message: detail(), statusCode: status)
+            default:
+                // Every other 4xx (400 included) is a request the provider
+                // rejected outright — `providerError` is `isFallbackable`, so
+                // the group advances instead of retrying a doomed request.
+                return .providerError(message: detail())
+            }
+        }
+
+        // Fallback path: no status was captured (a transport-level failure that
+        // never produced an HTTP response, or an SDK error raised before the
+        // URLProtocol saw the reply). Parse the description, but ANCHORED —
+        // `extractStatusCode` only accepts a leading `[503]`-style marker or an
+        // explicit "status code: 503" phrase, never a bare digit run, so a body
+        // mentioning `max_tokens: 8500` can no longer masquerade as a 5xx.
+        if let status = Self.extractStatusCode(from: description) {
+            switch status {
+            case 401, 403:
+                return .invalidAPIKey(detail: detail())
+            case 429:
+                return .rateLimited
+            case 500, 502, 503, 504, 529:
+                return .transientError(message: detail(), statusCode: status)
+            default:
+                return .providerError(message: detail())
+            }
+        }
+
+        // No status anywhere. Fall back to the SDK's own wording, which is the
+        // only signal left. Kept narrow: these two phrases are unambiguous,
+        // unlike a numeric search.
+        if description.lowercased().contains("authentication") {
+            return .invalidAPIKey(detail: detail())
+        }
+        if description.lowercased().contains("rate limit") {
+            return .rateLimited
         }
 
         // Try to extract a detailed message from the captured error body first,
@@ -549,6 +622,46 @@ final class AnthropicProvider: LLMProvider {
         if body.count <= 500 {
             return body
         }
+        return nil
+    }
+
+    /// [T-anthropic-status-not-substring] Extract the HTTP status from an SDK
+    /// error description, ANCHORED so it can only ever read a real status
+    /// marker.
+    ///
+    /// Two accepted shapes, both of which put the code at a fixed position:
+    ///   * `responseUnsuccessful(description: "status code 503…")` — the
+    ///     SwiftAnthropic form, where the code leads the inner string (the same
+    ///     `^status code (\d+)` anchor `extractAPIErrorMessage` already relies
+    ///     on to split code from message).
+    ///   * a leading `[503] …` marker, the form our own
+    ///     `extractAPIErrorMessage` emits and which can therefore come back
+    ///     round through a re-wrapped error.
+    ///
+    /// Anything else yields nil. This is the whole point: the previous check
+    /// asked `description.contains("503")`, which is true of `max_tokens: 8503`,
+    /// of a request id, and of a token count — so a 400 that could never
+    /// succeed was classified transient and retried on the same model instead
+    /// of falling back.
+    static func extractStatusCode(from description: String) -> Int? {
+        func firstCapture(_ pattern: String, in s: String) -> Int? {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
+                  let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+                  let r = Range(m.range(at: 1), in: s) else { return nil }
+            return Int(s[r])
+        }
+        // Unwrap `responseUnsuccessful(description: "…")` and anchor inside it.
+        let innerPattern = #"responseUnsuccessful\(description:\s*"(.+?)"\)"#
+        if let re = try? NSRegularExpression(pattern: innerPattern, options: [.dotMatchesLineSeparators]),
+           let m = re.firstMatch(in: description, range: NSRange(description.startIndex..., in: description)),
+           let r = Range(m.range(at: 1), in: description) {
+            let inner = String(description[r])
+            if let code = firstCapture(#"^status code (\d{3})"#, in: inner) { return code }
+            if let code = firstCapture(#"^\[(\d{3})\]"#, in: inner) { return code }
+        }
+        // Bare forms, still anchored to the start of the string.
+        if let code = firstCapture(#"^status code (\d{3})"#, in: description) { return code }
+        if let code = firstCapture(#"^\[(\d{3})\]"#, in: description) { return code }
         return nil
     }
 

@@ -42,6 +42,16 @@ data class ThinkingResolveContext(
     val isMistral: Boolean,
     val isDashScope: Boolean,
     /**
+     * [T-android-cerebras-reasoning-400] Endpoint is Cerebras (OpenMinis#361).
+     * Mirrors iOS ThinkingResolveContext.isCerebras.
+     *
+     * Same shape of problem as [isDashScope]: the `*qwen*` rule matches on the
+     * model NAME, and Cerebras re-hosts `qwen-3.8-27b`. Qwen's native
+     * `enable_thinking` is not accepted there — Cerebras' control is root
+     * `reasoning_effort`. Defaults false so every other endpoint is unchanged.
+     */
+    val isCerebras: Boolean = false,
+    /**
      * [OpenMinis#163] Endpoint is xAI's own API (api.x.ai), not a relay that
      * merely serves grok-named models. Scopes the empty-tier skip to the vendor
      * where the 400 was actually observed. Defaults false so existing
@@ -155,6 +165,30 @@ object ThinkingRuleResolver {
             )
         }
 
+        // Cerebras — OpenMinis#361. Endpoint-scoped, and it must sit ABOVE the
+        // `*qwen*` rule further down: stage A stops at the first scope match, and
+        // Cerebras re-hosts `qwen-3.8-27b`, which would otherwise be handed Qwen's
+        // native `enable_thinking` (a field Cerebras does not accept). Their
+        // documented control is root `reasoning_effort`, which the bundled
+        // models-dev catalog already declares for both Cerebras models.
+        //
+        // Same class of fix as iOS [T-ios-qwen-extra-body-400]: a model-NAME
+        // pattern cannot answer a question about the ENDPOINT, so the endpoint
+        // gets its own rule above it. Registered as a NEW rule — nothing existing
+        // is moved — and scoped to `ctx.isCerebras`, so no other endpoint's
+        // resolution changes.
+        if (ctx.isCerebras) {
+            add(
+                ThinkingRule(
+                    kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                    scope = ThinkingRule.Scope.AllModels,
+                    wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
+                    reasoningEcho = ReasoningEchoPolicy("reasoning_content", ReasoningEchoPolicy.Timing.NEVER),
+                    label = "cerebras-official",
+                ),
+            )
+        }
+
         // OpenRouter — nested `reasoning:{effort}`, OMIT when off so forced-reasoning
         // backends don't reject `effort:"none"`.
         if (ctx.isOpenRouter) {
@@ -202,6 +236,21 @@ object ThinkingRuleResolver {
             ThinkingRule(
                 kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
                 scope = ThinkingRule.Scope.ModelPattern("gpt-5*"),
+                wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
+                label = "openai-native",
+            ),
+        )
+        // [OpenMinis#377] gpt-6 and newer. The predicate above is a hand-maintained
+        // prefix list, so every new OpenAI generation is invisible to it until someone
+        // adds a row: gpt-6-astra matched neither "o*" nor "gpt-5*" and fell through to
+        // the generic tail, which is a different wire shape than the one OpenAI documents
+        // for its reasoning models. Added as its own row rather than by loosening the
+        // pattern to "gpt-*", which would sweep in gpt-4/gpt-4o — non-reasoning models
+        // that must NOT receive reasoning_effort at all.
+        add(
+            ThinkingRule(
+                kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                scope = ThinkingRule.Scope.ModelPattern("gpt-6*"),
                 wireFormat = ThinkingWireFormat.ReasoningEffort(ctx.offEffort),
                 label = "openai-native",
             ),
@@ -259,6 +308,36 @@ object ThinkingRuleResolver {
                 wireFormat = ThinkingWireFormat.DeepSeekSibling,
                 reasoningEcho = ReasoningEchoPolicy("reasoning_content", ReasoningEchoPolicy.Timing.AFTER_TOOL_USE_ONLY),
                 label = "deepseek-v4-official",
+            ),
+        )
+
+        // [T-android-deepseek-flash-scope] (GH#356, iOS 466b00f9b) DeepSeek now
+        // recommends the bare `deepseek-flash`; `deepseek-v4-flash` is kept only
+        // as a legacy alias and both are served by the same DeepSeek-V4.1-Flash.
+        // The new id does NOT match `*deepseek-v4*`, so it fell through to the
+        // generic `reasoning_effort` default below — the wrong wire shape for
+        // this vendor.
+        //
+        // A SIBLING rule rather than widening the one above: `Scope` is a single
+        // pattern with no OR, and the house style is to register a neighbour.
+        //
+        // Anchored `deepseek-flash*`, not `*deepseek-flash*` or `*deepseek*`.
+        // Verified against this file's own glob (ThinkingRule.Scope.glob, with
+        // the same `.`→`-` normalisation `matches` applies) rather than reasoned
+        // about: `deepseek-flash` and `deepseek-flash-lite` match; the legacy
+        // `deepseek-v4-flash` and `deepseek-v4-pro` stay on the rule above; and
+        // `deepseek-chat` / `deepseek-reasoner`, whose wire format may differ,
+        // are not claimed — which a bare `*deepseek*` would have swept in.
+        //
+        // Same wire format and the same reasoning echo policy as its neighbour,
+        // because it is the same family served by the same backend.
+        add(
+            ThinkingRule(
+                kind = ThinkingRule.Kind.OFFICIAL_VENDOR,
+                scope = ThinkingRule.Scope.ModelPattern("deepseek-flash*"),
+                wireFormat = ThinkingWireFormat.DeepSeekSibling,
+                reasoningEcho = ReasoningEchoPolicy("reasoning_content", ReasoningEchoPolicy.Timing.AFTER_TOOL_USE_ONLY),
+                label = "deepseek-flash-official",
             ),
         )
 
@@ -321,6 +400,57 @@ object ThinkingRuleResolver {
      * branch of the pre-refactor chain exactly — including its guards, which are the part
      * that carries the field evidence.
      */
+    /**
+     * [GH#306] Reserved top-level request keys a custom rule must never write.
+     *
+     * A thinking rule's job is to add a thinking knob, not to rewrite the request. The
+     * dotted path is user input, so `messages` or `model` is one typo away; letting it
+     * through would corrupt the conversation or silently retarget the request, and the
+     * failure would surface far from the rule that caused it. iOS has no such guard —
+     * this is deliberately stricter than the iOS port, because on Android the path is
+     * entered in a free-text field with no validation upstream.
+     *
+     * Only the FIRST segment is checked: `extra_body.model` is a vendor's own nested
+     * field and is none of our business, while a root `model` is.
+     */
+    private val RESERVED_ROOT_KEYS = setOf(
+        "messages", "model", "stream", "stream_options", "tools", "tool_choice",
+        "n", "functions", "function_call", "response_format",
+    )
+
+    /**
+     * [GH#306] Write [value] at a dotted [path] in [body], creating intermediate objects.
+     * Returns false when the write was refused, so the caller reports "nothing emitted"
+     * instead of claiming a value it never sent.
+     *
+     * Port of iOS `setValue(_:at:in:when:otherwiseWrite:)` with two differences, both
+     * deliberate:
+     *  - the reserved-root-key refusal above;
+     *  - JSONObject is a REFERENCE type, so this mutates nested objects in place. iOS
+     *    has to rebuild the dictionaries on the way out because `[String: Any]` is a
+     *    value type and an in-place write would update a copy.
+     */
+    private fun setValueAtPath(body: JSONObject, path: String, value: Any): Boolean {
+        val parts = path.split(".").map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.isEmpty()) return false
+        // Refused silently: this object is a pure function with no logger by design
+        // (that is what makes it testable without a network stub), and the refusal is
+        // already visible to the user — the resolve trace reports no emitted value, so
+        // the rule shows as having done nothing rather than appearing to work.
+        if (parts.first().lowercase() in RESERVED_ROOT_KEYS) return false
+        var cursor = body
+        for (i in 0 until parts.size - 1) {
+            val seg = parts[i]
+            // An existing NON-object at this segment is replaced: the alternative is
+            // failing the whole send because some other rule happened to put a scalar
+            // where this rule needs to nest, and the user's explicit rule should win.
+            val next = cursor.optJSONObject(seg) ?: JSONObject().also { cursor.put(seg, it) }
+            cursor = next
+        }
+        cursor.put(parts.last(), value)
+        return true
+    }
+
     private fun emit(
         format: ThinkingWireFormat,
         ctx: ThinkingResolveContext,
@@ -344,7 +474,49 @@ object ThinkingRuleResolver {
             }
 
             is ThinkingWireFormat.ReasoningEffort -> {
-                val isOpenAINative = lid.startsWith("o") || lid.startsWith("gpt-5")
+                // [OpenMinis#377] Keep in step with the rule rows above: a generation
+                // missing here sends the tier through a different arm of the `when`.
+                val isOpenAINative = lid.startsWith("o") ||
+                    lid.startsWith("gpt-5") ||
+                    lid.startsWith("gpt-6")
+                val declaresEffort = !ctx.declaredEffortValues.isNullOrEmpty()
+                // [OpenMinis#163] xAI-scoped skip. grok-build-0.1 answers
+                // reasoning_effort with "HTTP 400: Model grok-build-0.1 does not
+                // support parameter reasoningEffort"; the catalog describes
+                // exactly that state as "reasoning": true with
+                // "reasoning_options": [] (also true of grok-4.20-0309-reasoning).
+                //
+                // HOISTED ABOVE THE OFF DISPATCH on purpose (was inside the enabled
+                // branch only). "This model does not accept the parameter at all" is a
+                // property of the model, not of the requested level, so it has to
+                // outrank the level dispatch — otherwise turning thinking OFF is the
+                // one way to put the 400-triggering field back on the wire, which
+                // inverts the user's intent. Latent before this hoist only because
+                // explicitOffEffort() returns null for api.x.ai today; it would have
+                // gone live the moment xAI joined the off-tier allowlist. One check now
+                // governs both paths, so they cannot drift apart again.
+                //
+                // DELIBERATELY NOT data-driven across all vendors. The same
+                // empty-tier shape appears on 2090 bundled catalog entries —
+                // relay-hosted Claude, GPT-5, Qwen, and grok behind poe /
+                // fastrouter / anyapi — and honouring it everywhere would change
+                // the wire format for all of them at once. Omitting the field is
+                // arguably more correct for some of those too (Anthropic uses
+                // thinking.budget_tokens, not effort), but none of those routes
+                // has been verified, so the skip stays at the vendor where the
+                // 400 was actually observed. Widening it later is a one-line
+                // change to this condition, backed by new evidence.
+                //
+                // Still ordered so the self-reasoning family list below keeps firing
+                // for relay-hosted deepseek/glm/kimi/minimax ids the catalog is silent
+                // about: this guard requires declaresNoEffortTiers, which those ids do
+                // not set. Unified-effort gateways stay exempt — they normalize the
+                // field and own their model list.
+                if (ctx.isXAI && !ctx.usesUnifiedReasoningEffort &&
+                    ctx.declaresNoEffortTiers && !declaresEffort
+                ) {
+                    return null to null
+                }
                 if (!ctx.level.isEnabled) {
                     // OFF is a separate dispatch on Android, reproduced verbatim from the
                     // pre-refactor chain. Order matters: OpenAI-native ids send the tier
@@ -359,6 +531,17 @@ object ThinkingRuleResolver {
                         .any { lid.contains(it) }
                     when {
                         isOpenAINative -> {
+                            // [OpenMinis#377] Deliberately still unconditional. Clamping
+                            // here was tried and reverted: models.dev lists `none` for
+                            // only ~37% of effort-declaring entries (1209/3243 in the
+                            // bundled catalog), and o1/o3/o4-mini declare [low,medium,
+                            // high] yet have always accepted `none`. Their declaration is
+                            // indistinguishable from gpt-6-astra's [low…max], so no rule
+                            // over catalog data alone can separate "forgot to list none"
+                            // from "genuinely rejects none" — and guessing wrong here
+                            // silently changes the wire format for the whole o-series.
+                            // The Responses builder clamps instead, where the reported
+                            // 400 actually occurs and the model is in hand. See M17.
                             body.put("reasoning_effort", offEffort)
                             return offEffort to offEffort
                         }
@@ -390,39 +573,16 @@ object ThinkingRuleResolver {
                 // nothing" rather than family name — iOS 22647505 replaced the
                 // id-substring skip-list after GLM behind a relay silently received no
                 // thinking field at all.
-                val declaresEffort = !ctx.declaredEffortValues.isNullOrEmpty()
                 if (!ctx.usesUnifiedReasoningEffort && !declaresEffort &&
                     listOf("deepseek", "glm", "kimi", "minimax").any { lid.contains(it) }
                 ) {
                     return null to null
                 }
-                // [OpenMinis#163] xAI-scoped skip. grok-build-0.1 answers
-                // reasoning_effort with "HTTP 400: Model grok-build-0.1 does not
-                // support parameter reasoningEffort"; the catalog describes
-                // exactly that state as "reasoning": true with
-                // "reasoning_options": [] (also true of grok-4.20-0309-reasoning).
-                //
-                // DELIBERATELY NOT data-driven across all vendors. The same
-                // empty-tier shape appears on 2090 bundled catalog entries —
-                // relay-hosted Claude, GPT-5, Qwen, and grok behind poe /
-                // fastrouter / anyapi — and honouring it everywhere would change
-                // the wire format for all of them at once. Omitting the field is
-                // arguably more correct for some of those too (Anthropic uses
-                // thinking.budget_tokens, not effort), but none of those routes
-                // has been verified, so the skip stays at the vendor where the
-                // 400 was actually observed. Widening it later is a one-line
-                // change to this condition, backed by new evidence.
-                //
-                // Ordered AFTER the family list on purpose: that list keys on
-                // "declares nothing" and must keep firing for relay-hosted
-                // deepseek/glm/kimi/minimax ids the catalog is silent about.
-                // Unified-effort gateways stay exempt for the same reason as
-                // above — they normalize the field and own their model list.
-                if (ctx.isXAI && !ctx.usesUnifiedReasoningEffort &&
-                    ctx.declaresNoEffortTiers && !declaresEffort
-                ) {
-                    return null to null
-                }
+                // The [OpenMinis#163] xAI empty-tier skip used to sit here; it is now
+                // hoisted above the OFF dispatch at the top of this branch so one check
+                // governs both levels. Nothing else changed for the enabled path — the
+                // guard is level-independent, so hoisting it cannot alter this path's
+                // answer for any input.
                 if (ctx.supportsReasoning == false) return null to null
                 val requested = clampEffortForModel(wireEffort(ctx.level), lid)
                 val clamped = clampEffort(requested, ctx.declaredEffortValues)
@@ -493,6 +653,47 @@ object ThinkingRuleResolver {
                     },
                 )
                 null to null
+            }
+
+            // [GH#306] CustomPath / BooleanToggle / ExtraBodyToggle are USER-SELECTABLE
+            // in the rule editor, so reaching them is a user action, not a programmer
+            // error. Until this branch existed they fell into the `else` below and threw
+            // IllegalStateException from inside buildRequestBody — every send to that
+            // model failed before any network call, with a red error bubble and a Retry
+            // that failed identically. The only escape was deleting the rule.
+            //
+            // Mirrors iOS ThinkingRuleResolver.swift:702 (`case .customPath`).
+            is ThinkingWireFormat.CustomPath -> {
+                if (ctx.level.isEnabled) {
+                    // Fall back to the HIGH value when this tier has none, matching iOS
+                    // (`values[ctx.level] ?? values[.high]`): a rule authored with a
+                    // single value is a rule that applies at every enabled tier.
+                    val v = format.values[ctx.level] ?: format.values[ThinkingLevel.HIGH]
+                        ?: return null to null
+                    if (!setValueAtPath(body, format.path, v)) return null to null
+                    v to v
+                } else {
+                    val off = format.offValue ?: return null to null
+                    if (!setValueAtPath(body, format.path, off)) return null to null
+                    off to off
+                }
+            }
+
+            // Plain root boolean switch. iOS: `case .booleanToggle` → setValue(true...).
+            is ThinkingWireFormat.BooleanToggle -> {
+                if (!setValueAtPath(body, format.path, ctx.level.isEnabled)) return null to null
+                val s = ctx.level.isEnabled.toString()
+                s to s
+            }
+
+            // Same shape, conventionally nested under extra_body. Kept distinct because
+            // that is how users think about it (GH OpenMinis#171: DeepSeek's real switch
+            // is extra_body.thinking.enabled). iOS writes the key only when enabled —
+            // `otherwiseWrite: false` there is the literal `false`, not "omit".
+            is ThinkingWireFormat.ExtraBodyToggle -> {
+                if (!setValueAtPath(body, format.path, ctx.level.isEnabled)) return null to null
+                val s = ctx.level.isEnabled.toString()
+                s to s
             }
 
             else -> {
@@ -581,7 +782,7 @@ object ThinkingRuleResolver {
                     // gemini-3.7-flash returns a hard
                     //   400 "Thinking level MINIMAL is not supported for this model."
                     // on EVERY request — 5/5 consecutive, "all fallbacks exhausted".
-                    // So with 思考 set to Off, 3.7 Flash was completely unusable, not
+                    // So with Thinking set to Off, 3.7 Flash was completely unusable, not
                     // merely un-thinking. "low" is accepted by the whole family and is
                     // the same floor 3.x Pro already used, so fall back to it for the
                     // models that reject minimal rather than probing at runtime.
@@ -647,8 +848,14 @@ object ThinkingRuleResolver {
      *   `{effort:"<tier>"}`   → adaptive thinking (Claude 4.6+)
      *   `{budget_tokens:N}`   → legacy budget thinking (≤4.5)
      *   `{disabled:true}`     → adaptive model at OFF; must be explicit because those
-     *                           models think by DEFAULT when no thinking field is sent
-     *   `{}`                  → send nothing
+     *                           models think by DEFAULT when no thinking field is sent.
+     *                           Claude 4.6-4.x ONLY — see
+     *                           `modelAcceptsExplicitThinkingDisabled`.
+     *   `{}`                  → send nothing. Correct for legacy models (OFF is their
+     *                           default) AND for Claude 5+, which rejects
+     *                           `thinking.type.disabled` outright and defaults to
+     *                           adaptive when the field is absent.
+     *                           [T-android-claude5-thinking-disabled-400]
      */
     fun anthropicThinkingShape(
         modelId: String,
@@ -669,7 +876,18 @@ object ThinkingRuleResolver {
                 .thinkingBudget(maxTokens, level)
             return if (budget > 0) mapOf("budget_tokens" to budget) else emptyMap()
         }
-        return if (adaptive) mapOf("disabled" to true) else emptyMap()
+        // [T-android-claude5-thinking-disabled-400] Deliberately NOT `adaptive`:
+        // that is true for 4.6+ AND 5+, but only 4.6-4.x accepts the explicit
+        // disabled value. Claude 5+ 400s on it and treats an absent field as
+        // adaptive — which is exactly what OFF wants. Ported from iOS 69be65763.
+        return if (
+            com.openminis.app.provider.anthropic.AnthropicProvider
+                .modelAcceptsExplicitThinkingDisabled(modelId)
+        ) {
+            mapOf("disabled" to true)
+        } else {
+            emptyMap()
+        }
     }
 
     /** UI level → wire tier, before any per-model clamp. */
@@ -690,6 +908,37 @@ object ThinkingRuleResolver {
      */
     fun clampEffortForModel(effort: String, lid: String): String =
         if (effort == "xhigh" && (lid.contains("mimo") || lid.contains("agnes"))) "high" else effort
+
+    /**
+     * [OpenMinis#377] Snap an OFF-tier value onto what the model will actually accept.
+     *
+     * Distinct from [clampEffort], and the difference is the whole point. clampEffort
+     * walks DOWN then UP, so a `["high","max"]` model turns an OFF request into "high" —
+     * inverting the user's intent, which is exactly why the OFF dispatch below refuses to
+     * use it. The right answer for OFF is always the LOWEST tier the model declares: it is
+     * the closest thing to "don't think" that the model will accept, and it can never
+     * escalate past what a higher explicit level would have sent.
+     *
+     * Returns [effort] unchanged when the model declares nothing (or declares the
+     * requested value), so models without catalog effort data behave exactly as before.
+     *
+     * The bug this exists for: gpt-6-astra declares `[low, medium, high, xhigh, max]` and
+     * rejects `reasoning.effort:"none"` with HTTP 400 `invalid_request_error`. Compaction
+     * sends OFF, the official-OpenAI off tier is "none", and every compact — including all
+     * four halving retries — died on the parameter rather than on its size.
+     */
+    fun clampOffEffort(effort: String, values: List<String>?): String {
+        if (values.isNullOrEmpty()) return effort
+        if (values.contains(effort)) return effort
+        val ladder = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max")
+        // Lowest DECLARED tier by ladder order; unknown spellings are ignored rather
+        // than guessed at, and if none are recognisable the original value stands.
+        return values.mapNotNull { v -> ladder.indexOf(v).takeIf { it >= 0 }?.to(v) }
+            .minByOrNull { it.first }
+            ?.second
+            ?: effort
+    }
+
 
     /** Snap a requested tier onto the model's declared set, walking DOWN then up. */
     fun clampEffort(effort: String, values: List<String>?): String {

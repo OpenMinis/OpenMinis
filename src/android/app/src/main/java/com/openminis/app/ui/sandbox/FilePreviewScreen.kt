@@ -164,6 +164,28 @@ fun FilePreviewScreen(
     // because they fought the Activity's edge-to-edge transparent-scrim
     // setup instead of cooperating with it. The "Browse Chat Files" screen
     // (FileBrowserScreen) renders correctly with zero overrides; do the same.
+    //
+    // [T-android-file-preview-statusbar] ...with one exception, which that
+    // note predates. Since 988bd6491 this screen is a NavHost `dialog`
+    // destination (so the chat keeps its scroll position), i.e. it runs in
+    // its OWN window, on top. The status bar takes its icon colour from that
+    // top window, and nothing set it: a Dialog window defaults to light
+    // (white) icons. In light mode that is white on the white top bar — the
+    // status bar looked blank. Set the dialog window's icon appearance from
+    // the app theme; bar colours are left alone (they are what the note
+    // above warns about). Same fix the other own-window viewers carry
+    // (WebPreviewBottomSheet, FullscreenImageViewer, InlineMediaPlayer).
+    val previewDark = com.openminis.app.ui.theme.ChatColors.isDark
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    androidx.compose.runtime.DisposableEffect(hostView, previewDark) {
+        filePreviewDialogWindow(hostView)?.let { w ->
+            androidx.core.view.WindowInsetsControllerCompat(w, w.decorView).apply {
+                isAppearanceLightStatusBars = !previewDark
+                isAppearanceLightNavigationBars = !previewDark
+            }
+        }
+        onDispose { }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -480,7 +502,16 @@ private fun HtmlPreview(item: FileItem) {
                 // viewport units.
                 settings.useWideViewPort = true
                 settings.loadWithOverviewMode = true
-                webViewClient = WebViewClient()
+                // [T-android-webview-render-process-gone] (GH#341) Was a bare
+                // `WebViewClient()`; it has to be a subclass to override the
+                // callback at all.
+                webViewClient = object : WebViewClient() {
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: android.webkit.RenderProcessGoneDetail?,
+                    ): Boolean = com.openminis.app.ui.webview.WebViewRenderProcess
+                        .handle("FilePreviewScreen.inline", detail)
+                }
                 val targetUrl = "file://${item.file.absolutePath}"
                 post { loadUrl(targetUrl) }
             }
@@ -1101,9 +1132,20 @@ private fun openExternally(context: Context, item: FileItem, mime: String) {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(Intent.createChooser(intent, "Open with…"))
-    } catch (e: Exception) {
+    } catch (e: android.content.ActivityNotFoundException) {
         AppLogger.warning("FilePreview", "openExternally failed: ${e.message}")
         Toast.makeText(context, "No app available to open this file.", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        // [T-android-mount-fileprovider-root] Everything else is OUR failure —
+        // typically getUriForFile rejecting a path no provider root covers.
+        // Reporting it as "No app available" sent users looking for a missing
+        // viewer app when the file itself was never handed over.
+        AppLogger.warning("FilePreview", "openExternally failed: ${e.message}")
+        Toast.makeText(
+            context,
+            context.getString(R.string.file_open_failed_toast, e.message ?: ""),
+            Toast.LENGTH_SHORT,
+        ).show()
     }
 }
 
@@ -1237,6 +1279,16 @@ private fun printFile(context: Context, item: FileItem) {
         // Keep a reference alive until the print job is dispatched.
         var holder: WebView? = webView
         webView.webViewClient = object : WebViewClient() {
+            // [T-android-webview-render-process-gone] (GH#341) Throwaway
+            // WebView built just to drive the print adapter; if its renderer
+            // dies the print simply does not happen, which beats killing the
+            // app. Nothing holds a reference afterwards.
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?,
+            ): Boolean = com.openminis.app.ui.webview.WebViewRenderProcess
+                .handle("FilePreviewScreen.print", detail)
+
             override fun onPageFinished(view: WebView, url: String) {
                 val printManager =
                     context.getSystemService(Context.PRINT_SERVICE) as PrintManager
@@ -1366,3 +1418,16 @@ private fun collectImageGallery(
     return items to startIdx
 }
 
+/**
+ * [T-android-file-preview-statusbar] The Dialog window this preview runs in
+ * (as a NavHost `dialog` destination), or null when it is hosted directly in
+ * an Activity window.
+ */
+private fun filePreviewDialogWindow(view: android.view.View): android.view.Window? {
+    var p: android.view.ViewParent? = view.parent
+    while (p != null) {
+        if (p is androidx.compose.ui.window.DialogWindowProvider) return p.window
+        p = p.parent
+    }
+    return null
+}

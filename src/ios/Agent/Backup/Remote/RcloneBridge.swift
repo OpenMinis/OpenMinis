@@ -48,27 +48,22 @@ enum RcloneBridge {
     ///
     /// `MinisRcloneRPC` is a BLOCKING cgo call — nothing on the Swift side can
     /// interrupt it, so whatever rclone decides to wait for, the calling
-    /// thread waits too. Out of the box that is a 300s IO timeout with 10
-    /// low-level retries, i.e. a server that accepts a connection and then
-    /// stops responding can hold the caller for the better part of an hour.
-    /// Seen for real during protocol testing: a misbehaving server wedged the
-    /// debug RPC thread until the app was restarted, and on a user's device
-    /// the same shape means "backup appears frozen" rather than "backup
-    /// failed, try again".
+    /// thread waits too. A server that accepts a connection and then stops
+    /// responding must therefore be bounded by something, or a backup "appears
+    /// frozen" rather than "failed, try again".
     ///
-    /// So the waits are cut to something a person will sit through, and the
-    /// failure is allowed to surface as an error the UI can report.
+    /// `ConnectTimeout` is what bounds the dead-server case, and it stays
+    /// short. `Timeout` does NOT mean what its old value assumed — see the
+    /// note on `ioTimeout`.
     static func applyGlobalOptions() {
         let opts: [String: Any] = [
             // Nanoseconds — rclone's Duration options are int64 ns.
             "Timeout": Int(Self.ioTimeout * 1_000_000_000),
             "ConnectTimeout": Int(Self.connectTimeout * 1_000_000_000),
-            // Retries MULTIPLY the wait: rclone applies Timeout per attempt,
-            // so 60s x 2 low-level x 1 high-level is already two minutes of
-            // apparent freeze against a server that accepts a connection and
-            // then says nothing. The transfer layer above this reports a
-            // failed destination and keeps the other ones, and the user can
-            // re-run — both better outcomes than a long silence.
+            // Retries MULTIPLY the wait: rclone applies Timeout per attempt.
+            // The transfer layer above this reports a failed destination and
+            // keeps the other ones, and the user can re-run — both better
+            // outcomes than a long silence.
             "LowLevelRetries": 1,
             "Retries": 1,
         ]
@@ -81,14 +76,53 @@ enum RcloneBridge {
     }
 
     /// How long to wait for a server to accept a connection.
-    static let connectTimeout: TimeInterval = 20
-    /// How long a single transfer may stall before it is treated as dead.
     ///
-    /// Applies per attempt, so the worst-case wait is roughly this times the
-    /// retry count — keep both small. 45s is long enough for a large chunk to
-    /// cross a slow home link, short enough that a dead server surfaces as an
-    /// error while the user is still looking at the screen.
-    static let ioTimeout: TimeInterval = 45
+    /// This — not `ioTimeout` — is what bounds a server that is down or
+    /// black-holing packets, which is why it can stay short.
+    static let connectTimeout: TimeInterval = 20
+
+    /// [T-backup-webdav-response-deadline] rclone's `Timeout`, which becomes Go's
+    /// `http.Transport.ResponseHeaderTimeout` (fs/fshttp/http.go:237).
+    ///
+    /// It is NOT a stall timeout. The timer starts once the request body has
+    /// been fully written and is a FLAT deadline that never resets while the
+    /// server is working (x/net/http2/transport.go ~1187, and net/http's own
+    /// HTTP/1.1 path behaves the same way). For an unchunked WebDAV `PUT` that
+    /// means one thing:
+    ///
+    ///     the server must produce response headers within this budget AFTER
+    ///     receiving every byte.
+    ///
+    /// The old value was 45s, documented as "how long a transfer may stall".
+    /// That reading is wrong, and it made a whole class of perfectly healthy
+    /// servers fail deterministically: an AList/OpenList gateway that relays to
+    /// a cloud drive must receive the entire file, re-upload it to the cloud
+    /// API, and only then answer. For a 31MB backup that is routinely over a
+    /// minute of silence with nothing wrong.
+    ///
+    /// Field report 2026-09-22 (openlist.fsin.fun, `/dav/189/` = a 189 cloud
+    /// mount): every backup failed with
+    ///     unchunked simple update failed: Put "…": http2: timeout awaiting
+    ///     response headers
+    /// while the UI showed 3.1 MB/s — the bytes crossed in ~10s; only the
+    /// server's post-upload processing exceeded 45s.
+    ///
+    /// Reproduced and fixed under measurement (rclone v1.75.0 + these exact
+    /// options, against a WebDAV server stalled 60s after the body landed):
+    ///
+    ///     Timeout=45s  → fails at 46.1s, byte-identical error
+    ///     Timeout=300s → succeeds at 60.1s
+    ///     Timeout=45s + DisableHTTP2 → still fails at 46.1s (only the message
+    ///                   changes to "net/http:"), so HTTP/2 is NOT the cause
+    ///                   and disabling it is not a fix.
+    ///
+    /// 300s is rclone's own default. A per-size deadline was considered and
+    /// rejected: the delay tracks the BACKEND (a local-disk mount answers a
+    /// 100MB PUT in ~5ms and does not grow with size; a cloud relay takes
+    /// minutes), not the byte count, so there is no honest formula. The escape
+    /// hatch for a genuinely wedged transfer is Cancel, which
+    /// `RcloneTransfer.upload` now implements via `job/stop`.
+    static let ioTimeout: TimeInterval = 300
 
     /// Whether to accept self-signed / untrusted TLS certificates.
     ///

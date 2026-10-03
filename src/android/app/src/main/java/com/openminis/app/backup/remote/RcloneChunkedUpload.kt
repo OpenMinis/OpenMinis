@@ -125,51 +125,26 @@ class RcloneChunkedUpload(private val context: Context) {
         var lastError: Exception? = null
         for (attempt in 1..2) {
             if (isCancelled()) throw CancelledException()
+            // [T-android-backup-webdav-deadline] Pause before the retry, and
+            // let Stop cut the pause short. Retrying at once only doubled the
+            // cost of a failure that was going to repeat.
+            if (attempt > 1) pauseCancellably(RETRY_BACKOFF_MS, isCancelled)
             try {
-                // copyfile blocks until the whole package has been sent, so it
-                // can report nothing along the way. rclone tracks the transfer
-                // itself, so live bytes are polled from core/stats on a
-                // separate thread. `bytes` is cumulative for the session, hence
-                // the baseline taken before the copy starts.
-                val baseline = statsBytes()
-                // AtomicBoolean, not a plain local: the poller runs on another
-                // thread and must see the stop flag without a data race.
-                val done = java.util.concurrent.atomic.AtomicBoolean(false)
-                val poller = if (onProgress != null) {
-                    Thread {
-                        while (!done.get()) {
-                            try {
-                                Thread.sleep(500)
-                            } catch (_: InterruptedException) {
-                                break
-                            }
-                            if (done.get()) break
-                            val moved = (statsBytes() - baseline).coerceAtLeast(0)
-                            // Never report more than the file — stats can
-                            // include other bookkeeping, and a bar that
-                            // overshoots reads as a bug even when the transfer
-                            // is fine.
-                            onProgress(Progress(minOf(moved, size), size))
-                        }
-                    }.apply { isDaemon = true; start() }
-                } else {
-                    null
-                }
-
-                try {
-                    RcloneBridge.rpc(
-                        "operations/copyfile",
-                        mapOf(
-                            "srcFs" to (packageFile.parentFile?.absolutePath ?: ""),
-                            "srcRemote" to name,
-                            "dstFs" to fs,
-                            "dstRemote" to partial,
-                        ),
-                    )
-                } finally {
-                    done.set(true)
-                    poller?.interrupt()
-                }
+                // [T-android-backup-webdav-deadline] An ASYNC job, not a
+                // blocking copyfile: a blocking call owns its thread inside Go
+                // until the server answers (now up to IO_TIMEOUT_SECONDS), so
+                // Stop had nothing to interrupt and `isCancelled` was only
+                // looked at between attempts. `job/stop` aborts the transfer
+                // for real, and `_group` counts only this job's bytes instead
+                // of every transfer in the process. Mirrors iOS ceac9df0b and
+                // this file's own download path.
+                runCopyJob(
+                    srcFs = packageFile.parentFile?.absolutePath ?: "",
+                    srcRemote = name,
+                    dstFs = fs,
+                    dstRemote = partial,
+                    isCancelled = isCancelled,
+                ) { moved -> onProgress?.invoke(Progress(minOf(moved, size), size)) }
 
                 // The size check IS the success condition, not decoration.
                 val uploaded = remoteSize(fs, partial)
@@ -194,20 +169,85 @@ class RcloneChunkedUpload(private val context: Context) {
                 return
             } catch (e: Exception) {
                 lastError = e
-                // A failed or unverified transfer must not leave the scratch
-                // object behind — a later attempt overwrites it anyway, but a
-                // permanent failure shouldn't strand junk on the server.
                 runCatching {
                     RcloneBridge.rpc("operations/deletefile", mapOf("fs" to fs, "remote" to partial))
+                }
+                if (e is CancelledException || isCancelled()) {
+                    AppLogger.info(TAG, "[Rclone] upload to '${remote.name}' stopped on attempt $attempt")
+                    throw CancelledException()
                 }
                 AppLogger.warning(
                     TAG,
                     "[Rclone] upload attempt $attempt to '${remote.name}' failed: ${e.message}"
                 )
-                if (isCancelled()) throw CancelledException()
             }
         }
         throw UploadException(lastError?.message ?: "The remote rejected the upload.")
+    }
+
+    /**
+     * [T-android-backup-webdav-deadline] Run one `operations/copyfile` as an
+     * async rclone job, polling for completion, reporting this job's own bytes
+     * and stopping it when [isCancelled] turns true.
+     *
+     * After `job/stop` it keeps polling until rclone reports the job finished,
+     * so the caller never deletes a `.partial` that is still being written.
+     * Falls back to a blocking copy if rclone refuses the async request:
+     * an upload that cannot be stopped beats no upload.
+     */
+    private fun runCopyJob(
+        srcFs: String,
+        srcRemote: String,
+        dstFs: String,
+        dstRemote: String,
+        isCancelled: () -> Boolean,
+        onBytes: (Long) -> Unit,
+    ) {
+        val args = mapOf("srcFs" to srcFs, "srcRemote" to srcRemote, "dstFs" to dstFs, "dstRemote" to dstRemote)
+        val group = "backup-${java.util.UUID.randomUUID()}"
+        val jobId = RcloneBridge.rpc("operations/copyfile", args + mapOf("_async" to true, "_group" to group))
+            .optInt("jobid", -1)
+        if (jobId < 0) {
+            AppLogger.error(TAG, "[Rclone] copyfile returned no jobid; falling back to a blocking upload")
+            RcloneBridge.rpc("operations/copyfile", args)
+            return
+        }
+        var stopSent = false
+        var statusMisses = 0
+        while (true) {
+            Thread.sleep(POLL_INTERVAL_MS)
+            if (!stopSent && isCancelled()) {
+                stopSent = true
+                AppLogger.info(TAG, "[Rclone] stop requested; stopping upload job $jobId")
+                runCatching { RcloneBridge.rpc("job/stop", mapOf("jobid" to jobId)) }
+            }
+            val status = runCatching { RcloneBridge.rpc("job/status", mapOf("jobid" to jobId)) }.getOrNull()
+            if (status == null) {
+                // A job rclone cannot report on must not spin forever.
+                if (++statusMisses >= MAX_STATUS_MISSES) throw UploadException("Lost track of the upload.")
+                continue
+            }
+            statusMisses = 0
+            if (!status.optBoolean("finished")) {
+                val stats = runCatching { RcloneBridge.rpc("core/stats", mapOf("group" to group)) }.getOrNull()
+                onBytes((stats?.optLong("bytes") ?: 0L).coerceAtLeast(0L))
+                continue
+            }
+            if (stopSent) throw CancelledException()
+            val error = status.optString("error").orEmpty()
+            if (error.isNotEmpty()) throw UploadException(error)
+            return
+        }
+    }
+
+    /** Sleep [ms], in short steps, ending early with [CancelledException] on Stop. */
+    private fun pauseCancellably(ms: Long, isCancelled: () -> Boolean) {
+        val until = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < until) {
+            if (isCancelled()) throw CancelledException()
+            Thread.sleep(minOf(100L, until - System.currentTimeMillis()).coerceAtLeast(1L))
+        }
+        if (isCancelled()) throw CancelledException()
     }
 
     /**
@@ -281,7 +321,11 @@ class RcloneChunkedUpload(private val context: Context) {
      */
     fun deletePackage(remote: RcloneRemoteStore.Remote, pkg: RemotePackage) {
         if (!pkg.isChunked) {
-            deletePackage(remote, pkg.displayName)
+            // By key, not by name under the remote's root: a package picked in
+            // the restore browser may sit in a subfolder, and its key is the
+            // full path. For a root-level package the two are the same object.
+            RcloneBridge.rpc("operations/deletefile", mapOf("fs" to remote.fsSpec, "remote" to pkg.key))
+            AppLogger.info(TAG, "[Rclone] deleted ${pkg.key} from ${remote.name}")
             return
         }
         RcloneBridge.rpc("operations/purge", mapOf("fs" to remote.fsSpec, "remote" to pkg.key))
@@ -298,9 +342,6 @@ class RcloneChunkedUpload(private val context: Context) {
             ?: throw UploadException("Uploaded file not found on the server.")
         return item.optLong("Size", -1L)
     }
-
-    private fun statsBytes(): Long =
-        runCatching { RcloneBridge.rpc("core/stats").optLong("bytes", 0L) }.getOrDefault(0L)
 
     // MARK: - Reading back
 
@@ -654,6 +695,12 @@ class RcloneChunkedUpload(private val context: Context) {
         /** 250ms, not 500: Cancel is user-facing and the poll interval is the
          *  floor on how long it appears to hang. */
         private const val POLL_INTERVAL_MS = 250L
+
+        /** [T-android-backup-webdav-deadline] Pause before the single retry (iOS: 3 s). */
+        internal const val RETRY_BACKOFF_MS = 3_000L
+
+        /** Consecutive failed `job/status` polls (x 250 ms) before giving up on a job. */
+        private const val MAX_STATUS_MISSES = 40
 
         /** EMA weight for the derived transfer rate. */
         private const val RATE_ALPHA = 0.3

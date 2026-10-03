@@ -104,6 +104,27 @@ fun TokenUsageSheet(
             StatSection(title = stringResource(R.string.token_usage_section_cache)) {
                 StatRow(stringResource(R.string.token_usage_cache_read), formatTokens(s?.cacheRead ?: 0L))
                 StatRow(stringResource(R.string.token_usage_cache_write), formatTokens(s?.cacheWrite ?: 0L))
+                // [T-android-token-usage-cache-hit-rate] iOS parity. Hidden
+                // rather than shown as 0.0% when nothing was cached, so a
+                // provider that does no caching does not look like a cache
+                // miss — see SessionTokenStats.cacheHitRate.
+                s?.cacheHitRate?.let {
+                    StatRow(
+                        stringResource(R.string.token_usage_cache_hit_rate),
+                        String.format(java.util.Locale.US, "%.1f%%", it),
+                    )
+                }
+            }
+
+            // [T-android-token-usage-output-speed] iOS parity. Always shown,
+            // with "—" until a turn has streamed measurably — the row's
+            // absence would otherwise read as "this build has no speed".
+            StatSection(title = stringResource(R.string.token_usage_section_speed)) {
+                val speed = s?.outputTokensPerSecond
+                StatRow(
+                    stringResource(R.string.token_usage_output_speed),
+                    if (speed != null) String.format(java.util.Locale.US, "%.1f tok/s", speed) else "—",
+                )
             }
 
             StatSection(title = stringResource(R.string.token_usage_section_agent_loop)) {

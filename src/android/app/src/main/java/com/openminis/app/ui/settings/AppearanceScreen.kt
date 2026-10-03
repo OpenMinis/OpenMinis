@@ -230,6 +230,10 @@ private val languageOptions = listOf(
     // purpose \u2014 the resources live in values-pt-rBR and the wording is
     // Brazilian, so the tag should say so rather than claim generic "pt".
     LanguageOption("pt-BR", "\uD83C\uDDE7\uD83C\uDDF7", "Portugu\u00EAs (Brasil)"),
+    // hr: flag \uD83C\uDDED\uD83C\uDDF7 (HR), self-name Hrvatski. Three CLDR plural
+    // categories (one/few/other) and NO "many" \u2014 unlike Polish, so the
+    // counts pl sends to `many` land on `other` here.
+    LanguageOption("hr", "\uD83C\uDDED\uD83C\uDDF7", "Hrvatski"),
 )
 
 fun getAppearancePrefs(context: Context): SharedPreferences =

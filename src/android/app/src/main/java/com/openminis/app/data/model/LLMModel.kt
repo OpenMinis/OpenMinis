@@ -37,6 +37,14 @@ data class LLMModel(
     // Mirrors iOS ModelModality flags. When null, treat as text-in/text-out only.
     val inputModalities: List<String>? = null,
     val outputModalities: List<String>? = null,
+    // [T-openrouter-voice-catalog] OpenMinis#280. Which OpenRouter catalog
+    // endpoint this model came from: "tts" (?output_modalities=speech), "stt"
+    // (?output_modalities=transcription) or "none" (the default chat
+    // catalog). null = not catalog-sourced (custom entries, other providers,
+    // models saved before this field) — those keep the modality-based voice
+    // rules. See VoiceRole. Nullable so older persisted models decode as null.
+    // Mirrors iOS LLMModel.voiceRole.
+    val voiceRole: String? = null,
 ) {
     companion object {
         // Anthropic — mirrors iOS LLMTypes.swift allAnthropic.
@@ -61,9 +69,41 @@ data class LLMModel(
         // Fable 5 are 1M context; Haiku 4.5 is 200K. Output: 128K (Opus/Fable),
         // 64K (Sonnet/Haiku). Set explicitly so the values don't depend on the
         // id heuristic; models.dev enrich can still override at runtime.
+        // [T-anthropic-fable51-android] Fable 5.1 (2026-09-01). Same specs as
+        // Fable 5 — 1M context, 128K output, 5-series adaptive thinking and
+        // no-temperature handling, all derived from the id by
+        // parseClaudeVersion (which reads "claude-fable-5-1" as major=5,
+        // minor=1).
+        //
+        // Adaptive-thinking ONLY: deliberately no manual thinking budget is
+        // modelled. Declaring a min/max budget makes the server read the model
+        // as hybrid-thinking and reject the request upstream. LLMModel has no
+        // budget fields today, so this holds by construction; the note is here
+        // so a future refactor that adds them does not quietly extend them to
+        // this model.
+        //
+        // Reaching it also needs the claude-cli User-Agent at >= 2.1.251 (the
+        // pinned value is now 2.1.280, which Opus 5.5 requires) — see
+        // AnthropicProvider's fingerprint block.
+        val claudeFable51 = LLMModel("claude-fable-5-1", "Claude Fable 5.1", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
         val claudeFable5 = LLMModel("claude-fable-5", "Claude Fable 5", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
+        // [T-anthropic-opus55-catalog] Claude Opus 5.5 — 5-series, so
+        // parseClaudeVersion already routes it to adaptive thinking and away
+        // from both `temperature` and the literal `thinking.type="disabled"`
+        // (which this model 400s on). Requires claude-cli >= 2.1.280 in the
+        // mimicry User-Agent; below that the backend refuses the model in a
+        // way that reads like a catalog error rather than a version gate.
+        val claudeOpus55 = LLMModel("claude-opus-5-5", "Claude Opus 5.5", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
         val claudeOpus48 = LLMModel("claude-opus-4-8", "Claude Opus 4.8", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
         val claudeOpus46 = LLMModel("claude-opus-4-6", "Claude Opus 4.6", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
+        // [T-anthropic-sonnet55] Claude Sonnet 5.5 (CLIProxyAPI registry
+        // 9a3b869f, iOS 965ff194d): 1M context, 128K output (not Sonnet 5's
+        // 64K), text + image in via the Anthropic provider default, thinking
+        // low…max. parseClaudeVersion reads (5,5), so it takes the same Claude-5
+        // wire path as Sonnet 5: no `temperature`, adaptive thinking, and
+        // "thinking off" = no thinking field. Served under the unchanged
+        // claude-cli/2.1.280 fingerprint, the same one upstream uses for it.
+        val claudeSonnet55 = LLMModel("claude-sonnet-5-5", "Claude Sonnet 5.5", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 128_000, supportsReasoning = true)
         // [T-anthropic-sonnet5-catalog-android] Claude Sonnet 5 — same 5-series
         // adaptive-thinking + no-temperature handling (parseClaudeVersion) and
         // identical modalities/capabilities as the Sonnet 4.6 entry below.
@@ -71,7 +111,8 @@ data class LLMModel(
         val claudeSonnet46 = LLMModel("claude-sonnet-4-6", "Claude Sonnet 4.6", "Anthropic", contextWindow = 1_000_000, maxOutputTokens = 64_000, supportsReasoning = true)
         val claudeHaiku45 = LLMModel("claude-haiku-4-5", "Claude Haiku 4.5", "Anthropic", contextWindow = 200_000, maxOutputTokens = 64_000, supportsReasoning = true)
 
-        val allAnthropic = listOf(claudeFable5, claudeOpus48, claudeOpus46, claudeSonnet5, claudeSonnet46, claudeHaiku45)
+        // Newest first, matching iOS's ordering (LLMTypes.swift `allAnthropic`).
+        val allAnthropic = listOf(claudeFable51, claudeFable5, claudeOpus55, claudeOpus48, claudeOpus46, claudeSonnet55, claudeSonnet5, claudeSonnet46, claudeHaiku45)
 
         // Gemini
         val gemini3Pro = LLMModel("gemini-3-pro-preview", "Gemini 3 Pro (Preview)", "Google")
@@ -121,8 +162,8 @@ data class LLMModel(
         // flagship on top. T-xai-models-refresh dropped grok-3-* slugs
         // (xAI server-side now redirects those to grok-4.3, so showing
         // them in the picker is just noise) and added the multi-agent
-        // / build / fast / code-fast variants surfaced by xAI docs and
-        // OpenClaw's catalog (port iOS db973552).
+        // / build / fast / code-fast variants listed in the xAI docs
+        // (docs.x.ai/docs/models; port iOS db973552).
         // Official xAI catalog (docs.x.ai/docs/models) - synced from CLIProxyAPI models.json
         // [T-provider-dynamic-catalog-reconcile] grok-4.6 added for GH#265.
         // Note this list is now a SEED/FALLBACK, not the whole story: since
@@ -139,7 +180,7 @@ data class LLMModel(
         val grok3Mini = LLMModel("grok-3-mini", "Grok 3 Mini", "xAI", supportsReasoning = true)
         val grok3MiniFast = LLMModel("grok-3-mini-fast", "Grok 3 Mini Fast", "xAI", supportsReasoning = true)
         val grokComposer25Fast = LLMModel("grok-composer-2.5-fast", "Grok Composer 2.5 Fast", "xAI")
-        // High-frequency fast / code variants surfaced by OpenClaw's catalog.
+        // High-frequency fast / code variants (docs.x.ai/docs/models).
         val grok4Fast = LLMModel("grok-4-fast", "Grok 4 Fast", "xAI", supportsReasoning = true)
         val grok4FastNonReasoning = LLMModel("grok-4-fast-non-reasoning", "Grok 4 Fast (Non-Reasoning)", "xAI")
         val grokCodeFast1 = LLMModel("grok-code-fast-1", "Grok Code Fast 1", "xAI", supportsReasoning = true)
@@ -181,8 +222,11 @@ data class LLMModel(
          */
         fun modelDisplayName(fromId: String): String {
             if (fromId.isBlank()) return fromId
+            // [T-android-modeldisplayname-ios-parity] Kept byte-identical to
+            // iOS `modelDisplayName(from:)` (LLMTypes.swift) — "xxl" was the
+            // one entry Android was missing.
             val upperTokens = setOf(
-                "gpt", "glm", "oss", "ai", "xl", "vl", "llm", "moe", "api",
+                "gpt", "glm", "oss", "ai", "xl", "xxl", "vl", "llm", "moe", "api",
                 "hd", "sd", "rp", "sft", "rl", "dpo", "gguf", "fp16", "bf16", "int4", "int8",
             )
             val brandRewrites = mapOf(
@@ -197,17 +241,34 @@ data class LLMModel(
                 "qwen" to "Qwen",
                 "yi" to "Yi",
             )
-            return fromId.split('/').joinToString(" / ") { segment ->
-                segment.split('-').joinToString("-") { token ->
+            // [T-android-modeldisplayname-ios-parity] Reflow BOTH separators
+            // into spaces, exactly as iOS does.
+            //
+            // This previously split on '-' and joined back with '-', so the
+            // function only re-cased tokens and left the machine-readable
+            // separators in place. The same DeepSeek model therefore read
+            // "DeepSeek-Flash" on Android and "DeepSeek Flash" on iOS — a
+            // user-visible inconsistency reported from the field. DeepSeek's
+            // official /v1/models sends no `name` field, so every one of its
+            // models lands on this fallback and showed the hyphenated form.
+            //
+            // `filter { it.isNotEmpty() }` stands in for Swift's
+            // `split(separator:)`, which drops empty subsequences — without it
+            // a doubled separator ("org//model") would emit a blank token and
+            // produce a double space.
+            return fromId
+                .replace('/', ' ')
+                .replace('-', ' ')
+                .split(' ')
+                .filter { it.isNotEmpty() }
+                .joinToString(" ") { token ->
                     val lower = token.lowercase()
                     when {
                         brandRewrites.containsKey(lower) -> brandRewrites[lower]!!
                         upperTokens.contains(lower) -> lower.uppercase()
-                        token.isEmpty() -> token
                         else -> token.replaceFirstChar { it.titlecase() }
                     }
                 }
-            }
         }
     }
 
@@ -368,3 +429,109 @@ fun String.normalizeModalityName(): String =
 
 fun List<String>?.normalizeModalities(): List<String>? =
     this?.map { it.normalizeModalityName() }?.distinct()?.takeIf { it.isNotEmpty() }
+
+/**
+ * [T-android-modality-provider-fallback] Provider-level default modalities,
+ * used ONLY when a model declares none at all.
+ *
+ * Android derived modality purely from the two stored lists, which are filled
+ * either by a hand-written catalog literal or by ModelsDevApi.enrichModel. A
+ * model that models.dev has not catalogued yet — i.e. every model in its first
+ * days, Fable 5.1 being the case that surfaced this — has both lists null, and
+ * every `contains("image")` check then answered false. The model detail screen
+ * showed image / PDF / audio / video input all switched OFF for a model that
+ * plainly supports images.
+ *
+ * iOS never had the gap because `capabilities` is computed and falls back to a
+ * per-provider table (LLMTypes.swift `knownCapabilities`). This is the Android
+ * port of that table, values copied rather than re-derived:
+ *
+ *   Anthropic  .vision          → text, image, pdf
+ *   OpenAI     .vision          → text, image, pdf
+ *   OpenRouter .vision          → text, image, pdf
+ *   Google     .fullMultimodal  → text, image, pdf, audio, video
+ *   xAI, Kimi, GitHub Copilot  .vision  → text, image, pdf
+ *     ([T-provider-default-modality-key], iOS 97577e81d; see below)
+ *   (unknown)  .textOnly        → text
+ *
+ * Providers absent from iOS's table are absent here too, and fall through to
+ * text-only. That is deliberate: DeepSeek and every third-party
+ * OpenAI-compatible endpoint (vLLM, Ollama, LiteLLM…, labelled "Custom" by
+ * OpenAIModelsApi) keep deriving modality from what their /v1/models actually
+ * returned. Inventing a default for them is exactly the regression this table
+ * must not cause — a relay that serves a text-only model would start
+ * advertising image input.
+ */
+private val VISION_INPUT = listOf("text", "image", "pdf")
+private val FULL_MULTIMODAL_INPUT = listOf("text", "image", "pdf", "audio", "video")
+
+private val PROVIDER_DEFAULT_INPUT_MODALITIES: Map<String, List<String>> = mapOf(
+    "Anthropic" to VISION_INPUT,
+    "OpenAI" to VISION_INPUT,
+    "OpenRouter" to VISION_INPUT,
+    "Google" to FULL_MULTIMODAL_INPUT,
+    // [T-android-image-input-preflight] `LLMModel.provider` carries
+    // ProviderType.displayName, and the Gemini type's display name is
+    // "Google Gemini" — the "Google" row above never matched a real model, so
+    // un-catalogued Gemini models fell through with no default at all.
+    "Google Gemini" to FULL_MULTIMODAL_INPUT,
+    // [T-provider-default-modality-key] Port of iOS 97577e81d. iOS's enum
+    // (`ProviderType.defaultModality`) already said .vision for xAI, Kimi Code
+    // and GitHub Copilot, but its capability table had no rows for them, and a
+    // miss there is silent: it falls through to text-only. Android had the same
+    // gap. The shape is GH#265's: a Grok released after the last models.dev
+    // snapshot (grok-4.6 on its first day) declares no modalities, so it
+    // reported no image input — the model detail screen showed every input
+    // switch off and the image-input preflight refused photos for it.
+    //
+    // Keyed under BOTH spellings a real model can carry, the lesson of the
+    // Gemini row above: the catalog and the models APIs write "xAI" / "Kimi" /
+    // "GitHub Copilot" (the same strings iOS keys on), while the provider import
+    // path stamps ProviderType.displayName ("xAI (Grok)", "Kimi Code"). A model
+    // that declares its own list is unaffected; this only fills a null.
+    "xAI" to VISION_INPUT,
+    "xAI (Grok)" to VISION_INPUT,
+    "Kimi" to VISION_INPUT,
+    "Kimi Code" to VISION_INPUT,
+    "GitHub Copilot" to VISION_INPUT,
+)
+
+/** Output side of the same table. Every entry above is input-multimodal only
+ *  (iOS's `.fullMultimodal` is aliased to `.fullMultimodalInput`), so text out
+ *  is the correct default across the board. */
+private val PROVIDER_DEFAULT_OUTPUT_MODALITIES: Map<String, List<String>> = mapOf(
+    "Anthropic" to listOf("text"),
+    "OpenAI" to listOf("text"),
+    "OpenRouter" to listOf("text"),
+    "Google" to listOf("text"),
+    "Google Gemini" to listOf("text"),
+    "xAI" to listOf("text"),
+    "xAI (Grok)" to listOf("text"),
+    "Kimi" to listOf("text"),
+    "Kimi Code" to listOf("text"),
+    "GitHub Copilot" to listOf("text"),
+)
+
+/**
+ * [T-android-modality-provider-fallback] Input modalities to USE, with the
+ * provider default applied only as a last resort.
+ *
+ * Precedence, lowest priority last:
+ *   1. the model's own list (a catalog literal, or models.dev enrichment)
+ *   2. the provider default table
+ *
+ * The user's per-model override sits ABOVE both and is applied by the caller
+ * (ModelEntryDetailScreen / ModelOverrides), which never reaches this property
+ * when an override exists.
+ *
+ * Read this — not the raw field — for capability questions like "can it take an
+ * image". Do NOT read it for the voice SHAPE predicates: those match the stored
+ * lists exactly and must keep seeing null as null (see VoiceModality).
+ */
+val LLMModel.effectiveInputModalities: List<String>?
+    get() = inputModalities.normalizeModalities()
+        ?: PROVIDER_DEFAULT_INPUT_MODALITIES[provider]
+
+val LLMModel.effectiveOutputModalities: List<String>?
+    get() = outputModalities.normalizeModalities()
+        ?: PROVIDER_DEFAULT_OUTPUT_MODALITIES[provider]

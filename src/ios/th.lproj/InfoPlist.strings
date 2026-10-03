@@ -1,0 +1,20 @@
+/* Info.plist permission strings — ไทย */
+
+"NSLocationWhenInUseUsageDescription" = "Minis ใช้ตำแหน่งของคุณเพื่อบันทึกว่าเซสชันเอเจนต์เริ่มต้นที่ใดในประวัติเซสชันของคุณ";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis ใช้ตำแหน่งในเบื้องหลังเพื่อให้งานของเอเจนต์ทำงานต่อได้ขณะที่ไม่ได้เปิดแอป ข้อมูลตำแหน่งใช้เพื่อบันทึกประวัติเซสชันเท่านั้น";
+"NSCalendarsUsageDescription" = "Minis เข้าถึงปฏิทินเพื่อให้เอเจนต์ AI ดูตารางเวลา ตรวจสอบเวลาว่าง และสร้างกิจกรรมแทนคุณได้";
+"NSCalendarsFullAccessUsageDescription" = "Minis เข้าถึงปฏิทินเพื่อให้เอเจนต์ AI ดูตารางเวลา ตรวจสอบเวลาว่าง และสร้างกิจกรรมแทนคุณได้";
+"NSRemindersUsageDescription" = "Minis เข้าถึงเตือนความจำเพื่อให้เอเจนต์ AI ค้นหาและสร้างรายการเตือนความจำแทนคุณได้";
+"NSRemindersFullAccessUsageDescription" = "Minis เข้าถึงเตือนความจำเพื่อให้เอเจนต์ AI ค้นหาและสร้างรายการเตือนความจำแทนคุณได้";
+"NSCameraUsageDescription" = "Minis ต้องการเข้าถึงกล้องเพื่อถ่ายรูปสำหรับการสนทนากับ AI";
+"NSPhotoLibraryUsageDescription" = "Minis ต้องการเข้าถึงคลังรูปภาพเพื่อแนบรูปภาพในการสนทนากับ AI";
+"NSPhotoLibraryAddUsageDescription" = "Minis ต้องการสิทธิ์ในการบันทึกวิดีโอและรูปภาพลงในคลังรูปภาพของคุณ";
+"NSHealthShareUsageDescription" = "Minis เข้าถึง HealthKit เพื่อให้เอเจนต์ AI อ่านข้อมูลสุขภาพ เช่น จำนวนก้าว อัตราการเต้นของหัวใจ การนอน และการออกกำลังกายแทนคุณได้";
+"NSHealthUpdateUsageDescription" = "Minis เขียนข้อมูลลง HealthKit เพื่อให้เอเจนต์ AI บันทึกข้อมูลสุขภาพ เช่น จำนวนก้าว น้ำหนัก และการดื่มน้ำแทนคุณได้";
+"NSContactsUsageDescription" = "Minis เข้าถึงรายชื่อเพื่อให้เอเจนต์ AI ค้นหา แสดง และจัดการรายชื่อของคุณแทนคุณได้";
+"NSAppleMusicUsageDescription" = "Minis เข้าถึงคลังสื่อเพื่อให้เอเจนต์ AI ค้นหาคลังเพลงของคุณและควบคุมการเล่นได้";
+"NSMicrophoneUsageDescription" = "Minis ต้องการเข้าถึงไมโครโฟนสำหรับการป้อนข้อมูลด้วยเสียงในแชท";
+"NSSpeechRecognitionUsageDescription" = "Minis ใช้การรู้จำเสียงพูดเพื่อแปลงเสียงของคุณเป็นข้อความ";
+"NSHomeKitUsageDescription" = "Minis เข้าถึง HomeKit เพื่อให้เอเจนต์ AI ตรวจสอบและควบคุมอุปกรณ์สมาร์ทโฮมของคุณแทนคุณได้";
+"NSAlarmKitUsageDescription" = "Minis ใช้ AlarmKit เพื่อให้เอเจนต์ AI ตั้งนาฬิกาปลุกและตัวจับเวลาแทนคุณได้";
+"NSLocalNetworkUsageDescription" = "เครื่องเสมือนต้องการเข้าถึงเครือข่ายสำหรับการเชื่อมต่อแบบ SLIRP";

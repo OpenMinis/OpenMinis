@@ -36,13 +36,34 @@ class ScheduledTaskStore(private val context: Context) {
 
     fun get(taskId: String): ScheduledTask? = all().firstOrNull { it.id == taskId }
 
-    fun upsert(task: ScheduledTask) {
+    // [T-android-scheduled-fire-claim] Every write is a read-modify-write of
+    // the WHOLE list, and writers run on several threads (the alarm receiver,
+    // a run's completion on IO, the task screens, the CLI). Unserialised, two
+    // writes that overlap lose one of them — a count or anchor that just moved
+    // silently moves back, and an interval then overshoots its --count.
+    // apply() updates the in-memory map before returning, so the next read
+    // under the lock already sees the previous write.
+    fun upsert(task: ScheduledTask): Unit = synchronized(LOCK) {
         val current = all().filter { it.id != task.id }
         write(current + task)
     }
 
-    fun delete(taskId: String) {
+    fun delete(taskId: String): Unit = synchronized(LOCK) {
         write(all().filter { it.id != taskId })
+    }
+
+    /**
+     * [T-android-scheduled-fire-claim] Atomic read-modify-write of one row:
+     * [transform] sees the row as stored right now and returns its new value,
+     * or null to leave it unchanged. Returns what was written (null when the
+     * row is missing or nothing was written).
+     */
+    fun update(taskId: String, transform: (ScheduledTask) -> ScheduledTask?): ScheduledTask? = synchronized(LOCK) {
+        val tasks = all()
+        val cur = tasks.firstOrNull { it.id == taskId } ?: return null
+        val next = transform(cur) ?: return null
+        write(tasks.map { if (it.id == taskId) next else it })
+        next
     }
 
     fun clear() {
@@ -73,6 +94,9 @@ class ScheduledTaskStore(private val context: Context) {
 
     companion object {
         private const val TAG = "ScheduledTaskStore"
+
+        /** Process-wide: stores are constructed per call site, the file is one. */
+        private val LOCK = Any()
         private const val PREFS_NAME = "minis_scheduled_tasks_prefs"
         private const val KEY_TASKS = "tasks_json"
     }

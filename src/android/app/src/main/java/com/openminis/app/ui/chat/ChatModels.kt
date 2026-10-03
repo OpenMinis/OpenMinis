@@ -101,6 +101,44 @@ data class StreamingDelta(
     val isAwaitingModelResponse: Boolean,
 )
 
+/**
+ * [T-android-usage-capsule-time] One assistant turn's token counts, parsed from
+ * the `token_usage` JSON column.
+ *
+ * The column is written as a JSON literal by ChatViewModel.persistAssistantTurn;
+ * this reads the same five keys back. Parsing is total — a malformed or partial
+ * row yields null rather than throwing, because a bad usage string must never
+ * stop a message from rendering.
+ */
+data class ChatTokenUsage(
+    val inputTokens: Int,
+    val outputTokens: Int,
+    val cacheCreationTokens: Int,
+    val cacheReadTokens: Int,
+    val latestContextTokens: Int,
+) {
+    companion object {
+        fun parse(json: String?): ChatTokenUsage? {
+            if (json.isNullOrBlank()) return null
+            return runCatching {
+                val o = org.json.JSONObject(json)
+                val u = ChatTokenUsage(
+                    inputTokens = o.optInt("inputTokens", 0),
+                    outputTokens = o.optInt("outputTokens", 0),
+                    cacheCreationTokens = o.optInt("cacheCreationTokens", 0),
+                    cacheReadTokens = o.optInt("cacheReadTokens", 0),
+                    latestContextTokens = o.optInt("latestContextTokens", 0),
+                )
+                // An all-zero row carries nothing worth a capsule.
+                if (u.inputTokens == 0 && u.outputTokens == 0 &&
+                    u.cacheReadTokens == 0 && u.cacheCreationTokens == 0 &&
+                    u.latestContextTokens == 0
+                ) null else u
+            }.getOrNull()
+        }
+    }
+}
+
 data class ChatMessage(
     val id: String,
     val role: String,
@@ -147,6 +185,20 @@ data class ChatMessage(
     // ChatMessage.sourceSortOrder, which serves the same UI↔raw mapping
     // role (AIChatViewModel.swift:3411, 3421).
     val sourceDbIds: List<String> = emptyList(),
+    // [T-android-usage-capsule-time] Token usage for this assistant turn and
+    // the instant it finished, for the capsule under the bubble.
+    //
+    // `completedAt` is the persisted row's `created_at`, which IS the
+    // completion time here and not the request time: ChatRepository.append-
+    // Message stamps `createdAt = now` in the same call that writes
+    // `tokenUsage`, and ChatViewModel only makes that call once the turn has
+    // produced its usage. So no new column was needed.
+    //
+    // Both are null for a user message, for an assistant turn still streaming,
+    // and for rows written before usage was recorded — the capsule renders
+    // only when usage is present.
+    val tokenUsage: ChatTokenUsage? = null,
+    val completedAt: Long? = null,
 ) {
     /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the
@@ -166,13 +218,32 @@ data class ChatMessage(
         get() = role == "assistant" && isInternalBridgeText(content)
 
     companion object {
-        /** Current bridge wording — MUST stay byte-identical to the string
-         *  written in ChatViewModel.injectQueuedPromptsAsNewTurn. */
-        private const val INTERNAL_BRIDGE_TEXT =
+        /** Current bridge wording before a user follow-up injected mid-loop.
+         *  ChatViewModel.injectQueuedPromptsAsNewTurn writes this constant, so
+         *  the two cannot drift apart. */
+        internal const val INTERNAL_BRIDGE_TEXT =
             "(Interrupted mid-task by a new user message. Decide based on the new " +
                 "message and overall context whether the prior task should continue — do " +
                 "not forget or abandon it unless the user explicitly says to stop, or the " +
                 "new message makes clear it is no longer needed.)"
+
+        /** [T-scheduled-preemptive-insert] Bridge before a scheduled fire
+         *  slipped in between tool calls: a pause, not a change of course. */
+        /**
+         * [T-android-scheduled-resume-nudge] The one-shot hidden user turn sent
+         * when the model answered a scheduled fire inserted between tool calls
+         * and then stopped, although the task it interrupted may not be done.
+         * Verbatim from iOS RawMessage.scheduledResumeNudgeText (c9131e862).
+         * Starts with <system-reminder>, so it is never rendered.
+         */
+        internal const val SCHEDULED_RESUME_NUDGE_TEXT =
+            "<system-reminder>The scheduled task above has been handled. If the task you were working on before it " +
+                "arrived is not finished yet, continue it now from where you left off; if it is already complete, " +
+                "reply briefly and stop.</system-reminder>"
+
+        internal const val SCHEDULED_INSERT_BRIDGE_TEXT =
+            "(Pausing briefly between tool calls: a scheduled task has just fired and is delivered next. " +
+                "I will deal with it, then pick up the task I was working on where I left off.)"
 
         /**
          * Every bridge text this app has ever generated. Matching only the
@@ -184,6 +255,7 @@ data class ChatMessage(
          */
         private val INTERNAL_BRIDGE_TEXTS = listOf(
             INTERNAL_BRIDGE_TEXT,
+            SCHEDULED_INSERT_BRIDGE_TEXT,
             // Pre-2026-07-23 wording.
             "(Interrupted mid-task to handle your new message. Will return to the prior task after.)",
         )
@@ -203,7 +275,38 @@ data class QueuedPrompt(
     val id: String,
     val text: String,
     val attachments: List<InputAttachment> = emptyList(),
-)
+    /** [T-p2-gentle-injection] Who queued it — decides whether it may cut the
+     *  running plan short at the next tool boundary (USER) or must wait for
+     *  the loop to end on its own (PROGRAMMATIC). */
+    val origin: QueuedPromptOrigin = QueuedPromptOrigin.USER,
+    /** [T-scheduled-tool-prefill] Tool calls run as the first turn of the
+     *  loop that carries this prompt, before the model is asked. Only a
+     *  scheduled task sets these; a typed follow-up never has any. */
+    val prefill: List<com.openminis.app.scheduled.PrefilledToolCall> = emptyList(),
+    /** [T-scheduled-preemptive-insert] Id of the scheduled task whose fire
+     *  this is, or null for anything else. Set at enqueue from the
+     *  <scheduled_task> envelope, and only for PROGRAMMATIC prompts — a user
+     *  typing the tag by hand does not become a scheduled fire. */
+    val scheduledTaskId: String? = null,
+) {
+    val isScheduledFire: Boolean get() = scheduledTaskId != null
+}
+
+/**
+ * [T-p2-gentle-injection] Origin of a queued prompt.
+ *
+ * A USER follow-up typed while the agent is busy is an interruption by
+ * intent ("怎么样了" — stop the plan, answer me), so the agent loop injects
+ * it the moment the current tool call closes (T-android-queued-message-
+ * interrupt-on-toolclose). A PROGRAMMATIC prompt — a scheduled job firing,
+ * a background helper reporting back, an RPC/CLI send — carries no such
+ * intent: it is new information for the NEXT turn, and cutting a running
+ * shell_execute→read→edit plan short to deliver it is exactly the "helper
+ * result interrupted my sleep 90" report. Those wait for the loop to end
+ * and are drained as a fresh turn, like a follow-up the user typed after
+ * the agent went idle.
+ */
+enum class QueuedPromptOrigin { USER, PROGRAMMATIC }
 
 /**
  * Execution status of an assistant tool block. Mirrors iOS `ToolBlockStatus`
@@ -246,6 +349,14 @@ data class SlashCommand(
      * [isSkill] so the picker can tag MCP rows with [mcp] + a wrench icon and
      * skills with ⚡. Tapping fills the composer with the server name; the
      * actual discovery/call happens model-side via minis-mcp-cli.
+     *
+     * [T-android-mcp-slash-dispatch] READ BY `ChatViewModel.executeSlashCommand`,
+     * which routes `isSkill || isMcp` down the composer-fill path. That reader
+     * was missing until GH#372: the flag was written here and consulted
+     * nowhere, so tapping an MCP row fell through to the built-in-id dispatch
+     * and silently cleared the composer. If you add another row KIND, give it a
+     * flag AND a reader in that guard — a write-only flag is invisible to
+     * review and to the type system alike.
      */
     val isMcp: Boolean = false,
 )

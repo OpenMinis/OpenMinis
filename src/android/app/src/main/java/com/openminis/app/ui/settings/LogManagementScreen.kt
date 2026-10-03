@@ -86,6 +86,7 @@ fun LogManagementScreen(
     var loading by remember { mutableStateOf(true) }
     var showDeleteAllConfirm by remember { mutableStateOf(false) }
     var loggingEnabled by remember { mutableStateOf(AppLogger.isEnabled(context)) }
+    var loggingVerbose by remember { mutableStateOf(AppLogger.isVerbose(context)) }
 
     // T-config: Logs / Config Changes segmented control. Default to
     // "logs"; a `?tab=config-audit` deep-link query lands users straight
@@ -164,6 +165,11 @@ fun LogManagementScreen(
                     loggingEnabled = it
                     AppLogger.setEnabled(context, it)
                 },
+                loggingVerbose = loggingVerbose,
+                onSetVerbose = {
+                    loggingVerbose = it
+                    AppLogger.setVerbose(context, it)
+                },
                 onLogFileClick = onLogFileClick,
                 onDeleteAll = { showDeleteAllConfirm = true },
             )
@@ -205,6 +211,8 @@ private fun LogsBody(
     loading: Boolean,
     loggingEnabled: Boolean,
     onToggleLogging: (Boolean) -> Unit,
+    loggingVerbose: Boolean,
+    onSetVerbose: (Boolean) -> Unit,
     onLogFileClick: (fileName: String) -> Unit,
     onDeleteAll: () -> Unit,
 ) {
@@ -225,6 +233,26 @@ private fun LogsBody(
                 onCheckedChange = onToggleLogging,
                 showDivider = false,
             )
+        }
+
+        // [T-android-log-level] Mirrors iOS's "Detail Level" picker.
+        if (loggingEnabled) {
+            SettingsSection(
+                header = stringResource(R.string.log_section_detail_level),
+                footer = stringResource(R.string.log_detail_level_footer),
+            ) {
+                SettingsChoiceRow(
+                    title = stringResource(R.string.log_detail_level_info),
+                    selected = !loggingVerbose,
+                    onSelect = { onSetVerbose(false) },
+                )
+                SettingsChoiceRow(
+                    title = stringResource(R.string.log_detail_level_verbose),
+                    selected = loggingVerbose,
+                    onSelect = { onSetVerbose(true) },
+                    showDivider = false,
+                )
+            }
         }
 
         // While the IO load is in flight (single frame in practice, but the

@@ -1,5 +1,6 @@
 package com.openminis.app.ui
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -73,5 +74,58 @@ class DisplayBitmapLimitsTest {
         val w = 1600
         val h = 1200
         assertTrue(maxOf(w, h) <= DisplayBitmapLimits.MAX_DISPLAY_EDGE_PX)
+    }
+
+    // ── [T-android-tool-thumb-fullres-decode] bounded file decode ─────────
+    //
+    // The tool thumbnails decoded full-resolution screenshots (~10 MB native
+    // each) into a tile a few dozen dp wide. `decodeFileBounded` needs a real
+    // decoder, but the arithmetic that decides the sample size is pure and is
+    // where an off-by-one would silently re-open the leak.
+
+    @Test
+    fun `a phone screenshot is sampled down to the thumbnail bound`() {
+        // 1080x2400 is the common capture size. At 512 the sample must be 8:
+        // 2400/4 = 600 > 512, 2400/8 = 300 <= 512.
+        val s = DisplayBitmapLimits.sampleSizeFor(1080, 2400, DisplayBitmapLimits.MAX_THUMBNAIL_EDGE_PX)
+        assertEquals(8, s)
+        // ~10.4 MB -> ~160 KB of ARGB_8888.
+        val bytes = (1080L / s) * (2400L / s) * bytesPerPixel
+        assertTrue("sampled thumbnail is $bytes bytes", bytes < 1L * 1024 * 1024)
+    }
+
+    @Test
+    fun `sampling never leaves the longest edge above the bound`() {
+        for ((w, h) in listOf(1 to 1, 512 to 512, 513 to 100, 1080 to 2400, 3000 to 17920, 8192 to 8192)) {
+            val s = DisplayBitmapLimits.sampleSizeFor(w, h, DisplayBitmapLimits.MAX_THUMBNAIL_EDGE_PX)
+            assertTrue(
+                "${w}x$h sample=$s -> ${w / s}x${h / s} exceeds the bound",
+                maxOf(w / s, h / s) <= DisplayBitmapLimits.MAX_THUMBNAIL_EDGE_PX,
+            )
+        }
+    }
+
+    @Test
+    fun `sampling is always a power of two and never upsamples`() {
+        assertEquals(1, DisplayBitmapLimits.sampleSizeFor(100, 100, 512))
+        assertEquals(1, DisplayBitmapLimits.sampleSizeFor(512, 512, 512))
+        assertEquals(2, DisplayBitmapLimits.sampleSizeFor(513, 10, 512))
+        val s = DisplayBitmapLimits.sampleSizeFor(3000, 17920, DisplayBitmapLimits.MAX_DISPLAY_EDGE_PX)
+        assertTrue("sample=$s must be a power of two", s > 0 && (s and (s - 1)) == 0)
+    }
+
+    @Test
+    fun `degenerate inputs fall back to an unsampled decode`() {
+        // A zero from inJustDecodeBounds means the decoder could not read the
+        // header; the caller returns null before ever reaching this, but the
+        // function must not loop forever or divide by zero if it does.
+        assertEquals(1, DisplayBitmapLimits.sampleSizeFor(0, 2400, 512))
+        assertEquals(1, DisplayBitmapLimits.sampleSizeFor(1080, 0, 512))
+        assertEquals(1, DisplayBitmapLimits.sampleSizeFor(1080, 2400, 0))
+    }
+
+    @Test
+    fun `the thumbnail bound is well under the display ceiling`() {
+        assertTrue(DisplayBitmapLimits.MAX_THUMBNAIL_EDGE_PX < DisplayBitmapLimits.MAX_DISPLAY_EDGE_PX)
     }
 }

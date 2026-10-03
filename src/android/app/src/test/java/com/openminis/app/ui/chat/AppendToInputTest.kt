@@ -113,4 +113,48 @@ class AppendToInputTest {
         listOf("alpha", "beta", "gamma").forEach { draft = join(draft, it)!! }
         assertEquals("alpha beta gamma ", draft)
     }
+
+    // ─── Code fences (T-android-append-to-input-fence, iOS 44b465e11) ─────
+
+    private val block = "```kotlin\nval x = 1\n```"
+
+    @Test
+    fun `a fenced block goes on its own line after a draft`() {
+        assertEquals("look at\n$block\n", join("look at", block))
+    }
+
+    @Test
+    fun `a draft ending in a newline gets no extra blank line before the fence`() {
+        assertEquals("look at\n$block\n", join("look at\n", block))
+    }
+
+    @Test
+    fun `a fence into an empty draft ends with a newline, not a space`() {
+        assertEquals("$block\n", join("", block))
+    }
+
+    @Test
+    fun `prose that ends in a closing fence gets a newline after it`() {
+        val snippet = "See this:\n$block"
+        assertEquals("draft $snippet\n", join("draft", snippet))
+    }
+
+    @Test
+    fun `a snippet that opens with a fence but ends in prose keeps a space after`() {
+        val snippet = "$block\nthen more"
+        assertEquals("draft\n$snippet ", join("draft", snippet))
+    }
+
+    @Test
+    fun `tilde fences count too`() {
+        val tilde = "~~~\ncode\n~~~"
+        assertEquals("draft\n$tilde\n", join("draft", tilde))
+    }
+
+    @Test
+    fun `typing after an appended block starts on a fresh line`() {
+        val joined = join("", block)!! + "next"
+        assertEquals("```", joined.lines().dropLast(1).last())
+        assertEquals("next", joined.lines().last())
+    }
 }

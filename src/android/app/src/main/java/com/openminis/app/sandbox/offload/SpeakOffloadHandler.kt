@@ -1,6 +1,8 @@
 package com.openminis.app.sandbox.offload
 
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
@@ -30,8 +32,9 @@ import java.util.Locale
  * this commit doesn't regress.
  *
  * Init order: TTS initialisation is asynchronous, so the first `speak` call
- * after boot can race and silently no-op on slower devices. We wait up to 2s
- * for init, and if still unready return a structured error so the model knows
+ * after boot can race and silently no-op on slower devices. We wait up to
+ * [TextToSpeechManager.INIT_TIMEOUT_MS] (the manager's own budget) for init,
+ * and if still unready return a structured error so the model knows
  * speech didn't actually play.
  *
  * Voice resolution: iOS treats `--voice` as a BCP-47 language tag (passed to
@@ -87,7 +90,10 @@ class SpeakOffloadHandler(private val context: Context) : NativeOffloadHandler {
         if (text.isBlank()) {
             return NativeOffloadResult(2, "android-speak: missing <text>\n$HELP")
         }
-        if (!waitForInit(2_000)) {
+        // [T-android-tts-init-timeout] Wait as long as the manager itself does:
+        // 2 s gave up before TextToSpeechManager's own 4 s budget, so a slow
+        // engine cold start (OPPO ColorOS) was reported as "no engine".
+        if (!waitForInit(TextToSpeechManager.INIT_TIMEOUT_MS)) {
             val body = JSONObject()
                 .put("error", "tts_unavailable")
                 .put(
@@ -143,7 +149,7 @@ class SpeakOffloadHandler(private val context: Context) : NativeOffloadHandler {
      *   - `Voice.features`        → no gender field, marked "unspecified"
      */
     private fun cmdVoices(args: OffloadArgs): NativeOffloadResult {
-        if (!waitForInit(2_000)) {
+        if (!waitForInit(TextToSpeechManager.INIT_TIMEOUT_MS)) {
             val body = JSONObject()
                 .put("error", "tts_unavailable")
                 .put("voices", JSONArray())
@@ -215,18 +221,30 @@ class SpeakOffloadHandler(private val context: Context) : NativeOffloadHandler {
         return tts.isInitialized
     }
 
-    /** Best-effort: enumerate installed TTS engines via a throw-away TextToSpeech probe. */
-    private fun probeEngineNames(): List<String> {
-        return try {
-            val probe = TextToSpeech(context.applicationContext, null)
-            try {
-                probe.engines.orEmpty().mapNotNull { it.name }
-            } finally {
-                try { probe.shutdown() } catch (_: Throwable) {}
-            }
-        } catch (_: Throwable) {
-            emptyList()
+    /**
+     * Installed TTS engines (package names), best effort.
+     *
+     * [T-android-tts-engine-visibility] A direct PackageManager query for
+     * TTS_SERVICE — the same query TextToSpeech.getEngines() makes, without
+     * constructing a throw-away TextToSpeech that starts (and then abandons)
+     * an engine binding just to read a list. Either way the result is subject
+     * to package visibility: it is only complete because the manifest now
+     * declares a TTS_SERVICE <queries> entry. Before that, a user-installed
+     * engine was filtered out and this reported `available_engines: []` on a
+     * device that had one.
+     */
+    private fun probeEngineNames(): List<String> = try {
+        val pm = context.packageManager
+        val intent = Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE)
+        val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentServices(intent, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentServices(intent, 0)
         }
+        resolved.mapNotNull { it.serviceInfo?.packageName }.distinct()
+    } catch (_: Throwable) {
+        emptyList()
     }
 
     @Suppress("unused")

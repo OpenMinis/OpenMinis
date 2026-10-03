@@ -47,7 +47,19 @@ enum UploadPolicy {
                 // nothing. (OpenMinis#98, found while investigating that issue.)
                 return ["ProviderConfig", "ProviderConfigV2",
                         "ProviderInstanceV3", "ProviderModelEntryV3", "ProviderModelGroupV3",
-                        "ProviderThinkingRuleV3"]
+                        "ProviderThinkingRuleV3",
+                        // [T-subagent-own-store] Sub agent definitions no longer
+                        // live in ProviderConfig, but they stay under the
+                        // PROVIDERS toggle rather than gaining a switch of their
+                        // own: a definition's only external reference is a model
+                        // group, the Sub Agents screen sits in the same settings
+                        // area, and inventing a seventh user-facing sync switch
+                        // for one small roster is a UX decision this refactor
+                        // should not make unilaterally. Listing it here is what
+                        // keeps `sync.providers = off` from silently uploading
+                        // it anyway — the exact gap [T-icloud-uploadpolicy-v3-gap]
+                        // records for the V3 types.
+                        "SubAgentV3"]
             case .envVars:
                 return ["EnvVar", "EnvVarV2"]
             case .memory:

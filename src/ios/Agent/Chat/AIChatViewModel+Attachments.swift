@@ -4,9 +4,359 @@ import UniformTypeIdentifiers
 
 private let logger = AppLogger(category: "AIChatVM")
 
-// MARK: - Attachment Management
+// MARK: - Pasted-text placeholders [T-paste-placeholder]
+
+/// One long pasted text stashed for the current session's draft.
+/// `charCount`/`preview` are derived at init for the chip row — the buffer
+/// itself only ever needs `id` and `text`.
+struct PastedText: Identifiable {
+    let id: Int
+    let text: String
+    var charCount: Int { text.count }
+    var preview: String {
+        String(text.prefix(40)).replacingOccurrences(of: "\n", with: " ")
+    }
+}
+
+enum PastePlaceholder {
+    /// The literal the composer inserts and send() expands. Exactly one
+    /// spelling — `[Pasted#N]`, capital P, no space —
+    /// and the regex accepts only that: this is protocol text,
+    /// not localizable UI copy, and a single strict form keeps hand-typed
+    /// lookalikes falling through verbatim as designed.
+    static let regex = try! NSRegularExpression(pattern: #"\[Pasted#(\d+)\]"#)
+
+    static func literal(for id: Int) -> String { "[Pasted#\(id)]" }
+
+    /// [T-paste-huge-to-file] Above this many characters a paste stops being a
+    /// placeholder and becomes a .txt document attachment instead. Rationale:
+    /// a placeholder still has to be rendered somewhere and expanded into the
+    /// prompt, whereas a file attachment already has a bounded chip, an
+    /// on-demand preview, and an established upload path.
+    static let fileAttachmentThreshold = 15_000
+
+    /// [T-paste-mediaref] A pasted-text MediaRef is identified by a
+    /// `Pasted#<id>` filename prefix on an ordinary `text/plain` ref — NOT by a
+    /// custom mimeType.
+    ///
+    /// Matches Android (bbf392ce0 / PastedMedia.isPastedRef) so both platforms
+    /// read the same DB rows identically; these rows sync between devices, so a
+    /// divergent convention here would make one platform misread the other's
+    /// history. Reusing `text/plain` also keeps every existing consumer (icon
+    /// mapper, preview router, share sheet) working unchanged, since they all
+    /// treat `originalFileName` as an opaque label — teaching them a new
+    /// mimeType subtype would be a much larger surface.
+    static let pastedMimeType = "text/plain"
+    static let mediaRefFileNamePrefix = "Pasted#"
+
+    /// Session-media subdirectory pasted text is stored under. Separate from
+    /// `attachments/` so a pasted ref is identifiable by path and never appears
+    /// among the user's real uploads. Must be listed in
+    /// ChatStore.deleteSessionMedia or these files would outlive their session.
+    static let mediaSubdir = "pasted"
+
+    /// True when this MediaRef holds pasted conversation text (not a user file).
+    static func isPastedTextRef(_ ref: MediaRef) -> Bool {
+        ref.mimeType == pastedMimeType
+            && (ref.originalFileName?.hasPrefix(mediaRefFileNamePrefix) ?? false)
+    }
+
+    /// Filename given to a pasted-text MediaRef — carries the placeholder id so
+    /// a stored message can be traced back to its `[Pasted#N]` origin.
+    static func mediaRefFileName(for id: Int) -> String { "\(mediaRefFileNamePrefix)\(id).txt" }
+
+    /// [T-paste-mediaref] Substituted when a pasted ref's file cannot be read.
+    /// Explicit degradation beats a silent empty string: the model is told the
+    /// context is missing instead of answering as if nothing was ever pasted.
+    static let unavailableMarker =
+        "[pasted content unavailable — the stored text file is missing]"
+
+    /// Recover the placeholder id from such a filename (`Pasted#3.txt` → 3).
+    static func idFromMediaRefFileName(_ name: String?) -> Int? {
+        guard let name, name.hasPrefix(mediaRefFileNamePrefix) else { return nil }
+        let rest = name.dropFirst(mediaRefFileNamePrefix.count)
+        let digits = rest.prefix { $0.isNumber }
+        return digits.isEmpty ? nil : Int(digits)
+    }
+
+    /// Replace every `[Pasted#N]` in `text` using `lookup`. Returns `text`
+    /// unchanged when nothing resolves.
+    ///
+    /// Single pass over the ORIGINAL string: spans are collected first, then
+    /// stitched, so replacement output is never rescanned — pasted content that
+    /// itself contains something shaped like `[Pasted#2]` cannot be expanded a
+    /// second time (no injection through paste content). A `nil` from `lookup`
+    /// leaves that literal verbatim, matching the long-standing "unknown ids
+    /// pass through" contract.
+    static func expand(_ text: String, lookup: (Int) -> String?) -> String {
+        guard text.contains("[Pasted#") else { return text }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return text }
+
+        var result = ""
+        var lastEnd = 0
+        for m in matches {
+            result += ns.substring(with: NSRange(location: lastEnd, length: m.range.location - lastEnd))
+            let idStr = ns.substring(with: m.range(at: 1))
+            if let id = Int(idStr), let replacement = lookup(id) {
+                result += replacement
+            } else {
+                result += ns.substring(with: m.range)   // unknown id: keep literal
+            }
+            lastEnd = m.range.location + m.range.length
+        }
+        result += ns.substring(from: lastEnd)
+        return result
+    }
+
+    /// The long-paste threshold, shared by every paste surface (composer
+    /// Priority 5 + the voice panel's paste menu — previously two inline
+    /// copies). English-dominant text (>50% ASCII letters) is measured in
+    /// words, CJK/mixed in characters.
+    static func isLong(_ text: String) -> Bool {
+        let asciiLetters = text.unicodeScalars.filter {
+            ($0.value >= 0x41 && $0.value <= 0x5A) || ($0.value >= 0x61 && $0.value <= 0x7A)
+        }.count
+        let isEnglishDominant = asciiLetters > text.count / 2
+        if isEnglishDominant {
+            let wordCount = text.components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }.count
+            return wordCount > 1000
+        }
+        return text.count > 1200
+    }
+}
 
 extension AIChatViewModel {
+
+    /// Stash a long pasted text and return the placeholder literal to insert
+    /// at the caret.
+    ///
+    /// [T-paste-huge-to-file] Above `PastePlaceholder.fileAttachmentThreshold`
+    /// the paste does NOT become a placeholder at all: it is written to a .txt
+    /// and added as an ordinary document attachment, so it travels the same
+    /// send/preview/delete/upload path as a user-picked file. Returns nil in
+    /// that case — the caller must NOT insert a literal, because the content is
+    /// already represented by the attachment chip.
+    func stashPastedText(_ text: String) -> String? {
+        if text.count > PastePlaceholder.fileAttachmentThreshold {
+            let ok = addPastedTextAsFileAttachment(text)
+            logger.info("[PastePlaceholder] huge paste (\(text.count) chars) → .txt attachment ok=\(ok)")
+            // If the file could not be written, fall through to the placeholder
+            // path rather than dropping the user's paste on the floor.
+            if ok { return nil }
+        }
+        let entry = PastedText(id: nextPasteId, text: text)
+        nextPasteId += 1
+        pastedTexts.append(entry)
+        logger.info("[PastePlaceholder] stashed #\(entry.id) (\(text.count) chars), buffer=\(self.pastedTexts.count)")
+        return PastePlaceholder.literal(for: entry.id)
+    }
+
+    /// [T-paste-huge-to-file] Write `text` to a temp .txt and attach it as a
+    /// normal document. Returns false if the write failed.
+    private func addPastedTextAsFileAttachment(_ text: String) -> Bool {
+        let fm = FileManager.default
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        let name = "Pasted_\(stamp).txt"
+        let url = fm.temporaryDirectory.appendingPathComponent(name)
+        do {
+            try Data(text.utf8).write(to: url, options: .atomic)
+        } catch {
+            logger.error("[PastePlaceholder] failed to write \(name): \(error.localizedDescription)")
+            return false
+        }
+        // Same entry point a Files-app pick uses, so classification, the chip,
+        // upload and deletion all behave identically.
+        addFileAttachment(from: url)
+        // addFileAttachment copies into the attachment cache; the temp original
+        // is no longer needed.
+        try? fm.removeItem(at: url)
+        return true
+    }
+
+    /// [T-paste-single-split] Consume a draft's `[Pasted#N]` literals in ONE
+    /// place, producing everything every downstream consumer needs:
+    ///
+    ///   * `modelText`   — literals replaced by their full pasted bodies. This
+    ///     is what goes into `agentHistory`, which therefore NEVER contains a
+    ///     resolvable literal. Every provider request, retry, fallback,
+    ///     compaction summary and title generation reads history as-is and is
+    ///     automatically correct — there is no request-time expansion step left
+    ///     to forget to call.
+    ///   * `storedParts` — alternating `.text` / `.mediaRef` for `parts_json`,
+    ///     each paste written to its own `text/plain` file (Android
+    ///     PastedMedia.isPastedRef convention), so the DB never carries the
+    ///     blob and the bubble never typesets it.
+    ///
+    /// Returns nil when nothing in `draft` resolves against the buffer — the
+    /// caller keeps its plain `.text(draft)` path (unknown / hand-typed ids
+    /// pass through verbatim, the long-standing contract).
+    ///
+    /// Consumed entries are removed from `pastedTexts` here and nowhere else:
+    /// this function is the single point where a stash leaves the buffer.
+    ///
+    /// History: this replaces `resolveHistoryForOutbound`, which expanded
+    /// literals at request-build time and had to be manually wrapped around
+    /// every provider call site. Three separate bugs came from that shape —
+    /// each time a call site existed (or appeared) that the wrap missed, the
+    /// model silently received `[Pasted#N]` instead of the content. Expanding
+    /// once at the draft→AgentMessage boundary removes the entire class.
+    /// `liveCardMetas` mirrors what `toChatMessage` emits for a pasted ref on
+    /// session reload, so the just-sent bubble shows the SAME card the reload
+    /// path renders — before this, the live message carried no attachment for
+    /// the paste at all and the card only appeared after re-entering the
+    /// session ([T-paste-live-bubble-card]). Callers attach these to the
+    /// ChatMessage ONLY — never to the metas that feed the
+    /// `<user-attached-files>` XML: a paste is conversation content, not a
+    /// user file the model should discover via file tools.
+    /// `plannedFileIds` (paste id → storage uuid) comes from
+    /// `planPastedCards`: when present, the media file is written under the
+    /// PRE-PLANNED uuid so the card the bubble was born with points at the
+    /// real file. Ids without a plan fall back to a fresh uuid.
+    func consumePastedDraft(_ draft: String, sessionId: String,
+                            plannedFileIds: [Int: String] = [:]) async
+        -> (modelText: String, storedParts: [ContentPart], liveCardMetas: [AttachmentMeta])? {
+        guard !pastedTexts.isEmpty, draft.contains("[Pasted#") else { return nil }
+        let ns = draft as NSString
+        let matches = PastePlaceholder.regex.matches(
+            in: draft, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return nil }
+
+        var modelText = ""
+        var storedParts: [ContentPart] = []
+        var liveCardMetas: [AttachmentMeta] = []
+        var pending = ""            // text accumulated since the last emitted stored part
+        var lastEnd = 0
+        var consumedIds: Set<Int> = []
+        for m in matches {
+            let before = ns.substring(with: NSRange(location: lastEnd, length: m.range.location - lastEnd))
+            lastEnd = m.range.location + m.range.length
+            let idStr = ns.substring(with: m.range(at: 1))
+            guard let id = Int(idStr),
+                  let entry = pastedTexts.first(where: { $0.id == id }) else {
+                let literal = ns.substring(with: m.range)   // unknown id: keep literal
+                modelText += before + literal
+                pending += before + literal
+                continue
+            }
+            modelText += before + entry.text
+            pending += before
+            if !pending.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                storedParts.append(.text(pending))
+            }
+            pending = ""
+            // [T-paste-mediaref] Own subdirectory, deliberately NOT the shared
+            // `attachments/` dir: identifiable by path alone (edit-guard +
+            // renderer rely on it), never surfaces among real uploads, and
+            // deleteSessionMedia already covers it. `linuxPath` stays nil so
+            // the model's shell tools can't read it.
+            let ref = await ChatStore.shared.saveMedia(
+                data: Data(entry.text.utf8),
+                mimeType: PastePlaceholder.pastedMimeType,
+                sessionId: sessionId,
+                originalFileName: PastePlaceholder.mediaRefFileName(for: id),
+                subdir: PastePlaceholder.mediaSubdir,
+                fileId: plannedFileIds[id]
+            )
+            storedParts.append(.mediaRef(ref))
+            // Card meta matching the birth-time plan (same path when planned).
+            // Callers use these only to reconcile bubbles that were NOT born
+            // with a plan (queued prompts enqueued by older flows); paths
+            // already present on the ChatMessage are skipped.
+            let rel = ref.relativePath as NSString
+            liveCardMetas.append(AttachmentMeta(
+                path: "/var/minis/\((rel.deletingLastPathComponent as NSString).lastPathComponent)/\(rel.lastPathComponent)",
+                size: Data(entry.text.utf8).count,
+                modified: Date(),
+                displayName: ref.originalFileName,
+                pastedId: id,
+                pastedCharCount: entry.text.count
+            ))
+            consumedIds.insert(id)
+            logger.info("[PastePlaceholder] consumed #\(id) (\(entry.text.count) chars) as mediaRef \(ref.id)")
+        }
+        guard !consumedIds.isEmpty else { return nil }
+        let tail = ns.substring(from: lastEnd)
+        modelText += tail
+        pending += tail
+        if !pending.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            storedParts.append(.text(pending))
+        }
+        pastedTexts.removeAll { consumedIds.contains($0.id) }
+        logger.info("[PastePlaceholder] draft consumed ids=\(consumedIds.sorted()), buffer=\(self.pastedTexts.count)")
+        return (modelText, storedParts, liveCardMetas)
+    }
+
+    /// [T-paste-live-bubble-card] Plan the paste cards for a draft at BUBBLE
+    /// BIRTH time (synchronous, main actor): for every literal that resolves
+    /// against the buffer, pre-generate the storage uuid and build the final
+    /// AttachmentMeta. The bubble is born with these cards — per the
+    /// row-birth doctrine, post-insert attachment mutations are a re-layout
+    /// race, and on device the tile row never appeared at all when attached
+    /// after the first render. `consumePastedDraft` later writes each file
+    /// to its planned id, so the card paths are valid from the start.
+    ///
+    /// The bubble TEXT keeps the `[Pasted#N]` literal verbatim (user
+    /// requirement: the marker shows where the pasted content sits); the
+    /// card carries the content reference in composer-chip style.
+    func planPastedCards(for draft: String) -> (plan: [Int: String], metas: [AttachmentMeta]) {
+        guard !pastedTexts.isEmpty, draft.contains("[Pasted#") else { return ([:], []) }
+        let ns = draft as NSString
+        let matches = PastePlaceholder.regex.matches(
+            in: draft, range: NSRange(location: 0, length: ns.length))
+        var plan: [Int: String] = [:]
+        var metas: [AttachmentMeta] = []
+        for m in matches {
+            guard let id = Int(ns.substring(with: m.range(at: 1))),
+                  plan[id] == nil,
+                  let entry = pastedTexts.first(where: { $0.id == id }) else { continue }
+            let fileId = UUID().uuidString
+            plan[id] = fileId
+            metas.append(AttachmentMeta(
+                path: "/var/minis/\(PastePlaceholder.mediaSubdir)/\(fileId).txt",
+                size: Data(entry.text.utf8).count,
+                modified: Date(),
+                displayName: PastePlaceholder.mediaRefFileName(for: id),
+                pastedId: id,
+                pastedCharCount: entry.text.count
+            ))
+        }
+        return (plan, metas)
+    }
+
+    /// [T-paste-mediaref] True when the displayed message at `idx` carries
+    /// pasted content stored as a mediaRef.
+    ///
+    /// Detected via the AttachmentMeta emitted for such a ref by
+    /// `toChatMessage` — that card is the one artefact of the paste that IS
+    /// reachable from a `ChatMessage`. A draft-stage message (buffer still
+    /// populated, literal still in the text) is deliberately NOT matched: that
+    /// one edits fine.
+    func messageHasPastedRef(_ idx: Int) -> Bool {
+        guard idx >= 0, idx < messages.count else { return false }
+        // Exact: only pasted refs live under the dedicated subdir, so this
+        // cannot mistake a user-uploaded .txt for pasted content (which would
+        // wrongly block editing a perfectly ordinary message).
+        return messages[idx].attachments.contains {
+            $0.path.contains("/\(PastePlaceholder.mediaSubdir)/")
+        }
+    }
+
+    /// Chip-row removal: drop the buffer entry AND strip its exact literal
+    /// from the draft so no orphan `[pasted#N]` noise is left behind. Uses
+    /// plain string replacement of the full literal — `#1` cannot bite into
+    /// `#12` because the trailing `]` is part of the needle.
+    func removePastedText(id: Int) {
+        pastedTexts.removeAll { $0.id == id }
+        let literal = PastePlaceholder.literal(for: id)
+        if inputText.contains(literal) {
+            inputText = inputText.replacingOccurrences(of: literal, with: "")
+        }
+        logger.info("[PastePlaceholder] removed #\(id), buffer=\(self.pastedTexts.count)")
+    }
 
     private var attachmentCacheDir: URL {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

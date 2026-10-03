@@ -35,6 +35,14 @@ final class SessionActivityTracker: ObservableObject {
         /// When `toolName` last changed. Used to pick the most-recently-invoked
         /// tool across all sessions for the Dynamic Island minimal icon.
         var lastToolChange: Date = .distantPast
+        /// [T-agent-inner-tool-front] Last time ANYTHING about this session's
+        /// tool changed — the name or just the status line.
+        ///
+        /// Distinct from `lastToolChange`, which only moves when the tool NAME
+        /// changes and drives the Dynamic Island's "most recent tool" pick. An
+        /// agent doing ten browser_use operations in a row never changes its
+        /// name, so a picker keyed on that would see it as idle the whole time.
+        var lastActivity: Date = .distantPast
     }
     @Published var sessionToolInfo: [String: SessionToolInfo] = [:]
 
@@ -62,9 +70,18 @@ final class SessionActivityTracker: ObservableObject {
         if nameChanged {
             info.lastToolChange = Date()
         }
+        if nameChanged || statusChanged {
+            info.lastActivity = Date()
+        }
         sessionToolInfo[sessionId] = info
         guard nameChanged || statusChanged else { return }
-        logger.info("[LiveActivity][toolInfo] sid=\(sessionId.prefix(8)) toolName=\(toolName) status=\(toolStatus) nameChanged=\(nameChanged)")
+        // [T-log-noise-privacy] No `status` text: it is the model's own
+        // description of what it is doing right now ("搜索苹果 Q4 财报详情") —
+        // user-facing content, written to the log on EVERY tool step of every
+        // running session, which sub agents multiply by the fan-out width.
+        // The tool name and the changed flag are what the Live Activity and
+        // the tool bar actually key off; the prose was only ever incidental.
+        logger.info("[LiveActivity][toolInfo] sid=\(sessionId.prefix(8)) toolName=\(toolName) statusLen=\(toolStatus.count) nameChanged=\(nameChanged)")
         if nameChanged {
             throttledUpdateWorkItem?.cancel()
             throttledUpdateWorkItem = nil
@@ -349,7 +366,25 @@ final class SessionConcurrencyManager: ObservableObject {
 final class ViewModelCache {
     static let shared = ViewModelCache()
 
+    /// [T-vmcache-pools] Which LRU pool a cached VM belongs to.
+    ///
+    /// Child (sub agent) conversations must not compete with the user's own
+    /// for the ordinary budget: a fan-out of three sub agents used to evict
+    /// three normal conversations, and a long-running child could hold a slot
+    /// the user never sees. They get their own, larger pool instead.
+    enum PoolKind: String {
+        /// A conversation the user opens directly.
+        case normal
+        /// A sub agent / helper run. Created by HelperRunner, usually never
+        /// displayed; see `releaseRenderState`.
+        case child
+    }
+
     private var cache: [String: AIChatViewModel] = [:]
+
+    /// Pool membership per session id. Absent ⇒ `.normal`, so every existing
+    /// call site keeps its previous behaviour without passing anything.
+    private var poolKinds: [String: PoolKind] = [:]
 
     /// Session IDs in least-recently-used → most-recently-used order. Kept in
     /// sync with `cache`: appended/moved to the end on every access, removed
@@ -366,6 +401,15 @@ final class ViewModelCache {
     /// the VM and re-hydrates messages from SQLite via the normal isNew path.
     /// [T-ios-vmcache-lru-evict]
     private static let softCap: Int = 6
+
+    /// [T-vmcache-pools] Separate, larger cap for child (sub agent) VMs.
+    ///
+    /// Larger than the normal cap because a single fan-out can legitimately
+    /// hold several children at once (`AgentJobRegistry.maxConcurrentChildJobs`
+    /// is 3, and finished-but-not-yet-swept children linger), while each child
+    /// is cheaper: `releaseRenderState` strips its render state as soon as it
+    /// is not on screen, so a resident child is mostly message text.
+    private static let childSoftCap: Int = 10
 
     init() {
         // Evict aggressively under memory pressure — same hook BrowserTabPool
@@ -394,7 +438,30 @@ final class ViewModelCache {
     /// For staleness-aware callers (e.g. AIChatView's init), additionally check
     /// `consumeStaleFlag(sessionId:)` AFTER this call and trigger a reload
     /// when it returns true.
-    func getOrCreate(for sessionId: String) -> (vm: AIChatViewModel, isNew: Bool) {
+    func getOrCreate(for sessionId: String, kind: PoolKind = .normal) -> (vm: AIChatViewModel, isNew: Bool) {
+        // A session's pool is decided by whoever FIRST caches it, and then
+        // sticks. HelperRunner passes `.child`; everyone else gets `.normal`
+        // by default, so the 18 non-helper call sites needed no change.
+        //
+        // [T-vmcache-pool-sticky] Assign only when unset. The tag has to be
+        // immune in BOTH directions, not just one:
+        //
+        //  • child → normal: HelperBlockView / HelperSheet open a child for
+        //    VIEWING and must not thereby move it into the user's budget.
+        //    Covered by only writing on `.child`.
+        //  • normal → child: a `.child` call naming an ordinary session would
+        //    have silently re-tagged it, moving a conversation the user owns
+        //    into the sub agent pool — where it is swept against a different
+        //    cap and, worse, released by HelperSheet's disappear handler.
+        //    Reachable today: `debug.agent.openHelperSheet` takes an arbitrary
+        //    `childSessionId` from the caller (DebugJSONRPC.swift:2833), and
+        //    nothing downstream proves it is really a child.
+        //
+        // Whichever kind wins is therefore the one the session was first
+        // created under, which is the only one with real information behind it.
+        if kind == .child, poolKinds[sessionId] == nil, cache[sessionId] == nil {
+            poolKinds[sessionId] = .child
+        }
         if let existing = cache[sessionId] {
             touch(sessionId)
             logger.info("🔄SESSION ViewModelCache HIT session=\(sessionId) vm=\(existing.vmInstanceId) isProcessing=\(existing.isProcessing)")
@@ -443,8 +510,12 @@ final class ViewModelCache {
     }
 
     /// Remove a session's ViewModel from the cache (e.g. on session delete).
+    /// Deliberately still a `cancel()`: this is session DELETION, where the
+    /// conversation and its in-flight work really are meant to stop. Only the
+    /// capacity-driven paths above were changed to release instead.
     func remove(sessionId: String) {
         lruOrder.removeAll { $0 == sessionId }
+        poolKinds.removeValue(forKey: sessionId)
         if let removed = cache.removeValue(forKey: sessionId) {
             removed.cancel()
             logger.info("🔄SESSION ViewModelCache REMOVE session=\(sessionId) vm=\(removed.vmInstanceId)")
@@ -485,16 +556,45 @@ final class ViewModelCache {
         if vm.isProcessing { return false }
         if sessionId == AIChatViewModel.activeSessionId { return false }
         if SessionActivityTracker.shared.activeSessions.contains(sessionId) { return false }
+        // [T-ios-evict-cancels-subagents] A parent whose own loop has ENDED but
+        // which still has sub agents running in the background is NOT idle.
+        //
+        // `isProcessing` describes this VM's own agent loop only. The ordinary
+        // background-delegation shape is: the parent delegates, finishes its
+        // turn (isProcessing → false) and waits for the callback. Such a VM
+        // looked evictable, and `evict` calls `vm.cancel()` — which is the full
+        // user-Stop path, including `cancelAll(parent:)`. So an LRU sweep
+        // silently killed live sub agents and logged them as
+        // `reason=user stopped the conversation (silent)`, blaming a user who
+        // had touched nothing.
+        //
+        // Observed: 22 evictions in one session, all `over softCap(6)`; job
+        // 3CBA002A died 189s into a 30m budget this way, its parent reading
+        // `isProcessing=false lastBlocks=4`.
+        if AgentJobRegistry.shared.hasActiveChildren(parent: sessionId) { return false }
         return true
     }
 
+    /// [T-vmcache-pools] Each pool is swept against its OWN cap, so a burst of
+    /// sub agents can no longer evict the conversations the user is working in
+    /// (and vice versa). Within a pool the order is still plain LRU.
     private func evictIfOverCap() {
-        guard cache.count > Self.softCap else { return }
-        var overflow = cache.count - Self.softCap
-        // Walk LRU → MRU, evicting evictable VMs first.
-        for sessionId in lruOrder where overflow > 0 {
+        evictPool(.normal, cap: Self.softCap)
+        evictPool(.child, cap: Self.childSoftCap)
+    }
+
+    private func poolKind(_ sessionId: String) -> PoolKind {
+        poolKinds[sessionId] ?? .normal
+    }
+
+    private func evictPool(_ kind: PoolKind, cap: Int) {
+        let members = lruOrder.filter { poolKind($0) == kind && cache[$0] != nil }
+        guard members.count > cap else { return }
+        var overflow = members.count - cap
+        // Walk LRU → MRU within this pool only.
+        for sessionId in members where overflow > 0 {
             guard let vm = cache[sessionId], isEvictable(sessionId, vm) else { continue }
-            evict(sessionId, vm: vm, reason: "over softCap(\(Self.softCap))")
+            evict(sessionId, vm: vm, reason: "over \(kind.rawValue)Cap(\(cap))")
             overflow -= 1
         }
     }
@@ -507,12 +607,25 @@ final class ViewModelCache {
         for (sessionId, vm) in victims {
             evict(sessionId, vm: vm, reason: "memory warning")
         }
-        logger.info("🔄SESSION ViewModelCache memory-warning evicted \(victims.count) VM(s), \(self.cache.count) remain")
+        // [T-renderer-cache-bounded] The renderers survive VM eviction (they
+        // are keyed by message, on a static), so under real pressure they have
+        // to be dropped explicitly or the warning frees far less than it looks.
+        // Every VM that stays resident rebuilds its renderers lazily.
+        let renderers = SelectableMarkdownView.dropAllRenderers()
+        logger.info("🔄SESSION ViewModelCache memory-warning evicted \(victims.count) VM(s), \(self.cache.count) remain, dropped \(renderers) renderer(s)")
     }
 
+    /// [T-vmcache-release] Evicting is a RELEASE, never a cancel.
+    ///
+    /// This line used to be `vm.cancel()` — the full user-Stop path, including
+    /// `AgentJobRegistry.cancelAll(parent:silent:)`. A cache-size policy
+    /// therefore reached through into the job registry and killed live sub
+    /// agents, reporting them as a user stop (761be79da). `releaseForEviction`
+    /// frees the same memory and touches no jobs.
     private func evict(_ sessionId: String, vm: AIChatViewModel, reason: String) {
-        vm.cancel()
+        vm.releaseForEviction()
         cache.removeValue(forKey: sessionId)
+        poolKinds.removeValue(forKey: sessionId)
         lruOrder.removeAll { $0 == sessionId }
         // Clearing the stale marker too — a rebuilt VM loads fresh from SQLite.
         staleSessionIds.remove(sessionId)
@@ -622,6 +735,40 @@ final class ViewModelCache {
     /// Set by MoveToSessionSheet, consumed by AIChatView on appear — but only
     /// by the view whose session id matches `targetId`.
     static var pendingTransfer: PendingTransfer?
+
+    // MARK: - Move-to seed  [T-ios-moveto-seed]
+
+    /// The most recent session list any surface has loaded, kept so the
+    /// "Move to…" sheet can paint populated on its first frame instead of
+    /// waiting on the ChatStore actor.
+    ///
+    /// Why it lives here rather than being read from `ChatStore`: that store is
+    /// a real `actor`, so its `sessionListCache` cannot be read synchronously
+    /// from the main actor. Exposing it `nonisolated` would hand out an array
+    /// that DB writes mutate concurrently — a genuine data race, not a
+    /// theoretical one. This holder is `@MainActor` (the whole type is), so
+    /// both the write and the read happen on the main actor and no isolation is
+    /// crossed at all.
+    ///
+    /// Deliberately a plain snapshot, not a second source of truth: it is only
+    /// ever used as a first-frame placeholder, and the sheet's own `.task`
+    /// overwrites it with the authoritative query a moment later. Staleness is
+    /// therefore bounded by one frame of display, and a wrong row corrects
+    /// itself before it can be tapped in any realistic timing.
+    private(set) static var recentSessionsSeed: [ChatSession] = []
+
+    /// Record a freshly-loaded list as the seed. Callers pass whatever they
+    /// just fetched; the child-session filter is applied here so every writer
+    /// cannot forget it (child sessions are never move targets).
+    static func noteSessionsLoaded(_ sessions: [ChatSession]) {
+        let visible = sessions.filter { !$0.isChild }
+        guard !visible.isEmpty else { return }   // never replace a good seed with nothing
+        recentSessionsSeed = Array(visible.prefix(MoveToSeedLimit))
+    }
+
+    /// Cap on the stored seed. Matches the sheet's own `recentLimit`: holding
+    /// more would just be retained memory the picker never shows.
+    static let MoveToSeedLimit = 50
 
     /// Drop a staged transfer, deleting any attachment files it still owns so a
     /// discarded move doesn't leak cache entries.

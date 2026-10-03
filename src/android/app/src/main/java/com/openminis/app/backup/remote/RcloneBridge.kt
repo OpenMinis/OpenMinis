@@ -52,26 +52,36 @@ object RcloneBridge {
     const val CONNECT_TIMEOUT_SECONDS = 20L
 
     /**
-     * How long a single transfer may STALL before it is treated as dead.
+     * [T-android-backup-webdav-deadline] rclone's `Timeout`, which becomes Go's
+     * `http.Transport.ResponseHeaderTimeout` (fs/fshttp/http.go).
      *
-     * This is an inactivity timeout, not a cap on total transfer time: rclone
-     * resets it whenever bytes move, so a multi-hundred-megabyte upload over a
-     * slow home link is unaffected as long as it is making progress. That is
-     * what lets the same value protect a list call and a large upload without
-     * a separate budget for each.
+     * It is NOT a stall timeout, whatever this comment used to say. The timer
+     * starts once the request body has been fully WRITTEN and is a flat
+     * deadline that never resets while the server works. For a WebDAV `PUT`
+     * to a gateway in front of a cloud drive (AList/OpenList), the server
+     * re-uploads the whole file to the cloud before it answers, so 45 s meant
+     * "must answer within 45 s after receiving everything", and those servers
+     * failed EVERY backup even at full speed.
      *
-     * Applies PER ATTEMPT, so the worst-case wait is roughly this times the
-     * retry count — which is why the retry counts come down with it.
+     * Measured on a Pixel 4a against a WebDAV server that stalls 60 s after the
+     * body arrives: 45 s failed each attempt 46 s after the body landed ("i/o
+     * timeout"), twice, 92 s in all; 300 s succeeds at 60 s. Same finding and
+     * value as iOS (ceac9df0b). 300 s is rclone's own default.
+     *
+     * A per-size value is no fix: the delay follows the BACKEND (a local disk
+     * answers at once, a cloud relay takes minutes), not the byte count.
+     * What bounds a server that is down is [CONNECT_TIMEOUT_SECONDS]; what
+     * ends a genuinely wedged transfer is Stop, which reaches an upload in
+     * flight through `job/stop` (RcloneChunkedUpload).
      */
-    const val IO_TIMEOUT_SECONDS = 45L
+    const val IO_TIMEOUT_SECONDS = 300L
 
     /**
      * Low-level and high-level retry budgets.
      *
-     * Retries MULTIPLY the visible freeze because the timeout above is applied
-     * per attempt. rclone's defaults (10 low-level) would turn a 45s stall into
-     * minutes of apparent hang against a server that accepts a connection and
-     * then says nothing.
+     * Kept at one each: retries multiply every wait above, and rclone's
+     * defaults (10 low-level) would turn one slow server into minutes of
+     * apparent hang. The uploader adds its own single, backed-off retry.
      */
     const val LOW_LEVEL_RETRIES = 1L
     const val RETRIES = 1L

@@ -214,6 +214,28 @@ object VoiceOutputState {
         }
     }
 
+    /**
+     * [T-android-readaloud-menu-enable] The user explicitly asked to hear
+     * something (a long-press "Read Selection" / "Read from Start"), so turn
+     * read-replies on and lift a temporary mute before it is spoken.
+     *
+     * Every utterance goes through [ReadAloudPlayer.enqueue], which drops it
+     * unless [canPlay] (read-replies ON and not muted). Read-replies defaults
+     * to OFF, so with default settings both menu actions were silent — no
+     * sound, no error. A menu tap is a deliberate request, not the automatic
+     * reply TTS the switch exists to govern.
+     *
+     * Mirrors iOS, where all three explicit entry points do this before
+     * speaking: `readReplyFromStart`, `speakText` (T-issue316-read-selection-
+     * enable) and `activateReadAloudState` (T-readaloud-menu-force-unmute).
+     * Both setters persist, exactly like the user flipping the switch — so,
+     * as on iOS, later replies are read aloud too until it is switched off.
+     */
+    fun activateForExplicitReadAloud() {
+        if (!_isEnabled.value) setEnabled(true)
+        if (_isMuted.value) setMuted(false)
+    }
+
     fun setMuted(value: Boolean) {
         if (_isMuted.value == value) return
         _isMuted.value = value

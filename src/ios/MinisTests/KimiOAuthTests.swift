@@ -9,9 +9,9 @@ final class KimiOAuthTests: XCTestCase {
 
     private final class FakeStore {
         var stored: KimiTokenStorage?
-        var deleteCount = 0
+        var markCount = 0
         func load() -> KimiTokenStorage? { stored }
-        func delete() { stored = nil; deleteCount += 1 }
+        func markNeedsReauth() { markCount += 1 }
     }
 
     private func storage(access: String, refresh: String?, expiresInMinutes: Double = 60) -> KimiTokenStorage {
@@ -42,13 +42,13 @@ final class KimiOAuthTests: XCTestCase {
             error: invalidGrant(),
             isFatal: KimiOAuthRefreshCoordinator.isRefreshTokenInvalid,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         )
         XCTAssertEqual(result.accessToken, "NEW_ACCESS")
-        XCTAssertEqual(store.deleteCount, 0, "must NOT delete a token another request rotated")
+        XCTAssertEqual(store.markCount, 0, "must NOT mark a token another request rotated")
     }
 
-    func testInvalidGrant_noRotation_deletesCredentials() {
+    func testInvalidGrant_noRotation_marksForReauth() {
         let store = FakeStore()
         store.stored = storage(access: "OLD_ACCESS", refresh: "OLD_REFRESH")
         XCTAssertThrowsError(try KimiOAuthRefreshCoordinator.resolveAfterRefreshFailure(
@@ -57,9 +57,9 @@ final class KimiOAuthTests: XCTestCase {
             error: invalidGrant(),
             isFatal: KimiOAuthRefreshCoordinator.isRefreshTokenInvalid,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         ))
-        XCTAssertEqual(store.deleteCount, 1, "genuine invalid_grant must clear credentials")
+        XCTAssertEqual(store.markCount, 1, "genuine invalid_grant must mark for re-login, keeping credentials")
     }
 
     func testTransientFailure_keepsExistingValidToken() throws {
@@ -71,10 +71,10 @@ final class KimiOAuthTests: XCTestCase {
             error: networkError(),
             isFatal: KimiOAuthRefreshCoordinator.isRefreshTokenInvalid,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         )
         XCTAssertEqual(result.accessToken, "TOKEN")
-        XCTAssertEqual(store.deleteCount, 0)
+        XCTAssertEqual(store.markCount, 0)
     }
 
     func testTransientFailure_butExpired_throws() {
@@ -86,9 +86,9 @@ final class KimiOAuthTests: XCTestCase {
         XCTAssertThrowsError(try KimiOAuthRefreshCoordinator.resolveAfterRefreshFailure(
             staleRefreshToken: "R", existingStorage: expired, error: networkError(),
             isFatal: KimiOAuthRefreshCoordinator.isRefreshTokenInvalid,
-            loadCurrent: store.load, deleteCredentials: store.delete
+            loadCurrent: store.load, markNeedsReauth: store.markNeedsReauth
         ))
-        XCTAssertEqual(store.deleteCount, 0, "transient failure never deletes, even when expired")
+        XCTAssertEqual(store.markCount, 0, "transient failure never marks, even when expired")
     }
 
     // MARK: - Device-flow poll classification (RFC 8628 §3.5)

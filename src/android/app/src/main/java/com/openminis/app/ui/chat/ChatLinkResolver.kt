@@ -15,12 +15,15 @@ import java.io.File
  * Routing order:
  *  1. Recognized minis:// deep-link action  → DeepLink (delegated to MainActivity via Intent.ACTION_VIEW)
  *  2. minis://<sandbox path>, file://, or absolute /var/minis|/root path → SandboxFile
+ *     (a folder → SandboxFolder, opened in the in-app file browser)
  *  3. Non-http(s) external schemes (intent://, mailto:, tel:, geo:, …)   → ExternalApp
  *  4. Anything else (http(s), about, file)                                → Web
  */
 sealed class ChatLinkAction {
     data class DeepLink(val action: DeepLinkAction) : ChatLinkAction()
     data class SandboxFile(val item: FileItem) : ChatLinkAction()
+    /** [T-minis-folder-link] A sandbox folder, as its Linux path (/var/minis/workspace/dir). */
+    data class SandboxFolder(val linuxPath: String) : ChatLinkAction()
     data class ExternalApp(val url: String) : ChatLinkAction()
     data class Web(val url: String) : ChatLinkAction()
 }
@@ -54,6 +57,13 @@ object ChatLinkResolver {
         if (hostFile != null && hostFile.exists() && !hostFile.isDirectory) {
             FileItem.from(hostFile)?.let { return ChatLinkAction.SandboxFile(it) }
         }
+        // [T-minis-folder-link] Agents link folders too (minis://workspace/dir/).
+        // Before, a folder fell through to Web, and a web preview of a
+        // minis:// folder URL renders nothing — the link looked dead.
+        if (hostFile != null && hostFile.isDirectory) {
+            sandboxFolderLinuxPath(trimmed, scheme, sessionId, context)
+                ?.let { return ChatLinkAction.SandboxFolder(it) }
+        }
 
         // T136: intent://, mailto:, tel:, geo:, market: etc. need a system
         // dispatch — the in-app preview WebView's `loadUrl(...)` doesn't
@@ -65,6 +75,33 @@ object ChatLinkResolver {
         }
 
         return ChatLinkAction.Web(trimmed)
+    }
+
+    /**
+     * [T-minis-folder-link] The Linux path of the folder a sandbox link names,
+     * so the file browser can open at it. Picks the same decode candidate
+     * [resolveSandboxFile] would. `file://` links carry a host path, not a
+     * Linux one, so they are not handled here.
+     */
+    private fun sandboxFolderLinuxPath(
+        raw: String,
+        scheme: String?,
+        sessionId: String?,
+        context: Context?,
+    ): String? {
+        fun isDir(linuxPath: String): Boolean =
+            (if (sessionId != null && context != null) {
+                PRootKernel.resolveSessionHostPath(sessionId, linuxPath, context)
+            } else {
+                PRootKernel.resolveHostPath(linuxPath)
+            })?.isDirectory == true
+        val candidates = when (scheme) {
+            "minis" -> minisPathCandidates(raw.removePrefix("minis://").substringBefore('?'))
+                .map { if (it.startsWith("/")) it else "/var/minis/$it" }
+            null -> listOf(raw).filter { it.startsWith("/") }
+            else -> emptyList()
+        }
+        return candidates.firstOrNull { isDir(it) }?.trimEnd('/')?.ifEmpty { "/" }
     }
 
     /**

@@ -71,6 +71,7 @@ extension AIChatViewModel {
         case .toolInputDelta(let name, _): return "toolInputDelta(\(name))"
         case .toolCallComplete(_, let name, _, _): return "toolCallComplete(\(name))"
         case .usage: return "usage"
+        case .responseModel: return "responseModel"
         case .thinkingDelta: return "thinkingDelta"
         case .reasoningContent: return "reasoningContent"
         case .reasoningEcho: return "reasoningEcho"
@@ -462,6 +463,7 @@ extension AIChatViewModel {
                     case "browser_use": .browserTool(action: "")
                     case "read_image": .readImageTool(path: "")
                     case "memory_write", "memory_get": .memoryTool(action: name)
+                    case SubAgentDefinition.toolName: .delegateTool(title: "")
                     default: .shellTool(command: name)
                     }
                     if name == "file_write" || name == "file_edit" {
@@ -965,6 +967,12 @@ extension AIChatViewModel {
                 result.iterationUsage.add(u)
                 #endif
 
+            case .responseModel(let reported):
+                // [T-agent-model-identity] The API named the model that is
+                // serving this turn — record it on the vm so an agent's
+                // parent block / job can show the effective model in place.
+                await MainActor.run { self.noteResponseModel(reported) }
+
             case .done(let reason):
                 // Final flush of thinking block content
                 if let thinkIdx = currentThinkingBlockIdx, !result.thinkingText.isEmpty {
@@ -975,7 +983,18 @@ extension AIChatViewModel {
                         messages[msgIdx].blocks[thinkIdx].content = finalThinking
                     }
                 }
-                result.stopReason = reason
+                // [T-openai-done-overwrite] GH#263. First terminal reason wins
+                // over a later generic `.endTurn`. Providers emit `.done` once
+                // for the real finish reason and again at end-of-stream (OpenAI
+                // `[DONE]`, Gemini/Antigravity `.done`), and the end-of-stream
+                // one only knows "tool calls or not". Letting it overwrite
+                // turned `.maxTokens` / `.refusal` into `.endTurn`, i.e. a
+                // truncated or declined reply into "empty response".
+                if let prior = result.stopReason, prior != .endTurn, reason == .endTurn {
+                    logger.info("[StopReason] keeping \(prior) over later .endTurn")
+                } else {
+                    result.stopReason = reason
+                }
             }
         }
         // The AsyncThrowingStream may silently terminate (return nil) on Task

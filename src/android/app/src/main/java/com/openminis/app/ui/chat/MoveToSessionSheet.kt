@@ -38,6 +38,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,7 @@ import com.openminis.app.R
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.repository.ChatRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.util.Calendar
 import java.util.Date
@@ -86,6 +88,16 @@ import java.util.concurrent.TimeUnit
  * already understands (AppNavigation's own New Chat action builds one the
  * same way), so nothing downstream needs to special-case it.
  */
+/**
+ * [T-android-moveto-perf] How many recent sessions the "Move to" picker offers.
+ *
+ * The sheet is a "move this chat somewhere recent" affordance, not a session
+ * browser: past the first screenful the user scrolls rather than reads, and the
+ * unbounded query behind it was the thing making the sheet pause. 50 is well
+ * past what fits on screen while staying a trivial indexed read.
+ */
+private const val MOVE_TO_SESSION_LIMIT = 50
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MoveToSessionSheet(
@@ -93,13 +105,54 @@ fun MoveToSessionSheet(
     chatRepository: ChatRepository,
     onDismiss: () -> Unit,
     onSelect: (String) -> Unit,
+    initialSessions: List<ChatSessionEntity> = emptyList(),
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var sessions by remember { mutableStateOf<List<ChatSessionEntity>>(emptyList()) }
 
-    LaunchedEffect(Unit) {
-        sessions = withContext(Dispatchers.IO) {
-            chatRepository.dao.listSessions().filter { it.id != currentSessionId }
+    // [T-android-moveto-perf] Paint something on the FIRST frame.
+    //
+    // The sheet used to start from an empty list and show its "no sessions"
+    // state until a cold `SELECT * FROM sessions` returned — off the main
+    // thread, so never a jank, but a visible blank pause the user reads as the
+    // sheet being slow.
+    //
+    // Two seeds, in order of preference:
+    //   1. `initialSessions`, if the caller already has a collected list. No
+    //      caller does today (ChatScreen is a single-chat screen and holds no
+    //      session list), but the parameter costs nothing and is the cheapest
+    //      path the moment one does.
+    //   2. otherwise the same Room Flow the home list subscribes to. Room keeps
+    //      that query's result warm for the observers that already exist, so
+    //      the first emission is typically immediate rather than a fresh disk
+    //      read.
+    //
+    // Either way the LaunchedEffect below still runs and replaces this with the
+    // authoritative bounded query, so a stale or over-long seed is corrected
+    // within a frame or two rather than being what the user acts on.
+    val seeded by remember(currentSessionId) {
+        chatRepository.dao.observeSessions()
+            .map { all ->
+                all.asSequence()
+                    .filter { it.id != currentSessionId && !it.isChild }
+                    .take(MOVE_TO_SESSION_LIMIT)
+                    .toList()
+            }
+    }.collectAsState(initial = initialSessions)
+
+    var refreshed by remember { mutableStateOf<List<ChatSessionEntity>?>(null) }
+    val sessions = refreshed ?: seeded
+
+    LaunchedEffect(currentSessionId) {
+        refreshed = withContext(Dispatchers.IO) {
+            // [T-child-session-leak] Hidden agent child sessions are reachable
+            // only through their parent's tool block — never a move target.
+            // [T-android-moveto-perf] Both that exclusion and the cap now live
+            // in SQL; see ChatDao.listRecentMovableSessions for why the filter
+            // has to precede the LIMIT.
+            chatRepository.dao.listRecentMovableSessions(
+                excludeId = currentSessionId,
+                limit = MOVE_TO_SESSION_LIMIT,
+            )
         }
     }
 

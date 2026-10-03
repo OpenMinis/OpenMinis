@@ -49,6 +49,7 @@ struct RetryRunIntent: AppIntent {
         let pendingId = ShortcutRunTracker.markPending(
             intent: "RetryRunIntent",
             sessionId: session.id,
+            waitForResult: waitForResult,
             eagerKeepAliveArmed: eagerResult.armed,
             eagerKeepAliveSkippedReason: eagerResult.skipReason
         )
@@ -59,6 +60,27 @@ struct RetryRunIntent: AppIntent {
         // session may have been created by hand in the app, and that tag also
         // drives near-capacity auto-compaction.
         vm.suppressGeneralCompletionNotification = true
+        // [T-headless-mount-activation] Resolve external folder mounts and
+        // WAIT for them before any agent work (issue #335).
+        //
+        // `activateAll()` runs from the root view's `.onAppear`, which a headless
+        // intent (`openAppWhenRun = false`) never builds — so on a cold or
+        // force-quit launch nothing acquired the security scopes, `activeURLs`
+        // stayed empty, and the external-mount snapshot the agent reads was
+        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // opened the app once.
+        //
+        // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the
+        // pass keeps running and publishes late (the mount becomes usable
+        // mid-run) instead of being abandoned. 12s because a cold iCloud
+        // FileProvider takes ~5s per bookmark on device and the resolves run
+        // concurrently, so this clears a realistic mount set with headroom
+        // without ever being the thing that hangs a Shortcut.
+        //
+        // Placed OUTSIDE the branch below: the VM may already be cached (isNew
+        // false) while this process still never activated mounts, which is exactly
+        // the force-quit case this fixes.
+        await MountedFoldersManager.shared.ensureActivated(timeout: 12)
         if isNew {
             await vm.loadSession()
         }

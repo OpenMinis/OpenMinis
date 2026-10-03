@@ -313,7 +313,11 @@ static int browser_use_handler(int argc, char **argv,
 
     __block NSDictionary *resultDict = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    [BrowserUseOffloadBridge executeWithJson:jsonStr
+    // [T-browser-cli-reclaim-scope] execute returns a token naming this one
+    // invocation, so a timeout below cancels only the call it abandons. The
+    // old (session id, tab id) key matched every concurrent CLI call, since
+    // the session id is process-wide and most commands name no tab.
+    uint64_t invocation = [BrowserUseOffloadBridge executeWithJson:jsonStr
                                   withBase64:withBase64
                                   completion:^(NSDictionary *data) {
         resultDict = data;
@@ -323,9 +327,20 @@ static int browser_use_handler(int argc, char **argv,
     // Give the bridge a generous window.
     long waitErr = dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 90 * NSEC_PER_SEC));
     if (waitErr != 0 || resultDict == nil) {
+        // [T-browser-cli-timeout-reclaim] OpenMinis#245. Giving up here used
+        // to leave the action running natively. It kept holding the tab's
+        // serial slot until the pool's 300s dead-tab ceiling, so for ~5
+        // minutes every later command on that tab failed its slot wait. Tell
+        // the bridge to cancel it now: the pool rebuilds the wedged tab and
+        // frees the slot, so the next command starts on a fresh WebView.
+        if (waitErr != 0) {
+            [BrowserUseOffloadBridge cancelAndReclaimWithInvocation:invocation];
+        }
         NSDictionary *err = noff_json_error(TOOL_NAME, @"execute",
                                             NOFF_ERR_INTERNAL_ERROR,
-                                            @"browser action timed out after 90s");
+                                            waitErr != 0
+                                                ? @"browser action timed out after 90s; the stuck action was cancelled and, if its tab had hung, the tab was replaced — run list_tabs, then retry"
+                                                : @"browser action timed out after 90s");
         noff_emit_json(stdout_fd, err, compact, quiet);
         return NOFF_EXIT_ERROR;
     }

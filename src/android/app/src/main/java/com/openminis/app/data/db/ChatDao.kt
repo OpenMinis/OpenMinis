@@ -53,6 +53,17 @@ data class SessionTailRow(
     @ColumnInfo(name = "parts_json") val partsJson: String,
 )
 
+/**
+ * [T-android-error-persist-current-turn] One row of a session read newest-first
+ * while looking for the current turn's assistant row (see
+ * [ChatDao.messageHeadNewestFirst]).
+ */
+data class MessageHeadRow(
+    val id: String,
+    val role: String,
+    @ColumnInfo(name = "parts_json") val partsJson: String,
+)
+
 @Dao
 interface ChatDao {
     // Sessions
@@ -61,6 +72,31 @@ interface ChatDao {
 
     @Query("SELECT * FROM sessions ORDER BY updated_at DESC")
     suspend fun listSessions(): List<ChatSessionEntity>
+
+    /**
+     * [T-android-moveto-perf] Bounded, pre-filtered session list for pickers
+     * that only ever show recent sessions (the "Move to" sheet).
+     *
+     * Deliberately a NEW method rather than a LIMIT on [listSessions]: that one
+     * has callers which genuinely need every row — backup export, storage
+     * accounting, the parent-id map, first-launch routing — and silently
+     * truncating it would corrupt their results rather than merely slow them.
+     *
+     * The child-session exclusion is done in SQL, not by the caller, because
+     * `isChild` is a computed Kotlin property over `parent_session_id` rather
+     * than a column. Filtering after a LIMIT would apply the cap to rows that
+     * are then thrown away, so a user whose most recent sessions happen to be
+     * agent children would get a near-empty picker. Filtering first means the
+     * limit counts only rows that can actually be shown.
+     */
+    @Query(
+        "SELECT * FROM sessions WHERE parent_session_id IS NULL AND id != :excludeId " +
+            "ORDER BY updated_at DESC LIMIT :limit",
+    )
+    suspend fun listRecentMovableSessions(
+        excludeId: String,
+        limit: Int = 50,
+    ): List<ChatSessionEntity>
 
     @Query("SELECT * FROM sessions WHERE id = :id")
     suspend fun getSession(id: String): ChatSessionEntity?
@@ -89,14 +125,50 @@ interface ChatDao {
     @Query("DELETE FROM sessions WHERE id = :id")
     suspend fun deleteSession(id: String)
 
-    // Full-text search across session titles and message content
-    @Query("""
-        SELECT DISTINCT s.* FROM sessions s
-        LEFT JOIN messages m ON m.session_id = s.id
-        WHERE s.title LIKE :pattern OR m.parts_json LIKE :pattern
-        ORDER BY s.updated_at DESC
-    """)
-    suspend fun searchSessions(pattern: String): List<ChatSessionEntity>
+    /** [T-p1-delegate-task] Children of a parent, for cascade delete. */
+    @Query("SELECT id FROM sessions WHERE parent_session_id = :parentId")
+    suspend fun childSessionIds(parentId: String): List<String>
+
+    /** Number of sub-agent child sessions; OrphanChildSweeper logs it. */
+    @Query("SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL")
+    suspend fun childSessionCount(): Int
+
+    /**
+     * [T-android-zombie-child-sweep] Child sessions whose parent row is gone.
+     *
+     * A sub agent runs in a hidden child session. If the process is killed
+     * mid-run, or a parent is removed by a path that did not cascade, the child
+     * stays in the table forever: it is filtered out of every picker, so the
+     * user cannot see it, let alone delete it.
+     *
+     * The NOT EXISTS is the whole judgement — a child with a live parent is
+     * never a candidate, including one whose sub agent is running right now.
+     * [olderThanMs] additionally spares anything recently touched, so a row
+     * being written this instant is out of scope no matter what else is true.
+     */
+    @Query(
+        """
+        SELECT id FROM sessions c
+        WHERE c.parent_session_id IS NOT NULL
+          AND c.parent_session_id != ''
+          AND c.updated_at < :olderThanMs
+          AND NOT EXISTS (SELECT 1 FROM sessions p WHERE p.id = c.parent_session_id)
+        """
+    )
+    suspend fun orphanChildSessionIds(olderThanMs: Long): List<String>
+
+    /**
+     * [T-android-search-visible-only] Session-list search. Raw because the SQL
+     * (SessionSearch.VISIBLE_SEARCH_SQL) uses SQLite's JSON functions, which an
+     * older device's SQLite may lack — the caller catches that and re-runs
+     * SessionSearch.LEGACY_SEARCH_SQL.
+     */
+    @RawQuery
+    suspend fun runSessionSearchQuery(query: SupportSQLiteQuery): List<SessionSearchRow>
+
+    /** [T-android-search-visible-only] A session's older matching messages. */
+    @RawQuery
+    suspend fun runPartsJsonQuery(query: SupportSQLiteQuery): List<PartsJsonRow>
 
     // ─── Folders (session groups) ──────────────────────────────────────────
     // [T-android-session-grouping] "Folder" in code, "Group" in the UI.
@@ -207,7 +279,12 @@ interface ChatDao {
     @Query("SELECT COUNT(*) FROM messages")
     suspend fun totalMessageCount(): Int
 
-    @Query("SELECT token_usage FROM messages WHERE session_id = :sessionId AND token_usage IS NOT NULL")
+    // [T-ctx-measure-outbound] Conversation order, explicitly. Callers take the
+    // LAST row that has something (the calibration seed, the stats sheet's
+    // latest context size), and without ORDER BY SQLite returns storage order —
+    // which a backup restore or an iCloud-synced row inserted late does not
+    // keep in step with the conversation.
+    @Query("SELECT token_usage FROM messages WHERE session_id = :sessionId AND token_usage IS NOT NULL ORDER BY sort_order ASC")
     suspend fun tokenUsages(sessionId: String): List<String>
 
     /**
@@ -323,6 +400,11 @@ interface ChatDao {
      * the load-side merge that folds consecutive assistant rows keeping the last
      * row's identity. No-op when the session has no assistant row yet (e.g. a
      * first-turn failure before any turn persisted).
+     *
+     * [T-android-error-persist-current-turn] Used for CLEARS only now. Writing
+     * an error through this stamped the PREVIOUS turn's good reply whenever the
+     * failing turn had not persisted a row of its own (GH#263); writes go
+     * through [com.openminis.app.data.repository.ChatRepository.persistTurnError].
      */
     @Query("""
         UPDATE messages SET error_info = :errorInfo
@@ -333,6 +415,21 @@ interface ChatDao {
         )
     """)
     suspend fun updateLastAssistantError(sessionId: String, errorInfo: String?)
+
+    /**
+     * [T-android-error-persist-current-turn] The session's row at [offset]
+     * counting back from the newest (offset 0 = newest). One row per call on
+     * purpose: the caller stops at the first assistant row or turn-starting
+     * user row, which is almost always within the last two or three rows, so
+     * it never pulls a whole transcript (or several large tool_result blobs)
+     * through a CursorWindow just to place an error sticker.
+     */
+    @Query("""
+        SELECT id, role, parts_json FROM messages
+        WHERE session_id = :sessionId
+        ORDER BY sort_order DESC LIMIT 1 OFFSET :offset
+    """)
+    suspend fun messageHeadNewestFirst(sessionId: String, offset: Int): MessageHeadRow?
 
     // Pinned sessions first, then by updated_at
     @Query("SELECT * FROM sessions ORDER BY CASE WHEN pinned_at IS NOT NULL THEN 0 ELSE 1 END, pinned_at DESC, updated_at DESC")
@@ -451,3 +548,14 @@ interface ChatDao {
         endMs: Long?,
     ): Int
 }
+
+/** [T-android-search-visible-only] A search hit: the session, and its newest matching message. */
+data class SessionSearchRow(
+    @androidx.room.Embedded val session: ChatSessionEntity,
+    @ColumnInfo(name = "hit_parts_json") val hitPartsJson: String?,
+)
+
+/** [T-android-search-visible-only] One message's parts, for the look-further-back pass. */
+data class PartsJsonRow(
+    @ColumnInfo(name = "parts_json") val partsJson: String,
+)

@@ -28,18 +28,58 @@ struct ModelOverrides: Codable, Hashable, Sendable {
     var supportsReasoning: Bool?
     var maxThinkingLevel: ThinkingLevel?
 
+    // MARK: - [T-model-custom-params] User-set request parameters
+    //
+    // Phase one: storage only. These are carried on the entry and round-trip
+    // through config / backup / sync; nothing reads them into a request yet,
+    // so adding them changes no behaviour on its own.
+    //
+    // All optional, and absence means "don't send it" rather than "send a
+    // default" — a model whose provider has its own sampling defaults must
+    // keep getting them, so `nil` has to stay distinguishable from any value
+    // the user could pick.
+
+    /// Sampling temperature. nil = leave the provider's default alone.
+    var temperature: Double?
+
+    /// Nucleus-sampling cutoff. nil = leave the provider's default alone.
+    var topP: Double?
+
+    /// Extra HTTP headers for this model's requests. nil (not `[:]`) means
+    /// unset, so an empty dictionary the user deliberately created is not
+    /// silently the same as never having configured one.
+    var customHeaders: [String: String]?
+
+    /// Free-form body parameters passed through to the provider.
+    ///
+    /// `[String: String]` per the phase-one spec. Worth stating plainly: this
+    /// cannot express a non-string JSON value (a number, bool, array or nested
+    /// object), so a parameter the provider expects as e.g. `{"n": 2}` cannot
+    /// be represented here yet. The type is the storage contract for this
+    /// phase; whoever implements the send path will have to decide between
+    /// coercing on the way out and widening this to a JSON value type.
+    var extraBodyParams: [String: String]?
+
     init(displayName: String? = nil,
          maxOutputTokens: Int? = nil,
          modalityOverride: ModelModality? = nil,
          contextWindow: Int? = nil,
          supportsReasoning: Bool? = nil,
-         maxThinkingLevel: ThinkingLevel? = nil) {
+         maxThinkingLevel: ThinkingLevel? = nil,
+         temperature: Double? = nil,
+         topP: Double? = nil,
+         customHeaders: [String: String]? = nil,
+         extraBodyParams: [String: String]? = nil) {
         self.displayName = displayName
         self.maxOutputTokens = maxOutputTokens
         self.modalityOverride = modalityOverride
         self.contextWindow = contextWindow
         self.supportsReasoning = supportsReasoning
         self.maxThinkingLevel = maxThinkingLevel
+        self.temperature = temperature
+        self.topP = topP
+        self.customHeaders = customHeaders
+        self.extraBodyParams = extraBodyParams
     }
 
     /// True when the user has not set any override.
@@ -50,10 +90,17 @@ struct ModelOverrides: Codable, Hashable, Sendable {
             && contextWindow == nil
             && supportsReasoning == nil
             && maxThinkingLevel == nil
+            && temperature == nil
+            && topP == nil
+            && customHeaders == nil
+            && extraBodyParams == nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case displayName, maxOutputTokens, modalityOverride, contextWindow, supportsReasoning, maxThinkingLevel
+        // [T-model-custom-params] Additive: an older payload simply lacks
+        // these keys and decodes them as nil.
+        case temperature, topP, customHeaders, extraBodyParams
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +115,14 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         } else {
             self.maxThinkingLevel = nil
         }
+        // [T-model-custom-params] `decodeIfPresent` throughout, so an override
+        // blob written before these fields existed — an old backup, a config
+        // synced from an older build — decodes to nil rather than throwing and
+        // losing every other override alongside it.
+        self.temperature = try container.decodeIfPresent(Double.self, forKey: .temperature)
+        self.topP = try container.decodeIfPresent(Double.self, forKey: .topP)
+        self.customHeaders = try container.decodeIfPresent([String: String].self, forKey: .customHeaders)
+        self.extraBodyParams = try container.decodeIfPresent([String: String].self, forKey: .extraBodyParams)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -78,6 +133,13 @@ struct ModelOverrides: Codable, Hashable, Sendable {
         try container.encodeIfPresent(contextWindow, forKey: .contextWindow)
         try container.encodeIfPresent(supportsReasoning, forKey: .supportsReasoning)
         try container.encodeIfPresent(maxThinkingLevel?.rawValue, forKey: .maxThinkingLevel)
+        // [T-model-custom-params] `encodeIfPresent`, so an entry with none of
+        // these set serialises byte-identically to before this change — no
+        // diff churn in provider_config.json, and no LWW noise in sync.
+        try container.encodeIfPresent(temperature, forKey: .temperature)
+        try container.encodeIfPresent(topP, forKey: .topP)
+        try container.encodeIfPresent(customHeaders, forKey: .customHeaders)
+        try container.encodeIfPresent(extraBodyParams, forKey: .extraBodyParams)
     }
 }
 
@@ -122,9 +184,41 @@ struct ModelEntry: Identifiable, Codable, Hashable {
     /// stale override names from old devices that never stamped a modification time.
     var userModifiedAt: Date?
 
+    /// [T-model-absence-grace] When the provider's `/v1/models` first stopped
+    /// listing this model, or nil while the provider is still reporting it.
+    ///
+    /// Exists because "this refresh did not list the model" and "this model is
+    /// gone" are different facts, and `replaceEntries` used to treat them as
+    /// one: a catalog entry missing from a single response was deleted outright,
+    /// taking its `overrides` with it. Relay/aggregator endpoints (the reported
+    /// case: CPA-Mini2 serving `gemini-3.8-flash-high`) drop a model from the
+    /// list transiently — upstream quota, a backend rotation, a partial outage —
+    /// and list it again minutes later. The user saw the model vanish from the
+    /// provider, and separately saw a context-window override "revert", which
+    /// was the same deletion seen from the other side.
+    ///
+    /// While set, the entry is kept and shown as unavailable rather than
+    /// deleted; it is only really removed once the absence has persisted past
+    /// `ProviderConfigStore.modelAbsenceGracePeriod`. A model that comes back is
+    /// cleared back to nil and is indistinguishable from one that never left —
+    /// overrides included.
+    ///
+    /// DELIBERATELY LOCAL-ONLY, and not part of `isUserModified`: absence is a
+    /// per-device observation (each device refreshes on its own schedule against
+    /// possibly different upstream state), not user intent, so it must neither
+    /// travel over iCloud nor make an otherwise-untouched entry start syncing.
+    /// It is dropped on encode for exactly that reason — see `encode(to:)`.
+    var absentSince: Date?
+
+    /// True while the provider is not currently listing this model.
+    var isUnavailableFromProvider: Bool { absentSince != nil }
+
     /// True if this entry carries any user intent that should propagate via iCloud sync.
     /// Purely derived from existing state — no extra field to maintain. New override fields
     /// plug in automatically via `ModelOverrides.isEmpty`.
+    ///
+    /// `absentSince` is intentionally absent from this list: it is a local
+    /// observation about the provider, not something the user did.
     var isUserModified: Bool {
         isCustom || isHidden || !overrides.isEmpty
     }
@@ -134,7 +228,7 @@ struct ModelEntry: Identifiable, Codable, Hashable {
     var model: LLMModel {
         guard !overrides.isEmpty else { return baseModel }
         // LLMModel.displayName is a `let`, so rebuild via memberwise init to apply any override.
-        return LLMModel(
+        var rebuilt = LLMModel(
             id: baseModel.id,
             displayName: overrides.displayName ?? baseModel.displayName,
             provider: baseModel.provider,
@@ -144,6 +238,11 @@ struct ModelEntry: Identifiable, Codable, Hashable {
             supportsReasoning: overrides.supportsReasoning ?? baseModel.supportsReasoning,
             interleavedReasoningField: baseModel.interleavedReasoningField
         )
+        // Not an init parameter, so the rebuild would drop it and a renamed or
+        // re-moded OpenRouter entry would fall back to the audio-bit rule.
+        // [T-openrouter-voice-catalog]
+        rebuilt.voiceRole = baseModel.voiceRole
+        return rebuilt
     }
 
     init(
@@ -153,7 +252,8 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         overrides: ModelOverrides = ModelOverrides(),
         isCustom: Bool = false,
         isHidden: Bool = false,
-        userModifiedAt: Date? = nil
+        userModifiedAt: Date? = nil,
+        absentSince: Date? = nil
     ) {
         self.uuid = uuid
         self.providerInstanceId = providerInstanceId
@@ -162,10 +262,12 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         self.isCustom = isCustom
         self.isHidden = isHidden
         self.userModifiedAt = userModifiedAt
+        self.absentSince = absentSince
     }
 
     private enum CodingKeys: String, CodingKey {
         case uuid, providerInstanceId, model, overrides, isCustom, isHidden, userModifiedAt
+        case absentSince
     }
 
     // Decode with backwards compatibility: generate uuid if missing in old data,
@@ -179,6 +281,9 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         self.isCustom = try container.decode(Bool.self, forKey: .isCustom)
         self.isHidden = try container.decode(Bool.self, forKey: .isHidden)
         self.userModifiedAt = try container.decodeIfPresent(Date.self, forKey: .userModifiedAt)
+        // [T-model-absence-grace] Decoded so the grace window survives a relaunch;
+        // written only to the LOCAL config file (see encode(to:)).
+        self.absentSince = try container.decodeIfPresent(Date.self, forKey: .absentSince)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -192,6 +297,14 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         try container.encode(isCustom, forKey: .isCustom)
         try container.encode(isHidden, forKey: .isHidden)
         try container.encodeIfPresent(userModifiedAt, forKey: .userModifiedAt)
+        // [T-model-absence-grace] Encoded so the grace window survives a
+        // relaunch. It reaches the local config file only: the iCloud upload
+        // filters to `isUserModified` entries (CloudSyncEngine :1363/:2184),
+        // which absence deliberately does not set, and an entry that IS user
+        // modified carries a field the receiving device simply re-derives from
+        // its own next refresh. Each device observes its own provider, so a
+        // synced absence would be a claim one device cannot make for another.
+        try container.encodeIfPresent(absentSince, forKey: .absentSince)
     }
 
     // Hashable/Equatable based on stored properties only
@@ -202,7 +315,12 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         lhs.overrides == rhs.overrides &&
         lhs.isCustom == rhs.isCustom &&
         lhs.isHidden == rhs.isHidden &&
-        lhs.userModifiedAt == rhs.userModifiedAt
+        lhs.userModifiedAt == rhs.userModifiedAt &&
+        // [T-model-absence-grace] Part of equality so a change in availability
+        // is seen as a change: callers that diff entries before persisting
+        // (ProviderConfigDB's row-dirty check) would otherwise treat a model
+        // going unavailable — or coming back — as a no-op and never write it.
+        lhs.absentSince == rhs.absentSince
     }
 
     func hash(into hasher: inout Hasher) {
@@ -213,6 +331,7 @@ struct ModelEntry: Identifiable, Codable, Hashable {
         hasher.combine(isCustom)
         hasher.combine(isHidden)
         hasher.combine(userModifiedAt)
+        hasher.combine(absentSince)
     }
 }
 
@@ -242,6 +361,18 @@ extension ModelEntry {
             return ThinkingLevel.allCases.filter { $0 != .off && $0 <= ceiling }
         }
         let capped = declared.filter { $0 <= ceiling }
+        // [T-thinking-max-unreachable] The ceiling can legitimately sit ABOVE
+        // every declared tier — a catalog family rule that knows the model
+        // reaches Max while models.dev lists only ["low","medium","high"].
+        // Offering just the declared tiers would then hide the very levels the
+        // rule exists to expose, which is how Max went missing from the picker.
+        // Extend the ladder up to the ceiling, keeping the declared tiers as a
+        // floor so a sparse declaration still collapses the tiers BELOW its top
+        // (its whole point: one option per distinct wire value).
+        if let declaredTop = declared.last, ceiling > declaredTop {
+            let above = ThinkingLevel.allCases.filter { $0 != .off && $0 > declaredTop && $0 <= ceiling }
+            return capped + above
+        }
         // An override below every declared tier would empty the picker and
         // strand the toggle in an unusable state — keep the weakest tier.
         return capped.isEmpty ? [declared[0]] : capped

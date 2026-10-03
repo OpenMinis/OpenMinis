@@ -1,7 +1,14 @@
 package com.openminis.app.data.model
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonObject
 import java.util.UUID
 
 @Serializable
@@ -15,6 +22,20 @@ enum class ProviderType(val displayName: String) {
     // OpenAI-compatible upstream at api.kimi.com/coding/v1. DB round-trip is
     // name-based (ProviderCredential.valueOf), so appending is migration-safe.
     kimiCode("Kimi Code"),
+
+    /**
+     * [T-copilot-provider] GitHub Copilot via device-flow OAuth. Chat is
+     * OpenAI-compatible at api.githubcopilot.com, but auth is two-tier (see
+     * CopilotOAuthManager), which is why it cannot reuse the API-key path.
+     *
+     * ⚠️ Unofficial: borrows the VS Code client identity, and GitHub's terms
+     * treat proxying Copilot as grounds for account restriction. Gated behind
+     * CopilotFeatureFlag (default off) and an explicit in-app risk notice.
+     *
+     * Appended last — DB round-trips are name-based (ProviderCredential.valueOf),
+     * so adding a case is migration-safe.
+     */
+    githubCopilot("GitHub Copilot"),
 
     // [T-android-provider-type-parity] The cases below exist on iOS but were
     // missing here. They are declared so a cross-platform restore or sync can
@@ -65,7 +86,8 @@ enum class ProviderType(val displayName: String) {
         get() = when (this) {
             // openAIResponses included: it routes through the OpenAI provider
             // with the Responses endpoint forced on.
-            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses -> true
+            anthropic, gemini, openAI, openRouter, xAI, kimiCode, openAIResponses,
+            githubCopilot -> true
             antigravity, unsupported -> false
         }
 
@@ -79,7 +101,10 @@ enum class ProviderType(val displayName: String) {
             kimiCode -> LLMModel.allKimi
             // No built-in catalog for the decode-only types; models restored
             // alongside the instance still appear as custom entries.
-            openAIResponses, antigravity, unsupported -> emptyList()
+            // [T-copilot-provider] Copilot's catalog is fetched live from
+            // /models — a hardcoded list would offer models the signed-in
+            // account may not be entitled to.
+            githubCopilot, openAIResponses, antigravity, unsupported -> emptyList()
         }
 
     companion object {
@@ -102,7 +127,7 @@ enum class ProviderCredential {
     oauth,
 }
 
-@Serializable
+@Serializable(with = ThinkingLevelSerializer::class)
 enum class ThinkingLevel {
     // [T-android-thinking-level-arch] New cases MUST be appended at the end.
     // Kotlinx Serialization encodes enums by NAME string ("OFF"/"LOW"/...),
@@ -138,9 +163,44 @@ enum class ThinkingLevel {
          * letting the caller handle an exception or drop the whole config. Use
          * this for every "read from persisted data" path.
          */
-        fun decoded(raw: String): ThinkingLevel =
-            runCatching { valueOf(raw) }.getOrElse { XHIGH }
+        fun decoded(raw: String): ThinkingLevel = parseOrNull(raw) ?: XHIGH
+
+        /**
+         * [T-android-restore-thinking-level] Case-insensitive parse, or null
+         * when the value names no level. Accepts both spellings of a level:
+         * Android's enum name (`"HIGH"`) and iOS's raw value (`"high"`).
+         */
+        fun parseOrNull(raw: String): ThinkingLevel? =
+            entries.firstOrNull { it.name.equals(raw.trim(), ignoreCase = true) }
     }
+}
+
+/**
+ * [T-android-restore-thinking-level] Reads a level in either spelling; writes
+ * the enum name, exactly as the generated enum serializer did.
+ *
+ * Both platforms define the same seven levels, but iOS encodes them as its
+ * `String` raw values (`"high"`) and Android by enum name (`"HIGH"`). With the
+ * generated serializer, an iOS value was an unknown enum constant — and
+ * `BackupFormat.json`'s `coerceInputValues` turns that into `null` on a
+ * nullable property, silently. Every group level, per-model ceiling and sub
+ * agent override in an iOS backup restored on Android as "no level".
+ *
+ * Read side only, on purpose. The same serializer writes the Room blobs
+ * (ModelOverrides, SubAgentDefinition) and the ProviderConfig JSON mirror, so
+ * changing what is written would make an older build misread them after a
+ * downgrade. An unrecognized value (a level from a newer build) becomes XHIGH,
+ * the clamp [ThinkingLevel.decoded] and iOS `ThinkingLevel.decoded` already
+ * use; it can no longer be coerced to null, because this descriptor is a plain
+ * string, not an enum.
+ */
+object ThinkingLevelSerializer : KSerializer<ThinkingLevel> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("com.openminis.app.data.model.ThinkingLevel", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: ThinkingLevel) = encoder.encodeString(value.name)
+
+    override fun deserialize(decoder: Decoder): ThinkingLevel = ThinkingLevel.decoded(decoder.decodeString())
 }
 
 @Serializable
@@ -347,6 +407,22 @@ data class ModelOverrides(
     // of older JSON (unlike adding an enum case) — old configs simply lack the
     // key and it defaults to null.
     val maxThinkingLevel: ThinkingLevel? = null,
+    // [T-android-model-custom-params] Per-model request tuning. All four are
+    // nullable with a `= null` default, which is what lets an OLDER config or
+    // backup — written before these keys existed — decode without throwing
+    // MissingFieldException. kotlinx.serialization only tolerates a missing key
+    // when the property has a default, so the default is load-bearing, not
+    // decoration.
+    //
+    // null means "inherit / send nothing", NOT "use 0". That distinction
+    // matters for temperature especially: 0.0 is a legitimate, meaningful value
+    // (fully deterministic), so it cannot double as the absent marker.
+    val temperature: Double? = null,
+    val topP: Double? = null,
+    /** Extra headers merged into this model's requests. null = none. */
+    val customHeaders: Map<String, String>? = null,
+    /** Raw JSON merged into the request body for provider-specific knobs. */
+    val extraBodyParams: JsonObject? = null,
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -356,6 +432,15 @@ data class ModelOverrides(
             && inputModalities == null
             && outputModalities == null
             && maxThinkingLevel == null
+            // [T-android-model-custom-params] The new fields MUST be part of
+            // this predicate. `isEmpty` gates whether the overrides object is
+            // written at all on export (ProviderRepository ~2734), so omitting
+            // them here would make an entry carrying ONLY a temperature look
+            // empty and get dropped on backup/round-trip.
+            && temperature == null
+            && topP == null
+            && customHeaders == null
+            && extraBodyParams == null
 }
 
 @Serializable
@@ -371,19 +456,112 @@ data class ModelEntry(
      *  `ModelEntry.userModifiedAt` is a `Date?` decoded with `.iso8601`. */
     @Serializable(with = com.openminis.app.backup.Iso8601MillisNullableSerializer::class)
     val userModifiedAt: Long? = null,
+    /**
+     * [T-android-model-absence-grace] When the provider's /v1/models first
+     * stopped listing this model, or null while it is still being reported.
+     * Mirrors iOS `ModelEntry.absentSince`.
+     *
+     * Exists because "this refresh did not list the model" and "this model is
+     * gone" are different facts, and [ProviderRepository.replaceEntries] used
+     * to treat them as one: a catalog entry missing from a single response was
+     * deleted outright, taking its [overrides] with it. Relay/aggregator
+     * endpoints drop a model from the list transiently — upstream quota, a
+     * backend rotation, a partial outage — and list it again minutes later.
+     *
+     * While set, the entry is kept and shown as unavailable rather than
+     * deleted; it is only really removed once the absence outlives
+     * [ProviderRepository.MODEL_ABSENCE_GRACE_MS]. A model that comes back is
+     * cleared to null and is indistinguishable from one that never left,
+     * overrides included.
+     *
+     * DELIBERATELY excluded from [isUserModified]: absence is a per-device
+     * observation (each device refreshes on its own schedule against possibly
+     * different upstream state), not user intent, so it must not make an
+     * otherwise-untouched entry look user-modified. Same ISO-8601 wire shape as
+     * [userModifiedAt] so the field round-trips with iOS rather than becoming a
+     * platform-only dialect.
+     */
+    @Serializable(with = com.openminis.app.backup.Iso8601MillisNullableSerializer::class)
+    val absentSince: Long? = null,
 ) {
     val id: String get() = uuid
 
-    /** Effective model as seen by the rest of the app: baseModel with overrides applied. */
+    /** True while the provider is not currently listing this model. */
+    val isUnavailableFromProvider: Boolean get() = absentSince != null
+
+    /**
+     * Effective model as seen by the rest of the app: baseModel with overrides
+     * applied.
+     *
+     * [T-android-modality-provider-fallback] The two modality fields resolve
+     * through `effective*Modalities`, i.e. the full chain
+     *   user override > model's own declared list > provider default table.
+     * Every other field keeps the plain "null override means inherit baseModel
+     * verbatim" semantics — only modality has a provider-level default to fall
+     * back to.
+     *
+     * This property is what the REST OF THE APP reads (chat gating, Vision
+     * Group membership, hasImageInput and friends). 1be751fdc added the
+     * fallback but only wired it into ModelEntryDetailScreen, so the detail
+     * screen alone showed the corrected switches while every real consumer
+     * still saw the raw nulls — which is why reinstalling and refreshing
+     * models changed nothing for Fable 5.1.
+     *
+     * The `overrides.isEmpty` early return had to go, and that was the actual
+     * bug: `isEmpty` only asks whether the USER set anything, so the common
+     * case (new model, no override) returned baseModel without ever calling
+     * copy(), leaving no opportunity to apply any fallback at all. It is now
+     * gated on "nothing to apply from EITHER source" — no overrides AND no
+     * modality fallback pending — so the allocation is still skipped for the
+     * genuinely-unchanged case (every already-catalogued model, every provider
+     * outside the default table).
+     */
     val model: LLMModel
-        get() = if (overrides.isEmpty) baseModel else baseModel.copy(
-            displayName = overrides.displayName ?: baseModel.displayName,
-            maxOutputTokens = overrides.maxOutputTokens ?: baseModel.maxOutputTokens,
-            contextWindow = overrides.contextWindow ?: baseModel.contextWindow,
-            supportsReasoning = overrides.supportsReasoning ?: baseModel.supportsReasoning,
-            inputModalities = overrides.inputModalities ?: baseModel.inputModalities,
-            outputModalities = overrides.outputModalities ?: baseModel.outputModalities,
-        )
+        get() {
+            val effIn = baseModel.effectiveInputModalities
+            val effOut = baseModel.effectiveOutputModalities
+            // "Did the provider table contribute anything?" — asked as
+            // was-null-and-now-is-not, NOT by comparing list identity:
+            // effective* runs the list through normalizeModalities(), whose
+            // `.map {}` allocates a fresh list every call, so a referential
+            // check would be true even when nothing was added and the early
+            // return would be dead code.
+            val fallbackPending =
+                (baseModel.inputModalities == null && effIn != null) ||
+                    (baseModel.outputModalities == null && effOut != null)
+            if (overrides.isEmpty && !fallbackPending) return baseModel
+            return baseModel.copy(
+                displayName = overrides.displayName ?: baseModel.displayName,
+                maxOutputTokens = overrides.maxOutputTokens ?: baseModel.maxOutputTokens,
+                contextWindow = overrides.contextWindow ?: baseModel.contextWindow,
+                supportsReasoning = overrides.supportsReasoning ?: baseModel.supportsReasoning,
+                // [T-android-modality-normalize-override] (GH#305) Normalize the
+                // OVERRIDE too, not just the fallback.
+                //
+                // `effIn`/`effOut` come from effective*Modalities, which already
+                // runs normalizeModalities(). The override branch did not, so a
+                // user who ticked audio-input by hand stored the suffixed spelling
+                // ("audio_input", the OpenAI/OpenRouter form the detail screen
+                // writes) and every `contains("audio")` reader — hasAudioInput,
+                // hasImageInput, the Vision Group filter — compared it against the
+                // bare name and answered false. The switch showed ON while the
+                // capability stayed off, so the manual override silently did
+                // nothing: exactly the workaround a user reaches for when
+                // inference misses their model.
+                //
+                // [T-android-modality-override-off] …but an EMPTY override is
+                // user intent too: the detail screen saves only the ticked
+                // non-text modalities, so switching the last one off stores
+                // `[]`. normalizeModalities() maps empty to null, which fell
+                // back to inference and made it impossible to switch a
+                // mis-inferred TTS/ASR model OFF (the switch re-opened ON).
+                // Only a null override (never set) falls back.
+                inputModalities = overrides.inputModalities
+                    ?.let { it.normalizeModalities() ?: emptyList() } ?: effIn,
+                outputModalities = overrides.outputModalities
+                    ?.let { it.normalizeModalities() ?: emptyList() } ?: effOut,
+            )
+        }
 
     /** True when this entry carries user intent beyond API-reported defaults. */
     val isUserModified: Boolean
@@ -410,6 +588,13 @@ data class ProviderConfig(
     // voiceInputGroupId (meta KV row, not synced CRDT member maps). Absent in
     // old persisted JSON → deserializes to null (ignoreUnknownKeys + default).
     var visionGroupId: String? = null,
+    // [T-sub-agents-v1] The named sub agents the main model can delegate to.
+    // Mirrors iOS ProviderConfig.subAgents — deliberately carried on the
+    // existing provider-config blob rather than as a new synced type, so it
+    // rides the same path the groups above already do. Absent in old persisted
+    // JSON → deserializes to an empty list (ignoreUnknownKeys + default), which
+    // SubAgentRoster.normalize turns into "built-in only".
+    val subAgents: MutableList<SubAgentDefinition> = mutableListOf(),
     // Models and groups exposed to the agent loop (minis-model-use terminal
     // command) — mirrors iOS agentLoopModelEntryIds / agentLoopGroupIds.
     val agentLoopModelEntryIds: MutableList<String> = mutableListOf(),

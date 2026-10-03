@@ -12,7 +12,17 @@
 # JSON the agent parses).
 
 LOG="/var/minis/mcp-servers/mcp-cli.log"
-mkdir -p /var/minis/mcp-servers 2>/dev/null
+# [issue #380] Do NOT `mkdir -p /var/minis/mcp-servers` here.
+#
+# That path is a SYMLINK the host maintains into its App Group. Creating it from
+# the guest wins the race whenever the link is not yet in place and leaves a real
+# local directory shadowing the mount: the app then writes OAuth bridge files into
+# the App Group that this sandbox can never read, and every MCP call reports "not
+# authorized" while the host believes authorization succeeded.
+#
+# The host owns this directory (ensureMinisSymlinks). If it is missing, logging is
+# the only thing that degrades — `_log` already discards errors — and the Python
+# below reports the real problem with the path it tried.
 _log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG" 2>/dev/null; }
 
 # Ensure python3 is available.

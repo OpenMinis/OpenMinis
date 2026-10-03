@@ -122,15 +122,28 @@ class TerminalSanitizerTest {
 
     @Test
     fun `sanitize strips ANSI after CR folding`() {
+        // Both segments are the same length (escapes included), so the second
+        // fully overwrites the first; CR folding yields "\u001B[32mcomplete   \u001B[0m".
+        // The trailing spaces then go to sanitize()'s final outer trim (pass 5,
+        // edda1e7d1) — not to CR folding, which keeps them.
         val input = "\u001B[32mdownloading\u001B[0m\r\u001B[32mcomplete   \u001B[0m"
-        assertEquals("complete   ", TerminalSanitizer.sanitize(input))
+        assertEquals("complete", TerminalSanitizer.sanitize(input))
     }
 
     @Test
     fun `sanitize handles real-world wget output`() {
         // wget progress: "  50%[=====>    ] 500K  --.-KB/s\r 100%[=========>] 1.0M  1.5MB/s"
+        // Equal-length segments: full overwrite gives " 100%[=========>]", and
+        // the leading space is removed by sanitize()'s final outer trim
+        // (pass 5, edda1e7d1), not by CR folding.
         val input = "  50%[=====>    ]\r 100%[=========>]"
-        assertEquals(" 100%[=========>]", TerminalSanitizer.sanitize(input))
+        assertEquals("100%[=========>]", TerminalSanitizer.sanitize(input))
+
+        // A SHORTER later segment must leave the old tail visible, exactly as a
+        // terminal renders it: " 100" lands on "  50" and the "%[=====>    ]"
+        // beyond it stays. "Last non-empty segment wins" would drop the bar.
+        val shrinking = "  50%[=====>    ]\r 100"
+        assertEquals("100%[=====>    ]", TerminalSanitizer.sanitize(shrinking))
     }
 
     // ==================== truncateIfNeeded ====================
@@ -205,4 +218,61 @@ class TerminalSanitizerTest {
         val input = "col1\tcol2\tcol3"
         assertEquals(input, TerminalSanitizer.sanitize(input))
     }
+
+    // ==================== [GH#326] pre-sanitize input ceiling ====================
+
+    /**
+     * [T-android-longsession-sanitize-pretrim / GH#326] A huge dump must not be
+     * rewritten five times over before being thrown away.
+     *
+     * `sanitize` builds a fresh full-size string per pass, so peak transient
+     * memory used to be several times the raw output — for a result the caller
+     * immediately truncates to 50k. Those large contiguous char[] allocations
+     * are what the field's `Scudo ERROR: internal map failure` self-abort is
+     * made of. The ceiling is on the INPUT, so the passes now see a bounded
+     * string no matter how much the shell produced.
+     */
+    @Test
+    fun `sanitize bounds a huge input instead of rewriting all of it`() {
+        val huge = "x".repeat(5_000_000)
+        val out = TerminalSanitizer.sanitize(huge)
+        assertTrue(
+            "a 5M-char dump must not survive sanitize at full size (was ${out.length})",
+            out.length < 1_000_000,
+        )
+        assertTrue("the omission must be reported", out.contains("characters omitted"))
+    }
+
+    /**
+     * The margin is what keeps this invisible: anything that could still fit
+     * under the caller's 50k cap after cleaning must come through untouched.
+     */
+    @Test
+    fun `sanitize leaves ordinary output byte-identical`() {
+        val ordinary = (1..2_000).joinToString("\n") { "line $it: some ordinary build output" }
+        assertEquals(ordinary, TerminalSanitizer.sanitize(ordinary))
+    }
+
+    /** Escape stripping still works on an input large enough to be pre-trimmed. */
+    @Test
+    fun `sanitize still strips escapes in a pre-trimmed input`() {
+        val noisy = "\u001B[31mred\u001B[0m " + "y".repeat(2_000_000)
+        val out = TerminalSanitizer.sanitize(noisy)
+        assertFalse("ANSI escapes must still be gone", out.contains("\u001B"))
+        assertTrue(out.startsWith("red "))
+    }
+
+    /**
+     * The head/tail shape the caller depends on: a pre-trimmed result still
+     * carries both ends, so `truncateIfNeeded`'s own 50k window is taken from
+     * real head and real tail rather than from one contiguous chunk.
+     */
+    @Test
+    fun `a pre-trimmed result keeps both head and tail`() {
+        val body = "m".repeat(3_000_000)
+        val out = TerminalSanitizer.sanitize("HEAD_MARKER" + body + "TAIL_MARKER")
+        assertTrue("head must survive", out.contains("HEAD_MARKER"))
+        assertTrue("tail must survive", out.contains("TAIL_MARKER"))
+    }
+
 }

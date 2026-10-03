@@ -47,6 +47,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
@@ -98,6 +99,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import com.openminis.app.ui.components.MinisAlertDialog
@@ -143,6 +147,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import com.openminis.app.agent.jobs.AgentJobRegistry
 import com.openminis.app.service.SessionActivityTracker
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -186,6 +191,9 @@ import java.util.Calendar
 import java.util.Date
 import java.util.concurrent.TimeUnit
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import androidx.compose.ui.graphics.graphicsLayer
 
 // FAB color — use shared theme values
 
@@ -327,15 +335,54 @@ data class FolderGroupBlock(
  *    the group and keep their pin glyph.
  *  - A `folder_id` pointing at a group we don't have renders as UNGROUPED
  *    rather than vanishing. There is no FK, so this is a normal state.
- *  - Empty groups still render — a group that disappears when its last session
- *    moves out reads as data loss.
+ *  - Empty groups render only while they are still plausibly WANTED: pinned
+ *    (an explicit "keep this in front of me"), or created recently enough that
+ *    the user is still filing into them. See [emptyGroupIsStillRelevant].
  */
+/**
+ * [T-android-empty-group-visibility] Whether a group with no members is still
+ * worth a row.
+ *
+ * Two failure modes pull in opposite directions, and both are real:
+ *
+ *  - Show every empty group and deleting the last chat in one leaves a "ghost"
+ *    the user cannot get rid of by the obvious means.
+ *  - Hide every empty group and a group VANISHES the moment its last session
+ *    moves out — which reads as data loss, and makes a group the user just
+ *    created invisible before they can file anything into it.
+ *
+ * `isPinned` alone (the previous rule) is the wrong axis: it answers "does the
+ * user want this at the top", not "is this group still live". A user who never
+ * pins anything loses a group they created five seconds ago.
+ *
+ * The honest distinction is INTENT, approximated by age. A group created
+ * recently is one the user is still setting up, so it stays visible and
+ * droppable. A long-standing group that has drained to empty is the ghost case.
+ * Pinning remains an explicit override in both directions.
+ */
+internal fun emptyGroupIsStillRelevant(
+    folder: FolderEntity,
+    nowMs: Long,
+): Boolean = folder.isPinned || (nowMs - folder.createdAt) < EMPTY_GROUP_GRACE_MS
+
+/**
+ * How long a freshly created, still-empty group keeps its row. Long enough to
+ * create a group and file chats into it across a couple of sittings; short
+ * enough that a drained group does not linger for a whole day.
+ */
+internal const val EMPTY_GROUP_GRACE_MS: Long = 60L * 60L * 1000L
+
 // `internal` so the accordion invariant can be tested for real rather than by
 // matching source text — see SessionGroupAccordionTest.
 internal fun partitionByFolder(
     sessions: List<ChatSessionEntity>,
     folders: List<FolderEntity>,
-    collapsedIds: Set<String>,
+    /**
+     * [T-android-groups-collapsed-on-launch] The one open group, or null for
+     * all collapsed (the state on every cold start). An id naming a group
+     * that is not in this render opens nothing.
+     */
+    expandedFolderId: String?,
     /**
      * Session ids carrying a corner badge entered within the last 24h,
      * snapshotted ONCE by the caller (iOS computes `freshCornerIds` the same
@@ -344,6 +391,8 @@ internal fun partitionByFolder(
     freshBadgedIds: Set<String> = emptySet(),
     /** Ids whose agent loop is running — see [FolderGroupBlock.anyActive]. */
     activeSessionIds: Set<String> = emptySet(),
+    /** Injected so the empty-group recency rule is testable without a clock. */
+    nowMs: Long = System.currentTimeMillis(),
 ): Pair<List<FolderGroupBlock>, List<ChatSessionEntity>> {
     if (folders.isEmpty()) return emptyList<FolderGroupBlock>() to sessions
 
@@ -361,23 +410,18 @@ internal fun partitionByFolder(
         }
     }
 
-    // First-encounter order = activity order. Groups with no members are
-    // appended afterwards so they still render.
+    // First-encounter order = activity order. Empty groups are appended only
+    // when they are still plausibly wanted — see [emptyGroupIsStillRelevant].
     val ordered = members.keys.toMutableList()
-    for (f in folders) if (f.id !in members) ordered.add(f.id)
+    for (f in folders) if (f.id !in members && emptyGroupIsStillRelevant(f, nowMs)) ordered.add(f.id)
 
-    // [T-android-group-accordion] At most ONE group is open at a time.
-    //
-    // `collapsedIds` stores the inverse (which groups are shut), so an empty
-    // set — a fresh install, or a device whose folders all arrived from a
-    // restore — means "nothing is collapsed", i.e. everything unfolds at once.
-    // That is the state the user reported. The toggle already enforces the
-    // accordion; this makes the invariant hold on the way IN as well, so it
-    // cannot be violated by a set that no interaction has touched yet.
-    //
-    // The survivor is the first in `ordered`, which is activity order — the
-    // most recently used group is the one worth having open.
-    val openId = ordered.firstOrNull { it !in collapsedIds }
+    // [T-android-group-accordion] At most ONE group is open at a time, and
+    // [T-android-groups-collapsed-on-launch] only one the user opened: there
+    // is no fallback that picks a group on their behalf. The old rules (an
+    // inverse "collapsed" set whose empty state unfolded everything, then a
+    // restored preference with an activity-order fallback) all ended with the
+    // app choosing a group to open at launch; the user wants none open.
+    val openId = expandedFolderId?.takeIf { it in ordered }
 
     val blocks = ordered.mapNotNull { fid ->
         val folder = byId[fid] ?: return@mapNotNull null
@@ -462,6 +506,7 @@ fun SessionListScreen(
     onSettingsClick: () -> Unit,
     onAddProviderClick: () -> Unit = {},
     onSelectModelsClick: () -> Unit = {},
+    onRestoreBackupClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onRootfsClick: () -> Unit = {},
     // [T-android-scheduled-tasks-design] Entry to the scheduled-tasks list.
@@ -603,6 +648,10 @@ fun SessionListScreen(
     // confirmation can restate the consequence.
     var folderToDelete by remember { mutableStateOf<Pair<FolderEntity, Int>?>(null) }
     var showBulkDeleteDialog by remember { mutableStateOf(false) }
+    // [T-android-session-multi-export] Multi-select export: progress while it
+    // runs, then the summary (several sessions) before the share sheet.
+    var multiExportProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var multiExportResult by remember { mutableStateOf<com.openminis.app.share.SessionExporter.Result?>(null) }
     var showOverflowMenu by remember { mutableStateOf(false) }
     var editSession by remember { mutableStateOf<ChatSessionEntity?>(null) }
     var showBrowserSheet by remember { mutableStateOf(false) }
@@ -613,7 +662,9 @@ fun SessionListScreen(
     // leftovers go through date bucketing. Assembly order below is
     // Pinned → group block → date buckets, matching iOS.
     val folders by viewModel.folders.collectAsState()
-    val collapsedFolderIds by viewModel.collapsedFolderIds.collectAsState()
+    // [T-android-groups-collapsed-on-launch] In memory only: null (all
+    // collapsed) on every cold start.
+    val expandedFolderId by viewModel.expandedFolderId.collectAsState()
     val folderMemberCounts by viewModel.folderMemberCounts.collectAsState()
     val groupPickerRequest by viewModel.groupPickerRequest.collectAsState()
     // While searching, group cards are suppressed: padding a result set with
@@ -640,13 +691,23 @@ fun SessionListScreen(
     // can show that one of its members is still working. Keyed into the
     // partition memo — without it the blocks would keep a stale snapshot and
     // the ring would never appear or never clear.
-    val activeSessionIds by SessionActivityTracker.activeSessions.collectAsState()
+    // [T-android-sidebar-subagent-running] A session is working if it is
+    // streaming OR it has sub agents running on its behalf. The second half is
+    // invisible to the streaming tracker: a sub agent registers activity under
+    // its own hidden child session id, which no row here carries, so a
+    // conversation that had delegated everything out went dark while its work
+    // continued.
+    val streamingSessionIds by SessionActivityTracker.activeSessions.collectAsState()
+    val agentWorkParents by AgentJobRegistry.parentsWithAgentWork.collectAsState()
+    val activeSessionIds = remember(streamingSessionIds, agentWorkParents) {
+        if (agentWorkParents.isEmpty()) streamingSessionIds else streamingSessionIds + agentWorkParents
+    }
     val folderPartition = remember(
-        sessions, folders, collapsedFolderIds, showFolderBlock, freshBadgedIds, activeSessionIds,
+        sessions, folders, expandedFolderId, showFolderBlock, freshBadgedIds, activeSessionIds,
     ) {
         if (showFolderBlock) {
             partitionByFolder(
-                sessions, folders, collapsedFolderIds, freshBadgedIds, activeSessionIds,
+                sessions, folders, expandedFolderId, freshBadgedIds, activeSessionIds,
             )
         } else emptyList<FolderGroupBlock>() to sessions
     }
@@ -938,6 +999,7 @@ fun SessionListScreen(
                             hasGroups = hasGroups,
                             onAddProvider = onAddProviderClick,
                             onSelectModels = onSelectModelsClick,
+                            onRestoreBackup = onRestoreBackupClick,
                             onStartConversation = {
                                 scope.launch {
                                     val sessionId = viewModel.createNewSession()
@@ -1240,7 +1302,36 @@ fun SessionListScreen(
                 // Selection toolbar at bottom (matching iOS: Export + Delete)
                 SelectionToolbar(
                     selectedCount = selectedIds.size,
-                    onExport = { /* TODO: export */ },
+                    onExport = { format ->
+                        // Displayed order, persisted rows only: the synthetic
+                        // draft row was never written, so it has nothing to export.
+                        val targets = persistedSessions.filter { it.id in selectedIds }
+                        if (targets.isNotEmpty() && multiExportProgress == null) {
+                            multiExportProgress = 0 to 0
+                            scope.launch {
+                                try {
+                                    val result = com.openminis.app.share.SessionExporter.exportToZip(
+                                        context, targets, chatRepository, format,
+                                    ) { done, total ->
+                                        scope.launch { multiExportProgress = done to total }
+                                    }
+                                    // iOS shows the summary only for several sessions.
+                                    if (result.sessionCount > 1) multiExportResult = result
+                                    else shareSessionExport(context, result)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (t: Throwable) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        context.getString(R.string.export_progress_failed),
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                } finally {
+                                    multiExportProgress = null
+                                }
+                            }
+                        }
+                    },
                     onMove = { viewModel.requestGroupPickerForSelection() },
                     onDelete = { showBulkDeleteDialog = true },
                     modifier = Modifier.align(Alignment.BottomCenter),
@@ -1309,6 +1400,37 @@ fun SessionListScreen(
     }
 
     // Bulk delete confirmation
+    multiExportProgress?.let { (done, total) ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.sessionlist_export)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(stringResource(R.string.export_progress_running, done, total))
+                    if (total > 0) {
+                        LinearProgressIndicator(
+                            progress = { (done.toFloat() / total).coerceIn(0f, 1f) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {},
+        )
+    }
+    multiExportResult?.let { result ->
+        SessionExportSummaryDialog(
+            result = result,
+            onShare = {
+                multiExportResult = null
+                shareSessionExport(context, result)
+            },
+            onDismiss = { multiExportResult = null },
+        )
+    }
+
     if (showBulkDeleteDialog) {
         MinisAlertDialog(
             onDismissRequest = { showBulkDeleteDialog = false },
@@ -1332,8 +1454,12 @@ fun SessionListScreen(
         val suggesting by viewModel.groupSuggesting.collectAsState()
         val suggestFailed by viewModel.groupSuggestFailed.collectAsState()
         val suggestion by viewModel.groupSuggestion.collectAsState()
+        // [T-android-group-picker-recent] Most recently active group first, in
+        // the picker only; the list above keeps its own group order.
+        val lastActivity by viewModel.folderLastActivity.collectAsState()
+        val pickerFolders = remember(folders, lastActivity) { groupPickerOrder(folders, lastActivity) }
         GroupPickerSheet(
-            folders = folders,
+            folders = pickerFolders,
             memberCounts = folderMemberCounts,
             sessionCount = request.sessionIds.size,
             anyFiled = request.anyFiled,
@@ -1717,7 +1843,8 @@ private fun DualFabRow(
 @Composable
 private fun SelectionToolbar(
     selectedCount: Int,
-    onExport: () -> Unit,
+    /** [T-android-session-multi-export] JSON or plain text, picked from a menu as on iOS. */
+    onExport: (com.openminis.app.share.SessionExporter.Format) -> Unit,
     /** [T-android-session-grouping] Bulk-file the selection into a group. */
     onMove: () -> Unit,
     onDelete: () -> Unit,
@@ -1730,19 +1857,38 @@ private fun SelectionToolbar(
             .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-        // Export button (matching iOS)
-        MinisTextButton(
-            onClick = onExport,
-            enabled = selectedCount > 0,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Default.Share,
-                    contentDescription = stringResource(R.string.sessionlist_export),
-                    modifier = Modifier.size(20.dp),
+        // Export button (matching iOS: a menu of JSON / Plain Text)
+        var showExportMenu by remember { mutableStateOf(false) }
+        Box {
+            MinisTextButton(
+                onClick = { showExportMenu = true },
+                enabled = selectedCount > 0,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Share,
+                        contentDescription = stringResource(R.string.sessionlist_export),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(stringResource(R.string.sessionlist_export), fontSize = 11.sp)
+                }
+            }
+            DropdownMenu(expanded = showExportMenu, onDismissRequest = { showExportMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_json)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.JSON)
+                    },
                 )
-                Spacer(Modifier.height(4.dp))
-                Text(stringResource(R.string.sessionlist_export), fontSize = 11.sp)
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.sessionlist_export_plain)) },
+                    onClick = {
+                        showExportMenu = false
+                        onExport(com.openminis.app.share.SessionExporter.Format.PLAIN_TEXT)
+                    },
+                )
             }
         }
 
@@ -2778,8 +2924,11 @@ private fun SessionRow(
         }
 
         // Category icon in colored circle (18% opacity matching iOS)
+        // [T-android-sidebar-subagent-running] See the folder aggregate above:
+        // running sub agents count as this session working.
         val activeSessions by SessionActivityTracker.activeSessions.collectAsState()
-        val isActive = session.id in activeSessions
+        val agentWorkParents by AgentJobRegistry.parentsWithAgentWork.collectAsState()
+        val isActive = session.id in activeSessions || session.id in agentWorkParents
         // [T-android-session-paused-badge] Head of this session's badge queue
         // — null for the common case. Renders as an overlay in the icon's
         // bottom-right corner, mirroring where iOS's iCloud badge sits so
@@ -2929,25 +3078,31 @@ private fun SpinningRing(
     color: Color,
     modifier: Modifier = Modifier,
 ) {
-    var angle by remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(Unit) {
-        val startNanos = withFrameNanos { it }
-        while (true) {
-            withFrameNanos { now ->
-                val elapsedSec = (now - startNanos) / 1_000_000_000f
-                angle = (elapsedSec * 360f) % 360f
-            }
-        }
-    }
-    Canvas(modifier = modifier.rotate(angle)) {
-        val stroke = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round)
+    // [T-android-decorative-anim-perf] This is the home list's per-row
+    // running indicator, so N active sessions used to mean N private
+    // 90 fps frame loops, each writing `angle` into a state that
+    // `Modifier.rotate(angle)` read in COMPOSITION — recomposing the ring
+    // every frame, inside a LazyColumn row full of title/preview text.
+    //
+    // Now: one shared 30 fps tick, read inside the graphicsLayer lambda (a
+    // layer-phase read: no recomposition, no re-layout, and the lambda form
+    // is itself the layer boundary), and the arc is recorded once — only the
+    // layer's rotationZ changes per tick. Colour hoisted so the draw
+    // allocates nothing.
+    val tick = rememberDecorativeTick()
+    val arcColor = remember(color) { color.copy(alpha = 0.8f) }
+    Canvas(
+        modifier = modifier.graphicsLayer {
+            rotationZ = decorativePhase(tick.value, 1000) * 360f
+        },
+    ) {
         drawArc(
-            color = color.copy(alpha = 0.8f),
+            color = arcColor,
             startAngle = 0f,
             sweepAngle = 360f * 0.3f,
             useCenter = false,
             size = Size(size.width, size.height),
-            style = stroke,
+            style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round),
         )
     }
 }
@@ -3014,6 +3169,7 @@ private fun OnboardingLanding(
     onAddProvider: () -> Unit,
     onSelectModels: () -> Unit,
     onStartConversation: () -> Unit,
+    onRestoreBackup: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -3090,6 +3246,36 @@ private fun OnboardingLanding(
                 isLocked = !hasGroups,
                 onClick = { if (hasGroups) onStartConversation() },
             )
+        }
+
+        // [T-onboarding-restore-link] A side route for someone moving from
+        // another device (iOS parity: ContentView.emptyState). A footnote link,
+        // not a fourth card, so it does not compete with the three steps.
+        // Shown only until models are selected — after that this landing also
+        // greets returning users with no chats, whose path is Settings →
+        // Backup & Restore. Restore merges, so it is safe after step 1 too.
+        if (!hasGroups) {
+            Spacer(Modifier.height(12.dp))
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(onClick = onRestoreBackup)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.History,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.sessionlist_welcome_restore_backup),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -3332,6 +3518,86 @@ internal fun SessionEditSheet(
 }
 
 // ─── Export Session ────────────────────────────────────────────────────────
+
+/** [T-android-session-multi-export] Hand a finished export to the share sheet. */
+private fun shareSessionExport(context: Context, result: com.openminis.app.share.SessionExporter.Result) {
+    val mime = when {
+        result.fileName.endsWith(".zip") -> "application/zip"
+        result.format == com.openminis.app.share.SessionExporter.Format.JSON -> "application/json"
+        else -> "text/plain"
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = mime
+        putExtra(Intent.EXTRA_SUBJECT, result.fileName.substringBeforeLast('.'))
+        putExtra(Intent.EXTRA_STREAM, result.uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, context.getString(R.string.sessionlist_export))
+            .apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) },
+    )
+}
+
+/**
+ * [T-android-session-multi-export] What a multi-session export contains, before
+ * it is shared — iOS shows the same summary (format, sessions, messages, time
+ * range, attachments, size) for an export of several sessions.
+ */
+@Composable
+private fun SessionExportSummaryDialog(
+    result: com.openminis.app.share.SessionExporter.Result,
+    onShare: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val s = result.summary
+    val dateFmt = remember { java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT) }
+    val rows = buildList {
+        add(
+            stringResource(R.string.export_summary_format) to stringResource(
+                if (result.format == com.openminis.app.share.SessionExporter.Format.JSON) R.string.export_summary_format_value_json
+                else R.string.export_summary_format_value_txt,
+            ),
+        )
+        add(stringResource(R.string.export_summary_sessions) to result.sessionCount.toString())
+        add(stringResource(R.string.export_summary_messages) to stringResource(R.string.export_summary_messages_value, s.totalMessages))
+        if (s.earliest != null && s.latest != null) {
+            add(
+                stringResource(R.string.export_summary_timerange) to stringResource(
+                    R.string.export_summary_timerange_value,
+                    dateFmt.format(java.util.Date(s.earliest)),
+                    dateFmt.format(java.util.Date(s.latest)),
+                ),
+            )
+        }
+        if (s.attachmentCount > 0) {
+            add(stringResource(R.string.export_summary_attachments) to stringResource(R.string.export_summary_attachments_value, s.images, s.videos))
+        }
+        add(
+            stringResource(R.string.export_summary_size) to stringResource(
+                R.string.export_summary_size_value,
+                android.text.format.Formatter.formatShortFileSize(context, result.fileSizeBytes),
+            ),
+        )
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.export_progress_done)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((label, value) in rows) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(value, fontSize = 14.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onShare) { Text(stringResource(R.string.common_share)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
+    )
+}
 
 /**
  * Long-chat export (T-export-optimize b443b54d, iOS sister c9d1087d).

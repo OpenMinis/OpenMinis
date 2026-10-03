@@ -14,6 +14,7 @@
 #import "NativeOffloadUtils.h"
 #include "kernel/native_offload.h"
 #include <unistd.h>
+#include <dlfcn.h>
 
 // Swift bridge — generated header
 #if __has_include("Minis-Swift.h")
@@ -173,6 +174,43 @@ static BOOL ensureAuthorization(int stdout_fd, NSString *action, BOOL compact, B
         noff_emit_json(stdout_fd, err, compact, quiet);
     }
     return authorized;
+}
+
+// ── AlarmKit availability ──
+//
+// `@available(iOS 26.0, *)` is necessary but NOT sufficient. When the iPad
+// build runs in compatibility mode on visionOS ("Designed for iPad"), the
+// version check passes — visionOS reports a mapped iOS version >= 26 — but
+// AlarmKit does not exist on that platform at all. Entering any Swift code
+// whose signature mentions an AlarmKit type then traps in the runtime while
+// demangling the generic metadata (swift_getTypeByMangledName ->
+// swift::fatalError), which aborts the process rather than throwing.
+//
+// The probe is a class lookup rather than a dlopen of the binary path: no
+// hardcoded filesystem path, no leaked handle, and it asks the loaded-image
+// tables the same question the Swift runtime would.
+//
+// `AlarmManager` itself cannot be the probe — AlarmKit is almost entirely
+// pure Swift (its .swiftinterface contains exactly one @objc, a synthesized
+// deinit), so AlarmManager has no ObjC class to look up. But the framework
+// does export a small number of ObjC-visible classes, and AKAlarmAuthorization
+// is one of them; per the SDK .tbd it is exported by AlarmKit and by no other
+// framework, so finding it means AlarmKit is loadable and nothing else does.
+//
+// Because the class is an implementation detail rather than API, treat a
+// missing lookup as "cannot use AlarmKit" only in the safe direction: if a
+// future OS renames it we fall back to the existing NOT_AVAILABLE path, i.e.
+// alarms report unsupported instead of aborting the process. That is a
+// degradation, never a crash — the failure this guard exists to prevent.
+//
+// Seen as a crash on xrOS 27 in 1.14(11) via AlarmOffloadBridge.listAlarms.
+BOOL alarmkit_is_usable(void) {
+    static BOOL usable = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        usable = NSClassFromString(@"AKAlarmAuthorization") != nil;
+    });
+    return usable;
 }
 
 // ── AlarmKit commands (iOS 26+) ──
@@ -480,20 +518,35 @@ static int alarm_handler(int argc, char **argv,
 
     // Route to AlarmKit (iOS 26+ only)
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
+    // Nested, not `&&`: combining the two into one condition makes clang stop
+    // treating it as an availability guard (-Wunsupported-availability-guard)
+    // and lose the compile-time checking of the calls inside.
     if (@available(iOS 26.0, *)) {
-        if ([subcmd isEqualToString:@"set"])    return cmd_set_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
-        if ([subcmd isEqualToString:@"timer"])  return cmd_timer_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
-        if ([subcmd isEqualToString:@"list"])   return cmd_list_alarmkit(argc, argv, stdout_fd, compact, quiet);
-        if ([subcmd isEqualToString:@"cancel"]) return cmd_cancel_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
+        if (alarmkit_is_usable()) {
+            if ([subcmd isEqualToString:@"set"])    return cmd_set_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
+            if ([subcmd isEqualToString:@"timer"])  return cmd_timer_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
+            if ([subcmd isEqualToString:@"list"])   return cmd_list_alarmkit(argc, argv, stdout_fd, compact, quiet);
+            if ([subcmd isEqualToString:@"cancel"]) return cmd_cancel_alarmkit(argc, argv, stdout_fd, stderr_fd, compact, quiet);
+        }
     }
 #endif
 
-    // iOS < 26: not supported
+    // iOS < 26, or a platform with no AlarmKit at all (visionOS compat mode).
+    // The two need different wording: telling a Vision Pro user to upgrade iOS
+    // is advice they cannot act on, and this string is read by the agent.
     if ([subcmd isEqualToString:@"set"] || [subcmd isEqualToString:@"timer"] ||
         [subcmd isEqualToString:@"list"] || [subcmd isEqualToString:@"cancel"]) {
+        NSString *reason = @"apple-alarm requires iOS 26.0 or later. Please upgrade your iOS version.";
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 260000
+        if (@available(iOS 26.0, *)) {
+            // Version is fine, so the framework itself is what's missing.
+            reason = @"apple-alarm is not available on this platform: "
+                      "AlarmKit is not present (for example when the iPad app "
+                      "runs in compatibility mode on visionOS).";
+        }
+#endif
         NSDictionary *err = noff_json_error(TOOL_NAME, subcmd,
-                                             NOFF_ERR_NOT_AVAILABLE,
-                                             @"apple-alarm requires iOS 26.0 or later. Please upgrade your iOS version.");
+                                             NOFF_ERR_NOT_AVAILABLE, reason);
         noff_emit_json(stdout_fd, err, compact, quiet);
         return NOFF_EXIT_NOT_AVAILABLE;
     }

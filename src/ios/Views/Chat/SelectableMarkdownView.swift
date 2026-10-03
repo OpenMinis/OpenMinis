@@ -347,8 +347,15 @@ struct SelectableMarkdownTheme {
         return .systemFont(ofSize: size, weight: weight)
     }
 
-    var inlineCodeFont: UIFont {
-        let size = baseFontSize * 0.845
+    var inlineCodeFont: UIFont { inlineCodeFont(matching: nil) }
+
+    /// [T-md-inline-code-context-font] Inline code sized RELATIVE to the text
+    /// it sits in — 0.845× the CONTEXT font, the exact ratio body text has
+    /// always used (0.845 × baseFontSize), so paragraph rendering is
+    /// unchanged while a code span inside an H1/H2 scales with the heading
+    /// instead of rendering at body size and reading sunken/undersized.
+    func inlineCodeFont(matching contextFont: UIFont?) -> UIFont {
+        let size = (contextFont?.pointSize ?? baseFontSize) * 0.845
         if let menlo = UIFont(name: "Menlo", size: size) {
             let descriptor = menlo.fontDescriptor.addingAttributes([
                 .cascadeList: [UIFontDescriptor(fontAttributes: [.name: "PingFang SC"])]
@@ -1175,7 +1182,7 @@ fileprivate final class MarkdownNSRenderer {
     /// [T-ios-inline-code-long-path-wrap] Insert zero-width spaces after the
     /// separators inside an inline code span so TextKit can wrap a long token.
     ///
-    /// Problem: a path like `/tmp/android_backup_tg_feedback_triage_2026.md` is
+    /// Problem: a path like `/tmp/android_backup_user_feedback_triage_2026.md` is
     /// a single unbreakable "word" under `.byWordWrapping` except at `/`. On a
     /// narrow screen TextKit therefore breaks after `/tmp/` — leaving half the
     /// first line empty and a full-width background pill around four visible
@@ -1224,7 +1231,17 @@ fileprivate final class MarkdownNSRenderer {
 
         case .code(let code):
             var codeAttrs = attrs
-            codeAttrs[.font] = theme.inlineCodeFont
+            // [T-md-inline-code-context-font] Scale to the surrounding font
+            // (heading vs body) and center the code span's x-height on the
+            // context's x-height — Menlo's x-height ratio differs from SF's,
+            // so pure baseline alignment reads visually low in big headings.
+            let contextFont = attrs[.font] as? UIFont
+            let codeFont = theme.inlineCodeFont(matching: contextFont)
+            codeAttrs[.font] = codeFont
+            if let ctx = contextFont {
+                let offset = (ctx.xHeight - codeFont.xHeight) / 2
+                if abs(offset) > 0.25 { codeAttrs[.baselineOffset] = offset }
+            }
             codeAttrs[.foregroundColor] = theme.inlineCodeColor
             codeAttrs[.inlineCodeBackground] = true
             codeAttrs[.inlineCodeText] = code
@@ -1481,6 +1498,55 @@ final class CodeBlockAttachment: NSTextAttachment {
         return CGRect(x: 0, y: 0, width: width, height: height)
     }
 
+    /// [T-codeblock-hide-idle-scrollbars] Turn each scroll axis' indicator —
+    /// and its bounce — off when that axis has nothing to scroll.
+    ///
+    /// The scroll view is created with both indicators and both bounces on
+    /// unconditionally, so a 3-line snippet that fits entirely inside the box
+    /// still showed a vertical scrollbar and rubber-banded when dragged. Most
+    /// code blocks fit, so the common case was the wrong one.
+    ///
+    /// Compared against `scrollHeight`, NOT `bounds.height`: the frame is
+    /// `scrollHeight + bottomPadding` tall with a matching `contentInset.bottom`,
+    /// so the genuinely usable height is `scrollHeight`. Using the frame height
+    /// would count that padding as usable space and call a block scroll-free
+    /// when its last line is actually clipped.
+    ///
+    /// The 0.5pt tolerance absorbs sub-pixel noise from `sizeThatFits`, which
+    /// otherwise leaves a scrollbar on a block that fits exactly.
+    private static func syncScrollability(_ scrollView: UIScrollView,
+                                          contentSize: CGSize,
+                                          visibleWidth: CGFloat,
+                                          scrollHeight: CGFloat) {
+        let canScrollV = contentSize.height > scrollHeight + 0.5
+        let canScrollH = contentSize.width > visibleWidth + 0.5
+        scrollView.showsVerticalScrollIndicator = canScrollV
+        scrollView.showsHorizontalScrollIndicator = canScrollH
+        // Bouncing on an axis that cannot scroll reads as a glitch, and the
+        // rubber-band also competes with the enclosing message list's pan.
+        scrollView.alwaysBounceVertical = canScrollV
+        scrollView.alwaysBounceHorizontal = canScrollH
+        // When NEITHER axis can move, stop scrolling entirely rather than
+        // leaving an inert scroll view in the way. Its pan recognizer would
+        // still claim the touch and then do nothing with it, which is what
+        // makes dragging the message list over a code block feel like it
+        // catches — the list only starts moving after the finger leaves the
+        // block. `isScrollEnabled = false` removes the recognizer from
+        // arbitration, so the pan reaches the list immediately.
+        //
+        // Text selection inside the block is unaffected: that is the
+        // UITextView's own long-press/selection gestures, not this pan.
+        scrollView.isScrollEnabled = canScrollV || canScrollH
+        // [T-codeblock-offset-reset] A reused block (codeBlockViewCache /
+        // updateExistingView) can shrink to content that fits. Its old
+        // scroll position would then stay applied with scrolling switched
+        // off: the content shows clipped and cannot be scrolled back.
+        var offset = scrollView.contentOffset
+        if !canScrollH { offset.x = 0 }
+        if !canScrollV { offset.y = 0 }
+        if offset != scrollView.contentOffset { scrollView.contentOffset = offset }
+    }
+
     func makeView(width: CGFloat) -> UIView {
         let wrapper = UIView()
         wrapper.backgroundColor = .clear
@@ -1513,6 +1579,22 @@ final class CodeBlockAttachment: NSTextAttachment {
         scrollView.alwaysBounceHorizontal = true
         scrollView.alwaysBounceVertical = true
         scrollView.clipsToBounds = true
+        // [T-chat-statusbar-scrolltotop-mistap] Opt OUT of the status-bar tap
+        // here, so that the message list can reliably opt IN.
+        //
+        // This looks like the setting that was reverted on the collection view,
+        // but it does the opposite job. UIKit scrolls NOTHING when more than
+        // one eligible (`scrollsToTop == true`) scroll view is visible — it
+        // cannot tell which one the user meant. Every rendered code block is
+        // its own scroll view, so leaving this at the default would make the
+        // gesture work only while no code block happened to be on screen, and
+        // silently do nothing otherwise.
+        //
+        // Keeping it off leaves the message list as the sole candidate, which
+        // is what makes "tap the status bar -> jump to the top of the chat"
+        // behave the same way every time. It costs nothing: a status-bar tap is
+        // never a request to scroll a code snippet.
+        scrollView.scrollsToTop = false
 
         let codeTextView = UITextView()
         codeTextView.isEditable = false
@@ -1547,6 +1629,10 @@ final class CodeBlockAttachment: NSTextAttachment {
         scrollView.scrollIndicatorInsets = .zero
         scrollView.addSubview(codeTextView)
         scrollView.contentSize = CGSize(width: fittingWidth, height: contentHeight)
+        Self.syncScrollability(scrollView,
+                               contentSize: scrollView.contentSize,
+                               visibleWidth: contentWidth,
+                               scrollHeight: scrollHeight)
 
         // Auto-scroll to bottom during streaming
         let bottomY = scrollView.contentSize.height - scrollView.bounds.height
@@ -1654,6 +1740,14 @@ final class CodeBlockAttachment: NSTextAttachment {
         // desync the code frame from the text flow. Only the wrapper's visible
         // children (the rounded background container + its scroll view) animate
         // their height, so the box smoothly extends while layout stays exact.
+        // [T-codeblock-hide-idle-scrollbars] Re-evaluate on every update: a block
+        // that fitted a moment ago starts scrolling once streaming pushes it past
+        // maxCodeHeight, and a re-render with less content goes back to fitting.
+        Self.syncScrollability(scrollView,
+                               contentSize: fitting,
+                               visibleWidth: container.frame.width,
+                               scrollHeight: scrollHeight)
+
         let heightGrew = totalHeight > container.frame.size.height + 0.5
         wrapper.frame.size.height = totalHeight + Self.topMargin + Self.bottomMargin
         let applyChildFrames = {
@@ -2250,7 +2344,9 @@ final class TableAttachment: NSTextAttachment {
             return NSAttributedString(string: "\n", attributes: attrs)
         case .code(let code):
             var codeAttrs = attrs
-            codeAttrs[.font] = theme.inlineCodeFont
+            // [T-md-inline-code-context-font] Same context-relative rule as
+            // body inline code, keyed to the cell's font.
+            codeAttrs[.font] = theme.inlineCodeFont(matching: font)
             codeAttrs[.foregroundColor] = theme.inlineCodeColor
             // [T-ios-table-inline-code-rounded] Mark inline code with BOTH the
             // custom `.inlineCodeBackground` flag (drives the rounded painter)
@@ -3706,6 +3802,11 @@ final class ImageAttachment: NSTextAttachment {
     /// re-reads the source from disk. Called by the renderer when the
     /// on-disk fingerprint for this source changes between renders.
     func invalidateLoadedImage() {
+        // [T-img-placeholder-stuck-diag] The only path that un-loads an image.
+        // It was silent, which left "hasImg=true earlier, placeholder now"
+        // unexplainable from a log: nothing recorded who dropped the bitmap.
+        AppLogger(category: "AttachHotPath")
+            .info("[IMG][INVALIDATE] src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) hadImg=\(self.loadedImage != nil) wasLoading=\(self.isLoading) gen=\(self.loadGeneration)")
         loadedImage = nil
         loadedFingerprint = nil
         resolvedFileURL = nil
@@ -3751,6 +3852,17 @@ final class ImageAttachment: NSTextAttachment {
         let cnt = attachmentBoundsCallCount
         if cnt <= 5 || cnt % 50 == 0 {
             AppLogger(category: "AttachHotPath").info("[IMG][BOUNDS] #\(cnt) src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) rawW=\(String(format: "%.1f", rawWidth)) bucketW=\(String(format: "%.0f", width)) hasImg=\(self.loadedImage != nil)")
+        }
+
+        // [T-img-placeholder-stuck-diag] Which branch produced the height.
+        // `hasImg` alone could not distinguish "loaded" from "known-size
+        // fallback" from "200pt placeholder", and the placeholder branch is
+        // the one that reproduces the reported symptom.
+        if cnt <= 5 || cnt % 50 == 0 {
+            let branch = loadedImage != nil ? "LOADED"
+                : (NativeMediaImageCache.shared.size(forSource: Self.canonicalizeMarkdownImageSource(source)) != nil ? "KNOWN-SIZE" : "PLACEHOLDER-200")
+            AppLogger(category: "AttachHotPath")
+                .info("[IMG][BOUNDS-BRANCH] #\(cnt) src=\(Self.shortSrc(self.source)) ptr=\(ObjectIdentifier(self).hashValue & 0xFFFFFF) branch=\(branch)")
         }
 
         if let img = loadedImage {
@@ -3820,10 +3932,72 @@ final class ImageAttachment: NSTextAttachment {
             return CGRect(x: 0, y: 0, width: imgWidth + Self.imageShadowInset * 2,
                           height: h + Self.imageShadowInset * 2)
         }
-        // First time we see this source — fall back to placeholder. Same
-        // unconstrained-probe guard as the loaded path.
+        // [T-attach-bounds-probe-kick] First time we see this source. Ask for a
+        // header probe before returning the 200pt box, so the NEXT layout pass
+        // can take the recorded-size branch above.
+        //
+        // Without this the three branches formed a closed loop for any source
+        // whose load had not started yet:
+        //
+        //   no recorded size → 200pt placeholder → no load kicked
+        //     → probeAndPublishSize never runs → still no recorded size → …
+        //
+        // and only an outside event (the cell being rebuilt on scroll) could
+        // break it. Measured on device 2026-09-22: an image written by a
+        // background tool at 22:16:15 rendered at 22:16:42 with
+        // `branch=PLACEHOLDER-200` five times and NO `[Load] dispatching` at
+        // all; the first real load came 9m18s later when the row was scrolled
+        // back into view. The file was present and decoded fine (970x1120) —
+        // nothing was slow, the load simply was never asked for.
+        //
+        // TextKit probes this method with `lineFrag.width = 10_000_000` during
+        // intermediate passes (see the loaded branch), and those passes are
+        // discarded — skip them rather than spend a probe on a throwaway.
+        if rawWidth < Self.unconstrainedProbeWidth {
+            Self.kickHeaderProbe(source: source, canonicalSrc: canonicalSrc)
+        }
         let placeholderWidth = min(width, Self.maxImageWidth)
         return CGRect(x: 0, y: 0, width: placeholderWidth, height: Self.placeholderHeight)
+    }
+
+    /// [T-attach-bounds-probe-kick] Width at or above which a `lineFrag.width`
+    /// is TextKit's "unconstrained" probe rather than a real container width.
+    static let unconstrainedProbeWidth: CGFloat = 1_000_000
+
+    /// Sources a probe has already been attempted for, so a method called once
+    /// per layout pass cannot queue the same work repeatedly.
+    ///
+    /// Deliberately records the attempt, not the success: a source that has no
+    /// resolvable file (a remote URL, a deleted attachment) must not re-probe on
+    /// every pass either. A successful probe records a size, which makes the
+    /// branch above win and stops the calls at the source.
+    private static let probeKickedLock = NSLock()
+    private static var probeKicked: Set<String> = []
+
+    /// Run `probeAndPublishSize` OFF the layout pass, once per source.
+    ///
+    /// `attachmentBounds` is called from inside TextKit's layout loop — tens of
+    /// times per cell, thousands of times while scrolling (the diagnostic
+    /// counters in this file reach `#350`). Even a millisecond-cheap
+    /// `CGImageSourceCopyPropertiesAtIndex` does not belong there, and
+    /// `recordSize` writes UserDefaults. So the probe is dispatched and the
+    /// current pass still returns the placeholder; the notification it posts on
+    /// success is what re-measures the cell.
+    private static func kickHeaderProbe(source: String, canonicalSrc: String) {
+        guard NativeMediaImageCache.shared.size(forSource: canonicalSrc) == nil else { return }
+        probeKickedLock.lock()
+        let alreadyKicked = !probeKicked.insert(canonicalSrc).inserted
+        probeKickedLock.unlock()
+        guard !alreadyKicked else { return }
+
+        // Local files only. A remote source has no header to read without a
+        // network fetch, which is the load pipeline's job, not a bounds call's.
+        guard let url = URL(string: canonicalSrc), url.scheme == "minis" else { return }
+        Task.detached(priority: .utility) {
+            guard let resolved = resolveMinisFileURLForNativeText(url: url) else { return }
+            imgLogger.info("[MinisImage][Probe] bounds-kick src=\(canonicalSrc) — placeholder branch had no recorded size")
+            Self.probeAndPublishSize(at: resolved, canonicalSrc: canonicalSrc)
+        }
     }
 
     /// [T-ios-image-squish-probe] Read pixel dimensions from the file HEADER
@@ -4250,11 +4424,18 @@ final class VideoAttachment: NSTextAttachment {
 
     private static let placeholderHeight: CGFloat = 200
 
+    /// [T-video-squish-evidence] Last branch `attachmentBounds` answered from,
+    /// so the log shows each TRANSITION (placeholder → probed → thumbnail)
+    /// exactly once instead of once per TextKit probe. Value: 0 placeholder,
+    /// 1 recorded-size, 2 thumbnail.
+    private var lastBoundsBranch: Int = -1
+
     override func attachmentBounds(for textContainer: NSTextContainer?, proposedLineFragment lineFrag: CGRect, glyphPosition position: CGPoint, characterIndex charIndex: Int) -> CGRect {
         let width = min(lineFrag.width, 400)
         if let thumb = thumbnail {
             let aspect = thumb.size.height / max(thumb.size.width, 1)
             let h = min(width * aspect, UIScreen.main.bounds.height / 2)
+            logBoundsBranch(2, height: h + 24, aspect: aspect, width: width)
             // +24 for filename label below
             return CGRect(x: 0, y: 0, width: lineFrag.width, height: h + 24)
         }
@@ -4267,9 +4448,78 @@ final class VideoAttachment: NSTextAttachment {
            known.width > 0 {
             let aspect = known.height / known.width
             let h = min(width * aspect, UIScreen.main.bounds.height / 2)
+            logBoundsBranch(1, height: h + 24, aspect: aspect, width: width)
             return CGRect(x: 0, y: 0, width: lineFrag.width, height: h + 24)
         }
+        // [T-attach-bounds-probe-kick] Same closed loop as ImageAttachment: with
+        // no thumbnail and no recorded size this branch returns 200pt and kicks
+        // nothing, so the track-metadata probe (which lives in the thumbnail
+        // load) never runs and the next pass lands here again. Ask for it.
+        if lineFrag.width < ImageAttachment.unconstrainedProbeWidth {
+            Self.kickTrackProbe(source: source)
+        }
+        logBoundsBranch(0, height: Self.placeholderHeight, aspect: 0, width: width)
         return CGRect(x: 0, y: 0, width: lineFrag.width, height: Self.placeholderHeight)
+    }
+
+    /// [T-attach-bounds-probe-kick] See `ImageAttachment.kickHeaderProbe` — same
+    /// once-per-source, off-the-layout-pass contract, reading video track
+    /// metadata instead of an image header.
+    private static let probeKickedLock = NSLock()
+    private static var probeKicked: Set<String> = []
+
+    private static func kickTrackProbe(source: String) {
+        guard NativeMediaImageCache.shared.size(forSource: source) == nil else { return }
+        probeKickedLock.lock()
+        let alreadyKicked = !probeKicked.insert(source).inserted
+        probeKickedLock.unlock()
+        guard !alreadyKicked else { return }
+
+        guard let url = URL(string: source), url.scheme == "minis" else { return }
+        Task.detached(priority: .utility) {
+            guard let resolved = resolveMinisFileURLForNativeText(url: url) else { return }
+            await Self.probeAndPublishTrackSize(asset: AVAsset(url: resolved), src: source, via: "bounds-kick")
+        }
+    }
+
+    /// Record a video's display size from container metadata.
+    ///
+    /// Track metadata (naturalSize + preferredTransform) is read from the
+    /// container header — far lighter than AVAssetImageGenerator, which spins up
+    /// a decoder for a real frame. Recording it lets attachmentBounds return the
+    /// true aspect ratio while the (slow) thumbnail is still cooking — the
+    /// 8f9ffc437 header-probe idea applied to video. Orientation is handled by
+    /// applying preferredTransform (portrait phone captures store a landscape
+    /// naturalSize + 90° transform).
+    ///
+    /// Idempotent: no-op once a size is recorded, so the two callers (thumbnail
+    /// load and the bounds kick) cannot double-publish.
+    private static func probeAndPublishTrackSize(asset: AVAsset, src: String, via: String) async {
+        guard NativeMediaImageCache.shared.size(forSource: src) == nil,
+              let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform)
+        else { return }
+        let rect = CGRect(origin: .zero, size: natural).applying(transform)
+        let displaySize = CGSize(width: abs(rect.width), height: abs(rect.height))
+        guard displaySize.width > 0, displaySize.height > 0 else { return }
+        NativeMediaImageCache.shared.recordSize(displaySize, forSource: src)
+        imgLogger.info("[MinisVideo][Probe] via=\(via) track size=\(Int(displaySize.width))x\(Int(displaySize.height)) src=\(src) — publishing before thumbnail generation")
+        await MainActor.run {
+            NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: src)
+        }
+    }
+
+    /// [T-video-squish-evidence] The 200-vs-real-height fact, with a
+    /// timestamp. Emitted only when the answering branch CHANGES, so a burst
+    /// of TextKit probes costs one line, not dozens. Pair with
+    /// `[MinisVideo][Probe]` (when the size became known) and
+    /// `[AttachmentSize] clear` (when the cell was asked to re-measure) to
+    /// see whether the correction was late, or swallowed.
+    private func logBoundsBranch(_ branch: Int, height: CGFloat, aspect: CGFloat, width: CGFloat) {
+        guard branch != lastBoundsBranch else { return }
+        lastBoundsBranch = branch
+        let name = ["placeholder", "recordedSize", "thumbnail"][branch]
+        imgLogger.info("[MinisVideo][Bounds] branch=\(name) h=\(String(format: "%.0f", height)) aspect=\(String(format: "%.2f", aspect)) w=\(String(format: "%.0f", width)) src=\(source)")
     }
 
     func beginLoadingIfNeeded() {
@@ -4277,6 +4527,11 @@ final class VideoAttachment: NSTextAttachment {
         isLoading = true
 
         let src = source
+        // [T-video-squish-evidence] START of the async probe+thumbnail work.
+        // The gap between this line and the first `[MinisVideo][Bounds]`
+        // placeholder line is how long TextKit laid out at 200pt before the
+        // probe was even kicked off.
+        imgLogger.info("[MinisVideo][LoadStart] sizeKnown=\(NativeMediaImageCache.shared.size(forSource: src) != nil) src=\(src)")
         Task.detached(priority: .userInitiated) {
             var fileURL: URL?
             if let url = URL(string: src), url.scheme == "minis" {
@@ -4321,19 +4576,7 @@ final class VideoAttachment: NSTextAttachment {
             // the 8f9ffc437 header-probe idea applied to video. Orientation is
             // handled by applying preferredTransform (portrait phone captures
             // store a landscape naturalSize + 90° transform).
-            if NativeMediaImageCache.shared.size(forSource: src) == nil,
-               let track = try? await asset.loadTracks(withMediaType: .video).first,
-               let (natural, transform) = try? await track.load(.naturalSize, .preferredTransform) {
-                let rect = CGRect(origin: .zero, size: natural).applying(transform)
-                let displaySize = CGSize(width: abs(rect.width), height: abs(rect.height))
-                if displaySize.width > 0, displaySize.height > 0 {
-                    NativeMediaImageCache.shared.recordSize(displaySize, forSource: src)
-                    imgLogger.info("[MinisVideo][Probe] track size=\(Int(displaySize.width))x\(Int(displaySize.height)) src=\(src) — publishing before thumbnail generation")
-                    await MainActor.run {
-                        NotificationCenter.default.post(name: .minisAttachmentSizeChanged, object: src)
-                    }
-                }
-            }
+            await Self.probeAndPublishTrackSize(asset: asset, src: src, via: "thumbnail-load")
 
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
@@ -4770,6 +5013,12 @@ final class MinisLayoutManager: NSLayoutManager {
     /// pill doesn't look clipped against its final character.
     private static let inlineCodeTrailingInset: CGFloat = 2
 
+    /// [T-ios-inline-code-wrap-gap] Corner radius of the inline-code pill.
+    /// Named because the multi-line joining below has to reason about it: a
+    /// radius applied to an interior edge is what makes two stacked pills read
+    /// as separate chips rather than one block.
+    private static let inlineCodeCornerRadius: CGFloat = 5
+
     override func fillBackgroundRectArray(_ rectArray: UnsafePointer<CGRect>, count rectCount: Int, forCharacterRange charRange: NSRange, color: UIColor) {
         // Check if this range has inline code background
         guard let textStorage = self.textStorage else {
@@ -4805,6 +5054,10 @@ final class MinisLayoutManager: NSLayoutManager {
             lineFragCount += 1
         }
 
+        // [T-ios-inline-code-wrap-gap] Accumulated across the loop so the
+        // joining pass can see every line's pill at once.
+        var pillRects: [CGRect] = []
+
         for i in 0..<rectCount {
             var rawRect = rectArray[i]
             guard rawRect.width > 2 else { continue }
@@ -4822,6 +5075,13 @@ final class MinisLayoutManager: NSLayoutManager {
             // glyph on this line. See the clamp below for why rawRect's own
             // width can't be trusted on a wrapped line.
             var visibleMaxX: CGFloat = .nan
+            // [T-ios-inline-code-list-indent] Leading edge of the first glyph
+            // on this line — the counterpart to visibleMaxX. TextKit reports
+            // the background rect of a WRAPPED line as starting at the text
+            // container's origin (x=0), ignoring the paragraph's headIndent,
+            // so inside a list the pill ran back to the bubble's left edge
+            // while the text it belongs to sat one indent level in.
+            var visibleMinX: CGFloat = .nan
             enumerateLineFragments(forGlyphRange: glyphRange) { lineFragRect, usedRect, _, lineGlyphRange, _ in
                 guard lineFragRect.midY >= rawRect.minY && lineFragRect.midY <= rawRect.maxY else { return }
                 let overlapStart = max(glyphRange.location, lineGlyphRange.location)
@@ -4855,6 +5115,10 @@ final class MinisLayoutManager: NSLayoutManager {
                                                        effectiveRange: nil) {
                             let box = self.boundingRect(forGlyphRange: visibleGlyphRange, in: tc)
                             visibleMaxX = visibleMaxX.isNaN ? box.maxX : max(visibleMaxX, box.maxX)
+                            // [T-ios-inline-code-list-indent] Same measurement,
+                            // other edge. boundingRect honours headIndent, which
+                            // is exactly what the rect TextKit handed us does not.
+                            visibleMinX = visibleMinX.isNaN ? box.minX : min(visibleMinX, box.minX)
                         }
                     }
 
@@ -4892,6 +5156,25 @@ final class MinisLayoutManager: NSLayoutManager {
             // this shrink-only: a line TextKit already measured tightly (a
             // single-line span, or the last line of a wrapped one, where
             // visibleMaxX == rawRect.maxX) keeps its original rect untouched.
+            // [T-ios-inline-code-list-indent] Pull the LEADING edge in to the
+            // first glyph before the trailing clamp runs, so the width below is
+            // computed from the corrected origin.
+            //
+            // On a wrapped line TextKit reports the background rect from the
+            // container origin, dropping the paragraph's headIndent — so in a
+            // list the pill started at the bubble's left edge while its text
+            // began one indent level in. boundingRect does honour the indent,
+            // so the glyph extent measured above is the truth.
+            //
+            // Shrink-only, exactly like the trailing clamp: a line TextKit
+            // already measured tightly has visibleMinX == rawRect.minX and is
+            // left untouched. Never move the edge LEFT — that would let a
+            // mis-measured span paint outside the rect TextKit reserved.
+            if !visibleMinX.isNaN, visibleMinX > rawRect.minX, visibleMinX < rawRect.maxX {
+                rawRect.size.width -= visibleMinX - rawRect.minX
+                rawRect.origin.x = visibleMinX
+            }
+
             if !visibleMaxX.isNaN, visibleMaxX > rawRect.minX {
                 let padded = visibleMaxX + Self.inlineCodeTrailingInset
                 if padded < rawRect.maxX {
@@ -4910,11 +5193,84 @@ final class MinisLayoutManager: NSLayoutManager {
             let bgHeight = min(fontLineHeight + bgPaddingV * 2, rawRect.height)
             let bgY = rawRect.midY - bgHeight / 2 - 0.5
             let rect = CGRect(x: rawRect.minX - 0.5, y: bgY, width: rawRect.width + 1, height: bgHeight)
-            let path = UIBezierPath(roundedRect: rect, cornerRadius: 5)
-            context.addPath(path.cgPath)
+            // [T-ios-inline-code-wrap-gap] Collected rather than filled here —
+            // the joining pass below needs to see the whole set to know which
+            // edges are interior. See `paintInlineCodeRects`.
+            pillRects.append(rect)
         }
+
+        Self.paintInlineCodeRects(pillRects, in: context)
         context.fillPath()
         context.restoreGState()
+    }
+
+    /// [T-ios-inline-code-wrap-gap] Draw the pills for ONE inline-code span,
+    /// joining them vertically when the span wrapped across lines.
+    ///
+    /// The bug: each line's pill is sized to the code font
+    /// (`fontLineHeight + padding`) and centred in its line box. That is right
+    /// for a single-line span — it stops a short chip from inheriting the full
+    /// leading of a line whose tallest glyph is body text. But across a wrapped
+    /// span it means consecutive pills are shorter than the line pitch, so a
+    /// horizontal band of background shows between every pair of lines. In the
+    /// report that reads as the highlight "breaking" in the middle, while the
+    /// first and last lines look correct.
+    ///
+    /// The fix has two halves, and both are needed:
+    ///
+    ///  * **Close the vertical gap.** Sort by y and stretch each adjacent pair
+    ///    to meet at their midpoint. Only ever GROWS a pill, and only toward a
+    ///    neighbour that already exists, so a single-line span (one rect, no
+    ///    pairs) is bit-identical to before.
+    ///
+    ///  * **Square the interior corners.** Once two pills touch, rounding the
+    ///    joined edges carves notches out of the seam — visually worse than the
+    ///    gap it replaced. The first pill keeps its top corners, the last keeps
+    ///    its bottom, and everything in between is a plain rectangle.
+    ///
+    /// Deliberately NOT done as one union path: the lines have different widths
+    /// (the last is usually short), so a union outline would need mitred joins
+    /// between differing edges — far more geometry for no visual gain, since
+    /// the fill colour is flat and opaque.
+    static func paintInlineCodeRects(_ rects: [CGRect], in context: CGContext) {
+        guard !rects.isEmpty else { return }
+        let radius = inlineCodeCornerRadius
+
+        guard rects.count > 1 else {
+            context.addPath(UIBezierPath(roundedRect: rects[0], cornerRadius: radius).cgPath)
+            return
+        }
+
+        // Top-to-bottom. TextKit hands rects in layout order already, but the
+        // pairing below is only correct if that holds, so make it explicit.
+        var ordered = rects.sorted { $0.minY < $1.minY }
+
+        // Grow each adjacent pair until they meet halfway. Guarded on a real
+        // gap so already-touching or overlapping rects are left alone.
+        for i in 0..<(ordered.count - 1) {
+            let gap = ordered[i + 1].minY - ordered[i].maxY
+            guard gap > 0 else { continue }
+            let meet = ordered[i].maxY + gap / 2
+            ordered[i].size.height = meet - ordered[i].minY
+            let nextBottom = ordered[i + 1].maxY
+            ordered[i + 1].origin.y = meet
+            ordered[i + 1].size.height = nextBottom - meet
+        }
+
+        for (i, rect) in ordered.enumerated() {
+            let corners: UIRectCorner
+            switch i {
+            case 0: corners = [.topLeft, .topRight]
+            case ordered.count - 1: corners = [.bottomLeft, .bottomRight]
+            default: corners = []
+            }
+            let path = corners.isEmpty
+                ? UIBezierPath(rect: rect)
+                : UIBezierPath(roundedRect: rect,
+                               byRoundingCorners: corners,
+                               cornerRadii: CGSize(width: radius, height: radius))
+            context.addPath(path.cgPath)
+        }
     }
 }
 
@@ -5151,6 +5507,19 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         isEditable = false
         isSelectable = true
         isScrollEnabled = false
+        // [T-ios-datadetector-hardening] State the detector policy instead of
+        // inheriting it. This matches TerminalTextView / LogTextView /
+        // MinisTextView, which already set it explicitly.
+        //
+        // DEFENSIVE ONLY — this does NOT fix the DataDetectorsUI/Calculate
+        // watchdog crash seen in 1.14(8). That hang is inside
+        // DDConversionAction.calculateResult while the SYSTEM builds an
+        // edit-menu item's title, with zero Minis frames in the stack, and it
+        // is reached from a user-initiated selection rather than from an
+        // automatic detector pass. UITextView already defaults this property
+        // to [] (verified: rawValue 0), so this line changes no behavior
+        // today; it guards against a future SDK changing that default.
+        dataDetectorTypes = []
         // Symmetric 4pt top/bottom inset. Bottom was there originally to keep
         // emoji and Latin descenders (g, p, y) off the clipping edge under
         // TextKit 1; without a matching TOP inset the ascender of glyphs
@@ -5549,11 +5918,27 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
             // Check if touch is inside any code block UITextView subview
             for subview in attachmentViews {
                 if subview.frame.contains(location) {
-                    // Find the UITextView inside this attachment view
-                    if let codeTV = findCodeTextView(in: subview), codeTV.isScrollEnabled {
+                    // [T-codeblock-hide-idle-scrollbars] Ask the code block's
+                    // SCROLL VIEW what it can actually scroll.
+                    //
+                    // This used to look at `findCodeTextView(...).isScrollEnabled`,
+                    // but that inner UITextView is created with
+                    // `isScrollEnabled = false` on purpose ("scrollView handles
+                    // scrolling"), so the condition was never true and the whole
+                    // branch was dead — the outer view never yielded a pan.
+                    //
+                    // Yield only on the axis the block can really scroll, which
+                    // is what keeps a fitted (non-scrolling) block from stealing
+                    // the drag and making the message list feel stuck.
+                    if let codeScroll = findCodeScrollView(in: subview) {
                         let vel = self.panGestureRecognizer.velocity(in: self)
-                        // If primarily horizontal, let the inner code block handle it
-                        if abs(vel.x) > abs(vel.y) {
+                        let horizontal = abs(vel.x) > abs(vel.y)
+                        // Usable height excludes the bottom contentInset, the
+                        // same way syncScrollability measures it.
+                        let usableH = codeScroll.bounds.height - codeScroll.contentInset.bottom
+                        let canScrollH = codeScroll.contentSize.width > codeScroll.bounds.width + 0.5
+                        let canScrollV = codeScroll.contentSize.height > usableH + 0.5
+                        if (horizontal && canScrollH) || (!horizontal && canScrollV) {
                             return false
                         }
                     }
@@ -5624,10 +6009,14 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         return false
     }
 
-    private func findCodeTextView(in view: UIView) -> UITextView? {
+    /// [T-codeblock-hide-idle-scrollbars] The code block's own UIScrollView —
+    /// the view that actually scrolls (the UITextView inside it is created with
+    /// `isScrollEnabled = false`). Used by `gestureRecognizerShouldBegin` to
+    /// decide whether yielding the pan would accomplish anything.
+    private func findCodeScrollView(in view: UIView) -> UIScrollView? {
         for sub in view.subviews {
-            if let tv = sub as? UITextView { return tv }
-            if let found = findCodeTextView(in: sub) { return found }
+            if let sv = sub as? UIScrollView { return sv }
+            if let found = findCodeScrollView(in: sub) { return found }
         }
         return nil
     }
@@ -5750,6 +6139,43 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         UIPasteboard.general.string = plainTextWithTables(in: range)
     }
 
+    /// [T-ios-copy-full-scope] Whole-reply rich text.
+    ///
+    /// Separate from `copyRichText` rather than a parameter on it: that one is
+    /// selection-aware by design (it backs the standard selection copy path and
+    /// falls back to the full range only when nothing is selected). The "Copy
+    /// Full Reply" submenu promises the entire reply regardless of what happens
+    /// to be highlighted, so it must not consult `selectedRange` at all —
+    /// reusing the old method would have silently copied just the selection
+    /// whenever the long-press left one behind, which is the exact confusion
+    /// this menu was restructured to remove.
+    @objc func copyFullRichText(_ sender: Any?) {
+        let full = NSRange(location: 0, length: attributedText.length)
+        let subAttr = attributedText.attributedSubstring(from: full)
+        if let rtfData = try? subAttr.data(from: NSRange(location: 0, length: subAttr.length),
+                                           documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]) {
+            UIPasteboard.general.setData(rtfData, forPasteboardType: "public.rtf")
+        }
+        // Plain-text fallback for targets that ignore RTF (same reason as
+        // copyRichText: a table's NSTextAttachment collapses to a space).
+        UIPasteboard.general.string = plainTextWithTables(in: full)
+    }
+
+    /// [T-ios-copy-full-scope] Whole reply as plain text: paragraph structure
+    /// only, no markdown syntax.
+    ///
+    /// This is the RENDERED text, not `rawMarkdown` with the markup stripped.
+    /// The distinction matters — the attributed string is what the user is
+    /// looking at, so headings, list items and blockquotes arrive as the lines
+    /// they appear to be, with no `#`, `-`, `**` or `>` to clean up. Tables and
+    /// math still expand through `plainTextWithTables` (tab-separated cells,
+    /// `$…$` for formulae) because dropping them entirely would lose content
+    /// rather than formatting.
+    @objc func copyFullPlainText(_ sender: Any?) {
+        let full = NSRange(location: 0, length: attributedText.length)
+        UIPasteboard.general.string = plainTextWithTables(in: full)
+    }
+
     /// Returns the plain-text representation of `range`, expanding any
     /// `TableAttachment` runs into tab-separated cell text so multi-block
     /// selections that span a table preserve table content on copy.
@@ -5790,17 +6216,38 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
         // stack (provider voices, sanitizer, fail-over). Replaced below with
         // our own Read Selection / Read Reply entries.
         builder.remove(menu: .speech)
-        let copyMd = UICommand(
-            title: AppLocalized("Copy Markdown"),
-            image: UIImage(systemName: "text.quote"),
-            action: #selector(copyMarkdown(_:))
+        // [T-ios-copy-full-scope] Scope first, format second.
+        //
+        // This menu is raised by a long-press that usually ALSO produces a
+        // selection, and it sits beside "Read Selection" — so a top-level
+        // "Copy Markdown" reads as "copy what I highlighted" when it actually
+        // copies the whole reply. Putting the formats behind one "Copy Full
+        // Reply" entry states the scope ONCE, in the item the user taps first,
+        // and leaves the submenu free to talk only about format. It also keeps
+        // the top level short: three format entries inline would crowd out
+        // Add to Chat Input / the read-aloud pair.
+        let copyFull = UIMenu(
+            title: AppLocalized("Copy Full Reply"),
+            image: UIImage(systemName: "doc.on.doc"),
+            children: [
+                UICommand(
+                    title: AppLocalized("Copy as Markdown"),
+                    image: UIImage(systemName: "text.quote"),
+                    action: #selector(copyMarkdown(_:))
+                ),
+                UICommand(
+                    title: AppLocalized("Copy as Rich Text"),
+                    image: UIImage(systemName: "doc.richtext"),
+                    action: #selector(copyFullRichText(_:))
+                ),
+                UICommand(
+                    title: AppLocalized("Copy as Plain Text"),
+                    image: UIImage(systemName: "text.alignleft"),
+                    action: #selector(copyFullPlainText(_:))
+                ),
+            ]
         )
-        let copyRtf = UICommand(
-            title: AppLocalized("Copy Rich Text"),
-            image: UIImage(systemName: "doc.richtext"),
-            action: #selector(copyRichText(_:))
-        )
-        var extras: [UIMenuElement] = [copyMd, copyRtf]
+        var extras: [UIMenuElement] = [copyFull]
         if onCopyScreenshot != nil {
             extras.append(UICommand(
                 title: AppLocalized("Copy Screenshot"),
@@ -6165,6 +6612,17 @@ final class SelectableMarkdownTextView: UITextView, UIGestureRecognizerDelegate 
                             DispatchQueue.main.async { self?.refreshAttachmentViews() }
                         }
                         imageAttach.beginLoadingIfNeeded()
+                    } else if !stale {
+                        // [T-img-placeholder-stuck-diag] The reported case: the
+                        // bitmap IS loaded and the existing view is reused as-is
+                        // (`stale == false`), so nothing rebuilds the subview. If
+                        // that view was built while the image was still missing,
+                        // it is a placeholder and stays one — height correct,
+                        // content blank. Logged so a repro shows whether the
+                        // reuse actually kept a placeholder view.
+                        AppLogger(category: "AttachHotPath")
+                            .info("[IMG][REUSE-LOADED] src=\(ImageAttachment.shortSrc(imageAttach.source)) ptr=\(attachId.hashValue & 0xFFFFFF) — image present, view NOT rebuilt")
+                        imageAttach.onLoad = nil
                     } else {
                         // Clear any stale onLoad so a later invalidation path
                         // doesn't surface a synchronous refresh from an earlier
@@ -7478,8 +7936,10 @@ struct SelectableMarkdownView: UIViewRepresentable {
         // rects cached.
         if let mid = messageId, let existing = SelectableMarkdownView.rendererCache[mid] {
             coord.renderer = existing
+            SelectableMarkdownView.touchRenderer(mid)
         } else if let mid = messageId {
             SelectableMarkdownView.rendererCache[mid] = coord.renderer
+            SelectableMarkdownView.touchRenderer(mid)
         }
         return coord
     }
@@ -7495,7 +7955,61 @@ struct SelectableMarkdownView: UIViewRepresentable {
     /// state. The cache uses a regular dictionary because the keys are
     /// stable across the chat session and entries are cheap; in practice
     /// it grows at the rate of unique assistant messages in the live chat.
+    /// [T-renderer-cache-bounded] It used to be exactly that — an unbounded
+    /// dictionary with no removal path anywhere in the app. "Entries are cheap"
+    /// held per entry, but the map is keyed by MESSAGE id and lives on the
+    /// type, so it was reclaimed by nothing: not by leaving a chat, not by
+    /// ViewModelCache eviction (which is keyed by session), not by a memory
+    /// warning. Every assistant message rendered since launch kept its
+    /// renderer, and with it the attachments and layout it had built.
+    ///
+    /// Now bounded by an LRU cap, and drained explicitly on the three
+    /// occasions the owner disappears: a message goes away, a session's VM is
+    /// released, or the system asks for memory back.
     @MainActor private static var rendererCache: [UUID: MarkdownNSRenderer] = [:]
+
+    /// LRU order for `rendererCache`, oldest first.
+    @MainActor private static var rendererLRU: [UUID] = []
+
+    /// Renderers kept resident. Sized for "a long conversation the user is
+    /// actively scrolling" — well past a screenful so scrolling back never
+    /// re-parses, but far below the unbounded growth this replaces.
+    @MainActor private static let rendererCacheCap = 80
+
+    /// Record a renderer as most-recently-used and trim the tail.
+    @MainActor
+    private static func touchRenderer(_ id: UUID) {
+        if let i = rendererLRU.firstIndex(of: id) { rendererLRU.remove(at: i) }
+        rendererLRU.append(id)
+        while rendererLRU.count > rendererCacheCap, let oldest = rendererLRU.first {
+            rendererLRU.removeFirst()
+            rendererCache.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Drop one message's renderer. Safe to call for an id that was never
+    /// cached. Called from `AIChatViewModel.releaseRenderState`.
+    ///
+    /// Dropping is always safe: the renderer is a CACHE. The next render for
+    /// this message simply builds a fresh one — which is the same thing that
+    /// happens today for any message that was never rendered. What the cache
+    /// buys is attachment identity ACROSS coordinator recreations within one
+    /// live message; a message whose VM has been released is not live.
+    @MainActor
+    static func dropRenderer(for messageId: UUID) {
+        guard rendererCache.removeValue(forKey: messageId) != nil else { return }
+        if let i = rendererLRU.firstIndex(of: messageId) { rendererLRU.remove(at: i) }
+    }
+
+    /// Drop every cached renderer. Wired to the same memory-warning hook
+    /// ViewModelCache / BrowserTabPool / ThumbnailCache already use.
+    @MainActor
+    static func dropAllRenderers() -> Int {
+        let n = rendererCache.count
+        rendererCache.removeAll()
+        rendererLRU.removeAll()
+        return n
+    }
 
     func makeUIView(context: Context) -> SelectableMarkdownTextView {
         let textView = SelectableMarkdownTextView()

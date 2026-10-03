@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.graphics.Color
 import com.openminis.app.data.model.FallbackStrategy
@@ -288,7 +289,7 @@ fun ModelGroupDetailScreen(
                             ListItem(
                                 headlineContent = {
                                     Text(
-                                        "Model no longer available",
+                                        stringResource(R.string.model_group_detail_stale_member),
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 },
@@ -328,18 +329,25 @@ fun ModelGroupDetailScreen(
                         val instance = config.instances.find { it.id == entry.providerInstanceId }
                         val instanceLabel = instance?.label
                         val providerDisabled = instance?.isEnabled == false
+                        // [T-android-model-absence-grace] The provider stopped
+                        // listing this model. The entry (and its overrides) is
+                        // retained through the grace window, so say why the row
+                        // is dimmed instead of letting it look normal — or, as
+                        // before, letting it silently vanish from the group.
+                        val notListed = entry.isUnavailableFromProvider
                         var showMenu by remember { mutableStateOf(false) }
 
                         ReorderableItem(reorderState, key = entryId) { _ ->
                             ListItem(
-                                modifier = Modifier.alpha(if (providerDisabled) 0.4f else 1f),
+                                modifier = Modifier.alpha(if (providerDisabled || notListed) 0.4f else 1f),
                                 headlineContent = { Text(entry.model.displayName) },
                                 supportingContent = {
-                                    if (providerDisabled) {
+                                    if (providerDisabled || notListed) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Text(instanceLabel ?: "")
                                             Text(
-                                                " · Provider disabled",
+                                                if (providerDisabled) " · Provider disabled"
+                                                else " · " + stringResource(R.string.model_not_listed_by_provider),
                                                 color = MaterialTheme.colorScheme.error,
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
@@ -488,7 +496,27 @@ fun ModelGroupDetailScreen(
                                             index = idx,
                                             count = cases.size,
                                         ),
-                                    ) { Text(label) }
+                                        // [T-android-thinking-segment-overflow]
+                                        // Same six-segment overflow as the sub
+                                        // agent editor, which was ported from
+                                        // here: without this the labels break
+                                        // mid-word ("Medi/um", "XHig/h"). The
+                                        // check icon is redundant next to the
+                                        // selected segment's fill and was
+                                        // costing ~24dp of label width.
+                                        icon = {},
+                                    ) {
+                                        Text(
+                                            label,
+                                            // One size below labelSmall: six segments on a phone leave
+                                    // ~55dp each, and labelSmall's 11sp still made
+                                    // "Medium" the widest thing in the row.
+                                    fontSize = 10.sp,
+                                    lineHeight = 12.sp,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    }
                                 }
                             }
                         }

@@ -92,12 +92,34 @@ struct SendPromptIntent: AppIntent {
         let pendingId = ShortcutRunTracker.markPending(
             intent: "SendPromptIntent",
             sessionId: diagSessionId,
+            waitForResult: waitForResult,
             eagerKeepAliveArmed: eagerArmed,
             eagerKeepAliveSkippedReason: eagerSkipReason
         )
 
         let vm: AIChatViewModel
         let isNewSession: Bool
+        // [T-headless-mount-activation] Resolve external folder mounts and
+        // WAIT for them before any agent work (issue #335).
+        //
+        // `activateAll()` runs from the root view's `.onAppear`, which a headless
+        // intent (`openAppWhenRun = false`) never builds — so on a cold or
+        // force-quit launch nothing acquired the security scopes, `activeURLs`
+        // stayed empty, and the external-mount snapshot the agent reads was
+        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // opened the app once.
+        //
+        // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the
+        // pass keeps running and publishes late (the mount becomes usable
+        // mid-run) instead of being abandoned. 12s because a cold iCloud
+        // FileProvider takes ~5s per bookmark on device and the resolves run
+        // concurrently, so this clears a realistic mount set with headroom
+        // without ever being the thing that hangs a Shortcut.
+        //
+        // Placed OUTSIDE the branch below: the VM may already be cached (isNew
+        // false) while this process still never activated mounts, which is exactly
+        // the force-quit case this fixes.
+        await MountedFoldersManager.shared.ensureActivated(timeout: 12)
         if let session = session {
             let (cached, _) = ViewModelCache.shared.getOrCreate(for: session.id)
             vm = cached
@@ -147,11 +169,31 @@ struct SendPromptIntent: AppIntent {
             }
         }
 
-        // Send the prompt
-        vm.inputText = prompt
-        vm.send()
+        // Send the prompt through the programmatic channel. [T-p0-programmatic-prompt]
+        // A Shortcut aimed at a session that is mid-turn used to hit send()'s
+        // isProcessing guard and report "Running" for a prompt that never
+        // went anywhere; now it is queued as the next turn, and a genuine
+        // refusal is surfaced instead of faked.
+        let submitOutcome = vm.submitProgrammaticPrompt(prompt, origin: .shortcut, silent: true)
 
         let sid = vm.sessionId ?? "unknown"
+        // [T-shortcut-wait-queued-turn] Captured right here, before any await:
+        // when the session was busy the prompt went to the queue, and the wait
+        // below must track THAT prompt rather than the turn already running.
+        let queuedPromptId = vm.lastQueuedProgrammaticPromptId(for: submitOutcome)
+
+        if case .rejected(let reason) = submitOutcome {
+            ShortcutRunTracker.markCompleted(recordId: pendingId, reason: "rejected.\(reason)")
+            let rejected = SendPromptResult(
+                sessionId: sid,
+                modelName: vm.selectedModel.displayName,
+                status: "Rejected",
+                isNewSession: isNewSession,
+                prompt: prompt,
+                responseText: reason
+            )
+            return .result(value: rejected, dialog: IntentDialog(stringLiteral: AppLocalized("Minis could not accept the prompt (\(reason)).")))
+        }
 
         // Resolve actual model from session binding (matches what the agent loop uses)
         var modelName = vm.selectedModel.displayName
@@ -185,13 +227,29 @@ struct SendPromptIntent: AppIntent {
         }
 
         if waitForResult {
-            // Synchronous mode: wait for the agent to finish, then return the full response
-            for await processing in vm.$isProcessing.values {
-                if !processing { break }
-            }
+            // Synchronous mode: wait for the agent to finish, then return the full response.
+            // [T-shortcut-wait-queued-turn] Waits for the turn that carries THIS
+            // prompt (see awaitProgrammaticTurn) — a queued prompt is not done
+            // when the earlier turn ends. A cancelled wait (Shortcuts' own time
+            // limit, or the user stopping the run) returns what exists so far
+            // with status "Running" instead of pretending the turn completed.
+            let finished = await vm.awaitProgrammaticTurn(queuedPromptId: queuedPromptId)
 
             // [T-shortcuts-diag-and-pending] Loop finished.
-            ShortcutRunTracker.markCompleted(recordId: pendingId, reason: "waitForResult.done")
+            ShortcutRunTracker.markCompleted(recordId: pendingId,
+                                             reason: finished ? "waitForResult.done" : "waitForResult.cancelled")
+
+            guard finished else {
+                let partial = SendPromptResult(
+                    sessionId: sid,
+                    modelName: modelName,
+                    status: "Running",
+                    isNewSession: isNewSession,
+                    prompt: prompt,
+                    responseText: Self.extractResponseText(from: vm)
+                )
+                return .result(value: partial, dialog: IntentDialog(stringLiteral: AppLocalized("Minis is still working on it. I'll notify you when it's done.")))
+            }
 
             let responseText = Self.extractResponseText(from: vm)
 
@@ -222,13 +280,17 @@ struct SendPromptIntent: AppIntent {
         let capturedSid = sid
         let capturedPendingId = pendingId
         let capturedSendCompletionNotification = sendCompletionNotification
+        let capturedQueuedPromptId = queuedPromptId
         Task { @MainActor in
-            for await processing in vm.$isProcessing.values {
-                if !processing { break }
-            }
+            // [T-shortcut-wait-queued-turn] Same completion rule as the
+            // synchronous branch, so the notification describes this prompt's
+            // answer and not the turn that happened to be running before it.
+            let finished = await vm.awaitProgrammaticTurn(queuedPromptId: capturedQueuedPromptId)
 
             // [T-shortcuts-diag-and-pending] Loop finished.
-            ShortcutRunTracker.markCompleted(recordId: capturedPendingId, reason: "async.done")
+            ShortcutRunTracker.markCompleted(recordId: capturedPendingId,
+                                             reason: finished ? "async.done" : "async.cancelled")
+            guard finished else { return }
 
             let summary = String(Self.extractResponseText(from: vm).prefix(200))
 
@@ -245,7 +307,7 @@ struct SendPromptIntent: AppIntent {
         let result = SendPromptResult(
             sessionId: sid,
             modelName: modelName,
-            status: "Running",
+            status: submitOutcome == .queued ? "Queued" : "Running",
             isNewSession: isNewSession,
             prompt: prompt
         )
@@ -439,7 +501,7 @@ final class ShortcutNotificationDelegate: NSObject, UNUserNotificationCenterDele
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
         let userInfo = response.notification.request.content.userInfo
-        if let sessionId = userInfo["sessionId"] as? String {
+        if let sessionId = userInfo["sessionId"] as? String, !sessionId.isEmpty {
             DispatchQueue.main.async {
                 // Buffer first (cold-launch consumer), then post (warm-path
                 // consumer). Whichever runs marks the other's copy dead.
@@ -449,6 +511,18 @@ final class ShortcutNotificationDelegate: NSObject, UNUserNotificationCenterDele
                     object: nil,
                     userInfo: ["sessionId": sessionId]
                 )
+                // [T-p2-background-helper] A helper insurance notification
+                // also names the child: once the parent chat is up, open its
+                // read-only mirror so the user lands on what the notice was
+                // about. The delay covers the push animation; the chat view
+                // ignores the event if the parent does not match.
+                if let childId = userInfo["childSessionId"] as? String, !childId.isEmpty {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        NotificationCenter.default.post(
+                            name: .openHelperSheet, object: nil,
+                            userInfo: ["childSessionId": childId, "title": "", "parentSessionId": sessionId])
+                    }
+                }
             }
         }
         completionHandler()

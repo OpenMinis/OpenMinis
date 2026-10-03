@@ -31,6 +31,30 @@ object AppLogger {
     private const val PREF_NAME = "logging_prefs"
     private const val KEY_ENABLED = "logging_enabled"
 
+    /**
+     * [T-android-log-level] Detail level, mirroring iOS's Info / Verbose
+     * picker (0f60a5d78). Android had no level at all: with logging on, every
+     * AppLogger.debug line AND every Log.d/Log.v from the framework and
+     * libraries (logcat tail at `*:V`) went to the file. Info, the default,
+     * drops both; Verbose restores the previous everything-mode.
+     */
+    private const val KEY_VERBOSE = "logging_verbose"
+    @Volatile
+    private var verbose: Boolean = false
+
+    /**
+     * [T-android-log-size-cap] Per-file cap, mirroring iOS maxLogFileSize
+     * (500 MB on both since T-log-cap-500mb). Android had none, so one busy
+     * day could grow a single daily log without bound. Past the cap the file
+     * is cut to its newest half.
+     */
+    // `var` only so tests can shrink them instead of writing 100 MB to disk.
+    @androidx.annotation.VisibleForTesting
+    internal var MAX_LOG_FILE_BYTES = 500L * 1024 * 1024
+    @androidx.annotation.VisibleForTesting
+    internal var SIZE_CHECK_EVERY_BYTES = 1L * 1024 * 1024
+    private var bytesSinceSizeCheck = 0L
+
     private var logDir: File? = null
 
     /**
@@ -97,8 +121,9 @@ object AppLogger {
     fun init(context: Context) {
         primeContext(context)
         logDir = File(context.filesDir, LOG_DIR).also { it.mkdirs() }
-        enabled = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getBoolean(KEY_ENABLED, false)
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        enabled = prefs.getBoolean(KEY_ENABLED, false)
+        verbose = prefs.getBoolean(KEY_VERBOSE, false)
         pruneOldLogs()
         if (enabled) startCapture()
     }
@@ -107,6 +132,25 @@ object AppLogger {
         return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_ENABLED, false)
     }
+
+    fun isVerbose(context: Context): Boolean =
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_VERBOSE, false)
+
+    /** [T-android-log-level] Takes effect immediately, including the logcat filter. */
+    @Synchronized
+    fun setVerbose(context: Context, value: Boolean) {
+        verbose = value
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_VERBOSE, value).apply()
+        if (captureActive) {
+            logcatTailer?.stop()
+            logcatTailer = newLogcatTailer().also { it.start() }
+        }
+    }
+
+    private fun newLogcatTailer() =
+        LogcatTailer(minPriority = if (verbose) 'V' else 'I') { line -> writeLogcatLine(line) }
 
     fun setEnabled(context: Context, value: Boolean) {
         enabled = value
@@ -136,7 +180,7 @@ object AppLogger {
         System.setErr(PrintStream(LineCapturingStream(originalErr!!, "STDERR"), true))
         // Spawn the logcat tail before emitting the session-start marker so
         // the marker itself shows up in the captured stream as a sanity check.
-        logcatTailer = LogcatTailer { line -> writeLogcatLine(line) }.also { it.start() }
+        logcatTailer = newLogcatTailer().also { it.start() }
         captureActive = true
         info("AppLogger", "Logging session started — capturing stdout/stderr + logcat tail")
         // [T-android-mem-probe-trust] Device/ROM/heap identity, immediately
@@ -181,14 +225,28 @@ object AppLogger {
         val parenIdx = if (slashIdx >= 0) rawLine.indexOf('(', slashIdx) else -1
         if (slashIdx >= 0 && parenIdx > slashIdx) {
             val tag = rawLine.substring(slashIdx + 1, parenIdx).trim()
-            if (tag.startsWith("Minis.") || tag == "AppLogger") return
+            // [T-android-log-stdout-double-write] `System.out` / `System.err`
+            // must be filtered for the same reason `Minis.*` is: startCapture()
+            // redirects both streams into this file, AND the platform copies
+            // them to logcat, where the tailer reads them straight back. Every
+            // println — including the per-tick [T-HANG-DIAG] diagnostics —
+            // therefore landed in the log TWICE, once as `[STDOUT] …` and again
+            // as `[LOGCAT] … I/System.out(pid): …`. Verified on the 2026-09-15
+            // field log: 8 T-HANG-DIAG lines for 4 actual events.
+            //
+            // The cost is not just noise. It doubles the write+flush work on
+            // every println (writeLogcatLine flushes per line), doubles the
+            // bytes in a file that is already large enough to have needed
+            // tag-level suppression at the logcat command line, and makes any
+            // frequency read off these logs wrong by 2x.
+            if (tag.startsWith("Minis.") || tag == "AppLogger" ||
+                tag == "System.out" || tag == "System.err"
+            ) {
+                return
+            }
         }
         try {
-            val now = Date()
-            val today = dateFormat.format(now)
-            val w = getWriter(today)
-            w.println("[LOGCAT] $rawLine")
-            w.flush()
+            appendLine(dateFormat.format(Date()), "[LOGCAT] $rawLine")
         } catch (_: Exception) {
             // Swallow — must not feed back into logcat or we loop forever.
         }
@@ -258,11 +316,7 @@ object AppLogger {
         if (!enabled) return
         try {
             val now = Date()
-            val today = dateFormat.format(now)
-            val timestamp = timestampFormat.format(now)
-            val w = getWriter(today)
-            w.println("[$timestamp] [$channel] $line")
-            w.flush()
+            appendLine(dateFormat.format(now), "[${timestampFormat.format(now)}] [$channel] $line")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to write captured line: ${e.message}")
         }
@@ -293,18 +347,53 @@ object AppLogger {
      * but `Log.d → liblog → LogcatTailer → file write` is more expensive
      * than the string build alone.
      */
-    private val mutedDebugCategories = setOf("ChatScrollFollow")
+    private val mutedDebugCategories = setOf("ChatScrollFollow", "ScrollSrc")
 
     fun debug(category: String, message: String) {
         if (category in mutedDebugCategories) return
         log("DEBUG", category, message)
     }
 
-    private fun log(level: String, category: String, message: String) {
-        val now = Date()
-        val today = dateFormat.format(now)
-        val timestamp = timestampFormat.format(now)
+    /**
+     * [T-android-fab-up-anr] Lazy variant — the "can't fix that without
+     * lambdas" the note above refers to.
+     *
+     * For a muted category this costs one set lookup and never builds the
+     * message at all. Worth it where a call site can fire many times inside a
+     * single frame: the scroll-source diagnostic ran once per programmatic
+     * scroll on a path that could issue hundreds in one gesture, formatting
+     * six fields of layout state each time, with nothing consuming the result.
+     */
+    inline fun debug(category: String, message: () -> String) {
+        if (isDebugMuted(category)) return
+        debug(category, message())
+    }
 
+    /** Exposed for [debug]'s inline body; not part of the logging surface. */
+    fun isDebugMuted(category: String): Boolean = category in mutedDebugCategories
+
+    /**
+     * [T-android-log-hotpath] True when a per-event diagnostic has a reader:
+     * a debug build (adb logcat), or Verbose logging on (the only level at
+     * which DEBUG lines reach the log file).
+     */
+    val traceEnabled: Boolean
+        get() = com.openminis.app.BuildConfig.DEBUG || (enabled && verbose)
+
+    /**
+     * [T-android-log-hotpath] For diagnostics that fire per streamed event /
+     * chunk. [debug] builds its message and writes it to logcat on every
+     * call even when nothing reads it — at the default Info level a release
+     * build never saves a DEBUG line, yet paid the string build, a logcat JNI
+     * write and (before this change) two date formats per SSE event. Here
+     * the message is not even built unless [traceEnabled].
+     */
+    inline fun trace(category: String, message: () -> String) {
+        if (!traceEnabled || isDebugMuted(category)) return
+        debug(category, message())
+    }
+
+    private fun log(level: String, category: String, message: String) {
         // Also output to logcat
         val logcatTag = "Minis.$category"
         when (level) {
@@ -316,12 +405,71 @@ object AppLogger {
 
         // Write to file (only if enabled)
         if (!enabled) return
+        // [T-android-log-level] DEBUG reaches the file only at Verbose; it
+        // still goes to logcat above for adb users.
+        if (level == "DEBUG" && !verbose) return
+        // [T-android-log-hotpath] Format the timestamps only for a line that
+        // is actually written. They used to be computed first, so every
+        // logcat-only call (all DEBUG lines at the default level, and every
+        // line with file logging off) paid a Date plus two SimpleDateFormat
+        // formats for nothing.
+        val now = Date()
         try {
-            val w = getWriter(today)
-            w.println("[$timestamp] [$level] [$category] $message")
-            w.flush()
+            appendLine(dateFormat.format(now), "[${timestampFormat.format(now)}] [$level] [$category] $message")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to write log: ${e.message}")
+        }
+    }
+
+    /**
+     * The single file-write path for every captured line (AppLogger calls,
+     * stdout/stderr, logcat tail), so the size cap cannot be bypassed.
+     */
+    @Synchronized
+    private fun appendLine(date: String, text: String) {
+        val w = getWriter(date)
+        w.println(text)
+        w.flush()
+        bytesSinceSizeCheck += text.length + 1
+        if (bytesSinceSizeCheck >= SIZE_CHECK_EVERY_BYTES) {
+            bytesSinceSizeCheck = 0
+            truncateIfNeeded(date)
+        }
+    }
+
+    /**
+     * [T-android-log-size-cap] Keep the newest half once the file passes the
+     * cap. Streams through a temp file with FileChannel.transferTo rather than
+     * reading the tail into memory: that would be a ~50 MB heap allocation on
+     * the logging path of devices that are often already short on memory.
+     */
+    @Synchronized
+    private fun truncateIfNeeded(date: String) {
+        val dir = logDir ?: return
+        val file = File(dir, "minis-$date.log")
+        val size = file.length()
+        if (size <= MAX_LOG_FILE_BYTES) return
+        writer?.close()
+        writer = null
+        currentDate = ""
+        val tmp = File(dir, "minis-$date.log.truncating")
+        try {
+            java.io.FileInputStream(file).channel.use { src ->
+                java.io.FileOutputStream(tmp, false).use { out ->
+                    out.write("[log truncated: kept the newest ${MAX_LOG_FILE_BYTES / 2 / (1024 * 1024)} MB]\n".toByteArray())
+                    val start = size - MAX_LOG_FILE_BYTES / 2
+                    var pos = start
+                    while (pos < size) {
+                        val n = src.transferTo(pos, size - pos, out.channel)
+                        if (n <= 0) break
+                        pos += n
+                    }
+                }
+            }
+            if (!tmp.renameTo(file)) tmp.delete()
+        } catch (e: Exception) {
+            tmp.delete()
+            Log.w(TAG, "log truncate failed: ${e.message}")
         }
     }
 

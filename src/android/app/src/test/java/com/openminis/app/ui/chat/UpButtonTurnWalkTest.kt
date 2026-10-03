@@ -187,7 +187,7 @@ class UpButtonTurnWalkTest {
 
     @Test
     fun `the seek finds a target that sits just below the viewport`() {
-        // Device repro (读屏 session, user's real flow): viewport on rows 0..8,
+        // Device repro (a long test session, user's real flow): viewport on rows 0..8,
         // target user bubble at row 9 — one row BELOW the window. The old
         // stride-upward seek jumped 17 -> 41, stepped straight over row 9, and
         // returned null, which surfaced as a completely dead button.

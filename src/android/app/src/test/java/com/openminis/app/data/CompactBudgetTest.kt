@@ -6,63 +6,81 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [T-android-compact-runaway] The ceilings that bound a compaction run.
+ * [T-android-compact-runaway][T-compact-idle-timeout] The ceilings that bound a
+ * compaction run.
  *
- * Compaction previously had no time or call ceiling of its own: its only bound
- * was each provider's 10-minute OkHttp readTimeout, and the split-retry path
- * could issue 1+2+4+8 = 15 sequential leaf calls before depth 3 stopped it.
- * Slow-but-not-failing calls therefore accumulated into the ~20-minute apparent
- * hang users reported. These pin the arithmetic of the replacement budgets.
+ * Compaction originally had no ceiling of its own: its only bound was each
+ * provider's 10-minute OkHttp readTimeout, and the split-retry path could issue
+ * 1+2+4+8 = 15 sequential leaf calls before depth 3 stopped it, so slow calls
+ * accumulated into the ~20-minute hang users reported.
+ *
+ * The fix for that — a total elapsed-time budget — then caused the opposite
+ * failure, because total elapsed time cannot tell a stuck run from a long one.
+ * A healthy stream was cancelled at 150s mid-flight after 7,488 events. The
+ * budget is now an IDLE timer (time since the last chunk), which measures the
+ * thing that actually distinguishes the two, plus a loose total backstop for
+ * runaway output. These pin that arithmetic.
  */
 class CompactBudgetTest {
 
     @Test
-    fun `short transcript gets the base timeout`() {
-        assertEquals(
-            ChatViewModel.COMPACT_TIMEOUT_BASE_MS,
-            ChatViewModel.compactTimeoutMsFor(0),
+    fun `idle timeout is the working limit and total is only a backstop`() {
+        // [T-compact-idle-timeout] The ordering IS the design: whatever goes
+        // wrong, the idle timer should be what notices, because it is the only
+        // one of the two that distinguishes "stuck" from "long". If these ever
+        // invert, a slow-but-healthy compaction gets killed by the ceiling —
+        // exactly the bug this replaced.
+        assertTrue(
+            "idle timeout must fire long before the total ceiling",
+            ChatViewModel.COMPACT_IDLE_TIMEOUT_MS < ChatViewModel.COMPACT_MAX_TOTAL_MS,
         )
-        assertEquals(
-            ChatViewModel.COMPACT_TIMEOUT_BASE_MS,
-            ChatViewModel.compactTimeoutMsFor(9_999),
-        )
     }
 
     @Test
-    fun `timeout grows with transcript length`() {
-        // The point of a dynamic budget: a long first compaction must not be
-        // cut off by a limit sized for a short one.
-        val short = ChatViewModel.compactTimeoutMsFor(5_000)
-        val medium = ChatViewModel.compactTimeoutMsFor(50_000)
-        val long = ChatViewModel.compactTimeoutMsFor(120_000)
-        assertTrue("longer transcript must get more time", medium > short)
-        assertTrue("longer transcript must get more time", long > medium)
-    }
-
-    @Test
-    fun `growth is one step per 10k characters`() {
-        val base = ChatViewModel.COMPACT_TIMEOUT_BASE_MS
-        val step = ChatViewModel.COMPACT_TIMEOUT_PER_10K_CHARS_MS
-        assertEquals(base + step, ChatViewModel.compactTimeoutMsFor(10_000))
-        assertEquals(base + 3 * step, ChatViewModel.compactTimeoutMsFor(35_000))
-    }
-
-    @Test
-    fun `timeout is capped so nothing can hang indefinitely`() {
-        val huge = ChatViewModel.compactTimeoutMsFor(10_000_000)
-        assertEquals(ChatViewModel.COMPACT_TIMEOUT_MAX_MS, huge)
-    }
-
-    @Test
-    fun `cap stays below the providers' read timeout`() {
-        // Providers use a 10-minute readTimeout. Our ceiling must land first,
-        // or the run ends on a socket timeout with no message instead of our
-        // own "timed out, try again" path.
+    fun `idle timeout lands before the providers' socket read timeout`() {
+        // Providers use a 10-minute OkHttp readTimeout, which is itself an idle
+        // timer. Ours must fire first, or a dead stream surfaces as a raw
+        // socket error with no message instead of our own "stalled" path.
         val providerReadTimeoutMs = 10 * 60 * 1000L
         assertTrue(
-            "compact cap (${ChatViewModel.COMPACT_TIMEOUT_MAX_MS}ms) must be under " +
+            "idle timeout (${ChatViewModel.COMPACT_IDLE_TIMEOUT_MS}ms) must be under " +
                 "the provider read timeout (${providerReadTimeoutMs}ms)",
-            ChatViewModel.COMPACT_TIMEOUT_MAX_MS < providerReadTimeoutMs,
+            ChatViewModel.COMPACT_IDLE_TIMEOUT_MS < providerReadTimeoutMs,
+        )
+    }
+
+    @Test
+    fun `the reported regression would now succeed`() {
+        // The run from /tmp/minis-compact-timeout-2026-09-02.log: cancelled at
+        // 150s having received 7,488 SSE events and 19,459 characters — data
+        // arriving continuously, gaps between chunks in the millisecond range.
+        val reportedRunMs = 150_179L
+        val largestObservedGapMs = 2_400L // the widest inter-event gap in that log
+        assertTrue(
+            "a continuously-streaming run must not trip the idle timer",
+            largestObservedGapMs < ChatViewModel.COMPACT_IDLE_TIMEOUT_MS,
+        )
+        assertTrue(
+            "and it must finish well inside the total ceiling",
+            reportedRunMs < ChatViewModel.COMPACT_MAX_TOTAL_MS,
+        )
+    }
+
+    @Test
+    fun `total ceiling is the 15 minute backstop`() {
+        assertEquals(15 * 60 * 1000L, ChatViewModel.COMPACT_MAX_TOTAL_MS)
+    }
+
+    @Test
+    fun `a silent stream is not retried by splitting`() {
+        // Splitting exists for over-length payloads. A stream that went quiet
+        // was already accepted and streaming, so halving it just issues two
+        // more calls into the same broken pipe and burns the call budget.
+        assertTrue(
+            "idle timeout must not trigger the split retry",
+            !ChatViewModel.shouldSplitOnError(
+                ChatViewModel.Companion.CompactIdleTimeoutException("no data for 120s")
+            ),
         )
     }
 
@@ -85,9 +103,14 @@ class CompactBudgetTest {
     }
 
     @Test
-    fun `worst-case wall clock is bounded to minutes, not tens of minutes`() {
-        // The regression this whole change exists to prevent.
-        val worstMs = ChatViewModel.COMPACT_TIMEOUT_MAX_MS
-        assertTrue("must be under 6 minutes", worstMs <= 6 * 60 * 1000L)
+    fun `worst case is still bounded, just generously`() {
+        // [T-compact-idle-timeout] This assertion used to read "under 6
+        // minutes", which was the runaway fix over-correcting: it bounded the
+        // pathological case by also bounding the legitimate one. The ceiling is
+        // now deliberately loose because the idle timer — not this — is what
+        // catches a stuck run. What still matters is that SOME finite bound
+        // exists, so a looping model cannot hold the compact lock forever.
+        val worstMs = ChatViewModel.COMPACT_MAX_TOTAL_MS
+        assertTrue("must stay bounded", worstMs <= 20 * 60 * 1000L)
     }
 }

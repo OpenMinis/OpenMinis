@@ -32,6 +32,13 @@ import java.util.TimeZone
  * `image_path` + `minis_url` — raw base64 is only included when the caller
  * explicitly passes `--with-base64`, matching iOS.
  *
+ * [T-android-browser-cli-own-pool] Runs on the CALLING chat's tab pool (the one
+ * its `browser_use` tool drives), resolved by [BrowserCliPools] from the
+ * shell's `MINIS_CHAT_SESSION_ID`; mirrors iOS BrowserUseOffloadBridge. It used
+ * to run every chat's calls on one process-wide pool, so concurrent chats
+ * navigated each other's page. Screenshots and downloads go to the caller's
+ * own `/var/minis/browser/`.
+ *
  * Hard 90-second timeout via `withTimeout` so a hanging navigation can't lock
  * the shell indefinitely. Exits 0 for success, 1 for runtime errors, 2 for
  * bad arguments. Bare invocation prints help and exits 0 (matches iOS).
@@ -58,6 +65,20 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
             return NativeOffloadResult(0, HELP)
         }
 
+        // [T-tools-granular-switches] The CLI is a second door to the same
+        // capability: a shell_execute call can reach minis-browser-use even
+        // when browser_use was removed from the tool schema. Gate it here too,
+        // or turning the tool off would only hide it. Mirrors iOS
+        // BrowserUseOffloadBridge's AgentToolSwitch.browser guard. Checked
+        // AFTER --help so documentation stays readable while it is off.
+        if (!com.openminis.app.tools.AgentToolSwitch.BROWSER.isEnabled(app)) {
+            return emitError(
+                action = "execute", code = ERR_DISABLED,
+                message = "The browser tool is turned off in Settings > Tools.",
+                compact = compact, quiet = quiet, exit = 2,
+            )
+        }
+
         // Parse args into the browser_use input shape.
         val inputJson = try {
             buildInputJson(args)
@@ -73,6 +94,24 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
                 compact = compact, quiet = quiet, exit = 2)
 
         val actionName = input.action.value
+
+        // [T-android-browser-cli-own-pool] The caller's pool, not a shared one.
+        val pool = when (val r = BrowserCliPools.resolve(app, request.sessionId)) {
+            is BrowserCliPools.Resolution.Found -> {
+                Log.i(TAG, "action=$actionName sid=${request.sessionId?.take(8)} pool=${r.via}")
+                r.pool
+            }
+            is BrowserCliPools.Resolution.SessionGone -> return emitError(
+                action = actionName, code = ERR_INTERNAL,
+                message = "session ${r.sessionId} no longer exists; cannot run browser_use.",
+                compact = compact, quiet = quiet, exit = 1,
+            )
+        }
+        // The session whose /var/minis is mounted for this shell (the parent,
+        // for a sub agent), so files land where the caller can read them.
+        val filesSid = request.sessionId?.let {
+            com.openminis.app.sandbox.ExecutionCoordinator.mountedSessionIdFor(it)
+        }
 
         // [T-bg-overlay phase 2 fix] Surface browser sub-action progress
         // to SessionActivityTracker.currentToolStatus so the background
@@ -95,7 +134,9 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
                     // YOLO single-tab mode so every tab-less action sticks to the
                     // selected tab. Explicit --tab-id still routes normally.
                     // Mirrors iOS BrowserUseOffloadBridge passing singleTab=true.
-                    app.sharedBrowserTabPool.execute(input, singleTab = true)
+                    // No owner, as on iOS: the chat drives its own pool with
+                    // full access.
+                    pool.execute(input, singleTab = true)
                 }
             }
         } catch (_: TimeoutCancellationException) {
@@ -115,7 +156,7 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
                 compact = compact, quiet = quiet, exit = 1)
         }
 
-        val data = encodeData(result, withBase64 = withBase64)
+        val data = encodeData(result, withBase64 = withBase64, filesSid = filesSid)
         val envelope = envelope(actionName, data)
         return NativeOffloadResult(0, emit(envelope, data, compact = compact, quiet = quiet))
     }
@@ -236,7 +277,7 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
 
     // ── Data encoding (iOS BrowserUseOffloadBridge.encode counterpart) ────
 
-    private fun encodeData(r: BrowserActionResult, withBase64: Boolean): JSONObject {
+    private fun encodeData(r: BrowserActionResult, withBase64: Boolean, filesSid: String?): JSONObject {
         val out = JSONObject()
         out.put("text", r.text)
         out.put("success", r.success)
@@ -245,7 +286,14 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
         // Persist screenshot bytes under /var/minis/browser/ so shells can
         // reference the JPEG via image_path + minis_url instead of piping
         // base64 through stdout.
-        val browserHostDir: File? = PRootKernel.resolveHostPath(VAR_MINIS_BROWSER)?.also {
+        // [T-android-browser-cli-own-pool] The caller's own browser dir
+        // (minis-sessions/<sid>/browser is what /var/minis/browser mounts for
+        // that chat). The process-wide mount table only knows the last shell
+        // that set it up, so another chat's folder could get the file.
+        val browserHostDir: File? = (
+            filesSid?.let { com.openminis.app.sandbox.SessionMounts.sessionDir(app.filesDir, it, "browser") }
+                ?: PRootKernel.resolveHostPath(VAR_MINIS_BROWSER)
+            )?.also {
             try { it.mkdirs() } catch (_: Throwable) { /* non-fatal — write will fail below */ }
         }
 
@@ -403,6 +451,8 @@ class BrowserUseOffloadHandler(private val app: MinisApp) : NativeOffloadHandler
 
         // Error codes — match iOS NOFF_ERR_* constants.
         private const val ERR_INVALID_ARGS = "invalid_args"
+        /** [T-tools-granular-switches] The user turned browser_use off. */
+        private const val ERR_DISABLED = "tool_disabled"
         private const val ERR_INTERNAL = "internal_error"
 
         private val HELP = """

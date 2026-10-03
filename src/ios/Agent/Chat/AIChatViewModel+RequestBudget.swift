@@ -26,6 +26,8 @@ extension AIChatViewModel {
     private struct RequestBudgetPlan {
         let droppedIds: Set<Int>
         let droppedPaths: [Int: String?]
+        /// [T-image-budget-base64] Both are BASE64 byte counts (wire size),
+        /// matching the unit the budget is expressed in. Log/diagnostic only.
         let keptBytes: Int
         let elidedBytes: Int
         let droppedCount: Int
@@ -47,9 +49,16 @@ extension AIChatViewModel {
         // Walk latest → eldest so most-recent images win the budget.
         for img in images.reversed() {
             let id = ObjectIdentifier(img.data as AnyObject).hashValue
-            // Cap-clamp each image's effective size to kPerImageMaxBytes —
-            // matches what compressedImageDataUnderBudget would produce.
-            let effective = min(img.data.count, kPerImageMaxBytes)
+            // [T-image-budget-base64] Measure what this image costs ON THE
+            // WIRE: images are base64 inlined into the request body, so the
+            // budget has to count encoded bytes or it under-counts every image
+            // by a third — the gap that pushed real requests past a gateway's
+            // 32 MB body limit while this planner believed it was at 25 MB.
+            //
+            // Cap-clamp to kPerImageMaxBytes (also base64 bytes) — matches
+            // what compressedImageDataUnderBudget would produce, since its
+            // caller targets the raw equivalent of that same ceiling.
+            let effective = min(estimatedBase64Length(img.data.count), kPerImageMaxBytes)
             if kept + effective <= maxBytes {
                 kept += effective
             } else {
@@ -126,7 +135,7 @@ extension AIChatViewModel {
                 switch part {
                 case .imageData(let data, let mimeType, let lp):
                     refs.append(Ref(msgIdx: mi, partIdx: pi, image: BudgetImage(data: data, linuxPath: lp, mimeType: mimeType)))
-                case .toolResult(_, _, _, _, let imgData, let imgMime, _, let lp):
+                case .toolResult(_, _, _, _, let imgData, let imgMime, _, let lp, _):
                     if let d = imgData {
                         refs.append(Ref(msgIdx: mi, partIdx: pi, image: BudgetImage(data: d, linuxPath: lp, mimeType: imgMime ?? "image/jpeg")))
                     }
@@ -165,12 +174,14 @@ extension AIChatViewModel {
                 switch original {
                 case .imageData:
                     newParts[ref.partIdx] = .text(placeholder)
-                case .toolResult(let id, let name, let content, let isError, _, _, let pageURL, let imgLinuxPath):
+                case .toolResult(let id, let name, let content, let isError, _, _, let pageURL, let imgLinuxPath, let isReadback):
                     let newContent = content.isEmpty ? placeholder : "\(content)\n\(placeholder)"
                     newParts[ref.partIdx] = .toolResult(
                         id: id, name: name, content: newContent,
                         isError: isError, imageData: nil, imageMimeType: nil,
-                        pageURL: pageURL, imageLinuxPath: imgLinuxPath
+                        // [T-offload-readback-loop] Carry the flag across the rebuild.
+                        pageURL: pageURL, imageLinuxPath: imgLinuxPath,
+                        isOffloadReadback: isReadback
                     )
                 default: break
                 }
@@ -178,7 +189,7 @@ extension AIChatViewModel {
             mutated[mi].parts = newParts
         }
 
-        logger.info("[ImageBudget] request-level: dropped=\(plan.droppedCount)/\(plan.totalCount) keptBytes=\(plan.keptBytes) elidedBytes=\(plan.elidedBytes)")
+        logger.info("[ImageBudget] request-level: dropped=\(plan.droppedCount)/\(plan.totalCount) keptBytes=\(plan.keptBytes) elidedBytes=\(plan.elidedBytes) (base64 wire bytes, budget=\(Self.kRequestImageMaxBytes))")
 
         // Surface to the user via Toast (already-existing infrastructure).
         let droppedCount = plan.droppedCount
@@ -302,15 +313,22 @@ extension AIChatViewModel {
 
     /// Resolve a `minis://` URL to a host filesystem URL.
     /// Shared resolution logic used by Markdown link handlers and the browser's WKURLSchemeHandler.
-    nonisolated static func resolveMinisURL(_ url: URL) -> URL? {
+    ///
+    /// [T-minisurl-wrong-active-session] `sessionId` scopes the per-session
+    /// hosts (attachments/workspace/…) to the session that OWNS the reference.
+    /// Callers running inside an agent loop MUST pass their own session id —
+    /// the `activeSessionId` fallback tracks the session whose UI is
+    /// frontmost, which is the wrong scope whenever another session is
+    /// processing concurrently in the background.
+    nonisolated static func resolveMinisURL(_ url: URL, sessionId: String? = nil) -> URL? {
         guard url.scheme == "minis", let host = url.host else { return nil }
         // Tolerate double-encoded links (%25E6…) alongside the correct
         // single-encoded form. [T-fix-double-encoding]
         let subPaths = MinisURLPathDecoding.subPathCandidates(for: url)
         let fm = FileManager.default
 
-        // Primary: resolve via active session
-        if let sid = activeSessionId {
+        // Primary: resolve via the owning session (explicit), else frontmost
+        if let sid = sessionId ?? activeSessionId {
             for subPath in subPaths {
                 let candidate = minisPersistentBase
                     .appendingPathComponent(sid, isDirectory: true)

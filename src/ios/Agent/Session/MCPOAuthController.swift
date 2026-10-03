@@ -13,7 +13,7 @@
 //      refreshes autonomously via refresh_token when a call hits 401/expiry, and
 //      rewrites the bridge file so both sides stay current.
 //
-//  Storage decisions (deliberate, see design doc /tmp/mcp-oauth-design-report.md):
+//  Storage decisions (deliberate):
 //    1. client_secret + tokens live in the LOCAL Keychain (kSecAttrSynchronizable
 //       = false) — never in servers.json, so the iCloud MCPServerItem sync ships
 //       only the non-secret oauth config (endpoints/clientId). A peer device
@@ -76,12 +76,18 @@ final class MCPOAuthController: NSObject, ObservableObject {
     enum OAuthError: LocalizedError {
         case badConfig(String)
         case cancelled
+        /// [T-mcp-oauth-dcr] The user pressed Deny on the consent page. Kept
+        /// apart from `exchangeFailed` so the UI can say something human
+        /// instead of surfacing the raw `access_denied` OAuth code — a
+        /// deliberate decision by the user is not a malfunction.
+        case denied
         case exchangeFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .badConfig(let m): return m
             case .cancelled: return AppLocalized("Authorization was cancelled.")
+            case .denied: return AppLocalized("Access was not granted. You can try connecting again.")
             case .exchangeFailed(let m): return m
             }
         }
@@ -246,7 +252,16 @@ final class MCPOAuthController: NSObject, ObservableObject {
 
     /// Write the bridge file the guest transport reads. Includes refresh
     /// material so the daemon can renew tokens without the app's help.
-    private static func materializeBridge(server: String, oauth: MCPOAuthConfig, tokens: StoredTokens) {
+    /// [T-mcp-bridge-unreachable issue #380] Throws when the bridge file cannot be
+    /// written OR cannot be read back, so an authorization is never reported as
+    /// successful while the guest is unable to see the token.
+    ///
+    /// The failure this guards against is silent by construction: the host writes
+    /// into its App Group and reports success, while the sandbox reads
+    /// `/var/minis/mcp-servers` — a symlink that a guest-created placeholder
+    /// directory can shadow. Everything on the host side looks fine; the guest
+    /// simply never finds a token and reports "not authorized" forever.
+    private static func materializeBridge(server: String, oauth: MCPOAuthConfig, tokens: StoredTokens) throws {
         var obj: [String: Any] = [
             "access_token": tokens.accessToken,
             "expires_at": Int(tokens.expiresAt),
@@ -263,17 +278,90 @@ final class MCPOAuthController: NSObject, ObservableObject {
         if let resource = resourceURI(server: server) {
             obj["resource"] = resource
         }
+        let log = AppLogger(category: "MCPOAuth")
+        let url = bridgeFileURL(server: server)
         do {
-            let url = bridgeFileURL(server: server)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: obj)
             try data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            AppLogger(category: "MCPOAuth").info("[Bridge] materialized for '\(server)' (expiresAt=\(Int(tokens.expiresAt)))")
         } catch {
-            AppLogger(category: "MCPOAuth").error("[Bridge] write failed for '\(server)': \(error.localizedDescription)")
+            log.error("[Bridge] write failed for '\(server)': \(error.localizedDescription)")
+            throw OAuthError.exchangeFailed(
+                AppLocalized("Could not save the authorization for the sandbox to read.")
+                + " (\(error.localizedDescription))"
+            )
         }
+
+        // Read back what was just written. A write that "succeeded" into a
+        // directory the guest cannot reach is the #380 failure mode, and it is
+        // indistinguishable from success unless the bytes are verified here.
+        do {
+            let readBack = try Data(contentsOf: url)
+            guard let parsed = try JSONSerialization.jsonObject(with: readBack) as? [String: Any],
+                  (parsed["access_token"] as? String) == tokens.accessToken else {
+                throw OAuthError.exchangeFailed(
+                    AppLocalized("The saved authorization could not be verified.")
+                )
+            }
+        } catch let e as OAuthError {
+            log.error("[Bridge] verify failed for '\(server)': \(e.localizedDescription)")
+            throw e
+        } catch {
+            log.error("[Bridge] read-back failed for '\(server)' at \(url.path): \(error.localizedDescription)")
+            throw OAuthError.exchangeFailed(
+                AppLocalized("The saved authorization could not be verified.")
+                + " (\(error.localizedDescription))"
+            )
+        }
+        // [T-mcp-bridge-guest-verify] The read-back above uses the host URL it
+        // just wrote, so it cannot fail in the #380 state. Verify through the
+        // guest-visible path in the rootfs data tree as well.
+        let guestDir = RootfsManager.shared.dataPath
+            .appendingPathComponent(String(AIChatViewModel.minisMcpServersLinuxDir.dropFirst()), isDirectory: true)
+        if let problem = guestBridgeProblem(guestDir: guestDir, server: server, accessToken: tokens.accessToken) {
+            log.error("[Bridge] guest cannot see the bridge for '\(server)': \(problem)")
+            throw OAuthError.exchangeFailed(
+                AppLocalized("The saved authorization could not be verified.") + " (\(problem))"
+            )
+        }
+        log.info("[Bridge] materialized + verified for '\(server)' (expiresAt=\(Int(tokens.expiresAt)))")
+    }
+
+    /// [T-mcp-bridge-guest-verify] Why the guest cannot read the bridge file at
+    /// `guestDir` (the host location of `/var/minis/mcp-servers`), or nil when
+    /// it can. lstat, not stat: a guest-made real directory at that path is
+    /// exactly the #380 shadow, and following links would hide the difference.
+    /// A missing path is accepted: the rootfs has not been mounted yet, and the
+    /// next mount links it to the persistent dir that already holds the file.
+    private static func guestBridgeProblem(guestDir: URL, server: String, accessToken: String) -> String? {
+        var st = stat()
+        guard lstat(guestDir.path, &st) == 0 else {
+            if errno == ENOENT { return nil }
+            return "lstat \(guestDir.path) failed: errno=\(errno)"
+        }
+        guard (st.st_mode & S_IFMT) == S_IFLNK else {
+            // Before the kernel boots, a real directory here (e.g. the legacy
+            // pre-mount layout) is migrated and replaced by the link on the
+            // next performMount, so the guest will still see the file.
+            if !ISHKernel.shared.isBooted { return nil }
+            return "\(guestDir.path) is not a link to the config dir (mode=0o\(String(st.st_mode & S_IFMT, radix: 8))); a guest-created directory is shadowing it"
+        }
+        let resolved = guestDir.resolvingSymlinksInPath().standardized.path
+        let expected = AIChatViewModel.minisMcpServersPersistentDir.resolvingSymlinksInPath().standardized.path
+        guard resolved == expected else {
+            return "\(guestDir.path) links to \(resolved), expected \(expected)"
+        }
+        let guestFile = guestDir
+            .appendingPathComponent("oauth", isDirectory: true)
+            .appendingPathComponent("\(server).json")
+        guard let data = try? Data(contentsOf: guestFile),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (parsed["access_token"] as? String) == accessToken else {
+            return "the token is not readable through \(guestFile.path)"
+        }
+        return nil
     }
 
     // MARK: - PKCE Authorization Code flow
@@ -391,7 +479,7 @@ final class MCPOAuthController: NSObject, ObservableObject {
             expiresAt: expiresIn > 0 ? Date().timeIntervalSince1970 + expiresIn : 0
         )
         Self.keychainSet(try JSONEncoder().encode(stored), account: "\(server)#tokens")
-        Self.materializeBridge(server: server, oauth: oauth, tokens: stored)
+        try Self.materializeBridge(server: server, oauth: oauth, tokens: stored)
         logger.info("[Authorize] '\(server)' OK (hasRefresh=\(stored.refreshToken != nil), expiresIn=\(Int(expiresIn))s)")
     }
 
@@ -416,7 +504,17 @@ final class MCPOAuthController: NSObject, ObservableObject {
         try server.start()
 
         presentSafari(url: authURL)
-        let result = try await server.waitForCallback(timeout: 300)
+        let result: OAuthCallbackResult
+        do {
+            result = try await server.waitForCallback(timeout: 300)
+        } catch {
+            // [T-mcp-oauth-dcr] OAuthCallbackServer is shared with the Claude /
+            // Codex managers, so it reports an error-only callback as a generic
+            // provider error. Recognise the deny case here rather than widening
+            // OAuthCallbackResult, which those flows also depend on.
+            if error.localizedDescription.contains("access_denied") { throw OAuthError.denied }
+            throw error
+        }
         guard result.state == state else {
             throw OAuthError.exchangeFailed(AppLocalized("State mismatch in the OAuth callback."))
         }
@@ -450,6 +548,9 @@ final class MCPOAuthController: NSObject, ObservableObject {
         }
         guard let code = cbComps?.queryItems?.first(where: { $0.name == "code" })?.value else {
             let err = cbComps?.queryItems?.first(where: { $0.name == "error" })?.value ?? "no code"
+            // [T-mcp-oauth-dcr] `access_denied` is the user saying no on the
+            // consent page — report it as a decision, not a raw error code.
+            if err == "access_denied" { throw OAuthError.denied }
             throw OAuthError.exchangeFailed(AppLocalized("Authorization failed: \(err)"))
         }
         return code
@@ -473,7 +574,16 @@ final class MCPOAuthController: NSObject, ObservableObject {
     /// while already authorized, so the guest sees the new refresh material).
     static func refreshBridgeIfAuthorized(server: String, oauth: MCPOAuthConfig) {
         guard let t = tokens(server: server) else { return }
-        materializeBridge(server: server, oauth: oauth, tokens: t)
+        // [issue #380] Best-effort: this runs on a settings edit, not on an
+        // authorization, so there is no result to report and nothing to abort.
+        // It is still logged as an error — the same unreachable-bridge condition
+        // that fails an authorize will fail here, and a silent catch is what made
+        // #380 invisible in the first place.
+        do {
+            try materializeBridge(server: server, oauth: oauth, tokens: t)
+        } catch {
+            AppLogger(category: "MCPOAuth").error("[Bridge] refresh for '\(server)' failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Helpers

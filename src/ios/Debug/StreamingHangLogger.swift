@@ -478,21 +478,6 @@ final class StreamingHangLogger {
             mgr.writeRawLine(category: cat, level: lvl, message: "[StreamHang] === assignedText snapshot: (empty) ===")
         }
 
-        // [HangRepro] Dump the last few attribute:atIndex:effectiveRange:
-        // queries observed on the main thread. When a typesetter feedback
-        // loop is the trigger, these are the calls fillLayoutHole is
-        // making in a tight inner loop — they tell us *which attribute
-        // key* on which storage index the typesetter is stuck asking
-        // about.
-        if let attrDump = AttributeQueryRecorder.drainSnapshot(), !attrDump.isEmpty {
-            // The snapshot is already pre-formatted with "[AttributeQuery]" prefixes.
-            // Emit it line by line so the raw-line writer interleaves cleanly with
-            // the surrounding stack frames.
-            for line in attrDump.split(separator: "\n") {
-                mgr.writeRawLine(category: cat, level: lvl, message: String(line))
-            }
-        }
-
         for (i, event) in events.enumerated() {
             let dur = String(format: "%.0f", event.durationMs)
             let ts = String(format: "%.3f", event.timestamp)

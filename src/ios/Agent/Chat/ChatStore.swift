@@ -53,6 +53,17 @@ struct ChatSession: Identifiable, Codable, Hashable {
     var remoteDeviceName: String? // human-readable name of the remote device
     var pinnedAt: Date?       // non-nil if session is pinned; timestamp of when it was pinned
     var folderId: String?     // non-nil if filed into a folder; NULL = ungrouped
+    /// [T-p1-delegate-task] Non-nil ⇒ this is a hidden CHILD session (a
+    /// helper run spawned by `delegate_task`, later also `minis-scheduled
+    /// --target child-of-current`). Visibility is derived from this one
+    /// column: nil → home list; set → reachable only from the parent.
+    var parentSessionId: String?
+    /// The parent's `delegate_task` tool_use id that spawned this child, or
+    /// nil for a child created without a tool block (scheduled, P2).
+    var parentToolUseId: String?
+
+    /// Whether this session is a hidden child of another session.
+    var isChild: Bool { parentSessionId != nil }
 
     /// Whether this session is from a remote device (read-only).
     var isRemote: Bool { remoteDeviceId != nil }
@@ -92,6 +103,8 @@ struct ChatSession: Identifiable, Codable, Hashable {
             // without this the sidebar would keep rendering the row in its old
             // section until some unrelated mutation bumped the diff.
             && lhs.folderId == rhs.folderId
+            // Promotion (clearing the parent) must re-sort the list.
+            && lhs.parentSessionId == rhs.parentSessionId
             && lhs.title == rhs.title
             && lhs.category == rhs.category
             && lhs.source == rhs.source
@@ -355,6 +368,12 @@ struct StoredTokenUsage: Codable, Hashable {
     var cacheCreationTokens: Int
     var cacheReadTokens: Int
     var latestContextTokens: Int?
+    /// [T-ctx-measure-outbound] See TokenUsage.estimatedRequestTokens. Optional
+    /// so rows written before this field decode as nil, and so older builds and
+    /// Android's backup reader (ignoreUnknownKeys) skip it.
+    var estimatedRequestTokens: Int? = nil
+    var estimatedFixedTokens: Int? = nil
+    var calibrationModelId: String? = nil
 }
 
 /// A single message in the conversation (one "turn").
@@ -391,6 +410,24 @@ struct RawMessage: Identifiable, Codable, Hashable {
     var modelDisplayName: String? = nil
     /// `ProviderType` **rawValue** (e.g. `openAI`), never a display name.
     var providerType: String? = nil
+
+    /// [T-responses-echo-persist] Serialized `ReasoningEcho` for this assistant
+    /// turn — the OpenAI Responses `reasoning` head (item ids + summaries) plus
+    /// the upstream that minted them.
+    ///
+    /// Stored as JSON in `messages.reasoning_echo` rather than as typed columns
+    /// because it is a small, provider-shaped payload that only the provider
+    /// layer interprets.
+    ///
+    /// `encrypted_content` is deliberately NOT persisted: it is large (base64),
+    /// endpoint-bound, and worthless once the session may resume against a
+    /// different upstream. Dropping it degrades to an id-only replay, which the
+    /// live endpoint accepts (measured 200 with `store:false`) and which
+    /// `upstreamIdentity` already makes safe.
+    ///
+    /// nil on rows written before this column existed, and on turns that
+    /// genuinely produced no reasoning.
+    var reasoningEchoJSON: String? = nil
     /// Diagnostics / disambiguation only; the UI never resolves through it.
     var providerInstanceId: String? = nil
 
@@ -465,7 +502,15 @@ actor ChatStore {
     // `sessionListCacheDirty`, set true by every list-affecting mutation below.
     // ChatStore is an actor, so these fields need no extra locking.
     private var sessionListCache: [ChatSession]?
-    private var sessionListCacheDirty = true
+    /// [T-ios-listsessions-perf] Sessions whose ROW CONTENT changed since the
+    /// cache was built (a new message, a retitle, a model switch). Only these
+    /// are re-queried; every other cached ChatSession value is reused as-is.
+    private var dirtySessionIds: Set<String> = []
+    /// Set when the row SET or the ORDERING RULES change — a session created or
+    /// deleted, a folder move, a pin, a bulk restore or merge. An incremental
+    /// patch cannot express those, so the next listSessions() rebuilds fully.
+    /// Starts true so the first call after launch does one full build.
+    private var sessionListNeedsFullRebuild = true
 
     /// [T-ios-listsessions-cache] Mark the cached session list stale. Called by
     /// every mutation that can change what listSessions() returns — the row set
@@ -475,10 +520,50 @@ actor ChatStore {
     /// (ChatStore+BackupRestore.swift) can invalidate after its own row writes —
     /// Swift's `private` is file-scoped, so an extension in another file cannot
     /// see it.
+    /// Full invalidation: the next listSessions() re-queries every row.
+    /// Use ONLY where the set of rows or their relative order can change.
     func invalidateSessionListCache() {
-        sessionListCacheDirty = true
+        sessionListNeedsFullRebuild = true
     }
 
+    /// [T-ios-listsessions-perf] Targeted invalidation: only `sessionId`'s row
+    /// content changed, so the next listSessions() re-queries that one row and
+    /// reuses the rest of the cached array verbatim.
+    ///
+    /// Why this matters beyond the SQL saved: a full rebuild mints a brand-new
+    /// ChatSession (and a brand-new preview String) for every session, so
+    /// SwiftUI sees every row as changed and re-diffs the entire sidebar — 28.6
+    /// G cycles of `erasedSessionRow` work in the profiled trace. Patching one
+    /// element leaves the other values IDENTICAL, so the diff is O(changed).
+    ///
+    /// `updated_at` moves when a message lands, which reorders the list. That
+    /// is handled by re-sorting the patched array with the same rules the SQL
+    /// uses, NOT by falling back to a full rebuild — reordering is exactly the
+    /// common case here.
+    func invalidateSessionListCache(sessionId: String) {
+        dirtySessionIds.insert(sessionId)
+    }
+
+    /// [T-ios27-scene-create-watchdog] Everything here runs inside the
+    /// `dispatch_once` for `ChatStore.shared`, so ANY thread that touches the
+    /// singleton afterwards — the main thread during scene creation, most
+    /// importantly — blocks until this returns. It must therefore never do
+    /// anything of unbounded duration.
+    ///
+    /// The crash this guards against: on iOS 27.0 a background task entered
+    /// this initializer first, and an `iCloudLogger.info` inside `createTables`
+    /// went NSLog -> libtrace -> NSNotificationCenter post ->
+    /// `-[NSOperation waitUntilFinished]` and parked there. The main thread hit
+    /// `ChatStore.shared` from `ContentView.body` and sat in
+    /// `_dispatch_once_wait` until the 10 s scene-create watchdog killed the
+    /// app (0.161 s of app CPU against 10 s of wall clock).
+    ///
+    /// Two rules keep this bounded, both enforced below:
+    ///   1. No logging escapes to the system stack — `withDeferredLogging`
+    ///      buffers it and flushes after the once token is released.
+    ///   2. No optional/bulk work runs here. Schema creation must stay (nothing
+    ///      can query before it), but data backfills are deferred to
+    ///      `runDeferredMigrations()`, called off the init path.
     init() {
         let libraryURL = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
         let baseURL = libraryURL.appendingPathComponent("MinisChat", isDirectory: true)
@@ -488,9 +573,11 @@ actor ChatStore {
         try? FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: minisBaseURL, withIntermediateDirectories: true)
 
-        openDatabase()
-        createTables()
-        armRebootGuardIfDegraded()
+        AppLogger.withDeferredLogging {
+            openDatabase()
+            createTables()
+            armRebootGuardIfDegraded()
+        }
     }
 
     // MARK: - [T-ios-reboot-config-loss] Protected-data reboot guard
@@ -535,6 +622,8 @@ actor ChatStore {
             return
         }
         dbDegraded = false
+        // FULL: the database just came back after being unusable — nothing
+        // about the cached list can be trusted.
         invalidateSessionListCache()
         logger.info("[RebootGuard] minis.db reopened after unlock — session store restored")
     }
@@ -612,12 +701,29 @@ actor ChatStore {
         // idx_messages_session, on the 100k-message DB.
         exec("CREATE INDEX IF NOT EXISTS idx_msg_sess_role_sort ON messages(session_id, role, sort_order DESC)")
 
+        // [T-ios-moveto-perf] The session list is always ordered by
+        // `updated_at DESC`, and there was no index on it — so every rebuild
+        // sorted the whole table. Harmless at a few dozen sessions, a real cost
+        // at the 1772-session scale the preview subqueries were tuned against,
+        // and it is what makes the `LIMIT` in `listRecentSessions` actually
+        // cheap: with the index SQLite walks the first N rows in order instead
+        // of sorting everything and discarding the tail.
+        //
+        // `CREATE INDEX IF NOT EXISTS` runs on every open and is idempotent, so
+        // this needs no schema-version bump and no migration step.
+        exec("CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at DESC)")
+
         // Idempotent column migrations — guarded via PRAGMA table_info so
         // re-runs on already-migrated DBs don't emit duplicate-column errors.
         addColumnIfMissing(table: "sessions", column: "category", definition: "TEXT")
         addColumnIfMissing(table: "sessions", column: "model_binding", definition: "TEXT")
         addColumnIfMissing(table: "sessions", column: "source", definition: "TEXT")
         addColumnIfMissing(table: "messages", column: "reasoning_content", definition: "TEXT")
+        // [T-responses-echo-persist] Native reasoning items (OpenAI Responses
+        // `reasoning` heads: id + summary + the upstream that minted them),
+        // JSON. Nullable with no DEFAULT so a row written before this column
+        // existed stays distinguishable from one that genuinely has no echo.
+        addColumnIfMissing(table: "messages", column: "reasoning_echo", definition: "TEXT")
         addColumnIfMissing(table: "messages", column: "stream_interrupt_count", definition: "INTEGER NOT NULL DEFAULT 0")
         addColumnIfMissing(table: "sessions", column: "memory_enabled", definition: "INTEGER NOT NULL DEFAULT 1")
         addColumnIfMissing(table: "sessions", column: "last_synced_at", definition: "REAL")
@@ -631,6 +737,33 @@ actor ChatStore {
         // leaves references behind). Such orphans render as ungrouped rather
         // than failing a constraint — see foldersById callers in ContentView.
         addColumnIfMissing(table: "sessions", column: "folder_id", definition: "TEXT")
+        // [T-p1-delegate-task] Child-session linkage. Nullable, no DEFAULT,
+        // no FK (orphan-tolerant like folder_id).
+        addColumnIfMissing(table: "sessions", column: "parent_session_id", definition: "TEXT")
+        addColumnIfMissing(table: "sessions", column: "parent_tool_use_id", definition: "TEXT")
+        // [T-ios-listsessions-perf] Denormalised sidebar preview, computed when
+        // a message lands rather than re-derived for every session on every
+        // refresh. `preview_sort_order` is the sort_order of the message the
+        // text came from, so the assistant-wins-unless-the-user-is-newer rule
+        // can be applied incrementally without re-reading both candidate rows.
+        //
+        // Nullable with NO DEFAULT, deliberately: NULL is the signal "this row
+        // predates the column", which listSessions uses to fall back to the old
+        // extraction once and write the result back. A DEFAULT '' would erase
+        // the difference between "not computed yet" and "genuinely empty".
+        //
+        // These columns are NOT part of the sessions CREATE TABLE above (that
+        // DDL carries only the five original columns; every later column on
+        // this table arrives through addColumnIfMissing), so there is no
+        // both-places requirement here — unlike `folders.pinned_at` below,
+        // which IS in its DDL and therefore needs both.
+        //
+        // Derived state: deliberately absent from the iCloud wire format and
+        // the backup export. Each device computes its own, so an older peer
+        // that knows nothing about these columns is unaffected, and a downgrade
+        // simply ignores them.
+        addColumnIfMissing(table: "sessions", column: "preview_text", definition: "TEXT")
+        addColumnIfMissing(table: "sessions", column: "preview_sort_order", definition: "INTEGER")
         // Folder pinning (mirrors sessions.pinned_at). Also present in the
         // CREATE TABLE DDL above — per the add-column wipe trap, a new column
         // must exist in BOTH the initial DDL and the idempotent migration.
@@ -697,19 +830,11 @@ actor ChatStore {
         // existing installs still carry the rows from before that fix
         // and from any V2 build that wrote them as dual-write — so
         // sweep them once on first launch of this build.
-        let zombieCleanupKey = "cloudSync.v2.zombieDirtyCleanupV1Done"
-        if !UserDefaults.standard.bool(forKey: zombieCleanupKey) {
-            let v1Types = ["Session", "Message", "CompactMarker", "SessionFile",
-                           "Skill", "ProviderConfig", "EnvVar", "SyncDevice", "Soul"]
-            let inList = v1Types.map { "'\($0)'" }.joined(separator: ",")
-            var deletedCount: Int32 = 0
-            let delSQL = "DELETE FROM sync_dirty_records WHERE record_type IN (\(inList))"
-            if sqlite3_exec(db, delSQL, nil, nil, nil) == SQLITE_OK {
-                deletedCount = Int32(sqlite3_changes(db))
-            }
-            UserDefaults.standard.set(true, forKey: zombieCleanupKey)
-            iCloudLogger.info("[iCloudTrace] v1 dirty-row zombie cleanup: deleted=\(deletedCount) types=\(v1Types.joined(separator: ","))")
-        }
+        // [T-ios27-scene-create-watchdog] Moved out of the dispatch_once for
+        // the same reason as the part_flags backfill — a bulk DELETE over
+        // sync_dirty_records (a 28k+ row backlog on migrated installs) is not
+        // something the main thread should be able to wait behind. See
+        // runDeferredMigrations().
 
         // Compact markers table — tracks context compaction boundaries per session
         exec("""
@@ -745,24 +870,13 @@ actor ChatStore {
         // once. Scoped to rows still at the default (part_flags = 0 AND the JSON
         // actually contains a text/toolUse part) so re-runs after a partial
         // failure stay cheap and correct.
-        let partFlagsBackfillKey = "chatStore.partFlagsBackfillV1Done"
-        if !UserDefaults.standard.bool(forKey: partFlagsBackfillKey) {
-            let expr = Self.partFlagsSQLExpr("parts_json")
-            let backfillSQL = """
-                UPDATE messages SET part_flags = \(expr)
-                WHERE part_flags = 0
-                  AND (parts_json LIKE '%"type":"text"%' OR parts_json LIKE '%"type":"toolUse"%')
-            """
-            if sqlite3_exec(db, backfillSQL, nil, nil, nil) == SQLITE_OK {
-                let changed = Int(sqlite3_changes(db))
-                UserDefaults.standard.set(true, forKey: partFlagsBackfillKey)
-                iCloudLogger.info("[part_flags] backfill done: updated \(changed) row(s)")
-            } else {
-                let err = String(cString: sqlite3_errmsg(db))
-                // Leave the flag unset so it retries next launch.
-                iCloudLogger.error("[part_flags] backfill FAILED (will retry next launch): \(err)")
-            }
-        }
+        // [T-ios27-scene-create-watchdog] The backfill itself no longer runs
+        // here. It is an UPDATE with two unindexable LIKE scans over the whole
+        // messages table — on a 100k-message database that is seconds of work
+        // INSIDE the dispatch_once every other thread is waiting on. Moved to
+        // runDeferredMigrations(), which the launch path calls off the init.
+        // The ADD COLUMN above stays: the column must exist before any query
+        // references it, and ALTER TABLE ADD COLUMN is O(1) metadata in SQLite.
 
 
         // iCloud sync tables
@@ -880,6 +994,7 @@ actor ChatStore {
                 token_usage TEXT,
                 sort_order  INTEGER NOT NULL DEFAULT 0,
                 reasoning_content TEXT,
+                reasoning_echo TEXT,
                 stream_interrupt_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (id, device_id)
             )
@@ -973,6 +1088,75 @@ actor ChatStore {
     /// `sessions(id)` and `PRAGMA foreign_keys=ON` is set, so deleting the
     /// parent alone would fail. Orphaned children (session_id NULL / pointing at
     /// a NULL-id parent) can't be reattached to anything, so they go too.
+    /// [T-ios27-scene-create-watchdog] One-shot data migrations that used to
+    /// run inside `createTables()` — i.e. inside the `ChatStore.shared`
+    /// dispatch_once, where every second spent is a second the main thread can
+    /// be blocked for during scene creation.
+    ///
+    /// Call this from the launch path, never from `init`. It is idempotent and
+    /// guarded by UserDefaults flags, so a call that races another is harmless
+    /// and a call after the work is done is a no-op. Being an actor method, it
+    /// serialises against every other ChatStore operation for free.
+    func runDeferredMigrations() {
+        backfillPartFlagsIfNeeded()
+        cleanupV1ZombieDirtyRowsIfNeeded()
+    }
+
+    /// One-shot cleanup: drop legacy v1 dirty rows that have a v2 counterpart.
+    /// Under the V2 engine these have no consumer (the v1 engine is paused,
+    /// SyncCore filters via v2Only:true) so they accumulate forever. The
+    /// longer-term fix is the markDirty guard that no longer writes them in V2
+    /// mode, but existing installs still carry rows from before that fix and
+    /// from any V2 build that wrote them as dual-write — so sweep them once.
+    private func cleanupV1ZombieDirtyRowsIfNeeded() {
+        let zombieCleanupKey = "cloudSync.v2.zombieDirtyCleanupV1Done"
+        guard !UserDefaults.standard.bool(forKey: zombieCleanupKey) else { return }
+        let v1Types = ["Session", "Message", "CompactMarker", "SessionFile",
+                       "Skill", "ProviderConfig", "EnvVar", "SyncDevice", "Soul"]
+        let inList = v1Types.map { "'\($0)'" }.joined(separator: ",")
+        var deletedCount: Int32 = 0
+        let delSQL = "DELETE FROM sync_dirty_records WHERE record_type IN (\(inList))"
+        if sqlite3_exec(db, delSQL, nil, nil, nil) == SQLITE_OK {
+            deletedCount = Int32(sqlite3_changes(db))
+        }
+        UserDefaults.standard.set(true, forKey: zombieCleanupKey)
+        iCloudLogger.info("[iCloudTrace] v1 dirty-row zombie cleanup: deleted=\(deletedCount) types=\(v1Types.joined(separator: ","))")
+    }
+
+    /// [T-ios-listsessions-part-flags] One-shot backfill of part_flags for
+    /// rows written before the column existed (all default to 0). Computed in
+    /// pure SQL with the SAME LIKE patterns the old listSessions used, so
+    /// backfilled flags reproduce the previous preview selection exactly.
+    /// Guarded by a UserDefaults flag so it runs once. Scoped to rows still at
+    /// the default (part_flags = 0 AND the JSON actually contains a
+    /// text/toolUse part) so re-runs after a partial failure stay cheap and
+    /// correct.
+    ///
+    /// Until this has run, rows keep part_flags = 0 and listSessions' masked
+    /// subqueries skip them — such a session shows its stored preview or, on a
+    /// first launch after upgrade, falls back to the slower extraction. That is
+    /// a brief cosmetic delay on one launch, which is a far better trade than
+    /// blocking scene creation.
+    private func backfillPartFlagsIfNeeded() {
+        let partFlagsBackfillKey = "chatStore.partFlagsBackfillV1Done"
+        guard !UserDefaults.standard.bool(forKey: partFlagsBackfillKey) else { return }
+        let expr = Self.partFlagsSQLExpr("parts_json")
+        let backfillSQL = """
+            UPDATE messages SET part_flags = \(expr)
+            WHERE part_flags = 0
+              AND (parts_json LIKE '%"type":"text"%' OR parts_json LIKE '%"type":"toolUse"%')
+        """
+        if sqlite3_exec(db, backfillSQL, nil, nil, nil) == SQLITE_OK {
+            let changed = Int(sqlite3_changes(db))
+            UserDefaults.standard.set(true, forKey: partFlagsBackfillKey)
+            iCloudLogger.info("[part_flags] backfill done: updated \(changed) row(s)")
+        } else {
+            let err = String(cString: sqlite3_errmsg(db))
+            // Leave the flag unset so it retries next launch.
+            iCloudLogger.error("[part_flags] backfill FAILED (will retry next launch): \(err)")
+        }
+    }
+
     private func purgeUnusableSessionRows() {
         var stmt: OpaquePointer?
         var count = 0
@@ -1023,10 +1207,12 @@ actor ChatStore {
     // MARK: - Session CRUD
 
     @discardableResult
-    func createSession(modelId: String, title: String? = nil, source: String? = nil) -> ChatSession {
+    func createSession(modelId: String, title: String? = nil, source: String? = nil,
+                       parentSessionId: String? = nil, parentToolUseId: String? = nil) -> ChatSession {
+        // FULL: adds a row to the set.
         invalidateSessionListCache()
         let now = Date()
-        let session = ChatSession(
+        var session = ChatSession(
             id: UUID().uuidString,
             title: title,
             category: nil,
@@ -1035,6 +1221,8 @@ actor ChatStore {
             updatedAt: now,
             source: source
         )
+        session.parentSessionId = parentSessionId
+        session.parentToolUseId = parentToolUseId
 
         // [T-memory-enabled-new-session-bug] Explicitly write memory_enabled
         // from the global default. Previously the INSERT omitted the column
@@ -1056,7 +1244,7 @@ actor ChatStore {
         let rawObj = UserDefaults.standard.object(forKey: "memory.global.enabled")
         memDiagLogger.info("[MemDiag] createSession sid=\(session.id.prefix(8)) rawDefaults=\(String(describing: rawObj)) resolved=\(globalMemoryEnabled) → bind memory_enabled=\(globalMemoryEnabled ? 1 : 0)")
 
-        let sql = "INSERT INTO sessions (id, title, model_id, created_at, updated_at, source, memory_enabled) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        let sql = "INSERT INTO sessions (id, title, model_id, created_at, updated_at, source, memory_enabled, parent_session_id, parent_tool_use_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (session.id as NSString).utf8String, -1, nil)
@@ -1066,6 +1254,8 @@ actor ChatStore {
             sqlite3_bind_double(stmt, 5, now.timeIntervalSince1970)
             bindOptionalText(stmt, index: 6, value: source)
             sqlite3_bind_int(stmt, 7, globalMemoryEnabled ? 1 : 0)
+            bindOptionalText(stmt, index: 8, value: parentSessionId)
+            bindOptionalText(stmt, index: 9, value: parentToolUseId)
             let rc = sqlite3_step(stmt)
             memDiagLogger.info("[MemDiag] createSession INSERT step rc=\(rc) (101=DONE) sid=\(session.id.prefix(8))")
         } else {
@@ -1191,7 +1381,17 @@ actor ChatStore {
         return String(decoding: UnsafeBufferPointer(start: ptr, count: len), as: UTF8.self)
     }
 
-    func listSessions() -> [ChatSession] {
+    /// - Parameter limit: [T-ios-moveto-perf] cap the number of rows returned,
+    ///   newest first. `nil` (the default) keeps the full-list behaviour every
+    ///   existing caller relies on, byte for byte.
+    ///
+    ///   A limited call deliberately does NOT read or write `sessionListCache`:
+    ///   that cache backs the main sidebar, and letting a 50-row result land in
+    ///   it would silently truncate the sidebar on its next read (and vice
+    ///   versa — a full list served to a limited caller would just be wasted
+    ///   work it asked not to do). The two shapes are different lists; sharing
+    ///   one slot for them is the bug, not the optimisation.
+    func listSessions(limit: Int? = nil) -> [ChatSession] {
         // ─── crash triage (sqlite3MutexMisuseAssert in column_text) ───
         // Capture the calling context whenever this enters so we can match
         // mid-flight invocations (App Intents EntityQuery, iCloud sync,
@@ -1215,8 +1415,19 @@ actor ChatStore {
         // same preview Strings, zero new allocations. This is the fix for the
         // hundreds-of-MB StringStorage growth from redundant listSessions()
         // calls (proven via malloc_history).
-        if !sessionListCacheDirty, let cached = sessionListCache {
-            return cached
+        if limit == nil, !sessionListNeedsFullRebuild, let cached = sessionListCache {
+            if dirtySessionIds.isEmpty { return cached }
+            // [T-ios-listsessions-perf] Incremental path: re-query only the
+            // sessions whose content changed and splice them into the cached
+            // array. Unchanged rows keep their EXISTING ChatSession values, so
+            // SwiftUI's diff and the Move-to seed stay cheap.
+            if let patched = patchedSessionList(cached, dirtyIds: dirtySessionIds) {
+                sessionListCache = patched
+                dirtySessionIds.removeAll()
+                return patched
+            }
+            // The patch could not be built (prepare failed). Fall through to a
+            // full rebuild rather than serving a knowingly stale list.
         }
         // Session-list preview policy:
         //   1. Latest assistant text part that came AFTER the latest user
@@ -1264,12 +1475,107 @@ actor ChatStore {
         // real 100k-message / 1772-session DB, swapping LIKE→mask took it from
         // ~523ms to ~30-58ms (9×), each subquery a fast indexed
         // `SEARCH … USING idx_msg_sess_role_sort (session_id=? AND role=?)`.
-        // A window-function CTE (方案1) was tried and REJECTED: it materializes
+        // A window-function CTE (approach 1) was tried and REJECTED: it materializes
         // every assistant/user row across the whole table (MATERIALIZE asst),
         // clocking ~1100ms — 20× slower than the indexed subqueries here.
-        let asstMask = Self.partFlagHasText | Self.partFlagHasToolUse   // 3
-        let userMask = Self.partFlagHasText                            // 1
-        let sql = """
+        let sql = Self.sessionListSQL(whereClause: "")
+            // [T-ios-moveto-perf] Appended rather than interpolated into the
+            // literal above so the unlimited statement text stays identical to
+            // what it has always been — SQLite's prepared-statement cache keys
+            // on the text, and the tuning notes above were measured on it.
+            // `max(1, …)` because the value is interpolated: it comes from
+            // app code, not user input, but a 0 or negative would silently
+            // return nothing, and clamping is cheaper than trusting callers.
+            + (limit.map { "\nLIMIT \(max(1, $0))" } ?? "")
+            // Note: `remote_tombstoned_at` column still exists on the
+            // table for legacy rows but is no longer consulted. Peer-side
+            // SessionV2 deletes are now applied as hard deletes (the row
+            // and all its children leave SQLite outright) — see
+            // ChatStore.deleteSessionLocalOnly + TombstoneManager.
+        var stmt: OpaquePointer?
+        var sessions: [ChatSession] = []
+        // Count of unusable rows dropped this pass (NULL/empty primary key).
+        // Logged once after the loop rather than per row so a systematically
+        // corrupt table can't itself become a logging flood.
+        var skippedRows = 0
+        // [T-ios-listsessions-perf] Rows whose preview was derived the slow way
+        // because the column was NULL (written before the column existed).
+        // Written back AFTER the statement is finalized — writing to `sessions`
+        // while stepping a SELECT over it is exactly the reentrancy this file's
+        // crash notes warn about.
+        var previewBackfill: [(session: ChatSession, sortOrder: Int?)] = []
+
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                // A row whose primary key is NULL/empty can't be opened, deleted
+                // or synced by id — it is unusable rather than merely odd. Skip
+                // it (loudly) instead of surfacing a session that breaks every
+                // later lookup. This is the guard that breaks the crash loop.
+                let id = Self.colText(stmt, 0)
+                guard !id.isEmpty else {
+                    skippedRows += 1
+                    continue
+                }
+                let decoded = decodeSessionRow(stmt, id: id)
+                sessions.append(decoded.session)
+                if decoded.backfillPreview {
+                    previewBackfill.append((decoded.session, decoded.previewSortOrder))
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        // A session with no displayable message yields a nil preview. Writing
+        // NULL back would leave the row looking un-backfilled forever, so it
+        // would re-run the slow extraction on every single refresh — the exact
+        // cost this phase removes. Store a sentinel empty string instead: it is
+        // non-NULL (so the fast path takes it) and decodes back to nil below.
+        if !previewBackfill.isEmpty {
+            // One transaction for the whole backfill. On the first launch
+            // after the upgrade this is EVERY session (1772 on the profiled
+            // device); in autocommit mode each UPDATE would commit and sync
+            // separately — seconds of I/O inside the actor, on the very path
+            // this phase is speeding up. SAVEPOINT rather than BEGIN so it
+            // also nests safely should a caller ever hold a transaction open
+            // across listSessions.
+            exec("SAVEPOINT preview_backfill")
+            for entry in previewBackfill {
+                storePreview(sessionId: entry.session.id,
+                             text: entry.session.lastMessage ?? "",
+                             sortOrder: entry.sortOrder)
+            }
+            exec("RELEASE preview_backfill")
+            iCloudLogger.info("[ChatStore.listSessions] backfilled \(previewBackfill.count) pre-upgrade session preview(s)")
+        }
+
+        if skippedRows > 0 {
+            iCloudLogger.error("[ChatStore.listSessions] skipped \(skippedRows) unusable session row(s) with NULL/empty id — see T-ios-listsessions-cstring-trap")
+        }
+
+        // [T-ios-listsessions-cache] Store the freshly-built list; subsequent
+        // calls return this same array until a mutation invalidates it.
+        if limit == nil {
+            sessionListCache = sessions
+            sessionListNeedsFullRebuild = false
+            // A full rebuild subsumes every pending targeted invalidation.
+            dirtySessionIds.removeAll()
+        }
+        return sessions
+    }
+
+
+    /// [T-ios-listsessions-perf] The session-list SELECT, shared by the full
+    /// rebuild (`whereClause` empty) and the incremental patch
+    /// (`whereClause` = " WHERE s.id IN (?,?,…)"). One definition so the two
+    /// paths can never decode different column layouts — every column index
+    /// hard-coded in `decodeSessionRow` depends on this list staying in sync.
+    ///
+    /// The 4-correlated-subquery SHAPE is deliberate and measured; see the
+    /// commentary at the call site before changing it.
+    private static func sessionListSQL(whereClause: String) -> String {
+        let asstMask = partFlagHasText | partFlagHasToolUse   // 3
+        let userMask = partFlagHasText                        // 1
+        return """
             SELECT s.id, s.title, s.model_id, s.created_at, s.updated_at, s.category,
                    (SELECT m.parts_json FROM messages m
                      WHERE m.session_id = s.id
@@ -1298,100 +1604,192 @@ actor ChatStore {
                    -- Appended LAST on purpose: the decode below reads columns
                    -- by index, so a new column goes at the end to leave every
                    -- existing index untouched.
-                   s.folder_id
-            FROM sessions s ORDER BY s.updated_at DESC
+                   s.folder_id,
+                   s.parent_session_id, s.parent_tool_use_id,
+                   -- [T-ios-listsessions-perf] Appended LAST, same reason as
+                   -- folder_id above: the decode reads by index.
+                   s.preview_text, s.preview_sort_order
+            FROM sessions s\(whereClause)
+            ORDER BY s.updated_at DESC
             """
-            // Note: `remote_tombstoned_at` column still exists on the
-            // table for legacy rows but is no longer consulted. Peer-side
-            // SessionV2 deletes are now applied as hard deletes (the row
-            // and all its children leave SQLite outright) — see
-            // ChatStore.deleteSessionLocalOnly + TombstoneManager.
-        var stmt: OpaquePointer?
-        var sessions: [ChatSession] = []
-        // Count of unusable rows dropped this pass (NULL/empty primary key).
-        // Logged once after the loop rather than per row so a systematically
-        // corrupt table can't itself become a logging flood.
-        var skippedRows = 0
+    }
 
-        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                // A row whose primary key is NULL/empty can't be opened, deleted
-                // or synced by id — it is unusable rather than merely odd. Skip
-                // it (loudly) instead of surfacing a session that breaks every
-                // later lookup. This is the guard that breaks the crash loop.
-                let id = Self.colText(stmt, 0)
-                guard !id.isEmpty else {
-                    skippedRows += 1
-                    continue
-                }
-                let title = Self.colTextOpt(stmt, 1)
-                let modelId = Self.colText(stmt, 2)
-                let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
-                let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
-                let category = Self.colTextOpt(stmt, 5)
-                // Latest assistant text (preferred) → latest user text (fallback).
-                let assistantRaw = Self.colTextOpt(stmt, 6)
-                let userRaw = Self.colTextOpt(stmt, 7)
-                let assistantText = assistantRaw.flatMap { extractTextFromPartsJSON($0) }
-                let userText = userRaw.flatMap { extractTextFromPartsJSON($0) }
-                // sort_order of each picked row (columns 12/13). Prefer whichever
-                // is genuinely newer: assistant wins when its row is at least as
-                // recent (covers mid-tool-call previews); the user message wins
-                // only when the user just sent something the assistant hasn't
-                // answered yet (assistant row is from an earlier turn). This
-                // replaces the dropped SQL pivot clause and is robust to
-                // sort_order re-ranking from iCloud merges.
-                let asstSortOrder: Int? = sqlite3_column_type(stmt, 12) != SQLITE_NULL
-                    ? Int(sqlite3_column_int64(stmt, 12)) : nil
-                let userSortOrder: Int? = sqlite3_column_type(stmt, 13) != SQLITE_NULL
-                    ? Int(sqlite3_column_int64(stmt, 13)) : nil
-                let lastMessage: String? = {
-                    switch (assistantText, userText) {
-                    case let (a?, u?):
-                        // Both present — newer sort_order wins; tie → assistant.
-                        if let ao = asstSortOrder, let uo = userSortOrder, uo > ao { return u }
-                        return a
-                    case let (a?, nil): return a
-                    case let (nil, u?): return u
-                    default: return nil
-                    }
-                }()
-                // [LastMsgDiag removed — T-ios-session-list-equatable-jank]
-                // This per-session diagnostic logged one (or two) lines for
-                // EVERY session on EVERY listSessions() call — ~2900 lines for a
-                // single session-list rebuild on this user's device, ~73% of the
-                // whole log. The NSLog volume + daily-file writes were themselves
-                // a measurable Debug-build drag on the very session-switch path
-                // being profiled, and drowned out every other signal. Dropped;
-                // the last-message extractor logic above is unchanged.
-                let source = Self.colTextOpt(stmt, 8)
-                let lastSyncedAt: Date? = sqlite3_column_type(stmt, 9) != SQLITE_NULL
-                    ? Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9)) : nil
-                let remoteDeviceId = Self.colTextOpt(stmt, 10)
-                let pinnedAt: Date? = sqlite3_column_type(stmt, 11) != SQLITE_NULL
-                    ? Date(timeIntervalSince1970: sqlite3_column_double(stmt, 11)) : nil
-                let folderId = Self.colTextOpt(stmt, 14)
+    /// [T-ios-listsessions-perf] Decode one row of `sessionListSQL` into a
+    /// ChatSession. Extracted so the full rebuild and the incremental patch
+    /// share one column-index mapping — the indices below are meaningless
+    /// without that SELECT, and two copies would drift.
+    /// - Returns: the decoded row, and `backfillPreview` true when the row had
+    ///   no stored preview and one was derived the slow way — the caller writes
+    ///   it back so that row never pays again.
+    private func decodeSessionRow(
+        _ stmt: OpaquePointer?, id: String
+    ) -> (session: ChatSession, backfillPreview: Bool, previewSortOrder: Int?) {
+            let title = Self.colTextOpt(stmt, 1)
+            let modelId = Self.colText(stmt, 2)
+            let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
+            let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
+            let category = Self.colTextOpt(stmt, 5)
+            // Latest assistant text (preferred) → latest user text (fallback).
+            let assistantRaw = Self.colTextOpt(stmt, 6)
+            let userRaw = Self.colTextOpt(stmt, 7)
+            // [T-ios-listsessions-perf] The preview is normally read straight
+            // out of the session row, written when the message landed. The
+            // extraction below runs ONLY for rows that predate the column
+            // (preview_text IS NULL), and its result is written back so each
+            // such row pays for it exactly once.
+            //
+            // This is the change that removes the 65%-of-all-cycles hotspot:
+            // listSessions no longer JSON-decodes two parts blobs and runs the
+            // markdown pipeline for every session on every refresh.
+            // An empty stored preview is the "computed, nothing displayable"
+            // sentinel (see the backfill write) — surface it as nil so the row
+            // renders its placeholder exactly as before.
+            let storedPreviewRaw = Self.colTextOpt(stmt, 17)
+            let storedPreview = (storedPreviewRaw?.isEmpty ?? true) ? nil : storedPreviewRaw
+            let hasStoredPreview = sqlite3_column_type(stmt, 17) != SQLITE_NULL
 
-                sessions.append(ChatSession(
-                    id: id, title: title, category: category, modelId: modelId,
-                    createdAt: createdAt, updatedAt: updatedAt, lastMessage: lastMessage,
-                    source: source, lastSyncedAt: lastSyncedAt,
-                    remoteDeviceId: remoteDeviceId, pinnedAt: pinnedAt,
-                    folderId: folderId
-                ))
+            let assistantText: String?
+            let userText: String?
+            if hasStoredPreview {
+                assistantText = nil
+                userText = nil
+            } else {
+                assistantText = assistantRaw.flatMap { extractTextFromPartsJSON($0) }
+                userText = userRaw.flatMap { extractTextFromPartsJSON($0) }
             }
-        }
-        sqlite3_finalize(stmt)
+            // sort_order of each picked row (columns 12/13). Prefer whichever
+            // is genuinely newer: assistant wins when its row is at least as
+            // recent (covers mid-tool-call previews); the user message wins
+            // only when the user just sent something the assistant hasn't
+            // answered yet (assistant row is from an earlier turn). This
+            // replaces the dropped SQL pivot clause and is robust to
+            // sort_order re-ranking from iCloud merges.
+            let asstSortOrder: Int? = sqlite3_column_type(stmt, 12) != SQLITE_NULL
+                ? Int(sqlite3_column_int64(stmt, 12)) : nil
+            let userSortOrder: Int? = sqlite3_column_type(stmt, 13) != SQLITE_NULL
+                ? Int(sqlite3_column_int64(stmt, 13)) : nil
+            let lastMessage: String? = hasStoredPreview ? storedPreview : {
+                switch (assistantText, userText) {
+                case let (a?, u?):
+                    // Both present — newer sort_order wins; tie → assistant.
+                    if let ao = asstSortOrder, let uo = userSortOrder, uo > ao { return u }
+                    return a
+                case let (a?, nil): return a
+                case let (nil, u?): return u
+                default: return nil
+                }
+            }()
+            // [LastMsgDiag removed — T-ios-session-list-equatable-jank]
+            // This per-session diagnostic logged one (or two) lines for
+            // EVERY session on EVERY listSessions() call — ~2900 lines for a
+            // single session-list rebuild on this user's device, ~73% of the
+            // whole log. The NSLog volume + daily-file writes were themselves
+            // a measurable Debug-build drag on the very session-switch path
+            // being profiled, and drowned out every other signal. Dropped;
+            // the last-message extractor logic above is unchanged.
+            let source = Self.colTextOpt(stmt, 8)
+            let lastSyncedAt: Date? = sqlite3_column_type(stmt, 9) != SQLITE_NULL
+                ? Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9)) : nil
+            let remoteDeviceId = Self.colTextOpt(stmt, 10)
+            let pinnedAt: Date? = sqlite3_column_type(stmt, 11) != SQLITE_NULL
+                ? Date(timeIntervalSince1970: sqlite3_column_double(stmt, 11)) : nil
+            let folderId = Self.colTextOpt(stmt, 14)
+            let parentSessionId = Self.colTextOpt(stmt, 15)
+            let parentToolUseId = Self.colTextOpt(stmt, 16)
 
-        if skippedRows > 0 {
-            iCloudLogger.error("[ChatStore.listSessions] skipped \(skippedRows) unusable session row(s) with NULL/empty id — see T-ios-listsessions-cstring-trap")
+            var row = ChatSession(
+                id: id, title: title, category: category, modelId: modelId,
+                createdAt: createdAt, updatedAt: updatedAt, lastMessage: lastMessage,
+                source: source, lastSyncedAt: lastSyncedAt,
+                remoteDeviceId: remoteDeviceId, pinnedAt: pinnedAt,
+                folderId: folderId
+            )
+            row.parentSessionId = parentSessionId
+            row.parentToolUseId = parentToolUseId
+            // The sort_order the preview came from, so a later incremental
+            // update compares against a real value instead of NULL.
+            let winningOrder: Int? = {
+                guard !hasStoredPreview else { return nil }
+                switch (assistantText, userText) {
+                case (_?, _?):
+                    if let ao = asstSortOrder, let uo = userSortOrder, uo > ao { return uo }
+                    return asstSortOrder
+                case (_?, nil): return asstSortOrder
+                case (nil, _?): return userSortOrder
+                default: return nil
+                }
+            }()
+            return (row, !hasStoredPreview, winningOrder)
+    }
+
+    /// [T-ios-listsessions-perf] Re-query only `dirtyIds` and splice the
+    /// results into `cached`, returning the re-sorted list — or nil if the
+    /// statement could not be prepared, in which case the caller falls back to
+    /// a full rebuild rather than serving a stale list.
+    ///
+    /// Three things this must get right:
+    ///  * Unchanged sessions keep their EXISTING ChatSession values (not
+    ///    re-decoded equals), so SwiftUI's diff sees them as identical and the
+    ///    sidebar re-renders only the rows that actually moved or changed.
+    ///  * A dirty id with no row back has been deleted underneath us — drop it
+    ///    from the list rather than leaving a phantom.
+    ///  * The re-sort reproduces the SQL's `ORDER BY s.updated_at DESC`, which
+    ///    is the whole point: a new message bumps updated_at, and that
+    ///    reordering is the common case this path has to express.
+    private func patchedSessionList(
+        _ cached: [ChatSession], dirtyIds: Set<String>
+    ) -> [ChatSession]? {
+        let ids = Array(dirtyIds)
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        let sql = Self.sessionListSQL(whereClause: " WHERE s.id IN (\(placeholders))")
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            sqlite3_finalize(stmt)
+            iCloudLogger.error("[ChatStore.listSessions] incremental prepare failed — falling back to full rebuild")
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() {
+            sqlite3_bind_text(stmt, Int32(i + 1), (id as NSString).utf8String, -1, nil)
         }
 
-        // [T-ios-listsessions-cache] Store the freshly-built list; subsequent
-        // calls return this same array until a mutation invalidates it.
-        sessionListCache = sessions
-        sessionListCacheDirty = false
-        return sessions
+        var refreshed: [String: ChatSession] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = Self.colText(stmt, 0)
+            guard !id.isEmpty else { continue }
+            refreshed[id] = decodeSessionRow(stmt, id: id).session
+        }
+
+        var out: [ChatSession] = []
+        out.reserveCapacity(cached.count)
+        for row in cached {
+            guard dirtyIds.contains(row.id) else {
+                out.append(row)          // untouched: same value, same Strings
+                continue
+            }
+            // Absent from the re-query = deleted since the cache was built.
+            if let fresh = refreshed[row.id] { out.append(fresh) }
+        }
+        // A dirty id that was not in the cache at all is a session created
+        // since — but creation goes through the FULL invalidation path, so it
+        // cannot reach here. Assert the invariant in Debug rather than silently
+        // dropping a new session if that ever stops being true.
+        #if DEBUG
+        let cachedIds = Set(cached.map(\.id))
+        let unknown = dirtyIds.subtracting(cachedIds)
+        if !unknown.isEmpty {
+            iCloudLogger.error("[ChatStore.listSessions] incremental patch saw \(unknown.count) id(s) absent from the cache — a creation path is using the per-session invalidation it should not")
+        }
+        #endif
+
+        // Reproduce `ORDER BY s.updated_at DESC`. Ties broken by id so the
+        // order is total and stable — SQLite's tie order is unspecified, and
+        // an unstable sort here would churn the SwiftUI diff for no reason.
+        out.sort {
+            $0.updatedAt == $1.updatedAt ? $0.id > $1.id : $0.updatedAt > $1.updatedAt
+        }
+        return out
     }
 
     /// Query sync_devices table and check UserDefaults to find which remote devices have sync enabled.
@@ -1491,9 +1889,38 @@ actor ChatStore {
                 lastToolUse = tu
                 continue
             case .text(var t) where !t.isEmpty:
+                // [T-ios-markdown-preview-cap] Bound the body HERE, before the
+                // reminder/attachment strips, the trims and the markdown
+                // pipeline below, all of which copy the whole string. This
+                // runs for every session on every sidebar refresh (once a
+                // second while a background agent writes), and a multi-MB
+                // message here is what produced the 1.14(11) allocation-
+                // failure abort. Only 100 chars survive, so 4096 chars of
+                // prose is ample; fenced code and injected blocks are skipped
+                // whole so the cut never lands inside one.
+                //
+                // An <agent_callback> envelope is exempt: its <result> can be
+                // long, and AgentCallback.parse below needs the whole envelope
+                // (it derives the one-line preview itself). The envelope is
+                // app-authored and appears at most once per message, so the
+                // unbounded path is not the per-second hazard above. The
+                // opener sits at the very start (after at most a short
+                // system-reminder), so looking for it within the same 4096
+                // chars keeps this check O(cap) too.
+                if !MarkdownStripper.utf8Contains(
+                    t, "<\(AgentCallback.tag)", withinBytes: 4096
+                ) {
+                    t = MarkdownStripper.previewSource(t)
+                }
                 t = RawMessage.stripSystemReminders(t)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !t.isEmpty else { continue }
+                // [T-p3-agent-callback-cell] An agent callback previews as one
+                // readable line, never as its XML envelope.
+                if let cb = AgentCallback.parse(t) {
+                    lastTextPreview = String(cb.previewLine.prefix(100))
+                    continue
+                }
                 if let start = t.range(of: "<user-attached-files>") {
                     let end = t.range(of: "</user-attached-files>")
                     let endBound = end?.upperBound ?? t.endIndex
@@ -1503,7 +1930,7 @@ actor ChatStore {
                 t = RawMessage.stripAttachmentMarkers(t)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !t.isEmpty else { continue }
-                let clean = MarkdownStripper.plainText(t)
+                let clean = MarkdownStripper.plainText(t, inlinePassCap: MarkdownStripper.inlinePassCap)
                     .trimmingCharacters(in: .whitespaces)
                 guard !clean.isEmpty else { continue }
                 lastTextPreview = String(clean.prefix(100))
@@ -1967,7 +2394,7 @@ actor ChatStore {
     }
 
     func getSession(_ id: String) -> ChatSession? {
-        let sql = "SELECT id, title, model_id, created_at, updated_at, category, source, pinned_at, folder_id FROM sessions WHERE id = ?"
+        let sql = "SELECT id, title, model_id, created_at, updated_at, category, source, pinned_at, folder_id, parent_session_id, parent_tool_use_id FROM sessions WHERE id = ?"
         var stmt: OpaquePointer?
         var session: ChatSession?
 
@@ -1983,12 +2410,16 @@ actor ChatStore {
                 let pinnedAt: Date? = sqlite3_column_type(stmt, 7) != SQLITE_NULL
                     ? Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)) : nil
                 let folderId = sqlite3_column_text(stmt, 8).map { String(cString: $0) }
+                let parentSessionId = sqlite3_column_text(stmt, 9).map { String(cString: $0) }
+                let parentToolUseId = sqlite3_column_text(stmt, 10).map { String(cString: $0) }
 
                 session = ChatSession(
                     id: id, title: title, category: category, modelId: modelId,
                     createdAt: createdAt, updatedAt: updatedAt, source: source,
                     pinnedAt: pinnedAt, folderId: folderId
                 )
+                session?.parentSessionId = parentSessionId
+                session?.parentToolUseId = parentToolUseId
             }
         }
         sqlite3_finalize(stmt)
@@ -1997,7 +2428,9 @@ actor ChatStore {
     }
 
     func updateSessionModelId(_ id: String, modelId: String) {
-        invalidateSessionListCache()
+        // PER-SESSION: changes one row's displayed model. Row set and order
+        // (updated_at) are untouched.
+        invalidateSessionListCache(sessionId: id)
         let sql = "UPDATE sessions SET model_id = ? WHERE id = ?"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
@@ -2009,7 +2442,10 @@ actor ChatStore {
     }
 
     func updateSessionTitle(_ id: String, title: String, category: String? = nil) {
-        invalidateSessionListCache()
+        // PER-SESSION: title/category are this row's own fields. It also bumps
+        // updated_at, which reorders — the incremental patch re-sorts, so that
+        // is expressible without a full rebuild.
+        invalidateSessionListCache(sessionId: id)
         let sql = "UPDATE sessions SET title = ?, category = COALESCE(?, category), updated_at = ? WHERE id = ?"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
@@ -2027,6 +2463,7 @@ actor ChatStore {
     /// Toggle pin state for a session. Returns the new pinned state.
     @discardableResult
     func toggleSessionPin(_ id: String) -> Bool {
+        // FULL: pinning changes the sidebar's ordering rules, not just a field.
         invalidateSessionListCache()
         // Check current pin state
         var isPinned = false
@@ -2167,6 +2604,7 @@ actor ChatStore {
     /// updated_at so the change rides FolderV2's LWW cleanly.
     @discardableResult
     func toggleFolderPin(_ id: String) -> Bool {
+        // FULL: folder ordering affects how the whole list is arranged.
         invalidateSessionListCache()
         var isPinned = false
         var checkStmt: OpaquePointer?
@@ -2204,6 +2642,7 @@ actor ChatStore {
     /// "members are deleted".
     @discardableResult
     func dissolveFolder(_ id: String) -> [String] {
+        // FULL: re-homes every member session at once.
         invalidateSessionListCache()
         let memberIds = sessionIdsInFolder(id)
 
@@ -2250,6 +2689,7 @@ actor ChatStore {
     /// Move sessions into `folderId`, or out of any folder when it is nil.
     func setFolder(_ folderId: String?, forSessions sessionIds: [String]) {
         guard !sessionIds.isEmpty else { return }
+        // FULL: a folder move changes grouping for a whole set of rows.
         invalidateSessionListCache()
         let sql = "UPDATE sessions SET folder_id = ? WHERE id = ?"
         for sid in sessionIds {
@@ -2277,6 +2717,8 @@ actor ChatStore {
     /// read-then-write in the caller.
     @discardableResult
     func setFolderIfUnfiled(_ folderId: String, forSession sessionId: String) -> Bool {
+        // FULL: folder membership feeds the sidebar's grouping, which is part
+        // of how rows are arranged rather than a field of one row.
         invalidateSessionListCache()
         let sql = "UPDATE sessions SET folder_id = ? WHERE id = ? AND folder_id IS NULL"
         var changed = false
@@ -2364,6 +2806,7 @@ actor ChatStore {
             iCloudLogger.info("[iCloud] applyRemoteFolder SKIP (local newer/equal): id=\(f.id.prefix(8))")
             return
         }
+        // FULL: a remote folder create/rename re-groups the sidebar.
         invalidateSessionListCache()
         let sql = """
             INSERT INTO folders (id, name, icon, color, origin, sort_index, pinned_at, description, created_at, updated_at)
@@ -2403,6 +2846,7 @@ actor ChatStore {
     /// the deleting peer already pushed both its tombstone and its members'
     /// folder_id=NULL session updates; re-queueing here would delete-loop.
     func applyRemoteFolderDeletion(id: String) {
+        // FULL: unfiles every session that was in the deleted folder.
         invalidateSessionListCache()
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, "UPDATE sessions SET folder_id = NULL WHERE folder_id = ?", -1, &stmt, nil) == SQLITE_OK {
@@ -2477,7 +2921,15 @@ actor ChatStore {
     }
 
     func deleteSession(_ id: String) {
+        // FULL: removes a row from the set.
         invalidateSessionListCache()
+        // [T-p1-delegate-task] Cascade to child (helper) sessions FIRST — they
+        // are reachable only through this parent, so an orphaned child would
+        // be invisible yet still occupy storage and sync. Each goes through
+        // the full funnel (cloud tombstone + local rows + recent-delete mark).
+        for childId in childSessionIds(of: id) {
+            deleteSession(childId)
+        }
         // Queue cloud deletions BEFORE removing local rows so the SELECTs
         // below can still enumerate child ids. Peers receive op=delete
         // for the session + each child and apply them as hard deletes
@@ -2502,7 +2954,155 @@ actor ChatStore {
     /// noisy round-trip and risk a delete-loop with peers that haven't
     /// yet drained the same tombstone.
     func deleteSessionLocalOnly(_ id: String) {
+        // Inbound peer delete: the peer already tombstoned the children, so
+        // mirror the cascade locally without re-queueing cloud deletes.
+        for childId in childSessionIds(of: id) {
+            deleteSessionLocalOnly(childId)
+        }
         deleteSessionLocalRowsOnly(id)
+    }
+
+    /// [T-p1-delegate-task] Ids of the hidden child sessions of `parentId`.
+    /// `ids` plus every descendant child session, any depth.
+    /// [T-child-delete-storage] The one query every delete / measure path
+    /// uses to expand a user's selection to what really goes away.
+    func sessionIdsWithDescendants(_ ids: some Sequence<String>) -> [String] {
+        SessionTree.withDescendants(ids) { self.childSessionIds(of: $0) }
+    }
+
+    /// Single-integer query for the sweep's diagnostics. Binds its parameter
+    /// rather than interpolating: these ids come from the DB and are UUIDs
+    /// today, but a counting helper is exactly the place a future caller
+    /// passes something less controlled.
+    private func scalarCount(_ sql: String, bind: String? = nil) -> Int {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        if let bind { sqlite3_bind_text(stmt, 1, (bind as NSString).utf8String, -1, nil) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
+    }
+
+    /// [T-zombie-child-sweep] Delete child sessions whose parent is gone.
+    ///
+    /// Truncating a conversation (retry, or deleting from a message) drops the
+    /// message rows that carried the `subagent_task` blocks, but nothing ever
+    /// touched the child sessions those blocks spawned. The children survive
+    /// with a `parent_session_id` pointing at a parent whose block no longer
+    /// exists: invisible in the UI — nothing links to them any more — yet
+    /// still holding storage, still syncing to every other device, and
+    /// impossible for the user to reach and delete.
+    ///
+    /// Two guards keep this from eating live data, because "the parent row is
+    /// missing" is a much weaker claim than it looks:
+    ///
+    ///  1. **A one-month age floor.** iCloud delivers records in no particular
+    ///     order, so a child can legitimately arrive before its parent. Judged
+    ///     immediately, a freshly-synced child looks exactly like a zombie.
+    ///     Anything touched within the last month is therefore left alone —
+    ///     far longer than any sync convergence takes, and a zombie costs
+    ///     nothing by waiting.
+    ///  2. **The parent must be confirmed absent**, by id, right before the
+    ///     delete. Never inferred from the sweep's own snapshot.
+    ///
+    /// Returns the number of sessions deleted.
+    @discardableResult
+    func sweepZombieChildSessions(olderThan cutoff: TimeInterval = 30 * 24 * 60 * 60) -> Int {
+        let startedAt = Date()
+        let deadline = startedAt.timeIntervalSince1970 - cutoff
+        // Counted for the candidate line below: a large `children` with a
+        // small `candidates` is the healthy shape, and the ratio is what makes
+        // an unexpected sweep obvious. A clean run logs nothing — this is a
+        // cold-start path, and a line on every launch saying "nothing to do"
+        // is noise that would outnumber the events worth finding.
+        let totalChildren = scalarCount("SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL AND parent_session_id != ''")
+
+        // `updated_at` covers both the child's own activity and any inbound
+        // merge that touched it, so a child still receiving sync traffic can
+        // never be old enough to qualify.
+        let sql = """
+            SELECT c.id, c.parent_session_id, c.updated_at
+            FROM sessions c
+            WHERE c.parent_session_id IS NOT NULL AND c.parent_session_id != ''
+              AND c.updated_at < ?
+              AND NOT EXISTS (SELECT 1 FROM sessions p WHERE p.id = c.parent_session_id)
+            """
+        var stmt: OpaquePointer?
+        var candidates: [(child: String, parent: String, updatedAt: Double)] = []
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_double(stmt, 1, deadline)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let cid = Self.colText(stmt, 0), pid = Self.colText(stmt, 1)
+                let upd = sqlite3_column_double(stmt, 2)
+                if !cid.isEmpty, !pid.isEmpty { candidates.append((cid, pid, upd)) }
+            }
+        }
+        sqlite3_finalize(stmt)
+        guard !candidates.isEmpty else { return 0 }
+        logger.warning("[ZombieSweep] \(candidates.count) candidate(s) of \(totalChildren) child session(s), cutoff \(Int(cutoff / 86400))d")
+
+        var deleted = 0
+        var spared = 0
+        for (child, parent, updatedAt) in candidates {
+            // Re-check by id. The NOT EXISTS above was evaluated over the whole
+            // table at once; this asks the single question that authorises the
+            // delete, and asks it now. A parent that arrived from iCloud in
+            // between must save its child.
+            guard !sessionExists(id: parent) else {
+                spared += 1
+                logger.warning("[ZombieSweep] SPARED child=\(child.prefix(8)) — parent \(parent.prefix(8)) reappeared between query and delete")
+                continue
+            }
+            // Everything identifying the row goes in BEFORE the delete: once
+            // deleteSession returns, this row is the only remaining record that
+            // it existed. Age and message count are what a later "why did my
+            // session vanish" report needs to judge whether the call was right.
+            let msgCount = scalarCount("SELECT COUNT(*) FROM messages WHERE session_id = ?", bind: child)
+            let ageDays = Int(startedAt.timeIntervalSince1970 - updatedAt) / 86400
+            let descendants = childSessionIds(of: child).count
+            // Ids and counts only — no title. This is an audit line for an
+            // irreversible delete, and the session's title is the user's own
+            // task text; the id is enough to identify the row.
+            logger.warning("[ZombieSweep] DELETE child=\(child.prefix(8)) parent=\(parent.prefix(8)) age=\(ageDays)d msgs=\(msgCount) descendants=\(descendants)")
+            // A zombie whose own children are still live would strand THEM, so
+            // go through the normal funnel: it cascades to descendants, queues
+            // the cloud tombstone (peers hard-delete their copies), and records
+            // the recent-delete mark that stops fetchRecentV2 resurrecting it.
+            deleteSession(child)
+            deleted += 1
+        }
+        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+        logger.warning("[ZombieSweep] done — deleted=\(deleted) spared=\(spared) of \(candidates.count) candidate(s) in \(ms)ms")
+        return deleted
+    }
+
+    /// child id → parent id for every child session.
+    func sessionParentMap() -> [String: String] {
+        let sql = "SELECT id, parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL AND parent_session_id != ''"
+        var stmt: OpaquePointer?
+        var out: [String: String] = [:]
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let cid = Self.colText(stmt, 0), pid = Self.colText(stmt, 1)
+                if !cid.isEmpty, !pid.isEmpty { out[cid] = pid }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return out
+    }
+
+    func childSessionIds(of parentId: String) -> [String] {
+        let sql = "SELECT id FROM sessions WHERE parent_session_id = ?"
+        var stmt: OpaquePointer?
+        var ids: [String] = []
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (parentId as NSString).utf8String, -1, nil)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let cid = Self.colText(stmt, 0)
+                if !cid.isEmpty { ids.append(cid) }
+            }
+        }
+        sqlite3_finalize(stmt)
+        return ids
     }
 
     /// True if a session row exists locally. Lightweight existence check
@@ -2520,10 +3120,27 @@ actor ChatStore {
     private func deleteSessionLocalRowsOnly(_ id: String) {
         // [T-ios-listsessions-cache] Invalidate here (the low-level row delete)
         // so ALL callers are covered — deleteSession AND deleteSessionLocalOnly.
+        // FULL: removes a row from the set.
         invalidateSessionListCache()
+        // [T-child-delete-storage] Bottom of the delete funnel — every entry
+        // (home list, RPC, iCloud inbound tombstone) ends here, for the
+        // session and, through the recursive callers, each descendant:
+        //  - a still-running agent job for this session (as parent or as
+        //    the child itself) is cancelled, so it cannot keep writing;
+        //  - the WHOLE per-session directory goes (workspace, offloads,
+        //    browser, attachments …), not just the media subfolders, plus
+        //    the persisted browser-tab file. Global buckets are untouched
+        //    because only UUID-named directories are ever removed.
+        Task { @MainActor in
+            AgentJobRegistry.shared.dropQueuedDelegations(parent: id, reason: "sessionDeleted")
+            AgentJobRegistry.shared.cancelAll(parent: id, reason: "sessionDeleted")
+            AgentJobRegistry.shared.cancelAll(session: id, reason: "sessionDeleted")
+        }
         deleteMessages(sessionId: id)
         deleteCompactMarkers(sessionId: id)
         deleteSessionMedia(id)
+        SessionStorageCleanup.removeSessionDirectory(id, minisBase: minisBaseURL)
+        BrowserTabPool.deletePersistedData(for: id)
 
         let sql = "DELETE FROM sessions WHERE id = ?"
         var stmt: OpaquePointer?
@@ -2615,6 +3232,155 @@ actor ChatStore {
                   operation: "delete")
     }
 
+
+    // MARK: - Persisted session preview [T-ios-listsessions-perf]
+
+    /// Apply a freshly-written message to its session's stored preview.
+    ///
+    /// The rule reproduces exactly what listSessions used to derive by
+    /// re-reading both candidate rows on every refresh: the latest ASSISTANT
+    /// message with text or a tool_use wins, UNLESS the latest USER text
+    /// message is strictly newer by sort_order (the user has just sent
+    /// something the assistant has not answered yet). Ties go to the
+    /// assistant, matching the old `uo > ao` comparison.
+    ///
+    /// Applied incrementally, that becomes: overwrite the stored preview when
+    /// this message's sort_order is >= the stored one (it is at least as
+    /// recent), and additionally require that a user message not displace an
+    /// assistant message at the SAME sort_order. Because sort_order increases
+    /// monotonically per session, a message arriving now always has the
+    /// highest sort_order in its session, so the common path is a plain
+    /// overwrite — the comparison only matters for out-of-order arrivals from
+    /// an iCloud merge.
+    ///
+    /// Messages carrying no displayable part (a tool_result, an empty
+    /// assistant row) leave the stored preview alone: they are exactly the
+    /// rows the old SQL's part_flags filter excluded.
+    private func updateStoredPreview(
+        sessionId: String, parts: [ContentPart], partsJSON: String,
+        role: MessageRole, sortOrder: Int
+    ) {
+        let flags = Self.partFlags(for: parts)
+        // Assistant rows qualify on text OR tool_use; user rows on text only.
+        let qualifies = role == .assistant
+            ? (flags & (Self.partFlagHasText | Self.partFlagHasToolUse)) != 0
+            : (flags & Self.partFlagHasText) != 0
+        guard qualifies else { return }
+
+        // `partsJSON` is the string the caller just bound into the INSERT —
+        // reuse it rather than encoding `parts` a second time per message.
+        guard let preview = extractTextFromPartsJSON(partsJSON) else { return }
+
+        // `>=` for an assistant row (it wins ties), `>` for a user row (it must
+        // be strictly newer to displace the assistant).
+        let comparison = role == .assistant ? ">=" : ">"
+        let sql = """
+            UPDATE sessions
+               SET preview_text = ?, preview_sort_order = ?
+             WHERE id = ?
+               AND (preview_sort_order IS NULL OR ? \(comparison) preview_sort_order)
+            """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, (preview as NSString).utf8String, -1, nil)
+            sqlite3_bind_int64(stmt, 2, Int64(sortOrder))
+            sqlite3_bind_text(stmt, 3, (sessionId as NSString).utf8String, -1, nil)
+            sqlite3_bind_int64(stmt, 4, Int64(sortOrder))
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
+    /// Recompute one session's preview from its messages the way listSessions
+    /// always has, and store it. Used for the NULL fallback (rows written
+    /// before the column existed) and after a delete, where the winning
+    /// message may have been the one removed and the preview must move
+    /// BACKWARDS — something the incremental rule deliberately cannot do.
+    private func recomputeStoredPreview(sessionId: String) {
+        let asstMask = Self.partFlagHasText | Self.partFlagHasToolUse
+        let userMask = Self.partFlagHasText
+        let sql = """
+            SELECT
+              (SELECT m.parts_json FROM messages m
+                WHERE m.session_id = ? AND m.role = 'assistant'
+                  AND (m.part_flags & \(asstMask)) != 0
+                ORDER BY m.sort_order DESC LIMIT 1),
+              (SELECT m.parts_json FROM messages m
+                WHERE m.session_id = ? AND m.role = 'user'
+                  AND (m.part_flags & \(userMask)) != 0
+                ORDER BY m.sort_order DESC LIMIT 1),
+              (SELECT m.sort_order FROM messages m
+                WHERE m.session_id = ? AND m.role = 'assistant'
+                  AND (m.part_flags & \(asstMask)) != 0
+                ORDER BY m.sort_order DESC LIMIT 1),
+              (SELECT m.sort_order FROM messages m
+                WHERE m.session_id = ? AND m.role = 'user'
+                  AND (m.part_flags & \(userMask)) != 0
+                ORDER BY m.sort_order DESC LIMIT 1)
+            """
+        var stmt: OpaquePointer?
+        var preview: String?
+        var order: Int?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            for i in 1...4 {
+                sqlite3_bind_text(stmt, Int32(i), (sessionId as NSString).utf8String, -1, nil)
+            }
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                let asstRaw = Self.colTextOpt(stmt, 0)
+                let userRaw = Self.colTextOpt(stmt, 1)
+                let asstOrder: Int? = sqlite3_column_type(stmt, 2) != SQLITE_NULL
+                    ? Int(sqlite3_column_int64(stmt, 2)) : nil
+                let userOrder: Int? = sqlite3_column_type(stmt, 3) != SQLITE_NULL
+                    ? Int(sqlite3_column_int64(stmt, 3)) : nil
+                let asstText = asstRaw.flatMap { extractTextFromPartsJSON($0) }
+                let userText = userRaw.flatMap { extractTextFromPartsJSON($0) }
+                switch (asstText, userText) {
+                case let (a?, u?):
+                    if let ao = asstOrder, let uo = userOrder, uo > ao {
+                        preview = u; order = uo
+                    } else {
+                        preview = a; order = asstOrder
+                    }
+                case let (a?, nil): preview = a; order = asstOrder
+                case let (nil, u?): preview = u; order = userOrder
+                default: break
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+        // Empty-string sentinel rather than NULL when nothing is displayable —
+        // NULL means "never computed" and would re-trigger the slow backfill
+        // path on every refresh. See the backfill write in listSessions.
+        storePreview(sessionId: sessionId, text: preview ?? "", sortOrder: order)
+    }
+
+    /// The session a message belongs to, or nil if the row is gone.
+    private func sessionIdForMessage(_ messageId: String) -> String? {
+        let sql = "SELECT session_id FROM messages WHERE id = ?"
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(stmt, 1, (messageId as NSString).utf8String, -1, nil)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let sid = Self.colText(stmt, 0)
+        return sid.isEmpty ? nil : sid
+    }
+
+    /// Unconditional write of the preview pair (used by the recompute paths,
+    /// which have already decided the winner).
+    private func storePreview(sessionId: String, text: String?, sortOrder: Int?) {
+        let sql = "UPDATE sessions SET preview_text = ?, preview_sort_order = ? WHERE id = ?"
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            bindOptionalText(stmt, index: 1, value: text)
+            if let sortOrder { sqlite3_bind_int64(stmt, 2, Int64(sortOrder)) }
+            else { sqlite3_bind_null(stmt, 2) }
+            sqlite3_bind_text(stmt, 3, (sessionId as NSString).utf8String, -1, nil)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+    }
+
     // MARK: - Message CRUD
 
     func appendMessage(_ message: RawMessage) {
@@ -2624,8 +3390,13 @@ actor ChatStore {
     /// Batch-insert multiple messages in a single SQLite transaction.
     /// This reduces disk I/O by coalescing multiple writes into one fsync.
     func appendMessages(_ messages: [RawMessage]) {
-        invalidateSessionListCache()
         guard !messages.isEmpty else { return }
+        // PER-SESSION: a batch can span sessions, so mark each one it touches.
+        // Moved below the empty guard — an empty batch changes nothing and
+        // should not invalidate at all.
+        for sessionId in Set(messages.map(\.sessionId)) {
+            invalidateSessionListCache(sessionId: sessionId)
+        }
         // Drop assistant messages that carry no content the model could echo back —
         // a stream that aborts before producing any text or tool_use leaves an
         // assistant row with empty parts. On the next turn DeepSeek/OpenAI-compat
@@ -2648,8 +3419,8 @@ actor ChatStore {
         logger.info("[Store] appendMessages enter count=\(messages.count) dbOpen=\(dbOK) sid=\(firstSid)")
 
         let sql = """
-            INSERT INTO messages (id, session_id, role, parts_json, created_at, token_usage, sort_order, reasoning_content, stream_interrupt_count, updated_at, error_info, part_flags, model_id, model_display_name, provider_type, provider_instance_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (id, session_id, role, parts_json, created_at, token_usage, sort_order, reasoning_content, stream_interrupt_count, updated_at, error_info, part_flags, model_id, model_display_name, provider_type, provider_instance_id, reasoning_echo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         exec("BEGIN TRANSACTION")
@@ -2699,6 +3470,8 @@ actor ChatStore {
                 bindOptionalText(stmt, index: 14, value: message.modelDisplayName)
                 bindOptionalText(stmt, index: 15, value: message.providerType)
                 bindOptionalText(stmt, index: 16, value: message.providerInstanceId)
+                // [T-responses-echo-persist]
+                bindOptionalText(stmt, index: 17, value: message.reasoningEchoJSON)
                 let stepRC = sqlite3_step(stmt)
                 if stepRC != SQLITE_DONE {
                     let errMsg = String(cString: sqlite3_errmsg(db))
@@ -2711,6 +3484,16 @@ actor ChatStore {
                 logger.error("[Store] INSERT prepare failed rc=\(prepRC) sid=\(message.sessionId.prefix(8)) err=\(errMsg)")
             }
             sqlite3_finalize(stmt)
+
+            // [T-ios-listsessions-perf] Fold this message into the session's
+            // stored preview while its parts and sort_order are in hand — the
+            // work listSessions used to redo for every session on every
+            // refresh. Inside the same transaction as the INSERT, so the row
+            // and its preview can never disagree after a crash.
+            updateStoredPreview(
+                sessionId: message.sessionId, parts: message.parts,
+                partsJSON: partsJSON, role: message.role, sortOrder: sortOrder
+            )
 
             touchedSessions.insert(message.sessionId)
             // Always write dirty mark to DB immediately (crash-safe).
@@ -2760,7 +3543,7 @@ actor ChatStore {
     func loadMessages(sessionId: String) -> [RawMessage] {
         let totalStart = CFAbsoluteTimeGetCurrent()
         let sql = """
-            SELECT id, session_id, role, parts_json, created_at, token_usage, reasoning_content, stream_interrupt_count, sort_order, error_info, model_id, model_display_name, provider_type, provider_instance_id
+            SELECT id, session_id, role, parts_json, created_at, token_usage, reasoning_content, stream_interrupt_count, sort_order, error_info, model_id, model_display_name, provider_type, provider_instance_id, reasoning_echo
             FROM messages WHERE session_id = ? ORDER BY sort_order ASC, created_at ASC, id ASC
         """
         var stmt: OpaquePointer?
@@ -2815,6 +3598,10 @@ actor ChatStore {
                 // would silently strip attribution from every exported package.
                 msg.modelId = sqlite3_column_text(stmt, 10).map { String(cString: $0) }
                 msg.modelDisplayName = sqlite3_column_text(stmt, 11).map { String(cString: $0) }
+                // [T-responses-echo-persist] Rehydrate the native reasoning
+                // head so a reopened session can replay REAL server-minted ids
+                // instead of falling back to the id-less placeholder.
+                msg.reasoningEchoJSON = sqlite3_column_text(stmt, 14).map { String(cString: $0) }
                 msg.providerType = sqlite3_column_text(stmt, 12).map { String(cString: $0) }
                 msg.providerInstanceId = sqlite3_column_text(stmt, 13).map { String(cString: $0) }
                 messages.append(msg)
@@ -3027,7 +3814,15 @@ actor ChatStore {
     }
 
     func deleteMessages(sessionId: String) {
-        invalidateSessionListCache()
+        // PER-SESSION: empties one session's messages, changing its preview.
+        // The session row itself stays in the list.
+        invalidateSessionListCache(sessionId: sessionId)
+        // [T-ios-listsessions-perf] Every message is going, so the stored
+        // preview must go with it — otherwise the sidebar keeps showing the
+        // text of a message that no longer exists. Empty string, not NULL:
+        // NULL means "never computed" and would send this row back through
+        // the slow backfill path on the next refresh (see listSessions).
+        defer { storePreview(sessionId: sessionId, text: "", sortOrder: nil) }
         // Mark every message dirty for cloud deletion BEFORE the DELETE so other
         // devices remove them on next sync. Without this, Clear Chat wipes
         // locally but iCloud re-hydrates the rows on the next pull.
@@ -3059,7 +3854,20 @@ actor ChatStore {
     /// boundary; it does not rewrite a kept row). Mirrors appendMessage's
     /// parts_json encoding.
     func updateMessageParts(messageId: String, parts: [ContentPart]) {
-        invalidateSessionListCache()
+        // PER-SESSION: the row's session is resolved here once and reused by
+        // the preview recompute at the end. This runs on every assistant-turn
+        // finalize — the hottest path after appendMessages — and a FULL
+        // rebuild here would re-mint every ChatSession value each turn,
+        // undoing the incremental patch on exactly the path it exists for.
+        // Falls back to FULL only if the row cannot be resolved.
+        let previewSession = sessionIdForMessage(messageId)
+        if let sid = previewSession {
+            // PER-SESSION: parts rewrite on a known session.
+            invalidateSessionListCache(sessionId: sid)
+        } else {
+            // FULL: row could not be resolved — conservative fallback.
+            invalidateSessionListCache()
+        }
         let partsJSON: String
         do {
             let data = try JSONEncoder().encode(parts)
@@ -3083,6 +3891,10 @@ actor ChatStore {
         sqlite3_finalize(stmt)
         // Mark dirty so the rewritten row syncs to iCloud.
         markDirty(recordType: "Message", recordId: messageId)
+        // [T-ios-listsessions-perf] Rewriting a message's parts can change the
+        // preview in either direction (text replaced, or emptied out), so
+        // recompute rather than fold forward.
+        if let sid = previewSession { recomputeStoredPreview(sessionId: sid) }
     }
 
     /// Delete all message rows AFTER the first `keepCount` rows (ordered by
@@ -3102,7 +3914,12 @@ actor ChatStore {
     /// keepCount-th row (ascending, 1-based), then delete strictly AFTER it.
     /// This is correct regardless of whether sort_order is dense or shifted.
     func deleteMessagesAfter(sessionId: String, keepCount: Int) {
-        invalidateSessionListCache()
+        // PER-SESSION: truncates one session's tail, changing its preview only.
+        invalidateSessionListCache(sessionId: sessionId)
+        // [T-ios-listsessions-perf] A truncation can delete the very message
+        // the preview came from, so the preview has to move BACKWARDS. The
+        // incremental rule only ever moves it forward, so recompute here.
+        defer { recomputeStoredPreview(sessionId: sessionId) }
         // DIAG: snapshot state before delete
         let beforeStats = sessionWriteStats(sessionId: sessionId)
         logger.warning("[EditSync] [DeleteAfter] ENTER sid=\(sessionId.prefix(8)) keepCount=\(keepCount) — before: count=\(beforeStats.count) maxSortOrder=\(beforeStats.maxSortOrder)")
@@ -3201,9 +4018,14 @@ actor ChatStore {
     func saveMedia(
         data: Data, mimeType: String, sessionId: String,
         originalFileName: String? = nil, subdir: String = "attachments",
-        linuxPath: String? = nil
+        linuxPath: String? = nil, fileId: String? = nil
     ) -> MediaRef {
-        let fileId = UUID().uuidString
+        // [T-paste-live-bubble-card] `fileId` lets send() pre-plan the storage
+        // uuid synchronously so the bubble can be BORN with a card whose path
+        // is already final — the row-birth doctrine (see the inputAttachments
+        // seeding comment in send()): post-insert attachment mutations are a
+        // race, not a render path.
+        let fileId = fileId ?? UUID().uuidString
         let ext = Self.fileExtension(for: mimeType)
 
         let relativePath = "\(sessionId)/\(subdir)/\(fileId).\(ext)"
@@ -3247,7 +4069,9 @@ actor ChatStore {
     func deleteSessionMedia(_ sessionId: String) {
         let fm = FileManager.default
 
-        for subdir in ["browser", "attachments", "images"] {
+        // [T-paste-mediaref] "pasted" holds pasted-text refs; it must be here
+        // or those files outlive the session that owns them.
+        for subdir in ["browser", "attachments", "images", PastePlaceholder.mediaSubdir] {
             let dirURL = minisBaseURL.appendingPathComponent("\(sessionId)/\(subdir)")
             if fm.fileExists(atPath: dirURL.path) {
                 try? fm.removeItem(at: dirURL)
@@ -3553,7 +4377,9 @@ actor ChatStore {
     /// Set or clear the v2 soft-delete tombstone on a session row. Pass
     /// `at = nil` to clear (after a resurrect cascade re-pushes the tree).
     func setSessionTombstone(sessionId: String, at: Date?) {
-        invalidateSessionListCache()
+        // PER-SESSION: the tombstone column is not consulted by the list query
+        // (see the note in listSessions), so this only marks the row dirty.
+        invalidateSessionListCache(sessionId: sessionId)
         let sql = "UPDATE sessions SET remote_tombstoned_at = ? WHERE id = ?"
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
@@ -4074,7 +4900,9 @@ actor ChatStore {
     /// Wraps everything in a single transaction.
     @discardableResult
     func repairSession(sessionId: String) -> RepairReport {
-        invalidateSessionListCache()
+        // PER-SESSION: rewrites one session's message rows in place; the row
+        // set is unchanged.
+        invalidateSessionListCache(sessionId: sessionId)
         var report = RepairReport()
 
         exec("BEGIN TRANSACTION")
@@ -4305,6 +5133,82 @@ actor ChatStore {
         return records
     }
 
+    // MARK: - [T-p2-helper-usage] Helper usage
+
+    struct HelperUsageStats {
+        var delegateCalls = 0
+        var primaryRuns = 0
+        var subRuns = 0
+        var escalations = 0
+        var cancelledOrFailed = 0
+        var helperInputTokens = 0
+        var helperOutputTokens = 0
+        var childSessions = 0
+    }
+
+    /// Derived from what is already persisted — no separate ledger:
+    /// `delegate_task` tool_use parts (calls), their tool_result JSON
+    /// (tier_used / escalation_requested / status), and the token usage of
+    /// every child session (`parent_session_id IS NOT NULL`).
+    func fetchHelperUsage() -> HelperUsageStats {
+        var stats = HelperUsageStats()
+        var stmt: OpaquePointer?
+
+        // Calls + outcomes, from the parents' transcripts.
+        let partsSql = "SELECT parts_json FROM messages WHERE parts_json LIKE '%delegate_task%'"
+        if sqlite3_prepare_v2(db, partsSql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let raw = sqlite3_column_text(stmt, 0),
+                      let data = String(cString: raw).data(using: .utf8),
+                      let parts = try? JSONDecoder().decode([ContentPart].self, from: data) else { continue }
+                for part in parts {
+                    switch part {
+                    case .toolUse(let tu) where tu.name == SubAgentDefinition.toolName:
+                        stats.delegateCalls += 1
+                    case .toolResult(let tr):
+                        guard tr.output.hasPrefix("{"), tr.output.contains("\"tier_used\""),
+                              let d = tr.output.data(using: .utf8),
+                              let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
+                        switch obj["tier_used"] as? String {
+                        case "sub": stats.subRuns += 1
+                        case "primary": stats.primaryRuns += 1
+                        default: break
+                        }
+                        if (obj["escalation_requested"] as? Bool) == true { stats.escalations += 1 }
+                        if let status = obj["status"] as? String, status == "cancelled" || status == "failed" || status == "timeout" {
+                            stats.cancelledOrFailed += 1
+                        }
+                    default: break
+                    }
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        // Token cost of the helpers themselves.
+        let tokSql = """
+            SELECT m.token_usage FROM messages m JOIN sessions s ON m.session_id = s.id
+            WHERE s.parent_session_id IS NOT NULL AND m.token_usage IS NOT NULL
+            """
+        if sqlite3_prepare_v2(db, tokSql, -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                guard let raw = sqlite3_column_text(stmt, 0),
+                      let data = String(cString: raw).data(using: .utf8),
+                      let usage = try? JSONDecoder().decode(StoredTokenUsage.self, from: data) else { continue }
+                stats.helperInputTokens += usage.inputTokens
+                stats.helperOutputTokens += usage.outputTokens
+            }
+        }
+        sqlite3_finalize(stmt)
+
+        let countSql = "SELECT COUNT(*) FROM sessions WHERE parent_session_id IS NOT NULL"
+        if sqlite3_prepare_v2(db, countSql, -1, &stmt, nil) == SQLITE_OK, sqlite3_step(stmt) == SQLITE_ROW {
+            stats.childSessions = Int(sqlite3_column_int(stmt, 0))
+        }
+        sqlite3_finalize(stmt)
+        return stats
+    }
+
     /// Return the model_id most frequently used (by message count with token usage) since `date`.
     func fetchMostUsedModelId(since date: Date) -> String? {
         // [T-token-attribution-snapshot] Same fix as fetchUsageStats: group by
@@ -4349,7 +5253,11 @@ actor ChatStore {
     }
 
     private func touchSession(_ sessionId: String) {
-        invalidateSessionListCache()
+        // PER-SESSION: bumps updated_at only. This is the single hottest
+        // invalidation on the agent path (every message write touches its
+        // session), and the reordering it causes is precisely what the patch's
+        // re-sort handles.
+        invalidateSessionListCache(sessionId: sessionId)
         let sql = "UPDATE sessions SET updated_at = ? WHERE id = ?"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
@@ -4399,8 +5307,20 @@ actor ChatStore {
     /// scheduleSend() call is deferred until the agent loop finishes.
     private(set) var syncSendDeferred = false
 
-    func setSyncSendDeferred(_ value: Bool) {
-        syncSendDeferred = value
+    /// [T-p0-sync-defer-refcount] Owners (one per AIChatViewModel instance)
+    /// currently holding the send deferral. `syncSendDeferred` is true while
+    /// this is non-empty. A set rather than a counter so a double begin/end
+    /// from the same vm (new turn superseding a post-stop hold) is idempotent.
+    private var syncDeferralOwners = Set<String>()
+
+    func beginSyncSendDeferral(owner: String) {
+        syncDeferralOwners.insert(owner)
+        syncSendDeferred = true
+    }
+
+    func endSyncSendDeferral(owner: String) {
+        syncDeferralOwners.remove(owner)
+        syncSendDeferred = !syncDeferralOwners.isEmpty
     }
 
     /// Session IDs touched during agent processing — used to scan file directories
@@ -4412,6 +5332,12 @@ actor ChatStore {
     /// appendMessage/touchSession time), so this only handles file scanning and
     /// the final scheduleSend trigger.
     func flushPendingSyncDirty() {
+        // [T-p0-sync-defer-refcount] Another loop still holds the deferral:
+        // keep the pending session ids and let that loop's release flush them.
+        guard syncDeferralOwners.isEmpty else {
+            iCloudLogger.info("[iCloud] flushPendingSyncDirty: deferred — \(self.syncDeferralOwners.count) loop(s) still running, \(self.pendingSyncSessionIds.count) sessions pending")
+            return
+        }
         syncSendDeferred = false
         let f0 = CFAbsoluteTimeGetCurrent()
         var fileCount = 0
@@ -4515,7 +5441,16 @@ extension Array where Element == ContentPart {
                 objects.append(.text(s))
 
             case .mediaRef(let ref):
-                if let data = await store.loadMediaData(ref) {
+                // [T-paste-mediaref] Same gate as toAgentMessage: pasted text
+                // is content, not an image, and must never be base64'd as one.
+                if PastePlaceholder.isPastedTextRef(ref) {
+                    if let data = await store.loadMediaData(ref),
+                       let s = String(data: data, encoding: .utf8) {
+                        objects.append(.text(s))
+                    } else {
+                        objects.append(.text(PastePlaceholder.unavailableMarker))
+                    }
+                } else if let data = await store.loadMediaData(ref) {
                     let base64 = data.base64EncodedString()
                     let mediaType = anthropicMediaType(for: ref.mimeType)
                     objects.append(.image(.init(type: .base64, mediaType: mediaType, data: base64)))
@@ -4589,7 +5524,15 @@ extension Array where Element == ContentPart {
                 parts.append(["text": s])
 
             case .mediaRef(let ref):
-                if let data = await store.loadMediaData(ref) {
+                // [T-paste-mediaref] Pasted text inlines as a text part.
+                if PastePlaceholder.isPastedTextRef(ref) {
+                    if let data = await store.loadMediaData(ref),
+                       let s = String(data: data, encoding: .utf8) {
+                        parts.append(["text": s])
+                    } else {
+                        parts.append(["text": PastePlaceholder.unavailableMarker])
+                    }
+                } else if let data = await store.loadMediaData(ref) {
                     let base64 = data.base64EncodedString()
                     parts.append([
                         "inlineData": [
@@ -4775,6 +5718,58 @@ extension RawMessage {
             case .mediaRef(let ref):
                 let fileURL = mediaResolver(ref)
                 if role == .user {
+                    // [T-paste-mediaref] Exception to the skip below: a pasted
+                    // text ref has no <user-attached-files> XML entry (it is
+                    // conversation content, not a picked file), so nothing else
+                    // would render it. Emit an AttachmentMeta so it shows the
+                    // same file card as any document — `fileName` comes from the
+                    // path, and `Pasted#N.txt` already maps to the doc.text icon.
+                    if PastePlaceholder.isPastedTextRef(ref) {
+                        let size = ((try? FileManager.default
+                            .attributesOfItem(atPath: fileURL.path)[.size]) as? Int) ?? 0
+                        let pastedId = PastePlaceholder.idFromMediaRefFileName(ref.originalFileName)
+                        // Exact character count for the "#N · n chars" chip —
+                        // bytes ≠ characters for CJK. Pasted files are capped
+                        // at the placeholder threshold, so this is a bounded
+                        // small read, and only for pasted refs.
+                        let charCount = (try? String(contentsOf: fileURL, encoding: .utf8).count) ?? size
+                        // Re-inject the position marker the split removed from
+                        // the stored text, so the reloaded bubble shows WHERE
+                        // the paste sits — matching the live bubble, which now
+                        // keeps the literal verbatim.
+                        if let pastedId {
+                            if !textContent.isEmpty { textContent += "\n" }
+                            textContent += PastePlaceholder.literal(for: pastedId)
+                        }
+                        // Path must be under /var/minis/ for AttachmentMeta to
+                        // derive a resolvable `minis://` URL — the host path
+                        // would fall through minisURL's guard unchanged and the
+                        // card's tap would try to open a raw filesystem path.
+                        // Rebuilt from relativePath (`<sid>/attachments/<uuid>.txt`)
+                        // rather than ref.linuxPath, which is deliberately nil:
+                        // a pasted ref is program-read content, not a file the
+                        // model's shell tools should be able to discover.
+                        //
+                        // The stored file is named by UUID, so the DISPLAY name
+                        // comes from originalFileName (`Pasted#N.txt`) — without
+                        // this the card would show a bare UUID.
+                        // relativePath is `<sid>/pasted/<uuid>.txt`; the minis://
+                        // resolver looks up `<base>/<sid>/<host>/<subPath>`, so
+                        // host+subPath must be the REAL on-disk name (the uuid),
+                        // not the display name — pointing it at `Pasted#N.txt`
+                        // would 404.
+                        let rel = ref.relativePath as NSString
+                        let realName = rel.lastPathComponent
+                        let host = (rel.deletingLastPathComponent as NSString).lastPathComponent
+                        userAttachments.append(AttachmentMeta(
+                            path: "/var/minis/\(host)/\(realName)",
+                            size: size,
+                            modified: Date(),
+                            displayName: ref.originalFileName,
+                            pastedId: pastedId,
+                            pastedCharCount: charCount
+                        ))
+                    }
                     // Legacy: skip mediaRef for user messages — attachment metadata
                     // comes from <user-attached-files> XML which has the correct paths.
                     // Old sessions stored both YAML/XML + mediaRef (with different filenames), causing duplicates.
@@ -4820,6 +5815,9 @@ extension RawMessage {
                 case "memory_write", "memory_get":
                     kind = .memoryTool(action: tu.name)
                     content = tu.name == "memory_write" ? "Writing memory..." : "Reading memory..."
+                case SubAgentDefinition.toolName:
+                    kind = .delegateTool(title: tu.description ?? "")
+                    content = "Delegating..."
                 default:
                     kind = .shellTool(command: tu.name)
                     content = tu.name
@@ -4883,8 +5881,20 @@ extension RawMessage {
                 outputTokens: usage.outputTokens,
                 cacheCreationTokens: usage.cacheCreationTokens,
                 cacheReadTokens: usage.cacheReadTokens,
-                latestContextTokens: usage.latestContextTokens ?? 0
+                latestContextTokens: usage.latestContextTokens ?? 0,
+                estimatedRequestTokens: usage.estimatedRequestTokens ?? 0,
+                estimatedFixedTokens: usage.estimatedFixedTokens ?? 0,
+                calibrationModelId: usage.calibrationModelId
             )
+            // [T-usage-capsule-time] Restore the completion clock from the row
+            // rather than stamping Date() here — this runs on RELOAD, so a
+            // fresh stamp would relabel every past turn with the time the
+            // session was opened. `createdAt` is written by buildRawMessage at
+            // persist time, which for an assistant turn is after it finished,
+            // so it is the completion time this capsule wants. Set only
+            // alongside usage, matching the live path and the capsule's own
+            // render condition.
+            msg.completedAt = createdAt
         }
         msg.streamInterruptCount = streamInterruptCount
         // [T-error-persist-ios] Restore the persisted error indicator so a failed
@@ -4903,14 +5913,22 @@ extension RawMessage {
     /// send/compaction paths for the LLM; the UI surfaces real attachments
     /// via `msg.attachments` parsed from the <user-attached-files> XML, so
     /// these tokens are pure noise to the user.
+    /// [T-ios-listsessions-perf] Compiled once. These two patterns were
+    /// rebuilt on every call, and this runs for every session on every sidebar
+    /// refresh — 69 G cycles in the profiler trace, nearly all of it
+    /// `uregex_open`. NSRegularExpression is immutable and thread-safe, so a
+    /// shared instance is safe for the concurrent callers here.
+    private static let attachmentMarkerRes: [NSRegularExpression] = [
+        #"\[attached [A-Za-z]+:[^\]]*\]"#,
+        #"\[image omitted to save context[^\]]*\]"#,
+    ].map { try! NSRegularExpression(pattern: $0) }
+
     fileprivate static func stripAttachmentMarkers(_ s: String) -> String {
-        let patterns = [
-            #"\[attached [A-Za-z]+:[^\]]*\]"#,
-            #"\[image omitted to save context[^\]]*\]"#,
-        ]
         var out = s
-        for p in patterns {
-            if let re = try? NSRegularExpression(pattern: p) {
+        // Fast path: the markers are ASCII and most messages have neither. A
+        // byte scan for "[" skips both regex passes for the common case.
+        if out.utf8.contains(UInt8(ascii: "[")) {
+            for re in attachmentMarkerRes {
                 let range = NSRange(out.startIndex..., in: out)
                 out = re.stringByReplacingMatches(in: out, range: range, withTemplate: "")
             }
@@ -4972,10 +5990,19 @@ extension RawMessage {
     /// break, and never cuts inside a fenced code block.
     private static let longTextSegmentTarget = 4000
 
+    /// [T-ios-listsessions-perf] Compiled once; see `attachmentMarkerRes`.
+    private static let systemReminderRe = try! NSRegularExpression(
+        pattern: "<system-reminder>[\\s\\S]*?</system-reminder>"
+    )
+
     static func stripSystemReminders(_ text: String) -> String {
-        guard text.contains("<system-reminder>") else { return text }
-        let pattern = "<system-reminder>[\\s\\S]*?</system-reminder>"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        // Byte-level guard: the old `text.contains` bridged to NSString and
+        // built UTF-16 breadcrumbs for every message on every refresh, even
+        // though the overwhelming majority carry no reminder at all.
+        guard MarkdownStripper.utf8Contains(
+            text, "<system-reminder>", withinBytes: Int.max
+        ) else { return text }
+        let regex = systemReminderRe
         let ns = text as NSString
         let stripped = regex.stringByReplacingMatches(
             in: text, range: NSRange(location: 0, length: ns.length), withTemplate: ""
@@ -4997,7 +6024,26 @@ extension RawMessage {
             case .text(let s):
                 agentParts.append(.text(s))
             case .mediaRef(let ref):
-                if let data = try? Data(contentsOf: mediaResolver(ref)) {
+                // [T-paste-mediaref] A pasted-text ref is conversation content,
+                // not an image. Inline it as `.text` at this exact position so
+                // a reloaded session sends the model the same prompt it saw
+                // originally. Without this gate the UTF-8 bytes would be handed
+                // to the provider as `.imageData` and base64-encoded as a
+                // corrupt image — silent data loss on every app restart.
+                if PastePlaceholder.isPastedTextRef(ref) {
+                    if let data = try? Data(contentsOf: mediaResolver(ref)),
+                       let s = String(data: data, encoding: .utf8) {
+                        agentParts.append(.text(s))
+                    } else {
+                        // [T-paste-mediaref] The file is gone (cache purge,
+                        // iCloud orphan sweep, manual delete). Emit an explicit
+                        // marker rather than appending nothing: a silent drop
+                        // would make the model answer as if the user had never
+                        // pasted anything, with no signal that context is
+                        // missing.
+                        agentParts.append(.text(PastePlaceholder.unavailableMarker))
+                    }
+                } else if let data = try? Data(contentsOf: mediaResolver(ref)) {
                     agentParts.append(.imageData(data: data, mimeType: ref.mimeType, linuxPath: ref.linuxPath))
                 }
             case .toolUse(let tu):
@@ -5020,6 +6066,13 @@ extension RawMessage {
 
         var msg = AgentMessage(role: agentRole, parts: agentParts)
         msg.reasoningContent = reasoningContent
+        // [T-responses-echo-persist] Restore the native reasoning head. Before
+        // this, `reasoningEcho` was in-memory only, so every turn rehydrated
+        // from the DB reached the Responses builder with no echo and no real
+        // item id — the hole the synthetic `rs_syn_` id was invented to plug
+        // and then 404'd on. Items come back without `encrypted_content` by
+        // design (see ReasoningEcho.persistableJSON).
+        msg.reasoningEcho = ReasoningEcho(persistedJSON: reasoningEchoJSON)
         return msg
     }
 
@@ -5075,10 +6128,15 @@ extension ChatStore {
         // races ahead of the cloud delete (fetchRecentV2 re-pulling the still-
         // live record) can't resurrect it. Session/Message/SessionFile have
         // their own session-level tombstone path (recordDeletedSessionTombstone).
+        // [T-sync-message-resurrection] `Message` is on this list so that
+        // mergeRemoteMessage can refuse the echo of a just-deleted row (see
+        // that function): without a local tombstone, CloudKit handing back
+        // the record this device pushed moments before the delete re-inserts
+        // the whole turn the user had just retried away.
         if operation == "delete",
            ["Skill", "EnvVarItem", "CompactMarker", "MCPServerItem", "Folder",
             "ProviderInstanceV3", "ProviderModelEntryV3", "ProviderModelGroupV3",
-            "ProviderThinkingRuleV3"].contains(recordType) {
+            "ProviderThinkingRuleV3", "SubAgentV3", "Message"].contains(recordType) {
             recordDeletedRecordTombstone(type: recordType, id: recordId)
         }
         // Trace priority=0 (user-driven) writes so we can follow a
@@ -5207,7 +6265,6 @@ extension ChatStore {
         case "SyncDevice":      return "SyncDeviceV2"
         case "Soul":            return "SoulV2"
         case "Folder":          return "FolderV2"
-        case "MCPServers":      return "MCPServersV2"   // [T-mcp-integration-ios]
         default:                return v1Type
         }
     }
@@ -5257,8 +6314,12 @@ extension ChatStore {
         // Singleton records first so user-visible config (skills,
         // providers, env vars) syncs in the first push regardless of
         // how long the historical scan takes.
-        markDirty(recordType: "ProviderConfig", recordId: "provider-config", priority: backlogPriority)
-        markDirty(recordType: "EnvVar", recordId: "env-vars", priority: backlogPriority)
+        // [T-icloud-drop-wholefile-producers] ProviderConfig / EnvVar
+        // whole-file records are no longer queued here: providers and env
+        // vars travel as per-record v3 / EnvVarItem records, which the
+        // backlog scan below already enumerates. A v3 peer discards the
+        // whole-file forms on receipt, so queuing them only inflated the
+        // first push by ~900 KB.
         // Skills are stored in SkillStore's own DB; CloudSyncEngine /
         // its v2 caller enumerates SkillStore separately. ChatStore
         // doesn't see them.
@@ -5622,13 +6683,14 @@ extension ChatStore {
         // written but loadDirtyRecords filters them out, so nothing ever uploads
         // and the type fails SILENTLY.
         "ProviderThinkingRuleV3",
-        // [T-mcp-per-server-sync] Per-server MCP records, plus the legacy
-        // whole-file type. MCPServersV2 was NEVER in this whitelist — its
-        // dirty rows were written but filtered out by loadDirtyRecords
-        // (v2Only:true), so MCP config never uploaded at all. It's listed
-        // now so (a) the one-time legacy-record op=delete can drain and
-        // (b) any leftover upsert rows drain as no-ops (builder returns nil).
-        "MCPServersV2", "MCPServerItem",
+        // [T-subagent-own-store] Same rule: omit the type here and its dirty
+        // rows are written but filtered out by loadDirtyRecords, so the roster
+        // would never upload and the failure would be SILENT.
+        "SubAgentV3",
+        // [T-mcp-per-server-sync] Per-server MCP records. The legacy
+        // whole-file MCPServersV2 type is gone: it never uploaded once (it was
+        // never in this whitelist), so no cloud record of it exists to drain.
+        "MCPServerItem",
     ]
 
     /// Pre-built SQL IN-list fragment for `v2SyncRecordTypes`. Values
@@ -5673,11 +6735,14 @@ extension ChatStore {
         //   3. created_at ASC within the same priority/type — push the
         //      oldest dirty first so the queue drains FIFO.
         let whereClause = v2Only ? "WHERE record_type IN (\(Self.v2SyncRecordTypesSQL))" : ""
-        // Newest first within each priority+type group: gives perceived
-        // sync responsiveness for what the user just touched while the
-        // backlog drains in the background. Parent types (Session*) still
-        // ship before children (Message*) so peers never receive an
-        // orphan Message before its Session.
+        // [T-icloud-sync-tier2-fifo] Oldest first within each priority+type
+        // group, as the numbered comment above always said. The code had
+        // `created_at DESC`, which meant a backlog of N > 100 rows never
+        // drained its oldest entries: every send took the 100 newest, new
+        // writes kept arriving, and the tail aged forever. "What the user
+        // just touched" is already prioritised by priority=0 vs the
+        // migration backlog at priority=1; within one priority, FIFO is the
+        // only order that guarantees every row eventually ships.
         let sql = """
             SELECT record_type, record_id, zone_name, operation FROM sync_dirty_records
             \(whereClause)
@@ -5689,7 +6754,7 @@ extension ChatStore {
                     WHEN 'MessageV2' THEN 1
                     ELSE 2
                 END,
-                created_at DESC
+                created_at ASC
             LIMIT 100
         """
         var stmt: OpaquePointer?
@@ -5809,7 +6874,10 @@ extension ChatStore {
     /// untouched, and the swap is committed atomically only after we
     /// know cloud has something to give us.
     func forcePullSession(sessionId: String) async -> ForcePullOutcome {
-        invalidateSessionListCache()
+        // PER-SESSION: re-pulls one known session's messages. It cannot add or
+        // remove a sidebar row — the session already exists locally, which is
+        // what makes a force-pull meaningful.
+        invalidateSessionListCache(sessionId: sessionId)
         iCloudLogger.warning("[ForcePull] sid=\(sessionId.prefix(8)) START — pulling cloud first, local untouched")
 
         // 1. Cloud first (no local mutation yet). Returns the portables
@@ -5940,18 +7008,36 @@ extension ChatStore {
         return Int(sessions + messages + markers)
     }
 
-    func clearDirtyRecord(recordName: String) {
+    /// Clear a dirty row after the transport acknowledged it.
+    ///
+    /// [T-sync-message-resurrection] `ifOperation` is the operation that was
+    /// actually sent. `sync_dirty_records` is keyed by (type, id) and
+    /// `markDirty` is INSERT OR REPLACE, so a delete marked while an upsert
+    /// of the same record was in flight *replaces* that row; clearing
+    /// unconditionally on the upsert's success then destroyed the delete —
+    /// the tombstone was never pushed and the remote copy lived on. With
+    /// the guard, a row whose operation no longer matches what was sent is
+    /// left for the next batch.
+    func clearDirtyRecord(recordName: String, ifOperation: String? = nil) {
         // recordName format is "Type:id"
         let parts = recordName.split(separator: ":", maxSplits: 1)
         guard parts.count == 2 else { return }
         let recordType = String(parts[0])
         let recordId = String(parts[1])
-        let sql = "DELETE FROM sync_dirty_records WHERE record_type = ? AND record_id = ?"
+        let sql = ifOperation == nil
+            ? "DELETE FROM sync_dirty_records WHERE record_type = ? AND record_id = ?"
+            : "DELETE FROM sync_dirty_records WHERE record_type = ? AND record_id = ? AND operation = ?"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
             sqlite3_bind_text(stmt, 1, (recordType as NSString).utf8String, -1, nil)
             sqlite3_bind_text(stmt, 2, (recordId as NSString).utf8String, -1, nil)
+            if let op = ifOperation {
+                sqlite3_bind_text(stmt, 3, (op as NSString).utf8String, -1, nil)
+            }
             sqlite3_step(stmt)
+            if let op = ifOperation, sqlite3_changes(db) == 0 {
+                iCloudLogger.info("[iCloudTrace] clearDirty KEPT \(recordType):\(recordId.prefix(8)) — operation changed while in flight (sent=\(op))")
+            }
         }
         sqlite3_finalize(stmt)
     }
@@ -6114,8 +7200,28 @@ extension ChatStore {
     ///   local folder assignment must be preserved, whereas a new-build peer
     ///   sending an explicit nil means "ungrouped on that device" and, when
     ///   remote is newer, that wins (folder_id rides the session's LWW).
-    func mergeRemoteSession(_ session: ChatSession, fromDeviceId: String, memoryEnabled: Bool = true, modelBinding: String? = nil, remotePinnedAtRaw: Date? = nil, remoteFolderId: String? = nil, remoteHasFolderField: Bool = false) {
+    func mergeRemoteSession(_ session: ChatSession, fromDeviceId: String, memoryEnabled: Bool = true, modelBinding: String? = nil, remotePinnedAtRaw: Date? = nil, remoteFolderId: String? = nil, remoteHasFolderField: Bool = false,
+                            remoteParentSessionId: String? = nil, remoteParentToolUseId: String? = nil, remoteHasParentField: Bool = false) {
+        // FULL: a remote session may be one this device has never seen, so it
+        // can ADD a row to the set — the incremental patch cannot express that.
         invalidateSessionListCache()
+        // [T-p1-delegate-task] Parent linkage is immutable for the life of a
+        // child (only a future "promote" clears it), so the merge rule is
+        // simple: adopt the peer's value whenever the peer's record carries
+        // the field. An old-build peer omitting it must not clear ours.
+        defer {
+            if remoteHasParentField {
+                let pSql = "UPDATE sessions SET parent_session_id = ?, parent_tool_use_id = ? WHERE id = ?"
+                var pStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, pSql, -1, &pStmt, nil) == SQLITE_OK {
+                    bindOptionalText(pStmt, index: 1, value: remoteParentSessionId)
+                    bindOptionalText(pStmt, index: 2, value: remoteParentToolUseId)
+                    sqlite3_bind_text(pStmt, 3, (session.id as NSString).utf8String, -1, nil)
+                    sqlite3_step(pStmt)
+                }
+                sqlite3_finalize(pStmt)
+            }
+        }
         // Check if local session exists and its updated_at + pinned_at
         var localUpdatedAt: Double?
         var localPinnedAt: Double?
@@ -6324,6 +7430,7 @@ extension ChatStore {
 
     /// Delete a local session if it originated from the given device (remote deletion propagation).
     func deleteLocalSessionIfFromDevice(id: String, deviceId: String) {
+        // FULL: may remove a row from the set.
         invalidateSessionListCache()
         let sql = "DELETE FROM sessions WHERE id = ? AND remote_origin_device_id = ?"
         var stmt: OpaquePointer?
@@ -6361,7 +7468,10 @@ extension ChatStore {
         modelId: String? = nil, modelDisplayName: String? = nil,
         providerType: String? = nil, providerInstanceId: String? = nil
     ) {
-        invalidateSessionListCache()
+        // PER-SESSION: a remote message lands in one known session. If that
+        // session does not exist locally yet it arrives through
+        // mergeRemoteSession first, which invalidates fully.
+        invalidateSessionListCache(sessionId: sessionId)
         // Defer merging into a session that's actively running locally. While
         // an agent loop is streaming / running tools, the message list is
         // volatile and locally authoritative: appends bump sort_order and
@@ -6387,7 +7497,15 @@ extension ChatStore {
             sessionExists = sqlite3_step(checkStmt) == SQLITE_ROW
         }
         sqlite3_finalize(checkStmt)
-        guard sessionExists else { return }
+        guard sessionExists else {
+            // [T-icloud-sync-tier1-parents-first] The only early return in
+            // this function that used to say nothing. It fires when a
+            // message arrives before its session row; SyncCore now orders
+            // batches parents-first so this should be rare, and when it is
+            // not, the log is what tells us why a session looks empty.
+            iCloudLogger.info("[iCloud] mergeRemoteMessage SKIP (session row not present yet): id=\(id.prefix(8)) sid=\(sessionId.prefix(8)) — will apply on next fetch")
+            return
+        }
 
         // [T-icloud-deleted-session-resurrection] Defence in depth: even if the
         // parent session row somehow exists, refuse to re-insert a message whose
@@ -6398,6 +7516,15 @@ extension ChatStore {
         let msgUpdatedAt = updatedAt ?? createdAt
         if isResurrectionOfDeleted(sessionId, remoteUpdatedAt: msgUpdatedAt) {
             iCloudLogger.info("[iCloud] mergeRemoteMessage SKIP (parent session recently deleted — resurrection blocked): id=\(id.prefix(8)) sid=\(sessionId.prefix(8))")
+            return
+        }
+        // [T-sync-message-resurrection] Same guard at message granularity.
+        // Retry / edit / delete-from remove rows locally and queue delete
+        // tombstones; the remote copy (often this device's own push that
+        // was still in flight) must not come back as a "new" row. A genuinely
+        // newer re-create (remote updated after the local delete) still merges.
+        if isRecentlyDeletedRecord(type: "Message", id: id, remoteUpdatedAt: msgUpdatedAt) {
+            iCloudLogger.info("[iCloud] mergeRemoteMessage SKIP (message recently deleted locally — resurrection blocked): id=\(id.prefix(8)) sid=\(sessionId.prefix(8))")
             return
         }
 
@@ -6602,6 +7729,13 @@ extension ChatStore {
         // messages snapshot the next time the user opens it. The flag
         // is consumed on the next getOrCreate HIT
         // (T-inbound-message-cached-vm-stale).
+        // [T-ios-listsessions-perf] An inbound merge can land a message at any
+        // sort_order (including behind what this device already has) and can
+        // rewrite an existing row's parts, so recompute rather than fold
+        // forward. Sync batches are far rarer than agent appends, so the extra
+        // query is not on a hot path.
+        recomputeStoredPreview(sessionId: sessionId)
+
         let sid = sessionId
         Task { @MainActor in
             ViewModelCache.shared.markStale(sessionId: sid)
@@ -6708,7 +7842,22 @@ extension ChatStore {
     /// Used when a remote device signals a message-level deletion (retry / manual delete)
     /// that should propagate across devices.
     func deleteLocalMessage(messageId: String) {
-        invalidateSessionListCache()
+        // [T-ios-listsessions-perf] Resolve the session BEFORE the delete —
+        // afterwards the row is gone and the lookup would fail — then
+        // recompute, since the deleted message may have been the preview.
+        let previewSession = sessionIdForMessage(messageId)
+        // PER-SESSION: the session is in hand from that lookup, and deleting a
+        // message never changes the row set. A nil lookup means there is no
+        // local row, so the DELETE below is a no-op and nothing the sidebar
+        // shows can change — invalidate nothing. That matters: an inbound
+        // tombstone batch is mostly such no-ops (~6.4k per batch, see the log
+        // note below), and a FULL rebuild per call would be the wholesale
+        // invalidation this phase removed.
+        if let sid = previewSession {
+            // PER-SESSION: message delete on a known session.
+            invalidateSessionListCache(sessionId: sid)
+        }
+        defer { previewSession.map { recomputeStoredPreview(sessionId: $0) } }
         let sql = "DELETE FROM messages WHERE id = ?"
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
@@ -7225,6 +8374,7 @@ extension ChatStore {
     func restoreSession(_ session: ChatSession,
                         memoryEnabled: Bool,
                         modelBinding: String?) -> RestoreOutcome {
+        // FULL: backup restore rewrites rows in bulk and can add sessions.
         invalidateSessionListCache()
 
         let incoming = session.updatedAt.timeIntervalSince1970
@@ -7242,7 +8392,8 @@ extension ChatStore {
             guard incoming > local else { return .skippedLocalNewer }
             let sql = """
                 UPDATE sessions SET title = ?, category = ?, model_id = ?, updated_at = ?,
-                                    memory_enabled = ?, model_binding = ?, pinned_at = ?, folder_id = ?
+                                    memory_enabled = ?, model_binding = ?, pinned_at = ?, folder_id = ?,
+                                    parent_session_id = ?, parent_tool_use_id = ?
                 WHERE id = ?
                 """
             var up: OpaquePointer?
@@ -7256,7 +8407,9 @@ extension ChatStore {
                 if let p = session.pinnedAt { sqlite3_bind_double(up, 7, p.timeIntervalSince1970) }
                 else { sqlite3_bind_null(up, 7) }
                 bindText(up, 8, session.folderId)
-                sqlite3_bind_text(up, 9, (session.id as NSString).utf8String, -1, nil)
+                bindText(up, 9, session.parentSessionId)
+                bindText(up, 10, session.parentToolUseId)
+                sqlite3_bind_text(up, 11, (session.id as NSString).utf8String, -1, nil)
                 sqlite3_step(up)
             }
             sqlite3_finalize(up)
@@ -7267,8 +8420,9 @@ extension ChatStore {
         // list so it defaults to NULL — see the type doc above.
         let sql = """
             INSERT INTO sessions (id, title, category, model_id, created_at, updated_at,
-                                  memory_enabled, model_binding, pinned_at, folder_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  memory_enabled, model_binding, pinned_at, folder_id,
+                                  parent_session_id, parent_tool_use_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         var ins: OpaquePointer?
         if sqlite3_prepare_v2(db, sql, -1, &ins, nil) == SQLITE_OK {
@@ -7283,6 +8437,8 @@ extension ChatStore {
             if let p = session.pinnedAt { sqlite3_bind_double(ins, 9, p.timeIntervalSince1970) }
             else { sqlite3_bind_null(ins, 9) }
             bindText(ins, 10, session.folderId)
+            bindText(ins, 11, session.parentSessionId)
+            bindText(ins, 12, session.parentToolUseId)
             sqlite3_step(ins)
         }
         sqlite3_finalize(ins)

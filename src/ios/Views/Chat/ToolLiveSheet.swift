@@ -188,21 +188,101 @@ fileprivate func attributedShellLine(_ text: String) -> AttributedString {
     return AttributedString(mutable)
 }
 
-/// Wrapper that @ObservedObject's the ChatMessage so SwiftUI re-evaluates
-/// when blocks are added/changed.
-private struct FloatingToolPreviewContainer: View {
-    @ObservedObject var message: ChatMessage
-    var toolSnapshots: [ToolSnapshotItem] = []
-    var browserPool: BrowserTabPool?
+/// [T-ios-tool-sheet-watchdog] Shared tuning for lazily-revealed tool output.
+/// One source of truth for the sheet's own textContent window and the
+/// LazyRevealChunks component below — the two must agree on chunk size.
+fileprivate enum LazyRenderTuning {
+    /// Lines per chunk — must match chunkedLines' default.
+    static let chunkLines = 40
+    /// Initial reveal: ~200 lines = 5 chunks.
+    static let initialChunks = 5
+    /// Each subsequent batch: 200 more lines = 5 chunks.
+    static let batchChunks = 5
+    /// Byte cap for the initial reveal — clamps the initial chunk count so a
+    /// few very long lines (< 200 lines but > 10KB) still load incrementally.
+    static let initialByteCap = 10 * 1024
 
-    private var toolBlocks: [AssistantBlock] {
-        message.blocks.filter { $0.toolStatus != nil }
+    /// Initial number of chunks to reveal: min(initialChunks, count), further
+    /// clamped so the revealed text stays under `initialByteCap`.
+    static func initialRevealCount(_ chunks: [(id: Int, text: String)]) -> Int {
+        guard !chunks.isEmpty else { return 0 }
+        var count = 0
+        var bytes = 0
+        for chunk in chunks.prefix(initialChunks) {
+            bytes += chunk.text.utf8.count
+            count += 1
+            if bytes >= initialByteCap { break }
+        }
+        return max(1, count)
     }
+}
+
+/// [T-ios-tool-sheet-watchdog] Self-contained lazily-revealed chunk list with
+/// a "Load more / Load all" footer.
+///
+/// Several render paths in this sheet (generic text snapshot, browser result
+/// with and without screenshot, file/memory editor cards, JS script card,
+/// diff halves) used to hand the COMPLETE tool output to Text in one pass. A
+/// ~50KB mixed-script result then spends >10s inside CoreText glyph encoding
+/// and per-run font fallback on the main thread, and FrontBoard kills the app
+/// with 0x8BADF00D — five such .ips were captured on 2026-08-30 alone. The
+/// textContent path already had a reveal window (`revealedChunkCount`) but
+/// none of its siblings did. This view packages the same window so every path
+/// can share it; reveal state lives here, so several cards inside one sheet
+/// never fight over a single counter.
+///
+/// `resetKey` must change when the displayed block changes (pass `block.id`)
+/// so next/prev navigation re-collapses to the initial window.
+private struct LazyRevealChunks<ChunkView: View>: View {
+    let chunks: [(id: Int, text: String)]
+    let resetKey: UUID
+    @ViewBuilder let chunkView: (String) -> ChunkView
+
+    @State private var revealed: Int = 0
+    @State private var revealedFor: UUID?
 
     var body: some View {
-        let tools = toolBlocks
-        if !tools.isEmpty {
-            FloatingToolBar(toolBlocks: tools, toolSnapshots: toolSnapshots, browserPool: browserPool)
+        Group {
+            ForEach(Array(chunks.prefix(max(revealed, 1))), id: \.id) { chunk in
+                chunkView(chunk.text)
+            }
+            if revealed < chunks.count {
+                footer
+            }
+        }
+        .onAppear { resetIfNeeded() }
+        .onChange(of: resetKey) { _ in resetIfNeeded() }
+    }
+
+    private func resetIfNeeded() {
+        guard revealedFor != resetKey else { return }
+        revealedFor = resetKey
+        revealed = LazyRenderTuning.initialRevealCount(chunks)
+    }
+
+    private var footer: some View {
+        let remaining = chunks.count - revealed
+        let nextBatch = min(LazyRenderTuning.batchChunks, remaining)
+        return HStack(spacing: 16) {
+            Button {
+                revealed = min(revealed + LazyRenderTuning.batchChunks, chunks.count)
+            } label: {
+                Label("Load more (\(nextBatch * LazyRenderTuning.chunkLines) lines)", systemImage: "chevron.down")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            Button {
+                revealed = chunks.count
+            } label: {
+                Text("Load all")
+                    .font(.system(size: 13, weight: .medium))
+            }
+        }
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        // Auto-load when the footer scrolls into view so the user can just
+        // keep scrolling to reveal more without tapping.
+        .onAppear {
+            revealed = min(revealed + LazyRenderTuning.batchChunks, chunks.count)
         }
     }
 }
@@ -215,56 +295,400 @@ struct FloatingToolBar: View {
     var onBrowserTakeover: (() -> Void)?
     var onTakeoverDone: (() -> Void)?
     @State private var selectedIdx: Int? = nil
+    /// [T-agent-follow-change] Which sub agent the bar is following, and when
+    /// it was last allowed to change.
+    ///
+    /// Sub agents run their own tool loops in parallel, and each step of each
+    /// loop is a candidate to show. Following every one of them made the bar
+    /// flick between three agents several times a second — unreadable, and
+    /// nothing stayed up long enough to read. So a switch BETWEEN agents is
+    /// rate-limited: once the bar moves to an agent it stays for
+    /// `agentFollowWindow`, and whatever changed most recently when that
+    /// window closes is what it moves to next. Updates from the agent it is
+    /// already showing pass through immediately — that is the same agent's
+    /// preview refreshing, not a switch.
+    @State private var followedAgentId: UUID?
+    @State private var followedAt: Date = .distantPast
+    @State private var lastAgentActivity: [UUID: String] = [:]
+    /// The most recent agent the window turned away, applied once it closes.
+    @State private var pendingAgentId: UUID?
+    private static let agentFollowWindow: TimeInterval = 5
+    /// [T-agent-follow-expiry] How long the bar stays on a sub agent after its
+    /// last activity before falling back to the newest tool.
+    ///
+    /// Following an agent is meant to show what it is doing NOW. Once it stops
+    /// producing activity — because it finished, or because it is between
+    /// turns — holding the bar there strands the preview on a task that is
+    /// over while newer tools run underneath it. One minute is the cap on how
+    /// long any single sub agent may hold the bar: long enough to read what it
+    /// was doing, bounded so a quiet agent cannot own the preview.
+    /// No timer backs this. The expiry is a comparison against `now` inside
+    /// `displayedIdx`, so it cannot double-schedule, cannot leak, and has
+    /// nothing to cancel — the state it reads (`followedAt`) has exactly one
+    /// writer. The one edge it does have is the clock: `now` only advances
+    /// while some agent runs (the TimelineView in `body`), so if the LAST
+    /// agent finishes inside the window, the tick stops and the comparison
+    /// freezes. `Self.isActive` in the same condition covers that — a
+    /// finished agent fails the running check regardless of the clock, so the
+    /// bar still falls through on the next repaint.
+    private static let agentFocusExpiry: TimeInterval = 60
+
+    /// [T-agent-manual-hold] When the user last picked a tool with the arrows.
+    /// A manual choice suppresses auto-follow for `manualHoldSeconds` so the
+    /// bar stops sliding out from under someone who is reading it; after that
+    /// the automatic rule takes over again.
+    @State private var selectedAt: Date = .distantPast
+    private static let manualHoldSeconds: TimeInterval = 60
     @State private var expanded = false
+    /// [T-agent-thumbnail-accent] The sub agent's currently running tool, when
+    /// its tile was tapped. Presented as its own sheet so the child's block and
+    /// browser pool are what the sheet sees.
+    @State private var childToolTarget: ChildToolTarget?
+    /// [T-agent-inner-tool-front] Observed so the bar redraws the moment a sub
+    /// agent moves to a different tool.
+    ///
+    /// `sessionToolInfo` is @Published and updated by the child's own loop, so
+    /// the preview follows the child's work by event rather than by polling —
+    /// no timer, and no lag between the child switching tools and the tile
+    /// showing it. (The 1 Hz TimelineView below stays: the 5-second hold rule
+    /// is driven by elapsed time, which no event announces.)
+    @ObservedObject private var activity = SessionActivityTracker.shared
     @AppStorage("toolPreviewEnabled") private var toolPreviewEnabled: Bool = true
+    // [T-p2-agent-in-toolbar] A tool that just finished stays on top for a
+    // few seconds so its result is seen, then the bar falls back to the
+    // background agent block that is still running (kept `.running` by
+    // HelperRunner's mirror), showing the user that work continues.
+    //
+    // Stateless on purpose: this view does not observe every block, so an
+    // `onChange` keyed on block statuses missed the transition (device run
+    // 19:56). The hold is derived from the finished block's own start time
+    // + duration against a clock that ticks only while an agent is running.
+    /// The clock the hold rule reads. Fed by a TimelineView while an agent
+    /// runs (see `body`); a plain `Date()` otherwise. It used to be @State
+    /// driven by a Timer publisher, but that publisher is a stored property
+    /// recreated on every parent rebuild, so its ticks never reached the
+    /// on-screen instance (device run 20:02: the log said held=1, the bar
+    /// showed the agent).
+    var now = Date()
+    private static let holdSeconds: TimeInterval = 5
+
+    private static func isActive(_ b: AssistantBlock) -> Bool {
+        if case .streaming = b.toolStatus { return true }
+        if case .running = b.toolStatus { return true }
+        return false
+    }
+
+    /// [T-toolbar-published-read-uaf] Plain-value snapshot of the block fields
+    /// this bar's layout math needs.
+    ///
+    /// Reading a `@Published` property goes through `Published.access`, which
+    /// messages the ENCLOSING ObservableObject to register the dependency —
+    /// `objc_msgSend` on `objectWillChange`. `AssistantBlock` is a `final
+    /// class`, so when the agent loop drops a block (blocks are removed and
+    /// reassigned in ~100 places across AIChatViewModel, none of them actor
+    /// isolated) that publisher can be gone while this body is mid-evaluation,
+    /// and the message lands on a freed object — the crash was inside
+    /// `Published.access` → `objc_msgSend` → `objc_class::isInitialized`, with
+    /// a garbage isa, reached from `runningAgentIdx`.
+    ///
+    /// Reading each field ONCE into a struct, before any of the index math
+    /// runs, means the derivation below touches no publisher at all. It also
+    /// makes the math consistent: it previously re-read `kind`/`toolStatus`
+    /// several times per body pass and could see them change mid-computation.
+    private struct BlockFacts {
+        let id: UUID
+        let isAgent: Bool
+        let isActive: Bool
+        let toolStartTime: Date?
+        let toolDuration: TimeInterval?
+        let helperChildSessionId: String?
+    }
+
+    /// Snapshot taken once per body evaluation. Cheap — a handful of scalar
+    /// reads per block, no allocation beyond the array itself.
+    private var blockFacts: [BlockFacts] {
+        toolBlocks.map { b in
+            let kind = b.kind
+            let status = b.toolStatus
+            let isActive: Bool = {
+                if case .streaming = status { return true }
+                if case .running = status { return true }
+                return false
+            }()
+            var isAgent = false
+            if case .delegateTool = kind { isAgent = true }
+            return BlockFacts(
+                id: b.id,
+                isAgent: isAgent,
+                isActive: isActive,
+                toolStartTime: b.toolStartTime,
+                toolDuration: b.toolDuration,
+                helperChildSessionId: b.helperChildSessionId
+            )
+        }
+    }
+
+    /// Index of the last agent block that is still running, if any.
+    private var runningAgentIdx: Int? {
+        blockFacts.lastIndex { $0.isAgent && $0.isActive }
+    }
+
+    /// The most recently finished non-agent tool whose completion is less
+    /// than `holdSeconds` old — only meaningful while an agent still runs.
+    private var recentlyFinishedIdx: Int? {
+        let facts = blockFacts
+        guard facts.contains(where: { $0.isAgent && $0.isActive }) else { return nil }
+        return facts.indices.last { i in
+            let b = facts[i]
+            guard !b.isActive, let start = b.toolStartTime, let dur = b.toolDuration else { return false }
+            return now.timeIntervalSince(start.addingTimeInterval(dur)) < Self.holdSeconds
+        }
+    }
 
     private var displayedIdx: Int {
-        if let idx = selectedIdx, idx < toolBlocks.count { return idx }
-        if let activeIdx = toolBlocks.lastIndex(where: {
-            if case .streaming = $0.toolStatus { return true }
-            if case .running = $0.toolStatus { return true }
-            return false
-        }) { return activeIdx }
+        // [T-agent-manual-hold] A manual pick wins outright, but only for a
+        // minute. Previously it won forever: once the user touched an arrow
+        // the bar never auto-followed again for the life of the view, which
+        // silently disabled the whole live preview. Expiring it keeps both
+        // halves — read in peace now, live updates later.
+        if let idx = selectedIdx, idx < toolBlocks.count,
+           now.timeIntervalSince(selectedAt) < Self.manualHoldSeconds {
+            return idx
+        }
+        // [T-agent-inner-tool-front] Live work a level down outranks the
+        // 5-second hold. That hold exists so a tool THIS conversation just
+        // finished is seen before a background agent takes the bar back
+        // (8f09afa45); it was never meant to sit on top of an agent that is
+        // mid-tool right now — and because it only skips `isActive` blocks, a
+        // just-finished AGENT triggered it too and hid a sibling doing real
+        // work. Ordering it after this rule keeps both behaviours.
+        //
+        // [T-agent-follow-change] Whichever sub agent just changed activity is
+        // what the bar shows. Resolved from the block id each time rather than
+        // held as an index, so a delegation arriving mid-run cannot re-point
+        // the bar at someone else.
+        //
+        // [T-agent-follow-release] …but only while that agent is still running.
+        // `followedAgentId` was previously honoured for as long as the block
+        // existed, and nothing ever cleared it, so the FIRST agent the bar
+        // followed held the bar for the life of the view: a finished agent
+        // outranked a tool running right now, and the three fallbacks below
+        // became unreachable. Reported as a failed agent ("no deliverable")
+        // sitting on the bar for minutes while the pager counted up around it —
+        // the count grows because new tool blocks keep being appended to the
+        // session while this pointer stays frozen on the dead one.
+        //
+        // The staleness check belongs HERE rather than only in the 1 Hz tick:
+        // that tick runs only while some agent is running, so when the LAST
+        // agent finishes it stops firing — which is exactly the reported case.
+        // `tickFollow` still drops the id so the state does not linger, but
+        // this guard is what makes the bar correct the moment it repaints.
+        // [T-agent-follow-expiry] Two conditions now, not one: the followed
+        // agent must still be running AND have moved within the last 15s.
+        // "Still running" alone was not enough — an agent that is alive but
+        // idle (between turns, or waiting on a long tool) kept the bar on a
+        // preview that had stopped changing, which is the same stranding the
+        // running-check was added to fix, one state further along.
+        // [T-toolbar-published-read-uaf] Same snapshot as above — no
+        // `@Published` reads inside the index math.
+        let facts = blockFacts
+        if let followed = followedAgentId,
+           let idx = facts.firstIndex(where: { $0.id == followed }),
+           facts[idx].isActive,
+           now.timeIntervalSince(followedAt) < Self.agentFocusExpiry {
+            return idx
+        }
+        if let held = recentlyFinishedIdx { return held }
+        if let activeIdx = facts.lastIndex(where: { $0.isActive }) { return activeIdx }
+        // [T-agent-follow-expiry] Nothing running: the NEWEST block wins.
+        //
+        // This used to land on the last SUB AGENT instead, so that reopening a
+        // chat with three finished agents did not point at a plain tool nobody
+        // was looking at. But it also meant that when a fan-out ended, the bar
+        // stayed on the last agent for good — the reported "preview and index
+        // stuck on the final sub agent after the task finished". The newest
+        // block is the honest answer to "what happened last" in both cases,
+        // and after a fan-out the agents ARE the newest blocks, so the reason
+        // the old rule existed is satisfied without pinning.
         return toolBlocks.count - 1
     }
 
-    private var displayedBlock: AssistantBlock {
-        toolBlocks[displayedIdx]
+    private var displayedIsAgent: Bool {
+        guard let block = displayedBlock else { return false }
+        if case .delegateTool = block.kind { return true }
+        return false
+    }
+
+    /// [T-toolbar-published-read-uaf] Optional, and bounds-checked.
+    ///
+    /// `displayedIdx` ends with `toolBlocks.count - 1`, which is **-1** for an
+    /// empty array — an out-of-bounds trap. The bar is only built when
+    /// `allToolBlocks` is non-empty, but that check happens in the parent's
+    /// body, one SwiftUI evaluation earlier: the agent loop can clear the
+    /// blocks in between (`messages[i].blocks = …` / `removeAll` run from many
+    /// non-isolated sites), and a `selectedIdx` captured before a truncation is
+    /// stale in the same way.
+    private var displayedBlock: AssistantBlock? {
+        let idx = displayedIdx
+        guard toolBlocks.indices.contains(idx) else { return nil }
+        return toolBlocks[idx]
     }
 
     private static let thumbnailWidth: CGFloat = 100
 
     /// The snapshot corresponding to the currently displayed tool block, matched by ID.
     private var displayedSnapshot: ToolSnapshotItem? {
-        guard let blockId = displayedBlock.toolUseId else { return nil }
+        guard let blockId = displayedBlock?.toolUseId else { return nil }
         return toolSnapshots.first(where: { $0.id == blockId })
     }
 
-    var body: some View {
-        // Collapsed: thumbnail (optional) + status bar
-        ZStack(alignment: .bottomLeading) {
-            ToolStatusBar(
-                block: displayedBlock,
-                toolBlocks: toolBlocks,
-                displayedIdx: displayedIdx,
-                expanded: $expanded,
-                selectedIdx: $selectedIdx,
-                leadingInset: toolPreviewEnabled ? Self.thumbnailWidth + 18 : 0
-            )
+    /// [T-agent-follow-change] Each sub agent's current activity, keyed by its
+    /// block id. Per-agent rather than one combined string, so the handler can
+    /// tell WHICH agent moved — a combined one only says that something did.
+    private var agentActivity: [UUID: String] {
+        var out: [UUID: String] = [:]
+        // [T-toolbar-published-read-uaf] Snapshot, not live `@Published` reads.
+        for b in blockFacts {
+            guard b.isAgent, let child = b.helperChildSessionId,
+                  let info = activity.sessionToolInfo[child] else { continue }
+            out[b.id] = "\(info.toolName):\(info.toolStatus)"
+        }
+        return out
+    }
 
-            if toolPreviewEnabled {
-                ToolPreviewThumbnail(
-                    block: displayedBlock,
-                    snapshot: displayedSnapshot,
-                    browserPool: browserPool,
-                    onTap: { withAnimation { expanded = true } }
-                )
-                .offset(x: 10)
+    /// Flattened for `onChange`, which needs an Equatable value.
+    private var agentActivityStamp: String {
+        agentActivity.map { "\($0.key):\($0.value)" }.sorted().joined(separator: "|")
+    }
+
+    /// [T-agent-follow-change] Point the bar at whichever sub agent just moved,
+    /// subject to the 5-second window. Called on every activity change.
+    private func followLatestAgent() {
+        let current = agentActivity
+        var moved: [UUID] = []
+        for (id, act) in current where lastAgentActivity[id] != act {
+            moved.append(id)
+            lastAgentActivity[id] = act
+        }
+        guard let latest = moved.last else { return }
+        // The agent already on the bar refreshing itself is not a switch — it
+        // is that agent's own preview updating, which the tile does anyway.
+        if latest == followedAgentId { return }
+        let waited = Date().timeIntervalSince(followedAt)
+        guard followedAgentId == nil || waited >= Self.agentFollowWindow else {
+            // Held back. Remember it and re-check when the window closes: a
+            // busy agent may not produce another event for a while, and
+            // without this the bar could sit on a stale agent long after the
+            // window expired.
+            pendingAgentId = latest
+            return
+        }
+        // [T-agent-follow-flash] A switch has to be worth a second of the
+        // user's attention. Two sub agents of the same fan-out routinely carry
+        // the SAME title — the model names them after the shared job, and the
+        // bar shows that title — so moving between them repainted an
+        // identical-looking bar every few seconds: on screen a one-second
+        // flash with nothing to read, and no way to tell it apart from a
+        // rendering glitch. Measured: two children alternating produced three
+        // "switches" in six seconds, all rendering the same string.
+        //
+        // Compare what the user will actually SEE, not the identity behind it.
+        // Same title means stay put; the tile keeps live-updating either way,
+        // so nothing is lost by not moving the pointer.
+        let currentTitle = followedAgentId.flatMap { id in
+            toolBlocks.first { $0.id == id }?.toolSummary
+        }
+        let nextTitle = toolBlocks.first { $0.id == latest }?.toolSummary
+        if let currentTitle, let nextTitle, currentTitle == nextTitle { return }
+        followedAgentId = latest
+        followedAt = Date()
+        pendingAgentId = nil
+    }
+
+    /// [T-agent-follow-change] One second of follow bookkeeping: pick up any
+    /// activity change since the last tick, then release a deferred switch
+    /// whose window has closed. Ordered this way so a change arriving during
+    /// the window is recorded before the release reads `pendingAgentId`.
+    private func tickFollow() {
+        dropStaleFollow()
+        followLatestAgent()
+        releaseDeferredFollow()
+    }
+
+    /// [T-agent-follow-release] Forget an agent that has stopped running (or
+    /// whose block is gone), so the bar is free to follow someone else.
+    ///
+    /// Without this the id survives as `@State` for the life of the view and
+    /// keeps winning in `displayedIdx`. Also clears a deferred switch that has
+    /// gone stale while it waited out the window — releasing it later would
+    /// point the bar at an agent that finished in the meantime.
+    private func dropStaleFollow() {
+        let stillRunning: (UUID) -> Bool = { id in
+            guard let idx = toolBlocks.firstIndex(where: { $0.id == id }) else { return false }
+            return Self.isActive(toolBlocks[idx])
+        }
+        if let followed = followedAgentId, !stillRunning(followed) {
+            followedAgentId = nil
+        }
+        if let pending = pendingAgentId, !stillRunning(pending) {
+            pendingAgentId = nil
+        }
+    }
+
+    /// Release a switch the window deferred.
+    private func releaseDeferredFollow() {
+        guard let pending = pendingAgentId,
+              Date().timeIntervalSince(followedAt) >= Self.agentFollowWindow else { return }
+        let currentTitle = followedAgentId.flatMap { id in
+            toolBlocks.first { $0.id == id }?.toolSummary
+        }
+        let nextTitle = toolBlocks.first { $0.id == pending }?.toolSummary
+        // Same rule as the immediate path: a deferred switch that would look
+        // identical is not worth taking when the window finally opens.
+        if let currentTitle, let nextTitle, currentTitle == nextTitle {
+            pendingAgentId = nil
+            return
+        }
+        followedAgentId = pending
+        followedAt = Date()
+        pendingAgentId = nil
+    }
+
+    var body: some View {
+        Group {
+            if runningAgentIdx != nil {
+                // 1 Hz re-evaluation while any agent runs. This tick is also
+                // what drives the follow decision — see below.
+                TimelineView(.periodic(from: Date(), by: 1)) { ctx in
+                    collapsedBar(now: ctx.date)
+                        .onChange(of: ctx.date) { _ in tickFollow() }
+                }
+            } else {
+                collapsedBar(now: Date())
             }
         }
-        // .shadow(color: .black.opacity(0.2), radius: 12, x: 0, y: -4)
-        .animation(.easeInOut(duration: 0.15), value: displayedIdx)
+        // [T-agent-follow-change] The follow decision is driven by the 1 Hz
+        // tick above, NOT by `onChange(of: agentActivityStamp)`.
+        //
+        // `onChange` compares its value only when the body it is attached to
+        // is re-evaluated. This view observes the tracker, but the part of the
+        // body that reads `sessionToolInfo` sits inside the TimelineView
+        // closure, so SwiftUI had no reason to re-evaluate the OUTER body when
+        // a child changed tools — and the comparison never happened. On device
+        // that showed up starkly: two agents produced ~20 activity changes over
+        // 92 seconds and `[follow]` fired exactly once. Meanwhile the tile kept
+        // redrawing (it reads the tracker directly), so the preview text moved
+        // while the choice of agent stood still — "the preview I just switched
+        // to gets overwritten by another agent's summary".
+        //
+        // The tick already runs exactly when it matters (only while an agent is
+        // running) and is immune to how SwiftUI schedules re-evaluation, so a
+        // change can be missed for at most one second.
+        .onAppear { lastAgentActivity = agentActivity }
         .sheet(isPresented: $expanded) {
+            // [T-agent-tool-sheet-unified] An agent block is a tool like any
+            // other: the same ToolLiveSheet (HelperDetailCard inside), which
+            // links on to the full-screen transcript page.
             ToolLiveSheet(
                 toolBlocks: toolBlocks,
                 initialIdx: displayedIdx,
@@ -274,6 +698,122 @@ struct FloatingToolBar: View {
                 onTakeoverDone: onTakeoverDone
             )
         }
+        .sheet(item: $childToolTarget) { target in
+            // The sub agent shares the parent's browser pool by design, so the
+            // live page and its takeover control work unchanged here.
+            ToolLiveSheet(
+                toolBlocks: [target.block],
+                initialIdx: 0,
+                toolSnapshots: toolSnapshots,
+                browserPool: browserPool,
+                onBrowserTakeover: onBrowserTakeover,
+                onTakeoverDone: onTakeoverDone
+            )
+            .environment(\.chatSessionId, target.sessionId)
+        }
+    }
+
+    /// [T-agent-thumbnail-accent] A tile showing a tool the SUB AGENT is
+    /// running opens that tool's live sheet — the child's browser page with its
+    /// takeover control — instead of the parent's tool sheet.
+    ///
+    /// The tile is already displaying the child's work, so opening the parent's
+    /// sheet showed a different tool than the one just tapped. The child's
+    /// blocks live in its own view model, which is why this reaches through
+    /// ViewModelCache rather than using `toolBlocks`.
+    private func openTool(_ block: AssistantBlock) {
+        guard case .delegateTool = block.kind else {
+            withAnimation { expanded = true }
+            return
+        }
+        let log = AppLogger(category: "ToolLiveSheet")
+        guard let childId = block.helperChildSessionId else {
+            log.info("[agent-tap] no childId — opening the agent sheet")
+            withAnimation { expanded = true }
+            return
+        }
+        guard let childVM = ViewModelCache.shared.get(for: childId) else {
+            log.info("[agent-tap] child \(childId.prefix(8)) has no live VM — opening the agent sheet")
+            withAnimation { expanded = true }
+            return
+        }
+        guard let live = liveChildToolBlock(childSessionId: childId) else {
+            // Between tools, starting up, or finished: the agent's own sheet is
+            // the right destination then — there is no tool to show.
+            log.info("[agent-tap] child \(childId.prefix(8)) has no running tool — opening the agent sheet")
+            withAnimation { expanded = true }
+            return
+        }
+        log.info("[agent-tap] child \(childId.prefix(8)) running a tool — opening its live view")
+        childToolTarget = ChildToolTarget(sessionId: childId, block: live.block)
+    }
+
+}
+
+/// [T-agent-inner-tool-front] The tool block a sub agent is executing right
+/// now, or nil when it is between tools / starting / finished.
+///
+/// Scans newest-first: `.reversed()` on `messages` alone still walks each
+/// message's blocks forward, which would return the FIRST active block of the
+/// newest message rather than the one the agent is on now.
+@MainActor
+func liveChildToolBlock(childSessionId: String?) -> (block: AssistantBlock, snapshot: ToolSnapshotItem?)? {
+    guard let childSessionId, let vm = ViewModelCache.shared.get(for: childSessionId) else { return nil }
+    for msg in vm.messages.reversed() {
+        for b in msg.blocks.reversed() where b.toolStatus != nil {
+            switch b.toolStatus {
+            case .streaming, .running:
+                // The child's own snapshots — the parent's array is keyed by
+                // the parent's tool ids and would never match.
+                return (b, vm.toolSnapshots.first { $0.id == b.toolUseId })
+            default: continue
+            }
+        }
+    }
+    return nil
+}
+
+extension FloatingToolBar {
+    /// The collapsed bar, evaluated against an explicit clock.
+    ///
+    /// [T-toolbar-collapsed-bounds] Bounds-checked like `displayedBlock`: the
+    /// parent only builds the bar for a non-empty list, but that check is one
+    /// SwiftUI evaluation earlier, and the agent loop can clear the blocks in
+    /// between. An out-of-range index renders nothing instead of trapping.
+    fileprivate func collapsedBar(now: Date) -> some View {
+        var copy = self
+        copy.now = now
+        let idx = copy.displayedIdx
+        return Group {
+            if copy.toolBlocks.indices.contains(idx) {
+                collapsedBarContent(block: copy.toolBlocks[idx], idx: idx)
+            }
+        }
+    }
+
+    private func collapsedBarContent(block: AssistantBlock, idx: Int) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            ToolStatusBar(
+                block: block,
+                toolBlocks: toolBlocks,
+                displayedIdx: idx,
+                expanded: $expanded,
+                selectedIdx: $selectedIdx,
+                selectedAt: $selectedAt,
+                leadingInset: toolPreviewEnabled ? Self.thumbnailWidth + 18 : 0
+            )
+
+            if toolPreviewEnabled {
+                ToolPreviewThumbnail(
+                    block: block,
+                    snapshot: toolSnapshots.first(where: { $0.id == block.toolUseId }),
+                    browserPool: browserPool,
+                    onTap: { openTool(block) }
+                )
+                .offset(x: 10)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: idx)
     }
 }
 
@@ -303,7 +843,7 @@ private struct CopyableURLCapsule: View {
     }
 }
 
-/// Full-screen live sheet — Manus-style layout with nav bar, live content, and bottom status/navigation.
+/// Full-screen live sheet — layout with a nav bar, live content, and bottom status/navigation.
 struct ToolLiveSheet: View {
     let toolBlocks: [AssistantBlock]
     @State var currentIdx: Int
@@ -314,9 +854,20 @@ struct ToolLiveSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.chatSessionId) private var sessionId
 
+    /// [T-sub-agents-resume] True for an agent block whose run the app lost —
+    /// the payload still says "running" but no job is alive to back it.
+    private func isInterruptedAgent(_ b: AssistantBlock) -> Bool {
+        guard case .delegateTool = b.kind else { return false }
+        if case .finished(let status, _, _, _, _, _, _, _) = HelperBlockInfo.parse(b).phase {
+            return status == "interrupted"
+        }
+        return false
+    }
+
     @State private var browserSnapshot: UIImage?
     @State private var snapshotTimer: Timer?
     @State private var showTerminal = false
+
     @State private var navCopyDone = false
     /// Incremented when the current block publishes changes, forcing SwiftUI to re-render.
     @State private var blockUpdateTick = 0
@@ -325,18 +876,26 @@ struct ToolLiveSheet: View {
     /// sidestepping SwiftUI's "only one .sheet per view" limitation when
     /// ToolLiveSheet is itself hosted inside a sheet.
     @State private var activeSheet: ActiveSecondarySheet?
+    /// The sheet that was last presented through `activeSheet`, remembered so
+    /// `onDismiss` (which runs after `activeSheet` is already nil) can tell
+    /// which one closed. [T-agent-transcript-halfsheet]
+    @State private var lastPresentedSheet: ActiveSecondarySheet?
 
     /// Describes which secondary sheet is currently presented on top of
-    /// ToolLiveSheet. Cases are mutually exclusive by construction — the user
-    /// either taps the browser-takeover button or taps a URL in shell output.
+    /// ToolLiveSheet. Cases are mutually exclusive by construction — each is
+    /// opened by a different, single tap.
     enum ActiveSecondarySheet: Identifiable {
         case takeoverBrowser
         case linkPreview(URL)
+        /// [T-agent-transcript-halfsheet] The agent's live conversation,
+        /// stacked on top of this tool sheet so closing it comes back here.
+        case agentTranscript(HelperSheetTarget)
 
         var id: String {
             switch self {
             case .takeoverBrowser: return "takeoverBrowser"
             case .linkPreview(let url): return "linkPreview:\(url.absoluteString)"
+            case .agentTranscript(let t): return "agentTranscript:\(t.id)"
             }
         }
     }
@@ -357,15 +916,12 @@ struct ToolLiveSheet: View {
     /// blocks (next/prev tool) re-collapses to the initial batch.
     @State private var revealedForBlockId: UUID?
 
-    /// Lines per chunk — must match chunkedLines' default.
-    private static let lazyRenderChunkLines = 40
-    /// Initial reveal: ~200 lines = 5 chunks.
-    private static let lazyRenderInitialChunks = 5
-    /// Each subsequent batch: 200 more lines = 5 chunks.
-    private static let lazyRenderBatchChunks = 5
-    /// Byte cap for the initial reveal — clamp the initial chunk count so a
-    /// few very long lines (< 200 lines but > 10KB) still load incrementally.
-    private static let lazyRenderInitialByteCap = 10 * 1024
+    /// Aliases into the shared tuning (see LazyRenderTuning) so the sheet's
+    /// own textContent window and LazyRevealChunks can never drift apart.
+    private static let lazyRenderChunkLines = LazyRenderTuning.chunkLines
+    private static let lazyRenderInitialChunks = LazyRenderTuning.initialChunks
+    private static let lazyRenderBatchChunks = LazyRenderTuning.batchChunks
+    private static let lazyRenderInitialByteCap = LazyRenderTuning.initialByteCap
 
     init(toolBlocks: [AssistantBlock], initialIdx: Int, toolSnapshots: [ToolSnapshotItem] = [], browserPool: BrowserTabPool?,
          onBrowserTakeover: (() -> Void)? = nil, onTakeoverDone: (() -> Void)? = nil) {
@@ -378,9 +934,16 @@ struct ToolLiveSheet: View {
     }
 
     /// Get snapshot for the current block (matched by toolUseId).
+    ///
+    /// [T-ios-toollivesheet-newest-snapshot] `last`, not `first`: the array can
+    /// hold several snapshots for one tool_use id (a re-run, or a tool that
+    /// snapshots more than once), and they are appended in order. Taking the
+    /// first handed back the OLDEST — so when a tool finished and the view
+    /// switched from live output to the snapshot, the content could visibly
+    /// revert to an earlier run.
     private var currentSnapshot: ToolSnapshotItem? {
         guard let blockId = block.toolUseId else { return nil }
-        return toolSnapshots.first(where: { $0.id == blockId })
+        return toolSnapshots.last(where: { $0.id == blockId })
     }
 
     private var block: AssistantBlock {
@@ -492,7 +1055,14 @@ struct ToolLiveSheet: View {
         // cases are mutually exclusive by construction (takeover = button tap,
         // link preview = URL tap).
         .sheet(item: $activeSheet, onDismiss: {
-            // Only the takeover path needs to notify upstream when dismissed.
+            // [T-agent-transcript-halfsheet] `onTakeoverDone` resumes a paused
+            // browser-takeover continuation in the agent loop. It must not fire
+            // when the agent transcript closes — nothing was taken over, and
+            // resuming would release a continuation that belongs to a real
+            // takeover. The link preview keeps its existing behaviour.
+            let closed = lastPresentedSheet
+            lastPresentedSheet = nil
+            if case .agentTranscript = closed { return }
             onTakeoverDone?()
         }) { sheet in
             switch sheet {
@@ -502,7 +1072,13 @@ struct ToolLiveSheet: View {
                 }
             case .linkPreview(let url):
                 MinisLinkPreviewView(url: url, browserPool: browserPool)
+            case .agentTranscript(let target):
+                HelperTranscriptPage(target: target)
+                    .helperTranscriptSheetStyle()
             }
+        }
+        .onChange(of: activeSheet?.id) { _ in
+            if let s = activeSheet { lastPresentedSheet = s }
         }
     }
 
@@ -637,6 +1213,68 @@ struct ToolLiveSheet: View {
                             .background(ChatColors.secondaryBg)
                             .clipShape(Circle())
                     }
+                } else if case .delegateTool = block.kind {
+                    // [T-sub-agents-resume] Only for a run the app lost when it
+                    // was killed. A finished / cancelled / timed-out agent is
+                    // not offered this: those ended by decision, and a button
+                    // inviting the user around that decision would be wrong.
+                    if isInterruptedAgent(block) {
+                        Button {
+                            let childId = block.helperChildSessionId
+                                ?? (AIChatViewModel.parseDelegateResult(block.content)?["child_session_id"] as? String)
+                            guard let childId, let sid = sessionId,
+                                  let parent = ViewModelCache.shared.get(for: sid) else { return }
+                            AppLogger(category: "ToolLiveSheet").info("[agent] resume tapped child=\(childId.prefix(8))")
+                            dismiss()
+                            Task { @MainActor in
+                                if let why = await parent.resumeInterruptedHelper(childSessionId: childId) {
+                                    AppLogger(category: "ToolLiveSheet").warning("[agent] resume refused — \(why)")
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(HelperAccent.color)
+                                .frame(width: 32, height: 32)
+                                .background(ChatColors.secondaryBg)
+                                .clipShape(Circle())
+                        }
+                        .accessibilityLabel(Text("Resume sub agent", comment: "VoiceOver label for the button that restarts an interrupted sub agent"))
+                    }
+                    // [T-agent-detail-buttons] An agent block has no shell
+                    // command to prefill; its top-right action is the child's
+                    // live conversation, behind a chat-bubble glyph.
+                    Button {
+                        let childId = block.helperChildSessionId
+                            ?? (AIChatViewModel.parseDelegateResult(block.content)?["child_session_id"] as? String)
+                        AppLogger(category: "ToolLiveSheet").info("[agent] transcript button tapped child=\(childId?.prefix(8) ?? "nil")")
+                        guard let childId else { return }
+                        // [T-agent-transcript-halfsheet] Stack the transcript ON
+                        // TOP of this tool sheet, so closing it returns here.
+                        //
+                        // This used to dismiss this sheet and have the chat page
+                        // present a full-screen cover, which is exactly what
+                        // users hit: going "back" landed on the chat, not on the
+                        // tool sheet they had opened it from.
+                        //
+                        // The earlier nested attempt failed because the cover was
+                        // attached to a view inside the per-block content, which
+                        // is torn down whenever a running agent's block
+                        // re-renders. `activeSheet` is ToolLiveSheet's own
+                        // root-level @State and its `.sheet(item:)` sits on the
+                        // root of the body, so a block re-render cannot reach it.
+                        let title = block.toolSummary ?? block.toolDescription
+                        activeSheet = .agentTranscript(HelperSheetTarget(id: childId, title: title))
+                    } label: {
+                        Image(systemName: "text.bubble")
+                            .font(.system(size: 14))
+                            .foregroundStyle(ChatColors.primaryText)
+                            .frame(width: 32, height: 32)
+                            .background(ChatColors.secondaryBg)
+                            .clipShape(Circle())
+                    }
+                    .accessibilityLabel(AppLocalized("Open live agent conversation"))
+                    .accessibilityIdentifier("agentTranscriptButton")
                 } else {
                     Button { showTerminal = true } label: {
                         toolIcon
@@ -697,6 +1335,8 @@ struct ToolLiveSheet: View {
             return "read_image(\(truncateParam(path)))"
         case .memoryTool(let action):
             return "\(truncateParam(action))"
+        case .delegateTool(let title):
+            return "delegate_task(\(truncateParam(title)))"
         case .info:
             return ""
         }
@@ -716,6 +1356,7 @@ struct ToolLiveSheet: View {
         case .browserTool: Image(systemName: "globe")
         case .readImageTool: Image(systemName: "photo")
         case .memoryTool: Image(systemName: "brain.head.profile")
+        case .delegateTool: Image(systemName: HelperAccent.icon)
         case .info: Image(systemName: "arrow.triangle.2.circlepath")
         case .text: Image(systemName: "text.alignleft")
         case .thinking: Image("ThinkingIcon")
@@ -739,8 +1380,13 @@ struct ToolLiveSheet: View {
             case .memoryTool:
                 let content = memoryWriteContentFromArgs() ?? block.content
                 memoryEditorContent(content, action: memoryActionName(), isStreaming: true)
+            case .delegateTool:
+                HelperDetailCard(block: block)
             default: textContent
             }
+        } else if case .delegateTool = block.kind {
+            // A helper's persisted snapshot is the result JSON — never show it raw.
+            HelperDetailCard(block: block)
         } else if let snap = currentSnapshot {
             // Completed with a persisted snapshot — render it
             snapshotContent(snap)
@@ -773,6 +1419,8 @@ struct ToolLiveSheet: View {
             case .memoryTool:
                 let content = memoryWriteContentFromArgs() ?? block.content
                 memoryEditorContent(content, action: memoryActionName(), resultText: block.content)
+            case .delegateTool:
+                HelperDetailCard(block: block)
             default:
                 textContent
             }
@@ -892,13 +1540,21 @@ struct ToolLiveSheet: View {
 
                             Divider()
 
-                            // Result content
-                            Text(text)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(Color(UIColor.label))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .textSelection(.enabled)
-                                .padding(14)
+                            // Result content — chunked + windowed, and now
+                            // sanitized: this path used to feed raw text
+                            // (ANSI codes, unbounded line length) straight
+                            // into CoreText.
+                            VStack(alignment: .leading, spacing: 0) {
+                                LazyRevealChunks(chunks: Self.chunkedLines(text), resetKey: block.id) { t in
+                                    Text(t)
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(Color(UIColor.label))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 14)
+                                }
+                            }
+                            .textSelection(.enabled)
+                            .padding(.vertical, 14)
                         }
                         .background(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.10, alpha: 1) : UIColor(white: 0.94, alpha: 1) }))
                         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -965,13 +1621,19 @@ struct ToolLiveSheet: View {
 
                         Divider()
 
-                        // Result content
-                        Text(sanitizeForDisplay(text))
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(Color(UIColor.label))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(14)
+                        // Result content — chunked + windowed (was one Text
+                        // holding the whole result).
+                        VStack(alignment: .leading, spacing: 0) {
+                            LazyRevealChunks(chunks: Self.chunkedLines(text), resetKey: block.id) { t in
+                                Text(t)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Color(UIColor.label))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                            }
+                        }
+                        .textSelection(.enabled)
+                        .padding(.vertical, 14)
                     }
                     .background(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.10, alpha: 1) : UIColor(white: 0.94, alpha: 1) }))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -1009,8 +1671,8 @@ struct ToolLiveSheet: View {
                                 .padding(.horizontal, 14)
                                 .padding(.top, 14)
 
-                            ForEach(chunks, id: \.id) { chunk in
-                                Text(attributedShellLine(chunk.text))
+                            LazyRevealChunks(chunks: chunks, resetKey: block.id) { text in
+                                Text(attributedShellLine(text))
                                     .font(.system(size: 13, design: .monospaced))
                                     .foregroundColor(accentColor)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1040,15 +1702,25 @@ struct ToolLiveSheet: View {
                                     .frame(maxWidth: .infinity, alignment: .center)
                             }
 
-                            Text(sanitizeForDisplay(text))
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(accentColor)
-                                .frame(maxWidth: .infinity, minHeight: cardMinHeight, alignment: .topLeading)
-                                .textSelection(.enabled)
-                                .padding(14)
-                                .background(Color(white: 0.12))
-                                .clipShape(RoundedRectangle(cornerRadius: 10))
-                                .padding(.horizontal, 12)
+                            // [T-ios-tool-sheet-watchdog] Chunked + windowed:
+                            // this generic snapshot path is where any tool
+                            // without a dedicated renderer lands, so a 50KB
+                            // subagent result used to be one giant Text.
+                            VStack(alignment: .leading, spacing: 0) {
+                                LazyRevealChunks(chunks: Self.chunkedLines(text.isEmpty ? " " : text), resetKey: block.id) { t in
+                                    Text(t)
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(accentColor)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 14)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: cardMinHeight, alignment: .topLeading)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 14)
+                            .background(Color(white: 0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .padding(.horizontal, 12)
                         }
                         .padding(.bottom, 16)
                     }
@@ -1169,8 +1841,8 @@ struct ToolLiveSheet: View {
                                 // Removed lines (red)
                                 if !oldText.isEmpty {
                                     let oldChunks = Self.chunkedDiffLines(oldText, prefix: "- ")
-                                    ForEach(oldChunks, id: \.id) { chunk in
-                                        Text(chunk.text)
+                                    LazyRevealChunks(chunks: oldChunks, resetKey: block.id) { text in
+                                        Text(text)
                                             .font(.system(size: 13, design: .monospaced))
                                             .foregroundStyle(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 1, green: 0.4, blue: 0.4, alpha: 1) : UIColor(red: 0.8, green: 0.1, blue: 0.1, alpha: 1) }))
                                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1182,8 +1854,8 @@ struct ToolLiveSheet: View {
                                 // Added lines (green)
                                 if !newText.isEmpty {
                                     let newChunks = Self.chunkedDiffLines(newText, prefix: "+ ")
-                                    ForEach(newChunks, id: \.id) { chunk in
-                                        Text(chunk.text)
+                                    LazyRevealChunks(chunks: newChunks, resetKey: block.id) { text in
+                                        Text(text)
                                             .font(.system(size: 13, design: .monospaced))
                                             .foregroundStyle(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(red: 0.4, green: 1, blue: 0.4, alpha: 1) : UIColor(red: 0.1, green: 0.6, blue: 0.1, alpha: 1) }))
                                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1358,13 +2030,19 @@ struct ToolLiveSheet: View {
 
             Divider()
 
-            // Script content
-            Text(script)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Color(UIColor.label))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-                .padding(12)
+            // Script content — chunked + windowed; execute_js scripts are
+            // usually small but nothing bounds them.
+            VStack(alignment: .leading, spacing: 0) {
+                LazyRevealChunks(chunks: Self.chunkedLines(script), resetKey: block.id) { t in
+                    Text(t)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Color(UIColor.label))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                }
+            }
+            .textSelection(.enabled)
+            .padding(.vertical, 12)
         }
         .background(Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.10, alpha: 1) : UIColor(white: 0.94, alpha: 1) }))
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -1401,17 +2079,26 @@ struct ToolLiveSheet: View {
 
                     Divider()
 
-                    // Memory content body
+                    // Memory content body. Streaming keeps the full live tail
+                    // (liveChunkedLines already caps at 500 lines); completed
+                    // views get the reveal window.
                     VStack(alignment: .leading, spacing: 0) {
-                        let chunks = isStreaming
-                            ? Self.liveChunkedLines(memoryContent.isEmpty ? " " : memoryContent)
-                            : Self.chunkedLines(memoryContent.isEmpty ? " " : memoryContent)
-                        ForEach(chunks, id: \.id) { chunk in
-                            Text(chunk.text)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(.pink.opacity(0.85))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 14)
+                        if isStreaming {
+                            ForEach(Self.liveChunkedLines(memoryContent.isEmpty ? " " : memoryContent), id: \.id) { chunk in
+                                Text(chunk.text)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(.pink.opacity(0.85))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                            }
+                        } else {
+                            LazyRevealChunks(chunks: Self.chunkedLines(memoryContent.isEmpty ? " " : memoryContent), resetKey: block.id) { text in
+                                Text(text)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(.pink.opacity(0.85))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                            }
                         }
                     }
                     .textSelection(.enabled)
@@ -1467,14 +2154,26 @@ struct ToolLiveSheet: View {
 
                     Divider()
 
-                    // File content — chunked rendering
+                    // File content — chunked rendering. Streaming keeps the
+                    // live tail (already capped at 500 lines); completed
+                    // views get the reveal window.
                     VStack(alignment: .leading, spacing: 0) {
-                        ForEach(chunks, id: \.id) { chunk in
-                            Text(chunk.text)
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(Color(UIColor.label))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 14)
+                        if isStreaming {
+                            ForEach(chunks, id: \.id) { chunk in
+                                Text(chunk.text)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Color(UIColor.label))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                            }
+                        } else {
+                            LazyRevealChunks(chunks: chunks, resetKey: block.id) { text in
+                                Text(text)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Color(UIColor.label))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 14)
+                            }
                         }
                     }
                     .textSelection(.enabled)
@@ -1640,9 +2339,19 @@ struct ToolLiveSheet: View {
             ScrollView {
                 if case .shellTool(let cmd) = block.kind {
                     // Shell: command header + chunked output (cap at 500 lines while streaming)
+                    // [T-ios-toollivesheet-dup-command] Strip the `$ cmd\n`
+                    // prefix before chunking. `block.content` already opens with
+                    // it, and the header below renders it again — so during
+                    // streaming the command appeared twice, once as the header
+                    // and once as the first output line. `snapshotTextContent`
+                    // already stripped it; this path did not.
+                    let cmdPrefix = "$ \(cmd)\n"
+                    let displayContent = block.content.hasPrefix(cmdPrefix)
+                        ? String(block.content.dropFirst(cmdPrefix.count))
+                        : block.content
                     let allChunks = isLive
-                        ? Self.liveChunkedLines(block.content.isEmpty ? " " : block.content)
-                        : Self.chunkedLines(block.content.isEmpty ? " " : block.content)
+                        ? Self.liveChunkedLines(displayContent.isEmpty ? " " : displayContent)
+                        : Self.chunkedLines(displayContent.isEmpty ? " " : displayContent)
                     // [T-ios-tool-result-lazy-render] In the detail (non-live)
                     // view reveal only an initial window and grow on scroll.
                     let chunks = isLive ? allChunks : Array(allChunks.prefix(max(revealedChunkCount, 1)))
@@ -1984,6 +2693,7 @@ struct ToolLiveSheet: View {
         case .browserTool: return "Minis is using Browser"
         case .readImageTool: return "Minis is reading Image"
         case .memoryTool: return "Minis is using Memory"
+        case .delegateTool: return "Minis is using an Agent"
         case .info: return "Minis"
         case .text: return "Minis"
         case .thinking: return "Minis"
@@ -2017,6 +2727,7 @@ struct ToolLiveSheet: View {
         case .browserTool: return .blue
         case .readImageTool: return .purple
         case .memoryTool: return .pink
+        case .delegateTool: return HelperAccent.color
         case .info: return .secondary
         case .text: return .primary
         case .thinking: return .blue
@@ -2068,6 +2779,23 @@ private struct ToolPreviewThumbnail: View {
     @State private var snapshotTimer: Timer?
     @StateObject private var resourceMonitor = SystemResourceMonitor()
 
+    /// True while the SUB AGENT IS RUNNING A TOOL — any tool, not just the
+    /// browser.
+    ///
+    /// Deliberately not "is a delegate block": an agent that is starting up or
+    /// has finished needs no marking, and its own thumbnail is already
+    /// unmistakable. What needs marking is a tile standing for work happening
+    /// one level down — the tap goes to that child's tool, not to the parent's.
+    /// Keyed on the child having a live tool at all, because the earlier
+    /// `== "browser_use"` test left the glow off for every other tool the
+    /// child runs (shell_execute, text, file_read …), which is most of them.
+    private var isSubAgentTool: Bool {
+        // Same question the preview asks: is this agent inside a tool right
+        // now. One source of truth, so the ring and the content never disagree.
+        guard case .delegateTool = block.kind else { return false }
+        return liveChildToolBlock(childSessionId: block.helperChildSessionId) != nil
+    }
+
     private var isLive: Bool {
         if case .streaming = block.toolStatus { return true }
         if case .running = block.toolStatus { return true }
@@ -2076,8 +2804,25 @@ private struct ToolPreviewThumbnail: View {
 
     var body: some View {
         Group {
-            // If we have a persisted snapshot, prefer using it for the thumbnail
-            if let snapshot, let snapshotImage = loadSnapshotImage(snapshot) {
+            // [T-agent-thumbnail-json] An agent block always renders through
+            // its own thumbnail: its tool_result is a JSON payload (and the
+            // wait→background conversion persists one as a text snapshot),
+            // which the generic text-snapshot branch below would print raw.
+            if case .delegateTool = block.kind {
+                // [T-agent-inner-tool-front] One preview per sub agent, whose
+                // CONTENT follows its state: while it is inside a tool, show
+                // that tool exactly as the parent's own tools are shown (the
+                // live browser page for browser_use, snapshot/diff/text for the
+                // rest); otherwise — starting, between tools, finished — its
+                // own card. The agent shares the parent's browser pool, so the
+                // live page needs nothing extra here.
+                if let inner = liveChildToolBlock(childSessionId: block.helperChildSessionId) {
+                    ToolPreviewThumbnail(block: inner.block, snapshot: inner.snapshot,
+                                         browserPool: browserPool, onTap: onTap)
+                } else {
+                    HelperThumbnailView(block: block)
+                }
+            } else if let snapshot, let snapshotImage = loadSnapshotImage(snapshot) {
                 Image(uiImage: snapshotImage)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -2101,6 +2846,35 @@ private struct ToolPreviewThumbnail: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        // [T-agent-thumbnail-accent] A sub agent's tile is marked as one
+        // whatever it happens to be showing. The agent block's preview swaps to
+        // the live browser page while the child is inside browser_use, and that
+        // branch used to look exactly like the parent's own browser tool — same
+        // frame, same neutral hairline — so the one tile whose tap goes
+        // somewhere else was the one tile you could not identify.
+        //
+        // The gradient reaches in from the edges rather than tinting the whole
+        // tile: the preview underneath is the content, and a flat wash over a
+        // live page or a text snapshot would hurt legibility for no gain.
+        .overlay {
+            if isSubAgentTool {
+                // A ring hugging the edge, not a wash over the tile: an inset
+                // stroke blurred just enough to read as a glow. At ~6pt on a
+                // 100x65 tile it covers about a tenth of the area and leaves
+                // the preview underneath legible.
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(HelperAccent.color.opacity(0.55), lineWidth: 6)
+                    .blur(radius: 4)
+                    // The blur spreads past the corner radius; clip it back to
+                    // the tile so the glow stays inside and the rounded corners
+                    // are not smeared square.
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .allowsHitTesting(false)
+            }
+        }
+        // The sub agent marker is the inner glow alone — the tile keeps the
+        // same hairline every other tool has. A violet border on top of the
+        // glow read as an alert rather than an accent.
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(UIColor.separator).opacity(0.4), lineWidth: 0.5)
@@ -2357,6 +3131,7 @@ private struct ToolPreviewThumbnail: View {
         case .browserTool: return .blue
         case .readImageTool: return .purple
         case .memoryTool: return .pink
+        case .delegateTool: return HelperAccent.color
         case .info: return .secondary
         case .text: return .primary
         case .thinking: return .blue
@@ -2415,6 +3190,9 @@ private struct ToolStatusBar: View {
     let displayedIdx: Int
     @Binding var expanded: Bool
     @Binding var selectedIdx: Int?
+    /// [T-agent-manual-hold] Stamped when the user picks with the arrows, so
+    /// the owner can expire the manual choice after a minute.
+    @Binding var selectedAt: Date
     var leadingInset: CGFloat = 0
 
     var body: some View {
@@ -2438,33 +3216,34 @@ private struct ToolStatusBar: View {
 
             if toolBlocks.count > 1 {
                 HStack(spacing: 2) {
-                    Button {
-                        let prev = (selectedIdx ?? displayedIdx) - 1
-                        if prev >= 0 { withAnimation { selectedIdx = prev } }
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(displayedIdx > 0 ? ChatColors.primaryText : ChatColors.tertiaryText)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .disabled(displayedIdx <= 0)
+                    // [T-tool-pager-longpress] Tap steps one, long-press jumps
+                    // to the end. A conversation routinely runs past a hundred
+                    // tool calls (reported at 61/109), and reaching either end
+                    // by tapping meant dozens of taps.
+                    pagerButton(
+                        glyph: "chevron.left",
+                        enabled: displayedIdx > 0,
+                        step: { move(to: (selectedIdx ?? displayedIdx) - 1) },
+                        jump: { move(to: 0) })
 
+                    // [T-tool-pager-label] The pager walks every tool block in
+                    // the CONVERSATION — a browser, not a progress bar. A rule
+                    // and a wrench glyph used to sit here saying so; both were
+                    // dropped as visual noise (they cost width on a one-line
+                    // bar and the glyph named nothing a reader could act on).
+                    // The accessibility label is now the only place that
+                    // spells out what the count means, so it has to stay.
                     Text("\(displayedIdx + 1)/\(toolBlocks.count)")
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .foregroundStyle(ChatColors.secondaryText)
+                        .accessibilityLabel(
+                            AppLocalized("Tool call") + " \(displayedIdx + 1) / \(toolBlocks.count)")
 
-                    Button {
-                        let next = (selectedIdx ?? displayedIdx) + 1
-                        if next < toolBlocks.count { withAnimation { selectedIdx = next } }
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(displayedIdx < toolBlocks.count - 1 ? ChatColors.primaryText : ChatColors.tertiaryText)
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .disabled(displayedIdx >= toolBlocks.count - 1)
+                    pagerButton(
+                        glyph: "chevron.right",
+                        enabled: displayedIdx < toolBlocks.count - 1,
+                        step: { move(to: (selectedIdx ?? displayedIdx) + 1) },
+                        jump: { move(to: toolBlocks.count - 1) })
                 }
             }
         }
@@ -2474,6 +3253,66 @@ private struct ToolStatusBar: View {
         .frame(minHeight: 38)
         .frame(maxWidth: .infinity)
         .modifier(ToolStatusBarSurface())
+    }
+
+    /// [T-tool-pager-longpress] The one place the pager's manual selection is
+    /// written, so a step and a jump cannot drift apart.
+    ///
+    /// Clamped rather than guarded: every caller already computes an in-range
+    /// target and the buttons are disabled at the ends, but a clamp here means
+    /// no future caller can walk the index out of bounds.
+    private func move(to idx: Int) {
+        guard !toolBlocks.isEmpty else { return }
+        let target = min(max(idx, 0), toolBlocks.count - 1)
+        guard target != displayedIdx else { return }
+        withAnimation {
+            selectedIdx = target
+            // [T-agent-manual-hold] Stamping this is what suppresses auto-follow
+            // for the next minute — a jump is a manual pick like any other, so
+            // it must not skip the stamp or the bar would slide out from under
+            // the user immediately after they arrived.
+            selectedAt = Date()
+        }
+    }
+
+    /// [T-tool-pager-longpress] One pager arrow: tap steps, long-press jumps to
+    /// that end.
+    ///
+    /// Raw gestures on the glyph rather than a `Button` + `simultaneousGesture`.
+    /// A Button's own tap and an attached long press both fire on a long hold,
+    /// so the jump would land with a stray one-step move on top of it;
+    /// `onTapGesture` and `onLongPressGesture` on the same view are mutually
+    /// exclusive — the tap only completes if the press ends before the
+    /// long-press threshold.
+    ///
+    /// The trade of losing `Button` is that `.disabled` no longer suppresses
+    /// input for us (it gates Buttons and controls, not bare gesture
+    /// modifiers), so `enabled` is checked INSIDE both handlers. That is the
+    /// out-of-range guard: at either end the arrow is inert, not clamping to
+    /// where it already sits. `move(to:)` clamps as well, so the index cannot
+    /// go out of bounds even if this check were ever dropped.
+    @ViewBuilder
+    private func pagerButton(glyph: String,
+                             enabled: Bool,
+                             step: @escaping () -> Void,
+                             jump: @escaping () -> Void) -> some View {
+        Image(systemName: glyph)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(enabled ? ChatColors.primaryText : ChatColors.tertiaryText)
+            .frame(width: 20, height: 20)
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { step() } }
+            .onLongPressGesture(minimumDuration: 0.4) {
+                guard enabled else { return }
+                // Light, matching the codebase's other confirmatory long-press
+                // (FileBrowserView's copy-path). The jump moves the bar a long
+                // way with no travel to watch, so the tick is what tells the
+                // user it took.
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                jump()
+            }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityRespondsToUserInteraction(enabled)
     }
 
     @ViewBuilder
@@ -2551,4 +3390,13 @@ enum MinisStepTimestampFormatter {
         }
         return stillRunning ? "\(base)…" : base
     }
+}
+
+/// [T-agent-thumbnail-accent] A sub agent's live tool, addressed by the child
+/// session it belongs to. `Identifiable` on the block's id so `.sheet(item:)`
+/// re-presents when the child moves on to a different tool.
+struct ChildToolTarget: Identifiable {
+    let sessionId: String
+    let block: AssistantBlock
+    var id: String { block.toolUseId ?? block.id.uuidString }
 }

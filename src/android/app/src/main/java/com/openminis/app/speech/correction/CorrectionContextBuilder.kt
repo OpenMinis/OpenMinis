@@ -21,6 +21,23 @@ object RareContentScorer {
     /** A sentence containing a term at or above this "carries rare content". */
     const val STRONG_THRESHOLD = 60
 
+    /** A plain Latin word (`Issue`, `commit`) on its own: the zh word list cannot judge it. */
+    const val PLAIN_LATIN_SCORE = 20
+
+    /**
+     * [T-android-voice-mixed-term-restore] A plain Latin word that RECURS in a
+     * Chinese conversation is a term the user is talking about, and exactly what
+     * a Chinese recognizer transliterates into look-alike hanzi ("Issue" ->
+     * "遗穴"). On iOS, "Issue" appeared 10+ times in the scanned turns and never
+     * reached the digest, while ordinary words built from common hanzi (状态,
+     * 彻底) did at 40. Promoted to this score: above those, below the 90 of
+     * identifier-shaped tokens. Port of iOS 8622ea275.
+     */
+    const val RECURRING_LATIN_SCORE = 50
+
+    /** Occurrences across the scanned messages before a plain Latin word is promoted. */
+    const val RECURRING_LATIN_MIN_COUNT = 3
+
     private val COMMON_HANZI: Set<Char> = buildSet {
         val chunks = listOf(
             "的一是了我不人在他有这个上们来到时大地为子中你说生国年着就那和要她出也得里后自以会家可下而过天去能对小多然于心学么之都好看起发当没成只如事把还用第样道想作种开美总从无情己面最女但现前些所同日手又行意动方期它头经长儿回位分爱老因很给名法间知世什两次使身者被高已亲其进此话常与活正感",
@@ -63,9 +80,10 @@ object RareContentScorer {
             val allCaps = letters.length >= 2 && letters.all { it.isUpperCase() }
             val hasJoiner = t.any { it in "-_./" }
             if (interiorUpper || allCaps || hasJoiner) return 90
-            // A plain lowercase word scores below DIGEST_THRESHOLD on purpose:
-            // only technically-shaped Latin belongs in the digest.
-            return 20
+            // A plain word scores below DIGEST_THRESHOLD on purpose: only
+            // technically-shaped Latin belongs in the digest, unless it recurs
+            // (RECURRING_LATIN_SCORE, applied by the builder).
+            return PLAIN_LATIN_SCORE
         }
         if (!hasCjk) return 0
 
@@ -83,8 +101,11 @@ object RareContentScorer {
 data class ConversationContext(
     val rareTermsDigest: String? = null,
     val recentExcerpts: List<String> = emptyList(),
+    /** [T-android-voice-viewport-context] What is on screen; null when unavailable. */
+    val screen: ScreenContext? = null,
 ) {
-    val isEmpty: Boolean get() = rareTermsDigest.isNullOrEmpty() && recentExcerpts.isEmpty()
+    val isEmpty: Boolean
+        get() = rareTermsDigest.isNullOrEmpty() && recentExcerpts.isEmpty() && screen == null
 
     companion object {
         val EMPTY = ConversationContext()
@@ -130,6 +151,13 @@ object CorrectionContextBuilder {
         // while the first-seen casing is what gets shown.
         val rareTerms = HashMap<String, Triple<Int, Int, String>>()
         val scannedMessages = mutableListOf<ScannedMessage>()
+        // [T-android-voice-mixed-term-restore] Plain Latin words, counted for the
+        // recurring-term promotion below. Promotion only makes sense where Latin
+        // words stand out: in an English chat "file" and "code" recur too and are
+        // not terms, so it is gated on CJK terms outnumbering plain Latin ones.
+        val plainLatin = HashMap<String, kotlin.Pair<Int, String>>()
+        var cjkTermCount = 0
+        var plainLatinTotal = 0
 
         for ((idx, m) in scanned.withIndex()) {
             val stripped = m.text.trim()
@@ -138,7 +166,17 @@ object CorrectionContextBuilder {
             val sentences = SentenceSplitter.split(capped).map { sentence ->
                 var strongest = 0
                 for (term in runCatching { segment(sentence) }.getOrElse { emptyList() }) {
+                    if (term.any { RareContentScorer.isCjk(it) }) cjkTermCount++
                     val s = RareContentScorer.score(term, rank)
+                    if (s == RareContentScorer.PLAIN_LATIN_SCORE) {
+                        plainLatinTotal++
+                        if (!StopWords.contains(term)) {
+                            val key = term.lowercase()
+                            val prev = plainLatin[key]
+                            plainLatin[key] = (prev?.first ?: 0) + 1 to (prev?.second ?: term)
+                        }
+                        continue
+                    }
                     if (s >= RareContentScorer.DIGEST_THRESHOLD) {
                         val key = term.lowercase()
                         val prev = rareTerms[key]
@@ -155,6 +193,16 @@ object CorrectionContextBuilder {
             scannedMessages.add(ScannedMessage(m.role, idx, sentences))
         }
 
+        var promotedLatin = 0
+        if (cjkTermCount > plainLatinTotal) {
+            for ((key, entry) in plainLatin) {
+                if (entry.first >= RareContentScorer.RECURRING_LATIN_MIN_COUNT && rareTerms[key] == null) {
+                    rareTerms[key] = Triple(RareContentScorer.RECURRING_LATIN_SCORE, entry.first, entry.second)
+                    promotedLatin++
+                }
+            }
+        }
+
         val digest = buildDigest(rareTerms)
         val excerpts = buildExcerpts(scannedMessages)
 
@@ -163,6 +211,7 @@ object CorrectionContextBuilder {
             "[Context] messages=${scannedMessages.size}/${messages.size} " +
                 "excerptChars=${excerpts.sumOf { it.length }}/${CorrectionContextBudget.MESSAGE_EXCERPTS} " +
                 "digestChars=${digest?.length ?: 0}/${CorrectionContextBudget.RARE_DIGEST} " +
+                "recurringLatin=$promotedLatin " +
                 "durationMs=${System.currentTimeMillis() - started}",
         )
         return ConversationContext(rareTermsDigest = digest, recentExcerpts = excerpts)

@@ -20,6 +20,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material3.AlertDialog
@@ -52,6 +53,8 @@ import com.openminis.app.backup.remote.RcloneChunkedUpload
 import com.openminis.app.backup.remote.RcloneRemoteStore
 import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.ui.components.SwipeRowAction
+import com.openminis.app.ui.components.SwipeRowActions
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
 
@@ -85,6 +88,8 @@ fun RestoreBrowseScreen(
     val pending by vm.pending.collectAsState()
 
     var confirming by remember { mutableStateOf<RcloneChunkedUpload.RemoteEntry?>(null) }
+    /** Package awaiting delete confirmation; the item itself, so a reload cannot retarget it. */
+    var pendingDelete by remember { mutableStateOf<RcloneChunkedUpload.RemoteEntry?>(null) }
 
     LaunchedEffect(remote.name) { vm.browseDestination(remote) }
     // Leaving mid-browse must not strand listing state for the next visit.
@@ -136,14 +141,33 @@ fun RestoreBrowseScreen(
                         modifier = Modifier.fillMaxWidth().padding(14.dp),
                     )
                     else -> entries.forEachIndexed { i, e ->
-                        EntryRow(
-                            entry = e,
-                            showDivider = i < entries.lastIndex,
-                            onClick = {
-                                if (e.isDirectory) vm.browseDestination(remote, e.path)
-                                else confirming = e
-                            },
-                        )
+                        // [T-restore-browse-swipe-delete] Swipe a package left
+                        // to reveal Delete, as on iOS. Reveal-then-tap plus a
+                        // named confirmation, never delete-on-swipe: the file
+                        // is unlinked on the server and SMB / WebDAV / SFTP
+                        // have no trash. Folders get no action.
+                        androidx.compose.runtime.key(e.path) {
+                            SwipeRowActions(
+                                actions = if (e.isDirectory) emptyList() else listOf(
+                                    SwipeRowAction(
+                                        label = stringResource(R.string.backup_dest_delete_confirm),
+                                        icon = Icons.Outlined.Delete,
+                                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                        onClick = { pendingDelete = e },
+                                    ),
+                                ),
+                            ) {
+                                EntryRow(
+                                    entry = e,
+                                    showDivider = i < entries.lastIndex,
+                                    onClick = {
+                                        if (e.isDirectory) vm.browseDestination(remote, e.path)
+                                        else confirming = e
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -185,6 +209,32 @@ fun RestoreBrowseScreen(
             },
             dismissButton = {
                 MinisTextButton(onClick = { confirming = null }) {
+                    Text(stringResource(R.string.backup_dest_cancel))
+                }
+            },
+        )
+    }
+
+    // Names the file and its size: package names look alike, and the size is
+    // the cheapest way to notice the one about to go is the big one.
+    pendingDelete?.let { e ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text(stringResource(R.string.backup_dest_delete_title)) },
+            text = { Text(stringResource(R.string.restore_browse_delete_note, e.name, humanBytes(e.size))) },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    pendingDelete = null
+                    vm.deleteBrowsedPackage(remote, e)
+                }) {
+                    Text(
+                        stringResource(R.string.backup_dest_delete_confirm),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { pendingDelete = null }) {
                     Text(stringResource(R.string.backup_dest_cancel))
                 }
             },

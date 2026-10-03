@@ -137,10 +137,10 @@ struct ModelPickerConfig {
 
     /// Whether `model` can serve the voice direction: dedicated voice model OR
     /// multimodal with the required audio modality (chat-based transcription).
+    /// A catalog-tagged OpenRouter model is judged by its voice role
+    /// ([T-openrouter-voice-catalog]); everything else keeps the audio-bit rule.
     private static func canServe(_ model: LLMModel, direction: VoiceDirection) -> Bool {
-        if direction.isVoiceModel(model) { return true }
-        let m = model.capabilities.supportedModalities
-        return direction == .input ? m.contains(.audioInput) : m.contains(.audioOutput)
+        direction == .input ? model.isVoiceInputCandidate : model.isVoiceOutputCandidate
     }
 
     @MainActor
@@ -255,6 +255,15 @@ struct UnifiedModelPicker: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var searchText = ""
+    /// [T-picker-search-debounce] The query the LIST actually filters on (GH#271).
+    ///
+    /// `searchText` follows the keyboard; this trails it by `searchDebounce`.
+    /// Binding the filter straight to `searchText` meant every keystroke ran the
+    /// whole filter+sort pass synchronously during view evaluation — at 7,000+
+    /// models that is a visible freeze per character. Debouncing collapses a
+    /// burst of typing into ONE pass.
+    @State private var debouncedSearch = ""
+    @State private var searchDebounceTask: Task<Void, Never>?
     @State private var selectedEntryIds: Set<String> = []
     @State private var expandedGroupIds: Set<String> = []
     @State private var collapsedInstanceIds: Set<String> = []
@@ -269,6 +278,49 @@ struct UnifiedModelPicker: View {
     /// per-row bolt button so any model — cloud, group member, or System voice —
     /// can be smoke-tested (speak / text output) without leaving the picker.
     @State private var quickTestEntry: ModelEntry?
+
+    // [T-picker-cache-first] The rows this render draws, and where they came
+    // from. `nil` means "nothing computed yet" — only then does the list show a
+    // spinner. A warm cache renders on the FIRST frame, so the sheet is never
+    // waiting on the model list.
+    @State private var sections: [InstanceSection]?
+    /// The `configRevision` the current `sections` were built from, so a refresh
+    /// that produces identical input can skip re-publishing (and re-rendering).
+    @State private var sectionsRevision: UInt?
+    @State private var refreshTask: Task<Void, Never>?
+
+    typealias InstanceSection = (instance: ProviderInstance, entries: [ModelEntry])
+
+    /// Process-wide, keyed by the picker's identity (its config) + the store
+    /// revision. Reopening the same picker while nothing changed is a cache hit,
+    /// which is the common case: the user taps the model button repeatedly.
+    @MainActor
+    private enum SectionCache {
+        static var revision: UInt?
+        static var byKey: [String: [InstanceSection]] = [:]
+
+        static func read(key: String, revision current: UInt) -> [InstanceSection]? {
+            guard revision == current else { return nil }
+            return byKey[key]
+        }
+
+        static func write(key: String, revision current: UInt, value: [InstanceSection]) {
+            // A revision bump invalidates every key at once — entries computed
+            // from older config must never be served.
+            if revision != current { byKey.removeAll(); revision = current }
+            byKey[key] = value
+        }
+    }
+
+    /// Distinguishes the pickers that share this view (session picker, group
+    /// builder, agent-loop add, voice pickers): each filters the pool
+    /// differently, so they cannot share a cache slot.
+    private var cacheKey: String {
+        let prefs = (config.effectivePreferModality ?? []).map { String(describing: $0) }.sorted().joined(separator: ",")
+        let existing = config.existingIds?().sorted().joined(separator: ",") ?? ""
+        let hasFilter = config.candidateFilter != nil ? "f" : "-"
+        return "\(config.title)|\(config.mode)|\(prefs)|\(hasFilter)|\(existing.hashValue)|\(systemVoiceRoster.revision)"
+    }
 
     private var isMulti: Bool { config.mode == .multi }
 
@@ -315,7 +367,11 @@ struct UnifiedModelPicker: View {
         candidateEntries.filter { !VoiceProviderResolver.isSystemEntry($0.providerInstanceId) }
     }
 
-    private var entriesByInstance: [(instance: ProviderInstance, entries: [ModelEntry])] {
+    /// [T-picker-cache-first] The expensive build (whole-table sort + per-entry
+    /// instance lookup + per-section sort). Called ONLY from `loadSections`,
+    /// never from `body` — it used to be a computed property that `body` hit
+    /// several times per render, re-sorting all ~1100 entries each time.
+    private func buildSections() -> [InstanceSection] {
         var result: [(ProviderInstance, [ModelEntry])] = []
         // Built-in System engine FIRST — as its own provider section (Phase C), the
         // same collapsible header treatment as any cloud provider, driven by the
@@ -337,8 +393,8 @@ struct UnifiedModelPicker: View {
         // global array's type-interleaving is invisible there. This picker
         // walked the same array FLAT, which exposed that interleaving and made
         // the two orders disagree (user report: management shows
-        // 球球 → 球球图片 → 球球Grok …, picker shows DeepSeek → 球球 → Codex CPA
-        // → 球球图片 …).
+        // RelayA → RelayA-Image → RelayA-Grok …, picker shows DeepSeek → RelayA → Codex CPA
+        // → RelayA-Image …).
         //
         // Reordering cannot fix this from the data side: `moveInstances`
         // deliberately permutes only WITHIN a type section and pins every other
@@ -370,7 +426,7 @@ struct UnifiedModelPicker: View {
                     // T-model-release-ranking exists to prevent (OpenMinis#83 —
                     // the unusable model's 400 renders as an empty reply and
                     // reads as "the app is broken").
-                    result.append((instance, entries.sorted(by: ProviderConfigStore.releaseRankOrder)))
+                    result.append((instance, ProviderConfigStore.sortedByReleaseRank(entries)))
                 }
             }
         }
@@ -379,27 +435,96 @@ struct UnifiedModelPicker: View {
 
     // MARK: - Search
 
-    private func fuzzyMatch(_ text: String) -> Bool {
-        guard !searchText.isEmpty else { return true }
-        let query = searchText.lowercased()
-        let target = text.lowercased()
-        if target.contains(query) { return true }
-        var idx = target.startIndex
-        for ch in query {
-            guard let found = target[idx...].firstIndex(of: ch) else { return false }
-            idx = target.index(after: found)
-        }
-        return true
+    /// [T-picker-search-debounce] How long typing must settle before the list
+    /// re-filters. 120ms sits inside the 100-150ms the issue suggests: long
+    /// enough that a burst of typing is one pass, short enough to feel
+    /// immediate.
+    private static let searchDebounce: Duration = .milliseconds(120)
+
+    /// [T-picker-search-cap] Rows rendered for one search.
+    ///
+    /// A two-letter query against an aggregator can match thousands of models,
+    /// and mounting that many rows at once stalls the main thread no matter how
+    /// fast the filter is. The cap bounds the WORK, and the footer says the
+    /// result was truncated so it never silently looks like "that's all".
+    private static let maxSearchResults = 150
+
+    /// Match + rank in one pass. 0 = no match.
+    ///
+    /// [T-picker-search-relevance] Replaces the old Bool `fuzzyMatch` (GH#272):
+    /// filtering alone left results in the provider's default order, so a loose
+    /// subsequence hit could outrank an exact one.
+    private func matchScore(_ text: String, query: String) -> Int {
+        ModelSearchScorer.score(text, query: query)
     }
 
-    private var filteredEntriesByInstance: [(instance: ProviderInstance, entries: [ModelEntry])] {
-        guard !searchText.isEmpty else { return entriesByInstance }
-        return entriesByInstance.compactMap { item in
-            let filtered = item.entries.filter { entry in
-                fuzzyMatch(entry.model.displayName) || fuzzyMatch(entry.model.id)
+    /// [T-picker-cache-first] Search filtering runs over the CACHED sections, not
+    /// over the raw store: it is a cheap substring pass on an already-built list,
+    /// and keeping it out of the cache means typing never rebuilds the pool.
+    private var filteredEntriesByInstance: [InstanceSection] {
+        let base = sections ?? []
+        // [T-picker-search-debounce] Filter on the DEBOUNCED query, not on
+        // `searchText` — that is what keeps a keystroke from triggering this
+        // whole pass during view evaluation.
+        let query = debouncedSearch.lowercased()
+        guard !query.isEmpty else { return base }
+        return base.compactMap { item in
+            // [T-picker-search-provider-name] A provider-name hit shows the
+            // instance's WHOLE model list, mirroring visibleGroups where a
+            // group-name hit shows the whole group. Self-hosted instances are
+            // the case that made this gap visible: their label is the only
+            // memorable name ("host.example.com"), while the model ids underneath
+            // are opaque gguf paths that share no substring with it — so
+            // searching the provider name found nothing at all.
+            if matchScore(item.instance.label, query: query) > 0 { return item }
+            // [T-picker-search-relevance] Score once per entry, then sort by it
+            // (GH#272). Ties fall back to `releaseRankOrder`, which is the order
+            // the list already uses when nothing is being searched — so equal
+            // relevance keeps the familiar newest/most-capable-first ordering.
+            let scored: [(entry: ModelEntry, score: Int)] = item.entries.compactMap { entry in
+                let s = ModelSearchScorer.bestScore(
+                    of: [entry.model.displayName, entry.model.id], query: query)
+                return s > 0 ? (entry, s) : nil
             }
-            return filtered.isEmpty ? nil : (item.instance, filtered)
+            guard !scored.isEmpty else { return nil }
+            let ranked = scored.sorted { a, b in
+                if a.score != b.score { return a.score > b.score }
+                return ProviderConfigStore.releaseRankOrder(a.entry, b.entry)
+            }.map(\.entry)
+            return (item.instance, ranked)
         }
+    }
+
+    /// [T-picker-search-cap] `filteredEntriesByInstance`, truncated to
+    /// `maxSearchResults` rows in total (GH#271).
+    ///
+    /// Applied ACROSS sections rather than per section: a single aggregator
+    /// instance holding 7,000 models is the reported case, and a per-section cap
+    /// would not bound it at all. Sections are consumed in their existing order,
+    /// and because entries inside each one are already relevance-sorted, what
+    /// survives truncation is the most relevant part rather than an arbitrary
+    /// slice.
+    private var cappedEntriesByInstance: [InstanceSection] {
+        let all = filteredEntriesByInstance
+        guard !debouncedSearch.isEmpty else { return all }
+        var remaining = Self.maxSearchResults
+        var out: [InstanceSection] = []
+        for section in all {
+            if remaining <= 0 { break }
+            if section.entries.count <= remaining {
+                out.append(section)
+                remaining -= section.entries.count
+            } else {
+                out.append((section.instance, Array(section.entries.prefix(remaining))))
+                remaining = 0
+            }
+        }
+        return out
+    }
+
+    /// Total matches before the cap — drives the "showing N of M" footer.
+    private var totalSearchMatches: Int {
+        filteredEntriesByInstance.reduce(0) { $0 + $1.entries.count }
     }
 
     // MARK: - Groups
@@ -408,14 +533,16 @@ struct UnifiedModelPicker: View {
         switch config.groupScope {
         case .all:
             let groups = store.modelGroups
-            guard !searchText.isEmpty else { return groups }
-            return groups.filter { fuzzyMatch($0.name) }
+            let query = debouncedSearch.lowercased()
+            guard !query.isEmpty else { return groups }
+            return groups.filter { matchScore($0.name, query: query) > 0 }
         case .single(let groupId):
             guard let gid = groupId, let g = store.group(for: gid) else { return [] }
-            guard !searchText.isEmpty else { return [g] }
-            if fuzzyMatch(g.name) { return [g] }
+            let query = debouncedSearch.lowercased()
+            guard !query.isEmpty else { return [g] }
+            if matchScore(g.name, query: query) > 0 { return [g] }
             let memberMatch = g.memberEntryIds.contains { id in
-                store.entry(for: id).map { fuzzyMatch($0.model.displayName) } ?? false
+                store.entry(for: id).map { matchScore($0.model.displayName, query: query) > 0 } ?? false
             }
             return memberMatch ? [g] : []
         case .none:
@@ -479,11 +606,41 @@ struct UnifiedModelPicker: View {
                 }
             }
 
-            ForEach(filteredEntriesByInstance, id: \.instance.id) { item in
+            // [T-picker-search-cap] Render the capped list; the footer below
+            // says so when matches were truncated.
+            ForEach(cappedEntriesByInstance, id: \.instance.id) { item in
                 instanceSection(item)
             }
+            if !debouncedSearch.isEmpty, totalSearchMatches > Self.maxSearchResults {
+                Section {
+                    // Format string, not interpolation into the key: an
+                    // interpolated key would bake runtime numbers into the
+                    // catalog lookup and never resolve.
+                    Text(String(format: AppLocalized("Showing the %d best matches of %d. Type more to narrow the search."),
+                                Self.maxSearchResults, totalSearchMatches))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
 
-            if visibleGroups.isEmpty && filteredEntriesByInstance.isEmpty {
+            // [T-picker-cache-first] Cold path only: no cache yet, first build
+            // still running. A warm open never shows this.
+            if sections == nil {
+                Section {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            ProgressView()
+                            Text("Loading models...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 8)
+                }
+            } else if visibleGroups.isEmpty && cappedEntriesByInstance.isEmpty {
                 emptySection
             }
 
@@ -499,11 +656,42 @@ struct UnifiedModelPicker: View {
             }
         }
         .searchable(text: $searchText, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search models")
+        // [T-picker-search-debounce] Drive the debounced query (GH#271).
+        //
+        // Each keystroke cancels the pending task, so a burst of typing runs the
+        // filter+sort ONCE instead of once per character. Clearing is applied
+        // immediately — waiting 120ms to restore the full list after the user
+        // empties the field reads as lag, and restoring it costs nothing since
+        // the unsearched path just returns the cached sections.
+        .onChange(of: searchText) { newValue in
+            searchDebounceTask?.cancel()
+            let trimmed = newValue.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                debouncedSearch = ""
+                return
+            }
+            searchDebounceTask = Task { @MainActor in
+                try? await Task.sleep(for: Self.searchDebounce)
+                guard !Task.isCancelled else { return }
+                debouncedSearch = trimmed
+            }
+        }
+        .onDisappear { searchDebounceTask?.cancel() }
         .navigationTitle(config.title)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
+            // [T-picker-cache-first] Cache read is synchronous, so a warm open
+            // already has its rows on this first frame; the rebuild is deferred.
+            loadSections()
             seedCollapse()
             SystemVoiceCatalog.startObservingVoiceChanges()
+        }
+        .onDisappear { refreshTask?.cancel() }
+        .onChange(of: sections == nil) { _ in seedCollapse() }
+        .onChange(of: store.configRevision) { _ in loadSections() }
+        .onChange(of: systemVoiceRoster.revision) { _ in
+            sectionsRevision = nil
+            loadSections()
         }
         .toolbar { toolbarContent }
         .sheet(isPresented: $showCreateGroupSheet) {
@@ -770,6 +958,13 @@ struct UnifiedModelPicker: View {
         }
         if !entry.displayTraits.requiresCredential { return nil }
         if entry.isHidden { return AppLocalized("Hidden") }
+        // [T-model-absence-grace] The provider has stopped listing this model.
+        // The entry is retained (with its overrides) through the grace window,
+        // but routing must not pick it in the meantime — a request would go to a
+        // model the endpoint no longer serves. Reported like "Hidden" so group
+        // fallback skips it and the row explains itself, rather than the entry
+        // disappearing and taking the user's settings with it.
+        if entry.isUnavailableFromProvider { return AppLocalized("Not listed by provider") }
         guard let instance = store.instance(for: entry.providerInstanceId) else {
             return AppLocalized("Provider not found")
         }
@@ -859,7 +1054,7 @@ struct UnifiedModelPicker: View {
                     expandedEntryRow(systemVirtualEntry(forMemberId: entryId), parentGroup: group)
                         .padding(.leading, 30)
                 } else if let reason = memberUnavailableReason(entryId) {
-                    unavailableMemberRow(entryId: entryId, reason: reason)
+                    unavailableMemberRow(entryId: entryId, reason: reason, group: group)
                         .padding(.leading, 30)
                 } else if let entry = store.entry(for: entryId) {
                     expandedEntryRow(entry, parentGroup: group)
@@ -944,8 +1139,37 @@ struct UnifiedModelPicker: View {
         }
     }
 
+    /// [T-ios-picker-prune-dangling-member] True when this member refers to an
+    /// entry that no longer exists at all — the "Model not found" case, where
+    /// the row can only render the bare id because there is nothing to resolve.
+    ///
+    /// Deliberately narrower than "unavailable". The other reasons
+    /// (Hidden / Provider disabled / Not signed in / Provider not found) all
+    /// describe a member whose entry is still present and whose row will come
+    /// back the moment the user signs in or re-enables the provider; offering
+    /// to delete those would turn a transient state into permanent config loss.
+    /// Only a member with no entry behind it is safe to offer for removal.
+    private func isDanglingMember(_ entryId: String) -> Bool {
+        store.entry(for: entryId) == nil && Self.systemEntry(for: entryId) == nil
+    }
+
+    /// Drop one dangling member from a group.
+    ///
+    /// Routed through `store.updateGroup`, which diffs the prior member list
+    /// against the new one and stamps `removedMembers[id] = now`. That
+    /// tombstone is what makes the removal survive the inbound union-merge on
+    /// other devices — mutating `memberEntryIds` in place without it would let
+    /// the next sync from a peer resurrect the row.
+    private func removeDanglingMember(_ entryId: String, from group: ModelGroup) {
+        guard var fresh = store.group(for: group.id) else { return }
+        guard fresh.memberEntryIds.contains(entryId) else { return }
+        fresh.memberEntryIds.removeAll { $0 == entryId }
+        store.updateGroup(fresh)
+        MinisToast.show(AppLocalized("Removed from group"))
+    }
+
     @ViewBuilder
-    private func unavailableMemberRow(entryId: String, reason: String) -> some View {
+    private func unavailableMemberRow(entryId: String, reason: String, group: ModelGroup) -> some View {
         let entry = store.entry(for: entryId)
         HStack(spacing: 10) {
             Image(systemName: "circle")
@@ -986,6 +1210,28 @@ struct UnifiedModelPicker: View {
             }
 
             Spacer()
+
+            // [T-ios-picker-prune-dangling-member] A one-tap prune for members
+            // whose entry is gone. The loader deliberately PRESERVES unresolved
+            // UUID members (a member missing from the store may just be a
+            // sync gap, not a stale id), so the app cannot prune these on its
+            // own — which leaves the user looking at rows of raw UUIDs with no
+            // way to clear them. This button is that way.
+            //
+            // Only for genuinely dangling members: see `isDanglingMember`.
+            if isDanglingMember(entryId) {
+                Button {
+                    removeDanglingMember(entryId, from: group)
+                } label: {
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.red.opacity(0.8))
+                }
+                // The row sits inside a tappable list; without this the button's
+                // tap would also fall through to the row behind it.
+                .buttonStyle(.borderless)
+                .accessibilityLabel(AppLocalized("Remove from group"))
+            }
         }
     }
 
@@ -1220,8 +1466,56 @@ struct UnifiedModelPicker: View {
         }
     }
 
+    // MARK: - Cache-first loading [T-picker-cache-first]
+
+    /// Serve the cache synchronously (so the sheet's FIRST frame already has
+    /// rows), then recompute off the main actor and publish only if the result
+    /// actually differs. With no cache, `sections` stays nil and the list shows
+    /// its loading row until the first compute lands.
+    private func loadSections() {
+        let revision = store.configRevision
+        let key = cacheKey
+
+        // Warm path — no spinner, no work on the presentation frame.
+        if let cached = SectionCache.read(key: key, revision: revision) {
+            if sections == nil { sections = cached; sectionsRevision = revision }
+        }
+        // Already current for this revision: nothing to recompute.
+        if sectionsRevision == revision, sections != nil { return }
+
+        refreshTask?.cancel()
+        refreshTask = Task { @MainActor in
+            // Yield first so the sheet's presentation animation gets its frames
+            // before the rebuild runs. This is what keeps "open" feeling instant
+            // even on the cold path.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            let rebuilt = buildSections()
+            guard !Task.isCancelled else { return }
+            SectionCache.write(key: key, revision: revision, value: rebuilt)
+            // Skip a no-op publish so a refresh that changes nothing does not
+            // re-render the list under the user.
+            if sectionsRevision != revision || !sameSections(sections, rebuilt) {
+                sections = rebuilt
+                sectionsRevision = revision
+            }
+        }
+    }
+
+    private func sameSections(_ a: [InstanceSection]?, _ b: [InstanceSection]) -> Bool {
+        guard let a, a.count == b.count else { return false }
+        for (x, y) in zip(a, b) {
+            if x.instance.id != y.instance.id { return false }
+            if x.entries.count != y.entries.count { return false }
+            if !zip(x.entries, y.entries).allSatisfy({ $0.id == $1.id }) { return false }
+        }
+        return true
+    }
+
     private func seedCollapse() {
-        guard !collapseSeeded else { return }
+        // [T-picker-cache-first] Nothing to seed from until rows exist; on the
+        // cold path this is re-run once the first build publishes.
+        guard !collapseSeeded, sections != nil else { return }
         collapseSeeded = true
         // Voice pickers (Voice Input / Output group binding, or an explicit audio
         // modality preference) exist specifically to browse and add TTS/ASR voices.
@@ -1238,10 +1532,12 @@ struct UnifiedModelPicker: View {
             return
         }
         var ids = Set<String>()
-        // System is now an ordinary entry in entriesByInstance (its synthetic
+        // System is now an ordinary entry in the section list (its synthetic
         // instance), so this single loop collapses it too when it has >1 model
         // (the ~60 voice roster shouldn't fill the list).
-        for item in entriesByInstance where item.entries.count > 1 {
+        // [T-picker-cache-first] Seeds from whatever is loaded now; re-seeded
+        // when the first async build lands (see `.onChange(of: sections)`).
+        for item in (sections ?? []) where item.entries.count > 1 {
             ids.insert(item.instance.id)
         }
         collapsedInstanceIds = ids

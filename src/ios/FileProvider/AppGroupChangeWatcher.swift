@@ -93,8 +93,29 @@ final class AppGroupChangeWatcher {
 
     // MARK: - Watch lifecycle
 
+    /// Timestamp of the last "watch cap reached" warning. The recursive walk
+    /// used to emit one warning per directory in the entire remaining subtree
+    /// — and re-emit them all on every foreground reconcile — which cost a
+    /// contentsOfDirectory() per skipped dir and drowned the log tail (they
+    /// were the last visible lines in several 2026-08-30 crash reports and
+    /// sent triage down the wrong path). Prune the descent instead and log at
+    /// most once a minute.
+    private var lastCapLogAt: Date = .distantPast
+
+    private func logCapReached(prunedAt url: URL) {
+        guard Date().timeIntervalSince(lastCapLogAt) >= 60 else { return }
+        lastCapLogAt = Date()
+        logger.warning("watch cap reached (\(self.maxWatches)); pruning walk at \(url.path) — deeper directories are unwatched until something else detaches")
+    }
+
     /// Attach a watch to `url` and recursively to all existing subdirectories.
+    /// Stops descending entirely once the watch cap is reached: nothing below
+    /// this point could attach anyway, so scanning it is pure waste.
     private func attachRecursive(at url: URL, rootKey: String, relativePath: String) {
+        guard watches.count < maxWatches || watches[url] != nil else {
+            logCapReached(prunedAt: url)
+            return
+        }
         attachWatch(at: url, rootKey: rootKey, relativePath: relativePath)
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: url,
@@ -113,7 +134,7 @@ final class AppGroupChangeWatcher {
     private func attachWatch(at url: URL, rootKey: String, relativePath: String) {
         guard watches[url] == nil else { return }
         guard watches.count < maxWatches else {
-            logger.warning("watch cap reached (\(self.maxWatches)); skipping \(url.path)")
+            logCapReached(prunedAt: url)
             return
         }
         let fd = open(url.path, O_EVTONLY)

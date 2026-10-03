@@ -176,6 +176,9 @@ object DeepLinkHandler {
                 DeepLinkAction.OpenSettingsScreen(Routes.USAGE_STATS)
             "skills" -> DeepLinkAction.OpenSettingsScreen(Routes.SKILLS)
             "memory" -> DeepLinkAction.OpenSettingsScreen(Routes.MEMORY)
+            // [T-p2-agent-settings] Settings › Agents; scheduled tasks list.
+            "agents" -> DeepLinkAction.OpenSettingsScreen(Routes.AGENTS)
+            "scheduled", "scheduled-tasks", "scheduled_tasks" -> DeepLinkAction.OpenSettingsScreen(Routes.SCHEDULED_TASKS)
             "storage" -> DeepLinkAction.OpenSettingsScreen(Routes.STORAGE)
             "mount-external", "mount_external", "mounts", "mounted-folders", "mounted_folders" ->
                 DeepLinkAction.OpenSettingsScreen(Routes.MOUNTED_FOLDERS)

@@ -9,6 +9,8 @@ struct ProviderInstanceDetailView: View {
 
     @State private var editingLabel = ""
     @State private var showKimiLogin = false
+    /// [T-copilot-provider] Same device-code shape as Kimi's.
+    @State private var showCopilotLogin = false
     @State private var keyInputText = ""
     @State private var isFetchingModels = false
     /// [T-thinking-rules-ui-fix] Owned HERE, not inside ThinkingRulesSection: a .sheet on a
@@ -75,10 +77,32 @@ struct ProviderInstanceDetailView: View {
         .sheet(item: $editingModelEntry) { entry in
             ModelEntryDetailSheet(entry: entry)
         }
+        .sheet(isPresented: $showCopilotLogin) {
+            if let instance = instance {
+                // [T-copilot-provider] Device-code sheet, same post-sign-in
+                // model reconcile as Kimi — the catalog is empty until the
+                // server has been asked, so this refresh is what populates it.
+                CopilotDeviceLoginSheet(instanceId: instance.id) { success in
+                    oauthRefreshTrigger.toggle()
+                    if success, instance.providerType.oauthSupportsModelDiscovery {
+                        Task { await store.refreshModels(for: instance) }
+                    }
+                }
+            }
+        }
         .sheet(isPresented: $showKimiLogin) {
             if let instance = instance {
-                KimiDeviceLoginSheet(instanceId: instance.id) { _ in
+                KimiDeviceLoginSheet(instanceId: instance.id) { success in
                     oauthRefreshTrigger.toggle()
+                    // [T-provider-oauth-model-discovery] Kimi Code signs in
+                    // through a device-code sheet rather than `oauthLogin`, so
+                    // it needs the same post-sign-in reconcile — otherwise this
+                    // one provider keeps the stale-catalog behaviour GH#265 is
+                    // about. Gated on `success`: a cancelled or timed-out
+                    // device flow leaves no usable token to fetch with.
+                    if success, instance.providerType.oauthSupportsModelDiscovery {
+                        Task { await store.refreshModels(for: instance) }
+                    }
                 }
             }
         }
@@ -88,6 +112,19 @@ struct ProviderInstanceDetailView: View {
                     Section {
                         SecureField("Bearer token", text: $manualTokenInputText)
                             .font(.system(.body, design: .monospaced))
+                            // [T-provider-label-keyboard issue #364] Opt this
+                            // field OUT of AutoFill's password association, the
+                            // same declaration AddProviderView has carried since
+                            // 3825397ca. An undeclared SecureField is
+                            // `secure=YES, textContentType=nil` — a password field
+                            // with no marker — which leaves the strong-password /
+                            // keychain heuristic free to run and to claim the
+                            // nearest preceding text field as its username.
+                            // `.oneTimeCode` is the reliable "credential, but not
+                            // a saveable account password" marker: it suppresses
+                            // the strong-password flow while SecureField keeps
+                            // masking.
+                            .textContentType(.oneTimeCode)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     } footer: {
@@ -157,7 +194,18 @@ struct ProviderInstanceDetailView: View {
                     // Output Tokens), and an undeclared keyboardType can inherit
                     // the numeric type from whichever field was focused last.
                     .keyboardType(.default)
-                    .textContentType(.none)
+                    // [T-provider-label-keyboard issue #364] `.nickname`, not
+                    // `.none`. `.textContentType(.none)` compiles to nil — byte
+                    // identical to declaring nothing — so it only withholds an
+                    // explicit type and leaves the heuristic free to guess. A
+                    // POSITIVE non-credential marker tells AutoFill what the field
+                    // actually is. Never `.username`: that is precisely the pairing
+                    // AutoFill looks for beside a password field.
+                    //
+                    // This is the belt to the credential field's braces, not a
+                    // replacement for it — the earlier attempt proved the
+                    // Label-side declaration alone does not break the pairing.
+                    .textContentType(.nickname)
                     .textInputAutocapitalization(.words)
                     .onAppear { editingLabel = instance.label }
                     .onSubmit { saveLabel(instance) }
@@ -243,7 +291,17 @@ struct ProviderInstanceDetailView: View {
             }
 
             // MARK: Manual OAuth Token (for OAuth instances with manual token)
-            if instance.credentialType == .oauth && instance.providerType != .antigravity {
+            //
+            // [T-copilot-oauth-only] Copilot is excluded for the same reason
+            // Antigravity is: `makeCopilotProvider` wires `oauthTokenProvider`
+            // to the session-token minter unconditionally and never reads the
+            // `manual-oauth-token` account this section writes. A token pasted
+            // here was stored, shown as "Configured", and then ignored on every
+            // request. The Add Provider screen already excludes it; this is the
+            // second entry point, which that fix missed.
+            if instance.credentialType == .oauth
+                && instance.providerType != .antigravity
+                && instance.providerType != .githubCopilot {
                 manualOAuthTokenSection(instance)
             }
 
@@ -418,6 +476,19 @@ struct ProviderInstanceDetailView: View {
             // unreadable.
             ZStack(alignment: .leading) {
                 TextField(keyPlaceholder(instance.providerType), text: $keyInputText)
+                    // [T-provider-label-keyboard issue #364] The credential half of
+                    // the AutoFill opt-out. This field and the Label field live in
+                    // the SAME List (Section "Label", then Section "Credential"),
+                    // which is the shape that makes iOS offer the password bar on
+                    // the Label. AddProviderView declared this on all three of its
+                    // credential fields; this screen was left with only the Label
+                    // half, so the pairing was never actually broken here.
+                    //
+                    // Declared even though this is a plain TextField rather than a
+                    // SecureField (masking is done by clearing the glyph colour —
+                    // see [T-provider-key-field-masked-untappable]): the field still
+                    // holds a credential, and saying so costs nothing.
+                    .textContentType(.oneTimeCode)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .foregroundStyle(showKeyRevealed ? Color.primary : Color.clear)
@@ -467,6 +538,9 @@ struct ProviderInstanceDetailView: View {
     @ViewBuilder
     private func oauthCredentialView(_ instance: ProviderInstance) -> some View {
         let isAuth = oauthIsAuthenticated(instance)
+        // [T-oauth-keep-credentials] Refresh was rejected: the credential is kept
+        // (never auto-deleted) but unusable until the user signs in again.
+        let needsReauth = isAuth && ProviderKeychainHelper.oauthNeedsReauth(instanceId: instance.id)
         let detail = oauthDetail(instance)
         // Subscribe to auth state changes (Keychain token save/delete)
         let _ = oauthRefreshTrigger
@@ -480,21 +554,34 @@ struct ProviderInstanceDetailView: View {
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if needsReauth {
+                        Text(AppLocalized("Sign-in expired. Sign in again to keep using this provider."))
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
                 }
                 Spacer()
                 if isAuth {
                     Circle()
-                        .fill(Color.green)
+                        .fill(needsReauth ? Color.red : Color.green)
                         .frame(width: 8, height: 8)
                 }
             }
 
             HStack(spacing: 12) {
-                if isAuth {
-                    Button(AppLocalized("Copy Token")) {
-                        Task { await oauthCopyToken(instance) }
+                if needsReauth {
+                    Button(AppLocalized("Sign In Again")) {
+                        oauthStartSignIn(instance)
                     }
                     .font(.caption.weight(.medium))
+                }
+                if isAuth {
+                    if !needsReauth {
+                        Button(AppLocalized("Copy Token")) {
+                            Task { await oauthCopyToken(instance) }
+                        }
+                        .font(.caption.weight(.medium))
+                    }
                     Button(AppLocalized("Sign Out"), role: .destructive) {
                         oauthLogout(instance)
                         oauthRefreshTrigger.toggle()
@@ -502,17 +589,7 @@ struct ProviderInstanceDetailView: View {
                     .font(.caption.weight(.medium))
                 } else {
                     Button(oauthSignInLabel(instance)) {
-                        // Kimi uses the RFC 8628 device-code sheet; others run inline.
-                        if instance.providerType == .kimiCode {
-                            showKimiLogin = true
-                        } else {
-                            Task {
-                                await oauthLogin(instance)
-                                await MainActor.run {
-                                    oauthRefreshTrigger.toggle()
-                                }
-                            }
-                        }
+                        oauthStartSignIn(instance)
                     }
                     .font(.caption.weight(.medium))
                 }
@@ -521,6 +598,22 @@ struct ProviderInstanceDetailView: View {
             .controlSize(.small)
         }
         .id(oauthRefreshTrigger)
+    }
+
+    private func oauthStartSignIn(_ instance: ProviderInstance) {
+        // Kimi uses the RFC 8628 device-code sheet; others run inline.
+        if instance.providerType == .kimiCode {
+            showKimiLogin = true
+        } else if instance.providerType == .githubCopilot {
+            showCopilotLogin = true
+        } else {
+            Task {
+                await oauthLogin(instance)
+                await MainActor.run {
+                    oauthRefreshTrigger.toggle()
+                }
+            }
+        }
     }
 
     // MARK: - Custom Base URL
@@ -535,6 +628,7 @@ struct ProviderInstanceDetailView: View {
         case .openAIResponses: return "https://api.openai.com/v1"
         case .xAI: return "https://api.x.ai/v1"
         case .kimiCode: return "https://api.kimi.com/coding"
+        case .githubCopilot: return CopilotConstants.apiBaseURL
         case .unsupported: return "—"
         }
     }
@@ -750,7 +844,7 @@ struct ProviderInstanceDetailView: View {
                 HStack(spacing: 5) {
                     Text(entry.model.displayName)
                         .font(.subheadline)
-                        .foregroundStyle(isHidden ? .secondary : .primary)
+                        .foregroundStyle(isHidden || entry.isUnavailableFromProvider ? .secondary : .primary)
                     modalityIcons(for: entry.model)
                 }
                 HStack(spacing: 4) {
@@ -759,6 +853,15 @@ struct ProviderInstanceDetailView: View {
                         .foregroundStyle(.tertiary)
                     if entry.isCustom {
                         Text("Custom")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
+                    // [T-model-absence-grace] The provider stopped listing this
+                    // model. The entry (and its overrides) is kept for the grace
+                    // window, so say why it is greyed out instead of letting it
+                    // look normal — or, as before, letting it silently vanish.
+                    if entry.isUnavailableFromProvider {
+                        Text("Not listed by provider")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.orange)
                     }
@@ -807,7 +910,7 @@ struct ProviderInstanceDetailView: View {
 
     private func modalityIcons(for model: LLMModel) -> some View {
         let modality = model.modalityOverride ?? model.capabilities.supportedModalities
-        // [T-ios-model-capability-output-tags] (XIN msg 38847) The list only
+        // [T-ios-model-capability-output-tags] The list only
         // rendered INPUT modalities (image/pdf/audio/video _input) — output
         // modalities were never iterated, so a generator like gpt-image-2
         // (image_output) or an audio_output model showed no capability badge.
@@ -902,6 +1005,7 @@ struct ProviderInstanceDetailView: View {
         case .openAIResponses: return false // API key only
         case .xAI: return XAIOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .kimiCode: return KimiOAuthManager.shared.isAuthenticated(instanceId: instance.id)
+        case .githubCopilot: return CopilotOAuthManager.shared.isAuthenticated(instanceId: instance.id)
         case .unsupported: return false // synced from newer build
         }
     }
@@ -963,6 +1067,9 @@ struct ProviderInstanceDetailView: View {
         case .kimiCode:
             return KimiOAuthManager.shared.isAuthenticated(instanceId: instance.id)
                 ? AppLocalized("Authenticated") : AppLocalized("Not authenticated")
+        case .githubCopilot:
+            return CopilotOAuthManager.shared.isAuthenticated(instanceId: instance.id)
+                ? AppLocalized("Authenticated") : AppLocalized("Not authenticated")
         case .unsupported:
             return AppLocalized("Unsupported in this app version")
         }
@@ -978,6 +1085,7 @@ struct ProviderInstanceDetailView: View {
         case .openAIResponses: return AppLocalized("Sign In")
         case .xAI: return AppLocalized("Sign in with xAI")
         case .kimiCode: return AppLocalized("Sign in with Kimi Code")
+        case .githubCopilot: return AppLocalized("Sign in with GitHub")
         case .unsupported: return AppLocalized("Sign In")
         }
     }
@@ -993,7 +1101,26 @@ struct ProviderInstanceDetailView: View {
             case .openAIResponses: break
             case .xAI: try await XAIOAuthManager.shared.login(instanceId: instance.id)
             case .kimiCode: break // device-code flow runs in KimiDeviceLoginSheet
+            case .githubCopilot: break // device-code flow runs in CopilotDeviceLoginSheet
             case .unsupported: break
+            }
+            // [T-provider-oauth-model-discovery] Reconcile models on a
+            // SUCCESSFUL sign-in here too, not only when the instance is first
+            // added (GH#265).
+            //
+            // This is the same moment for an existing instance that
+            // `addInstance` is for a new one: credentials just became valid, so
+            // the model list can be checked against the vendor for the first
+            // time — or for the first time since it expired. Re-authenticating
+            // is also exactly what a user does when a provider has been sitting
+            // unused for a while, which is when its catalog is most likely to
+            // have moved on.
+            //
+            // Only reached when `login` did not throw, so a cancelled or failed
+            // sign-in changes nothing. Failure inside the refresh is contained:
+            // `refreshModels` logs and returns, leaving the existing entries.
+            if instance.providerType.oauthSupportsModelDiscovery {
+                await store.refreshModels(for: instance)
             }
         } catch {
             await MainActor.run {
@@ -1012,6 +1139,7 @@ struct ProviderInstanceDetailView: View {
         case .openAIResponses: break // API key only
         case .xAI: XAIOAuthManager.shared.logout(instanceId: instance.id)
         case .kimiCode: KimiOAuthManager.shared.logout(instanceId: instance.id)
+        case .githubCopilot: CopilotOAuthManager.shared.logout(instanceId: instance.id)
         case .unsupported: break
         }
     }
@@ -1035,6 +1163,8 @@ struct ProviderInstanceDetailView: View {
             token = try? await XAIOAuthManager.shared.validAccessToken(instanceId: instance.id)
         case .kimiCode:
             token = try? await KimiOAuthManager.shared.validAccessToken(instanceId: instance.id)
+        case .githubCopilot:
+            token = try? await CopilotOAuthManager.shared.validSessionToken(instanceId: instance.id)
         case .unsupported:
             token = nil
         }
@@ -1051,6 +1181,7 @@ struct ProviderInstanceDetailView: View {
         case .openAI: return "sk-..."
         case .xAI: return "xai-..."
         case .kimiCode: return "" // OAuth only
+        case .githubCopilot: return "" // OAuth only
         case .antigravity: return "API Key..."
         case .openRouter: return "sk-or-..."
         case .openAIResponses: return "sk-..."
@@ -1672,9 +1803,24 @@ struct ModelEntryDetailSheet: View {
             interleavedReasoningField: entry.baseModel.interleavedReasoningField
         )
 
-        // Build overrides: only record a field when the user's choice diverges from the
-        // baseModel/API value, so future provider-side capability bumps can still flow
-        // through for fields the user hasn't touched.
+        // Build overrides.
+        //
+        // [T-model-override-silent-drop] Record a field when the USER FILLED IT IN,
+        // not when it happens to differ from today's API value.
+        //
+        // The old rule compared the typed value against `entry.baseModel`, while the
+        // sheet LOADS from `entry.model` (= overrides overlaid on baseModel). That
+        // asymmetry silently discards intent: a user who types a number equal to the
+        // current auto-detected value writes no override at all, so the next refresh
+        // that moves the vendor value simply shows the new one through. Reproduced on
+        // device: typing 1000000 into a field whose auto value was already 1000000 and
+        // pressing Save left `overrides.contextWindow` null.
+        //
+        // "Equal to the current auto value" and "has no opinion" are not the same
+        // thing. The UI already states the real rule — "leave empty to use the
+        // auto-detected value" — so EMPTY is the way back to auto, and a filled field
+        // is a choice that must persist. baseModel stays API truth either way (see the
+        // comment above): overrides is the only place a refresh preserves verbatim.
         var newOverrides = ModelOverrides()
 
         let effectiveTypedName = trimmedName.isEmpty ? updatedBaseModel.displayName : trimmedName
@@ -1684,17 +1830,28 @@ struct ModelEntryDetailSheet: View {
 
         newOverrides.maxOutputTokens = parsedMaxTokens
 
-        let baselineModality = entry.baseModel.modalityOverride
+        // All three fields below are loaded from `effective` (see loadFromEntry) and so
+        // must be recorded against what the sheet SHOWED, never against baseModel.
+        //
+        // Toggles have no empty state, so "the user filled it in" is not expressible for
+        // them; what IS expressible is "this still differs from the API's own value".
+        // Compare against the value the sheet displayed — i.e. keep an existing override
+        // alive when the vendor later catches up to it, instead of silently dropping it.
+        // Worked example of the old behaviour: base=false + override=true, a refresh sets
+        // base=true, the user re-saves unchanged, `true == true` clears the override, and
+        // a later vendor flip back to false loses the user's choice entirely.
+        let baselineModality = entry.model.modalityOverride
             ?? entry.baseModel.capabilities.supportedModalities
-        if modality != baselineModality {
+        if modality != baselineModality || entry.overrides.modalityOverride != nil {
             newOverrides.modalityOverride = modality
         }
 
-        if typedContextWindow != entry.baseModel.contextWindow {
-            newOverrides.contextWindow = typedContextWindow
-        }
+        // Filled → record it, even when equal to the current auto value. Empty → nil,
+        // which is the documented way back to auto-detection.
+        newOverrides.contextWindow = typedContextWindow
 
-        if supportsThinking != (entry.baseModel.supportsReasoning ?? false) {
+        let baselineThinking = entry.model.supportsReasoning ?? false
+        if supportsThinking != baselineThinking || entry.overrides.supportsReasoning != nil {
             newOverrides.supportsReasoning = supportsThinking
         }
 

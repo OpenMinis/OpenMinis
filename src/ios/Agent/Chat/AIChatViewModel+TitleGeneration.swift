@@ -36,6 +36,9 @@ extension AIChatViewModel {
     /// Retries up to 3 times across agent loop iterations if the title is still missing.
     /// Skips if a generation request is already in-flight to avoid wasting tokens.
     func generateSessionTitleIfNeeded(toolEntries: [(name: String, args: [String: Any])] = []) {
+        // [T-p1-delegate-task] A helper session keeps its "Agent · <title>"
+        // name; an auto-generated title would also cost an extra model call.
+        guard helperConfig == nil else { return }
         guard let sessionId, titleGenAttempts < 3, !isTitleGenerating else { return }
 
         let userMessages = messages.filter { $0.role == .user }
@@ -95,9 +98,23 @@ extension AIChatViewModel {
 
         let attempt = titleGenAttempts
         let subEntry = resolveSubEntry()
+        // [T-ios-switch-model-ghost-retry] Snapshot the generation token. Every
+        // attempt below re-checks it against the live value, so a model switch
+        // (which bumps it) stops this Task instead of letting it keep calling
+        // the model the user just moved away from.
+        let genEpoch = titleGenEpoch
         logger.info("[TitleGen] Starting title generation attempt \(attempt)/3 for session \(sessionId ?? "nil"), subEntry: \(subEntry?.model.id ?? "nil")")
-        Task { [weak self, sessionId, subEntry, firstUserRaw, summary] in
+        Task { [weak self, sessionId, subEntry, firstUserRaw, summary, genEpoch] in
             do {
+                /// True once a model switch has superseded this Task.
+                @MainActor func superseded() -> Bool {
+                    guard let self else { return true }
+                    return self.titleGenEpoch != genEpoch
+                }
+                if await superseded() {
+                    logger.info("[TitleGen] attempt \(attempt) abandoned before start — model changed")
+                    return
+                }
                 // If title already exists (e.g. set by a previous async Task), stop trying
                 if let session = await ChatStore.shared.getSession(sessionId), session.title != nil {
                     await MainActor.run {
@@ -112,33 +129,83 @@ extension AIChatViewModel {
                 // folder question into THIS call — no second round-trip. With
                 // the toggle off, or with no folders to offer, the prompt and
                 // schema are byte-identical to the title-only form.
-                let autoGroup = UserDefaults.standard.bool(forKey: "autoGroupingEnabled")
-                var folderNames: [String] = []
-                var folderContext: [String] = []
-                if autoGroup {
-                    var seen = Set<String>()
-                    for f in await ChatStore.shared.listFolders() where seen.insert(f.name.lowercased()).inserted {
-                        folderNames.append(f.name)
-                        // "name — one-sentence description" when the group has
-                        // one; the description exists precisely to sharpen
-                        // this judgment.
-                        if let d = f.desc, !d.isEmpty {
-                            folderContext.append("\"\(f.name)\" — \(d)")
+                // [T-titlegen-folder-dedup] Shared with regenerate; a
+                // first-generation session is unfiled by definition, so
+                // requireUnfiled is a no-op safety here, not a behavior change.
+                let folderOffer = await Self.buildFolderOfferContext(
+                    sessionId: sessionId, requireUnfiled: true)
+                let folderNames = folderOffer.folderNames
+                let folderContext = folderOffer.folderContext
+                // [T-titlegen-retry-not-retrying] The "N/3" in the logs used to
+                // be a fiction: ONE model was called ONCE, any failure applied
+                // the first-user-message fallback immediately, and the fallback
+                // title then blocked every later attempt via the title-exists
+                // guard above — a single transient 429 froze "title = prompt
+                // text" permanently. Manual regenerate always worked because it
+                // walks regenerateTitleCandidates; do the same here: up to 3
+                // candidate models (session sub → session primary → other
+                // eligible entries), short backoff between tries, and the
+                // fallback only after ALL of them fail.
+                var candidates = await Self.regenerateTitleCandidates(sessionId: sessionId)
+                if candidates.isEmpty, let subEntry { candidates = [subEntry] }
+                // [T-titlegen-group-order] Candidates now include the FULL
+                // bound group in router order (A→B→C…) before cross-tier
+                // degradation; cap at 6 so a typical 6-member sub group can be
+                // exhausted before the first-message fallback, without letting
+                // a huge model pool spin forever.
+                let tries = Array(candidates.prefix(6))
+                var trimmed = ""
+                var category: String? = nil
+                var folderName: String? = nil
+                for (idx, entry) in tries.enumerated() {
+                    // [T-ios-switch-model-ghost-retry] Re-check before EVERY
+                    // candidate, not just at entry: the 1.5s pause below is
+                    // exactly the window in which the user switches model, and
+                    // `tries` was resolved from the OLD binding.
+                    if await superseded() {
+                        logger.info("[TitleGen] attempt \(attempt) abandoned at candidate \(idx + 1)/\(tries.count) — model changed")
+                        return
+                    }
+                    do {
+                        let result = try await Self.callSubModelForTitle(
+                            conversationSummary: summary,
+                            subEntry: entry,
+                            folderNames: folderNames,
+                            folderContext: folderContext,
+                            // [T-opencode-dedicated-channel] Title generation is
+                            // this conversation's traffic too — an OpenCode
+                            // instance 400s a request without the session header.
+                            sessionId: sessionId
+                        )
+                        let t = result.0.trimmingCharacters(in: .whitespacesAndNewlines)
+                            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+                        if t.isEmpty {
+                            logger.error("[TitleGen] FAILED attempt \(idx + 1)/\(tries.count) — model=\(entry.model.id) reason=empty-response (raw: \"\(result.0.prefix(80))\")")
                         } else {
-                            folderContext.append("\"\(f.name)\"")
+                            trimmed = t
+                            category = result.1
+                            folderName = result.2
+                            break
                         }
+                    } catch {
+                        let reason: String
+                        if let urlErr = error as? URLError {
+                            reason = urlErr.code == .timedOut ? "timeout" : "request-error(\(urlErr.code.rawValue))"
+                        } else if let llmErr = error as? LLMError {
+                            reason = "llm-error(\(llmErr.errorDescription ?? "unknown"))"
+                        } else {
+                            reason = "error(\(error.localizedDescription))"
+                        }
+                        logger.error("[TitleGen] FAILED attempt \(idx + 1)/\(tries.count) — model=\(entry.model.id) reason=\(reason)")
+                    }
+                    // Rate limits recover in seconds and the next candidate is
+                    // usually a different provider — a short pause is enough.
+                    if idx + 1 < tries.count {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
                     }
                 }
-                let (title, category, folderName) = try await Self.callSubModelForTitle(
-                    conversationSummary: summary,
-                    subEntry: subEntry,
-                    folderNames: folderNames,
-                    folderContext: folderContext
-                )
-                let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
                 guard !trimmed.isEmpty else {
-                    logger.error("[TitleGen] FAILED attempt \(attempt)/3 — reason=empty-response (model returned no usable title after trimming, raw: \"\(title.prefix(80))\")")
+                    logger.error("[TitleGen] All \(tries.count) candidate model(s) failed — applying first-message fallback")
                     await Self.applyFallbackTitle(sessionId: sessionId, firstUserRaw: firstUserRaw, attempt: attempt)
                     await MainActor.run {
                         self?.titleGenAttempts = 3
@@ -148,18 +215,10 @@ extension AIChatViewModel {
                 }
                 await ChatStore.shared.updateSessionTitle(sessionId, title: trimmed, category: category)
                 // Folder assignment is best-effort and strictly subordinate to
-                // the title: a name that resolves to nothing is silently
-                // dropped (never create a folder from a model's answer), and
-                // setFolderIfUnfiled means a hand-filed session is never
-                // overridden by the model's guess.
-                if let folderName, !folderName.isEmpty {
-                    if let folder = await ChatStore.shared.findFolderByName(folderName) {
-                        let applied = await ChatStore.shared.setFolderIfUnfiled(folder.id, forSession: sessionId)
-                        logger.info("[TitleGen] Auto-group: '\(folderName)' -> \(folder.id.prefix(8)) applied=\(applied)")
-                    } else {
-                        logger.info("[TitleGen] Auto-group: model offered '\(folderName)' but no folder matches — leaving ungrouped")
-                    }
-                }
+                // the title. [T-titlegen-folder-dedup]
+                await Self.applyFolderSuggestionIfOffered(
+                    folderName: folderName, offering: folderOffer.offering,
+                    sessionId: sessionId, logTag: "Auto-group")
                 await MainActor.run {
                     self?.titleGenAttempts = 3
                     self?.isTitleGenerating = false
@@ -186,6 +245,56 @@ extension AIChatViewModel {
                     self?.isTitleGenerating = false
                 }
             }
+        }
+    }
+
+    // MARK: - [T-titlegen-folder-dedup] Shared folder-suggestion flow
+
+    /// Single source of truth for the folder-OFFER side, shared by every
+    /// title-generation entry point (auto after first turn, manual
+    /// regenerate, any future one): reads the auto-grouping toggle, applies
+    /// the unfiled requirement, and formats the deduped
+    /// `"name — description"` context lines. Two hand-copied versions of
+    /// this had already drifted apart in shape — do not inline a third.
+    ///
+    /// `requireUnfiled` also skips asking the model for a folder at all when
+    /// the session is filed: the answer could never be applied
+    /// (setFolderIfUnfiled's `WHERE folder_id IS NULL` guard), so offering
+    /// would only waste an output slot.
+    static func buildFolderOfferContext(sessionId: String, requireUnfiled: Bool) async
+        -> (folderNames: [String], folderContext: [String], offering: Bool) {
+        guard UserDefaults.standard.bool(forKey: "autoGroupingEnabled") else { return ([], [], false) }
+        if requireUnfiled {
+            guard let session = await ChatStore.shared.getSession(sessionId),
+                  session.folderId == nil else { return ([], [], false) }
+        }
+        var names: [String] = []
+        var context: [String] = []
+        var seen = Set<String>()
+        for f in await ChatStore.shared.listFolders() where seen.insert(f.name.lowercased()).inserted {
+            names.append(f.name)
+            if let d = f.desc, !d.isEmpty {
+                context.append("\"\(f.name)\" — \(d)")
+            } else {
+                context.append("\"\(f.name)\"")
+            }
+        }
+        return (names, context, true)
+    }
+
+    /// Single source of truth for the folder-APPLY side: existing folders
+    /// only (never create one from a model's answer), unfiled sessions only
+    /// (SQL-guarded), silent skip on no match. `logTag` is the only per-path
+    /// difference — e.g. "Auto-group" vs "Auto-group (regenerate)".
+    static func applyFolderSuggestionIfOffered(
+        folderName: String?, offering: Bool, sessionId: String, logTag: String
+    ) async {
+        guard offering, let folderName, !folderName.isEmpty else { return }
+        if let folder = await ChatStore.shared.findFolderByName(folderName) {
+            let applied = await ChatStore.shared.setFolderIfUnfiled(folder.id, forSession: sessionId)
+            logger.info("[TitleGen] \(logTag): '\(folderName)' -> \(folder.id.prefix(8)) applied=\(applied)")
+        } else {
+            logger.info("[TitleGen] \(logTag): model offered '\(folderName)' but no folder matches — leaving ungrouped")
         }
     }
 
@@ -280,14 +389,23 @@ extension AIChatViewModel {
         // alternates — beyond that the cause is systemic, not per-model.
         let maxAttempts = 5
         var lastError: Error? = nil
+        // [T-titlegen-regenerate-folder] Folder suggestion under the same
+        // rules as the auto path — shared helper, see
+        // [T-titlegen-folder-dedup]. Filed sessions get no folder offer at
+        // all; setFolderIfUnfiled's `WHERE folder_id IS NULL` remains the
+        // authoritative guard.
+        let folderOffer = await buildFolderOfferContext(
+            sessionId: sessionId, requireUnfiled: true)
         for (idx, entry) in candidates.prefix(maxAttempts).enumerated() {
             do {
-                // Regenerate deliberately IGNORES the folder slot: the user's
-                // intent at this entry point is "give me a better title", and
-                // silently re-filing the session would be a surprise move.
-                let (title, category, _) = try await callSubModelForTitle(
+                let (title, category, folderName) = try await callSubModelForTitle(
                     conversationSummary: summary,
-                    subEntry: entry
+                    subEntry: entry,
+                    folderNames: folderOffer.folderNames,
+                    folderContext: folderOffer.folderContext,
+                    // [T-opencode-dedicated-channel] Same as the auto path: a
+                    // regenerate is still this conversation's traffic.
+                    sessionId: sessionId
                 )
                 let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
@@ -296,6 +414,10 @@ extension AIChatViewModel {
                     continue
                 }
                 await ChatStore.shared.updateSessionTitle(sessionId, title: trimmed, category: category)
+                // [T-titlegen-folder-dedup] Shared conservative application.
+                await applyFolderSuggestionIfOffered(
+                    folderName: folderName, offering: folderOffer.offering,
+                    sessionId: sessionId, logTag: "Auto-group (regenerate)")
                 if idx > 0 {
                     logger.info("[TitleGen] regenerate succeeded on fallback candidate \(idx + 1) (\(entry.model.id))")
                 }
@@ -467,11 +589,17 @@ extension AIChatViewModel {
     /// (a sub-model has no basis for reasoning about opaque ids; the caller
     /// resolves the name locally, where duplicate names tie-break by most
     /// recent member activity).
+    /// - Parameter sessionId: [T-opencode-dedicated-channel] the conversation
+    ///   this title is being generated FOR. Title generation is a sub-task, but
+    ///   it is still traffic belonging to that conversation, and an OpenCode
+    ///   instance rejects any request without `x-opencode-session` — so it must
+    ///   carry the same id as the turns around it rather than going out bare.
     private static func callSubModelForTitle(
         conversationSummary: String,
         subEntry: ModelEntry? = nil,
         folderNames: [String] = [],
-        folderContext: [String] = []
+        folderContext: [String] = [],
+        sessionId: String? = nil
     ) async throws -> (String, String?, String?) {
         guard let entry = subEntry else {
             throw NSError(domain: "TitleGen", code: -1, userInfo: [NSLocalizedDescriptionKey: "No sub model available"])
@@ -488,7 +616,7 @@ extension AIChatViewModel {
         // `injectThinkingParams` and emits `enable_thinking: false` /
         // `reasoning_effort: "none"` / `thinking_budget: 0` per model
         // family.
-        let provider = await AIChatViewModel.makeAgentProvider(for: entry)
+        let provider = await AIChatViewModel.makeAgentProvider(for: entry, sessionId: sessionId)
         logger.info("[TitleGen] Using provider: \(provider.name), model: \(entry.model.id), thinkingLevel=.off")
 
         let langInjection = titleLanguageInjection()

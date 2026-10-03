@@ -70,9 +70,12 @@ class ScheduledTasksViewModel(private val appContext: Context) : ViewModel() {
 
     suspend fun listSessions(limit: Int = 100): List<SessionOption> = withContext(Dispatchers.IO) {
         if (!ready()) return@withContext emptyList()
+        // [T-child-session-leak] A scheduled task's target picker is a
+        // user-facing session list: hide agent child sessions.
+        val childIds = app.chatRepository.dao.listSessions().filter { it.isChild }.map { it.id }.toSet()
         app.chatRepository.querySessionsMeta(
             sessionIds = null, keywords = null, limit = limit, startMs = null, endMs = null,
-        ).map {
+        ).filter { it.id !in childIds }.map {
             SessionOption(it.id, it.title?.ifBlank { null } ?: "Untitled", it.lastActive)
         }
     }

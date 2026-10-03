@@ -106,7 +106,41 @@ struct TextAttributes: OptionSet, Equatable {
 
 /// A single character cell in the terminal grid
 struct TerminalCell: Equatable {
-    var character: Character = " "
+
+    /// [T-terminal-glyph-key-no-character] A cell's Unicode scalars, captured
+    /// once when the cell is written and stored as plain integers.
+    ///
+    /// The renderer needs these on every redraw to key its glyph-advance
+    /// cache. Deriving them there — `character.unicodeScalars.map(\.value)` —
+    /// meant walking String storage per glyph per frame, which is where
+    /// 1.14(16) trapped inside the Swift runtime. Computing them at write
+    /// time does the work once, on bytes the ANSI parser has just validated,
+    /// and hands the hot path nothing but integers.
+    ///
+    /// `first` is inline because virtually every cell is a single scalar;
+    /// `rest` is non-empty only for a combining sequence.
+    struct Glyph: Equatable {
+        var first: UInt32
+        var rest: [UInt32]
+
+        init(_ character: Character) {
+            var it = character.unicodeScalars.makeIterator()
+            // A Character is never empty, but read defensively rather than
+            // force-unwrap: this runs on every cell written.
+            self.first = it.next()?.value ?? 0x20
+            var tail: [UInt32] = []
+            while let s = it.next() { tail.append(s.value) }
+            self.rest = tail
+        }
+
+        static let blank = Glyph(" ")
+    }
+
+    /// The cell's character. Write it through `setCharacter(_:)` — assigning
+    /// this directly would leave `glyph` stale.
+    private(set) var character: Character = " "
+    /// Scalars for `character`, kept in lockstep by every writer. See `Glyph`.
+    private(set) var glyph: Glyph = .blank
     var foreground: TerminalColor = .default
     var background: TerminalColor = .default
     var attributes: TextAttributes = []
@@ -115,6 +149,32 @@ struct TerminalCell: Equatable {
 
     /// Whether this cell is part of a wide character (the trailing half)
     var isWideTrailer: Bool = false
+
+    /// Explicit rather than memberwise, so `glyph` cannot be left behind.
+    /// A `didSet` on `character` would not have covered this: didSet does not
+    /// fire from an initializer, so every memberwise construction — which is
+    /// how `CursorStyle.makeCell` builds every printed cell — would have
+    /// stored a blank glyph and mis-measured the whole terminal.
+    init(character: Character = " ",
+         foreground: TerminalColor = .default,
+         background: TerminalColor = .default,
+         attributes: TextAttributes = [],
+         width: UInt8 = 1,
+         isWideTrailer: Bool = false) {
+        self.character = character
+        self.glyph = Glyph(character)
+        self.foreground = foreground
+        self.background = background
+        self.attributes = attributes
+        self.width = width
+        self.isWideTrailer = isWideTrailer
+    }
+
+    /// Replace the character, recomputing `glyph` with it.
+    mutating func setCharacter(_ c: Character) {
+        character = c
+        glyph = Glyph(c)
+    }
 
     static let blank = TerminalCell()
 }

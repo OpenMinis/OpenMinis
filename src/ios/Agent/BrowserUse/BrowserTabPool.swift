@@ -251,13 +251,98 @@ final class BrowserTabPool: ObservableObject {
     private var tabSerialChains: [Int: (token: UInt64, task: Task<Void, Never>)] = [:]
     private var nextSerialToken: UInt64 = 0
 
+    /// [T-browser-cli-timeout-reclaim] OpenMinis#245. The action currently
+    /// holding each tab's serial slot, as a trigger that ends its
+    /// `withDeadOnTimeout` race early. Firing it runs the ordinary dead-tab
+    /// path — op task cancelled, tab rebuilt, slot released by the caller's
+    /// `defer` — so an external caller (the CLI giving up at 90s) reclaims the
+    /// tab without waiting out the 300s ceiling. Tagged with a token so a
+    /// finished action only removes its own entry.
+    private var inFlightAborts: [Int: (token: UInt64, abort: () -> Void)] = [:]
+
     /// Max time a browser_use call waits to acquire a tab id's serial slot, i.e.
     /// for the in-flight operation on that SAME tab to finish. This is the
     /// LOCK-WAIT timeout ONLY — it is deliberately separate from the per-action
     /// browser timeout (which is unchanged and applies AFTER the slot is held).
-    private static let serialWaitTimeout: TimeInterval = 60
+    /// Down from 60 s: with per-agent tab ownership the only thing that can
+    /// be ahead in a tab's queue is the same caller's previous action.
+    private static let serialWaitTimeout: TimeInterval = 20
 
     @Published var tabs: [Tab] = []
+    // [T-p2-shared-workspace] One pool can now serve a parent agent and its
+    // helpers. Each agent (`owner` = its session id) keeps its own default
+    // tab, so an implicit-tab action from one agent never lands on the tab
+    // the other is driving; explicit `tab_id` still reaches any tab.
+    /// tab id → owner session id (the agent that opened / last drove it).
+    private(set) var tabOwner: [Int: String] = [:]
+    /// owner session id → the tab it acted on most recently.
+    private var lastTabByOwner: [String: Int] = [:]
+
+    /// The tab an implicit-tab action from `owner` should default to.
+    // MARK: Ownership (T-browser-agent-isolation)
+    //
+    // One pool is shared by a chat and every agent it delegates to. Tabs are
+    // tagged with the session id that created them; the chat itself and a
+    // human taking over (`owner == nil`) may use any tab, an AGENT may only
+    // use its own. Agents get a small quota, never see other owners' tabs in
+    // list_tabs, never move the chat's selected tab, and give their tabs back
+    // when their job ends. This is what stops three parallel research agents
+    // from navigating each other's pages away (seen on device 2026-09-04).
+
+    /// Tabs an agent may open at once; the chat itself keeps `maxTabs`.
+    static let agentTabQuota = 2
+    /// Absolute pool ceiling while agents run (the registry's global cap and
+    /// memory-pressure reclaim still apply on top).
+    static let maxTabsWithAgents = 6
+
+    /// The chat that owns this pool, or a human (nil) — full access.
+    private func isPrivileged(_ owner: String?) -> Bool {
+        owner == nil || owner == sessionId
+    }
+
+    private func agentOwners() -> Set<String> {
+        Set(tabOwner.values).subtracting([sessionId ?? ""])
+    }
+
+    /// Pool ceiling right now: 3 alone, +2 per active agent, capped at 6.
+    func effectiveMaxTabs(requestingOwner: String?) -> Int {
+        var owners = agentOwners()
+        if let o = requestingOwner, !isPrivileged(o) { owners.insert(o) }
+        return owners.isEmpty ? Self.maxTabs : min(Self.maxTabs + Self.agentTabQuota * owners.count, Self.maxTabsWithAgents)
+    }
+
+    /// True when `owner` (an agent) may act on `tabId`.
+    private func mayUse(tabId: Int, owner: String?) -> Bool {
+        if isPrivileged(owner) { return true }
+        return tabOwner[tabId] == owner
+    }
+
+    private func notYourTabError(_ tabId: Int, owner: String) -> BrowserActionResult {
+        let mine = tabIds(ownedBy: owner)
+        let hint = mine.isEmpty ? "open one with action: new_tab" : "use your own tab id(s) \(mine.map(String.init).joined(separator: ", ")) or action: new_tab"
+        return .error("Tab \(tabId) belongs to another agent or to the main chat and cannot be used from here — \(hint). list_tabs shows only your tabs.")
+    }
+
+    /// Close every tab an agent owns and forget its bookkeeping. Called when
+    /// the agent's job ends so the slots go back to the chat and to other
+    /// agents. Idempotent.
+    func releaseTabs(owner: String) {
+        let mine = tabIds(ownedBy: owner)
+        for id in mine { _ = closeTab(id: id) }
+        lastTabByOwner.removeValue(forKey: owner)
+        if !mine.isEmpty { logger.info("[agent] released \(mine.count) tab(s) of owner \(owner.prefix(8))") }
+    }
+
+    private func preferredTab(for owner: String?) -> Int? {
+        guard let owner, let id = lastTabByOwner[owner], tabs.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    /// Tabs currently attributed to `owner`.
+    func tabIds(ownedBy owner: String) -> [Int] {
+        tabOwner.filter { $0.value == owner }.map(\.key).sorted()
+    }
+
     @Published var selectedTabId: Int = 0 {
         didSet { rebindLoadingObservation() }
     }
@@ -421,9 +506,18 @@ final class BrowserTabPool: ObservableObject {
     }
 
     /// Create a new tab (up to maxTabs). Returns a result with the new tab ID or an error.
-    func newTab(url: String? = nil) -> BrowserActionResult {
-        guard tabs.count < Self.maxTabs else {
-            return .error("Maximum of \(Self.maxTabs) tabs reached. Close a tab first with close_tab.")
+    func newTab(url: String? = nil, owner: String? = nil) -> BrowserActionResult {
+        if let owner, !isPrivileged(owner) {
+            let mine = tabIds(ownedBy: owner)
+            if mine.count >= Self.agentTabQuota {
+                return .error("You already have \(mine.count) tab(s) (limit \(Self.agentTabQuota) per agent). Reuse tab id(s) \(mine.map(String.init).joined(separator: ", ")) — navigate them to the next page — or close_tab one of yours first.")
+            }
+        }
+        let ceiling = effectiveMaxTabs(requestingOwner: owner)
+        guard tabs.count < ceiling else {
+            return isPrivileged(owner)
+                ? .error("Maximum of \(ceiling) tabs reached. Close a tab first with close_tab.")
+                : .error("The browser is at its tab limit right now (\(ceiling)). Reuse one of your own tabs, or close_tab one of yours and retry.")
         }
         // Try to make room globally. Unlike acquireTab, newTab is an
         // explicit "open another" — falling back to "load in current tab"
@@ -436,6 +530,7 @@ final class BrowserTabPool: ObservableObject {
         let tab = Tab(id: nextId, manager: manager, inUse: true)
         tabs.append(tab)
         selectedTabId = nextId
+        if let owner { tabOwner[nextId] = owner; lastTabByOwner[owner] = nextId }
         // If the agent supplied a URL with new_tab, load it. Previously the
         // url was silently dropped (the tool said "Opened new tab 0" but the
         // tab was blank) — restoreSavedURL only fires for tabs that had a
@@ -517,6 +612,8 @@ final class BrowserTabPool: ObservableObject {
         // Don't save URL on explicit close — user intentionally closed it
         savedURLs.removeValue(forKey: id)
         tabs.remove(at: idx)
+        tabOwner.removeValue(forKey: id)
+        for (o, t) in lastTabByOwner where t == id { lastTabByOwner.removeValue(forKey: o) }
         logger.info("Closed tab \(id), remaining: \(self.tabs.count)")
 
         // If the closed tab was selected, switch to another
@@ -529,16 +626,24 @@ final class BrowserTabPool: ObservableObject {
     }
 
     /// List all open tabs with their URLs and titles.
-    func listTabs() -> BrowserActionResult {
-        if tabs.isEmpty {
-            return BrowserActionResult(text: "No tabs open.")
+    func listTabs(owner: String? = nil) -> BrowserActionResult {
+        // An agent sees only its own tabs; the chat / a human sees everything
+        // with each agent's tabs tagged.
+        let visible = isPrivileged(owner) ? tabs : tabs.filter { tabOwner[$0.id] == owner }
+        if visible.isEmpty {
+            return BrowserActionResult(text: isPrivileged(owner)
+                ? "No tabs open."
+                : "You have no tabs yet (limit \(Self.agentTabQuota) per agent). Open one with action: new_tab, or just navigate.")
         }
-        var lines: [String] = ["Open tabs:"]
-        for tab in tabs {
+        var lines: [String] = [isPrivileged(owner) ? "Open tabs:" : "Your tabs (\(visible.count)/\(Self.agentTabQuota)):"]
+        for tab in visible {
             let url = tab.manager.currentURL.isEmpty ? "(blank)" : tab.manager.currentURL
             let title = tab.manager.pageTitle.isEmpty ? "(untitled)" : tab.manager.pageTitle
-            let marker = tab.id == selectedTabId ? " *" : ""
-            lines.append("  Tab \(tab.id): \(title) — \(url)\(marker)")
+            let marker = isPrivileged(owner) && tab.id == selectedTabId ? " *" : ""
+            let ownerTag = isPrivileged(owner)
+                ? (tabOwner[tab.id].flatMap { $0 == sessionId ? nil : " [agent \($0.prefix(8))]" } ?? "")
+                : ""
+            lines.append("  Tab \(tab.id): \(title) — \(url)\(marker)\(ownerTag)")
         }
         return BrowserActionResult(text: lines.joined(separator: "\n"))
     }
@@ -684,7 +789,8 @@ final class BrowserTabPool: ObservableObject {
     /// someone adds another `return`.
     func execute(
         action input: BrowserActionInput,
-        singleTab: Bool = false
+        singleTab: Bool = false,
+        owner: String? = nil
     ) async throws -> BrowserActionResult {
         let diagId = BrowserResourceMonitor.shared.actionWillStart(
             action: input.action.rawValue,
@@ -692,7 +798,7 @@ final class BrowserTabPool: ObservableObject {
             tabId: input.tabId
         )
         do {
-            let result = try await executeInner(action: input, singleTab: singleTab)
+            let result = try await executeInner(action: input, singleTab: singleTab, owner: owner)
             BrowserResourceMonitor.shared.actionDidFinish(
                 diagId,
                 success: result.success,
@@ -714,9 +820,12 @@ final class BrowserTabPool: ObservableObject {
 
     private func executeInner(
         action input: BrowserActionInput,
-        singleTab: Bool
+        singleTab: Bool,
+        owner: String?
     ) async throws -> BrowserActionResult {
         let poolStart = CFAbsoluteTimeGetCurrent()
+        // The tab an implicit (no tab_id) action from this agent falls back to.
+        let implicitDefault = preferredTab(for: owner) ?? selectedTabId
         logger.info("[PoolTiming] enter action=\(input.action.rawValue) tab_id=\(input.tabId.map(String.init) ?? "nil") singleTab=\(singleTab)")
 
         // Handle tab management actions
@@ -725,12 +834,13 @@ final class BrowserTabPool: ObservableObject {
             // Pass input.url through so the new tab actually loads it — Android
             // already does this (BrowserTabPool.kt NEW_TAB branch).
             // [T-ios-new-tab-url-dropped]
-            return newTab(url: input.url)
+            return newTab(url: input.url, owner: owner)
         case .closeTab:
-            let tabId = input.tabId ?? selectedTabId
+            let tabId = input.tabId ?? implicitDefault
+            if let owner, !mayUse(tabId: tabId, owner: owner) { return notYourTabError(tabId, owner: owner) }
             return closeTab(id: tabId)
         case .listTabs:
-            return listTabs()
+            return listTabs(owner: owner)
         default:
             break
         }
@@ -765,19 +875,35 @@ final class BrowserTabPool: ObservableObject {
         // still shows its old site. [T-browser-tab-reuse-silent-switch]
         var reusedTabSwitch: (tabId: Int, oldURL: String)? = nil
         if let requestedId = input.tabId, tabs.contains(where: { $0.id == requestedId }) {
+            if let owner, !mayUse(tabId: requestedId, owner: owner) {
+                return notYourTabError(requestedId, owner: owner)
+            }
             targetId = requestedId
+        } else if let owner, !isPrivileged(owner), !explicitTabId {
+            // An agent's implicit target: its own last tab, else a free tab it
+            // owns, else a fresh tab within its quota — NEVER the chat's
+            // selected tab or another agent's.
+            if let own = preferredTab(for: owner), mayUse(tabId: own, owner: owner) {
+                targetId = own
+            } else if let free = tabs.first(where: { !$0.inUse && tabOwner[$0.id] == owner }) {
+                targetId = free.id
+            } else {
+                let created = newTab(url: nil, owner: owner)
+                guard let id = created.tabId else { return created }
+                targetId = id
+            }
         } else if !isOpenPageAction {
             // Read / exec / operate action without a valid explicit tab_id:
             // follow the current tab (selectedTabId) when it exists; otherwise
             // open the default tab. NEVER fan out to a fresh blank tab and
             // never block on a serial slot to acquire one — just target the
             // tab the agent is already looking at.
-            let probe = input.tabId ?? selectedTabId
+            let probe = input.tabId ?? implicitDefault
             if preemptedTabIds.remove(probe) != nil {
                 return .error("Browser tab \(probe) was reclaimed under memory pressure (another session needed the slot). Please retry — the page URL has been saved and will be restored.")
             }
-            targetId = tabs.contains(where: { $0.id == selectedTabId })
-                ? selectedTabId
+            targetId = tabs.contains(where: { $0.id == implicitDefault })
+                ? implicitDefault
                 : ensureDefaultTab()
         } else {
             // Before creating a default tab, surface a one-shot preempt
@@ -802,11 +928,17 @@ final class BrowserTabPool: ObservableObject {
                 // sequence reads the page it just loaded. ensureDefaultTab()
                 // already returns selectedTabId when that tab exists, and
                 // creates tab 0 (selecting it) when the pool is empty.
-                targetId = tabs.contains(where: { $0.id == selectedTabId })
-                    ? selectedTabId
+                targetId = tabs.contains(where: { $0.id == implicitDefault })
+                    ? implicitDefault
                     : ensureDefaultTab()
             } else if !explicitTabId {
-                if let freeTab = tabs.first(where: { !$0.inUse }) {
+                // [T-p2-shared-workspace] Only reuse a tab that is free AND
+                // either unowned or this agent's own: the parent's idle tab
+                // must not be navigated away by a helper's implicit open
+                // (device run 20:57 clobbered example.com with wikipedia).
+                if let freeTab = tabs.first(where: { t in
+                    !t.inUse && (owner == nil || tabOwner[t.id] == nil || tabOwner[t.id] == owner)
+                }) {
                     targetId = freeTab.id
                     // [T-browser-tab-reuse-silent-switch] We're about to REUSE an
                     // idle tab that already holds a page (not a blank fresh tab)
@@ -819,7 +951,7 @@ final class BrowserTabPool: ObservableObject {
                        let newURL = input.url, oldURL != newURL {
                         reusedTabSwitch = (tabId: freeTab.id, oldURL: oldURL)
                     }
-                } else if tabs.count < Self.maxTabs,
+                } else if tabs.count < effectiveMaxTabs(requestingOwner: owner),
                           BrowserTabPoolRegistry.shared.requestSlot(for: self) {
                     let nextId = (tabs.map(\.id).max() ?? -1) + 1
                     let manager = makeManager()
@@ -853,7 +985,11 @@ final class BrowserTabPool: ObservableObject {
         tabs[idx].graceExpiryTask?.cancel()
         tabs[idx].graceExpiryTask = nil
         tabs[idx].lastActivityDate = Date()
-        selectedTabId = targetId
+        if isPrivileged(owner) { selectedTabId = targetId }
+        if let owner {
+            lastTabByOwner[owner] = targetId
+            if tabOwner[targetId] == nil { tabOwner[targetId] = owner }
+        }
         defer {
             if let i = tabs.firstIndex(where: { $0.id == targetId }) {
                 tabs[i].lastActivityDate = Date()
@@ -963,21 +1099,42 @@ final class BrowserTabPool: ObservableObject {
             if let sw = reusedTabSwitch, sw.tabId == targetId, r.success {
                 r.text = "[Note] Reused existing tab \(targetId): it previously showed \(sw.oldURL) and has now been navigated to the new URL. Any earlier content on tab \(targetId) is gone; use tab_id \(targetId) to operate on THIS page.\n" + r.text
             }
+            // [T-ios-js-dialogs-256] If this tab's page tried to open an
+            // alert/confirm/prompt, the agent browser answered it with a
+            // default rather than showing a modal (which would hang an
+            // unattended loop). Surface that here, on the next result for this
+            // tab, so the model can react — otherwise the interception is
+            // invisible and it keeps assuming the page did what it asked.
+            // Prepended so it is read before the result it qualifies; draining
+            // clears the queue, so each dialog is reported exactly once.
+            if let dialogReport = manager.drainInterceptedDialogReport() {
+                r.text = dialogReport + r.text
+            }
             result = Self.stampTabId(r, targetId: targetId)
-        } catch is ActionDeadTimeout {
-            // [T-browser-bg-stuck-diag] The action blew past actionDeadTimeout.
+        } catch let dead as ActionDeadTimeout {
+            // [T-browser-bg-stuck-diag] The action blew past actionDeadTimeout
+            // — or [T-browser-cli-timeout-reclaim] its caller gave up on it
+            // first (`abortedByCaller`) and asked for the tab back.
             // The tab is wedged and unrecoverable in place; drop it and open a
             // fresh one, then tell the model exactly what happened, on which new
             // tab it can continue, and (if known) the URL that hung — so it can
             // decide to retry there, try a different approach, or give up.
             let elapsed = Int(CFAbsoluteTimeGetCurrent() - managerStart)
+            // [T-ios-js-dialogs-256] Drain BEFORE rebuildDeadTab, which destroys
+            // this manager and would take the queue with it. A page that opened
+            // a confirm() and then wedged is precisely the case where knowing
+            // about the dialog explains the wedge, so this is the last chance to
+            // tell the model — losing it here would be a silent, permanent drop.
+            let deadTabDialogReport = manager.drainInterceptedDialogReport()
             let (newId, deadURL) = rebuildDeadTab(oldId: targetId)
-            logger.warning("[PoolTiming] action_DEAD elapsed=\(elapsed)s tab=\(targetId) action=\(input.action.rawValue) → rebuilt as tab \(newId)")
+            logger.warning("[PoolTiming] action_DEAD elapsed=\(elapsed)s tab=\(targetId) action=\(input.action.rawValue) abortedByCaller=\(dead.abortedByCaller) → rebuilt as tab \(newId)")
             let urlPart = deadURL.isEmpty ? "" : " while on \(deadURL)"
-            var msg = "Browser tab \(targetId) became unresponsive: the '\(input.action.rawValue)' action ran for over \(Int(Self.actionDeadTimeout))s without completing\(urlPart) — its web page most likely wedged (an infinite script, a never-completing navigation, or a background-suspended renderer). The tab could not be recovered and was closed. A fresh tab (id \(newId)) has been opened for you. To continue, retry on tab_id \(newId)"
+            let ranFor = dead.abortedByCaller ? elapsed : Int(Self.actionDeadTimeout)
+            var msg = "Browser tab \(targetId) became unresponsive: the '\(input.action.rawValue)' action ran for over \(ranFor)s without completing\(urlPart) — its web page most likely wedged (an infinite script, a never-completing navigation, or a background-suspended renderer). The tab could not be recovered and was closed. A fresh tab (id \(newId)) has been opened for you. To continue, retry on tab_id \(newId)"
             if !deadURL.isEmpty { msg += " (e.g. navigate it to \(deadURL) again, or take a different approach if that page keeps hanging)" }
             msg += "."
-            var r = BrowserActionResult(text: msg, success: false, tabId: newId)
+            var r = BrowserActionResult(text: deadTabDialogReport.map { $0 + msg } ?? msg,
+                                        success: false, tabId: newId)
             r.pageURL = deadURL.isEmpty ? nil : deadURL
             return r
         } catch {
@@ -1008,8 +1165,12 @@ final class BrowserTabPool: ObservableObject {
     static let actionDeadTimeout: TimeInterval = 300
     #endif
 
-    /// Thrown internally by `withDeadOnTimeout` when the wall clock elapses.
-    private struct ActionDeadTimeout: Error {}
+    /// Thrown internally by `withDeadOnTimeout` when the wall clock elapses, or
+    /// when the action is aborted from outside (`abortedByCaller`: the awaiting
+    /// task was cancelled, or `abortAndRebuildTab` fired).
+    private struct ActionDeadTimeout: Error {
+        var abortedByCaller = false
+    }
 
     /// One-shot race arbiter: exactly one of {operation completes, timer fires}
     /// resumes the awaiting continuation; the other's `finish` is dropped. The
@@ -1075,6 +1236,10 @@ final class BrowserTabPool: ObservableObject {
         // one-shot box: whoever resumes first wins, and we DON'T wait for the
         // loser. The wedged operation task is abandoned (it leaks until its
         // WebView is torn down by the tab rebuild, which is exactly what we do).
+        // A caller that has already given up must not start work on the tab:
+        // its cancellation would fire the abort below at once and rebuild a
+        // tab that was never wedged.
+        try Task.checkCancellation()
         let box = RaceBox()
         let opTask = Task {
             do { let r = try await operation(); box.finish(.success(r)) }
@@ -1088,10 +1253,56 @@ final class BrowserTabPool: ObservableObject {
         }
         timer.resume()
         box.onFinish = { timer.cancel(); opTask.cancel() }
-        let raced: BrowserActionResult = try await withCheckedThrowingContinuation { cont in
-            box.attach(cont)
+
+        // [T-browser-cli-timeout-reclaim] Let the action be ended from outside
+        // too — by `abortAndRebuildTab`, or by cancelling the task awaiting us
+        // (the CLI bridge does that when the sandbox's 90s wait expires). The
+        // continuation below ignores cancellation on its own, so without this a
+        // caller that already gave up kept the tab's serial slot for the full
+        // `deadline`, and every follow-up command on that tab timed out on it.
+        let abortToken = nextSerialToken
+        nextSerialToken &+= 1
+        let abort: @Sendable () -> Void = {
+            logger.warning("[DeadTimeout] ABORTED by caller tab=\(targetId) action=\(action)")
+            box.finish(.failure(ActionDeadTimeout(abortedByCaller: true)))
+        }
+        inFlightAborts[targetId] = (abortToken, abort)
+        defer {
+            if inFlightAborts[targetId]?.token == abortToken {
+                inFlightAborts.removeValue(forKey: targetId)
+            }
+        }
+
+        let raced: BrowserActionResult = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                box.attach(cont)
+            }
+        } onCancel: {
+            abort()
         }
         return raced
+    }
+
+    /// [T-browser-cli-timeout-reclaim] OpenMinis#245. Abort the action holding
+    /// `tabId`'s serial slot and replace the tab with a fresh WebView.
+    ///
+    /// Everything runs through the action's own dead-tab path: its op task is
+    /// cancelled, `rebuildDeadTab` swaps in a fresh tab, and the slot is
+    /// released by `executeInner`'s `defer`. That way the slot is never freed
+    /// while the old action still thinks it holds it, and the tab is never
+    /// rebuilt twice.
+    ///
+    /// Returns false when nothing is running on `tabId`. The tab is then left
+    /// alone: nothing shows it is wedged, and rebuilding it would throw away a
+    /// working page.
+    @discardableResult
+    func abortAndRebuildTab(tabId: Int) -> Bool {
+        guard let entry = inFlightAborts[tabId] else {
+            logger.info("[DeadTimeout] abortAndRebuildTab tab=\(tabId): no action in flight — tab left as is")
+            return false
+        }
+        entry.abort()
+        return true
     }
 
     /// Drop a wedged tab and open a fresh replacement. Returns the new tab id.
@@ -1436,7 +1647,7 @@ final class BrowserTabPool: ObservableObject {
         var sessionViewportHeight: Int?
     }
 
-    private static func storeURL(for sessionId: String) -> URL {
+    nonisolated private static func storeURL(for sessionId: String) -> URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("MinisChat/browser_tabs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1510,7 +1721,7 @@ final class BrowserTabPool: ObservableObject {
     }
 
     /// Delete persisted tab data for a session (called on session delete).
-    static func deletePersistedData(for sessionId: String) {
+    nonisolated static func deletePersistedData(for sessionId: String) {
         let url = storeURL(for: sessionId)
         try? FileManager.default.removeItem(at: url)
     }

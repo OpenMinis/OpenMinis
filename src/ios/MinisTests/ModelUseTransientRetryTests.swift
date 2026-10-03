@@ -64,7 +64,7 @@ final class ModelUseTransientRetryTests: XCTestCase {
                 throw self.transient(attempts)
             }
             XCTFail("expected transientError after exhausting retries")
-        } catch let Minis.LLMError.transientError(message) {
+        } catch let Minis.LLMError.transientError(message, _) {
             XCTAssertTrue(message.contains("attempt 6"), "should surface the LAST attempt's error: \(message)")
         } catch {
             XCTFail("unexpected error type: \(error)")

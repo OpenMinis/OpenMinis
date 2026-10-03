@@ -247,7 +247,7 @@ class TerminalNativeView @JvmOverloads constructor(
         if (col !in line.indices) return col to col
 
         fun isWordChar(c: Int): Boolean {
-            // Letters, digits, and common URL punctuation — matches Termux.
+            // Letters, digits, and common URL punctuation.
             val ch = c.toChar()
             return ch.isLetterOrDigit() || ch == '_' || ch == '-' || ch == '.' ||
                 ch == '/' || ch == ':' || ch == '?' || ch == '&' || ch == '=' ||

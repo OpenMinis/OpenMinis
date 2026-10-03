@@ -20,9 +20,16 @@ internal class LazyReadAloudPlayer(context: Context) {
     @Volatile
     private var player: ReadAloudPlayer? = null
 
-    /** Speak [text] as one utterance, stopping anything already in flight. */
+    /**
+     * Speak [text] sentence by sentence, stopping anything already in flight.
+     *
+     * Only the explicit long-press actions call this, so read-replies is
+     * switched on (and un-muted) first — otherwise, with the default settings,
+     * the player drops the text silently. [T-android-readaloud-menu-enable]
+     */
     fun speak(text: String) {
         if (text.isBlank()) return
+        com.openminis.app.speech.VoiceOutputState.activateForExplicitReadAloud()
         val p = player ?: synchronized(this) {
             player ?: ReadAloudPlayer(appContext).also { player = it }
         }

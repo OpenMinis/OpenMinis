@@ -15,7 +15,7 @@ import java.util.Locale
  * the app-level locale to every Activity/Service Resources, including the
  * framework strings the system TextView uses to label its selection
  * `ActionMode` ("Cut" / "Copy" / "Paste" / "Select All"). On Android 12
- * and earlier — e.g. the MIUI 13 device that filed Telegram msg 31956 —
+ * and earlier — e.g. a MIUI 13 device from a field report —
  * there is no such system plumbing, so the text-selection ActionMode
  * stays in the device's system language regardless of the user's pick in
  * Settings → Appearance → Language.

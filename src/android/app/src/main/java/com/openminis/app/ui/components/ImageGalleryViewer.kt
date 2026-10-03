@@ -309,12 +309,10 @@ fun ImageGalleryViewer(
                                 label = stringResource(R.string.image_action_save),
                                 onClick = {
                                     scope.launch {
-                                        val bmp = loadBitmap(context, currentItem.model)
-                                        if (bmp != null) {
-                                            val saved = saveToGallery(context, bmp)
-                                            val msg = if (saved) savedToAlbumMsg else saveFailedMsg
-                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        }
+                                        // [T-image-save-original] The original file, not a decode.
+                                        val saved = saveImageToGallery(context, currentItem.model)
+                                        val msg = if (saved) savedToAlbumMsg else saveFailedMsg
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                     }
                                 },
                             )

@@ -1,4 +1,5 @@
 import XCTest
+@testable import Minis
 
 /// [T-anthropic-cli-version] Unit coverage for the dynamic `claude-cli`
 /// fingerprint resolution that replaced the hardcoded `2.1.195` constant.
@@ -98,5 +99,35 @@ final class ClaudeCLIVersionTests: XCTestCase {
         XCTAssertTrue(ua.hasPrefix("claude-cli/"))
         XCTAssertTrue(ua.hasSuffix(" (external, cli)"))
         XCTAssertFalse(ua.contains("2.1.195"), "the stale pin must not come back")
+    }
+
+    // MARK: - Wire: one source of truth with ClaudeCLIMimicry
+
+    func testFallbackIsTheMimicryFloor() {
+        // The floor lives once, in ClaudeCLIMimicry.headers; the resolver must
+        // read it, not carry a second constant that can drift.
+        XCTAssertEqual(ClaudeCLIMimicry.headers["User-Agent"],
+                       "claude-cli/\(ClaudeCLIVersion.fallbackVersion) (external, cli)")
+    }
+
+    func testRuntimeVersionReachesTheMimicrySet() {
+        ClaudeCLIVersion.resetForTest()
+        defer { ClaudeCLIVersion.resetForTest() }
+        XCTAssertTrue(ClaudeCLIVersion.accept("2.9.999"))
+        let sent = ClaudeCLIMimicry.current()
+        XCTAssertEqual(sent["User-Agent"], "claude-cli/2.9.999 (external, cli)")
+        for (field, value) in ClaudeCLIMimicry.headers where field != "User-Agent" {
+            XCTAssertEqual(sent[field], value, field)
+        }
+        var request = URLRequest(url: URL(string: "https://claude.ai/v1/oauth/token")!)
+        ClaudeCLIMimicry.apply(to: &request)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "claude-cli/2.9.999 (external, cli)")
+    }
+
+    func testNeverBelowTheFloor() {
+        ClaudeCLIVersion.resetForTest()
+        defer { ClaudeCLIVersion.resetForTest() }
+        XCTAssertFalse(ClaudeCLIVersion.accept("2.1.195"))
+        XCTAssertEqual(ClaudeCLIMimicry.current()["User-Agent"], ClaudeCLIMimicry.headers["User-Agent"])
     }
 }

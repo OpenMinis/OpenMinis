@@ -367,6 +367,8 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
             }
             if (code !in 200..299) {
                 Log.e(TAG, "xAI refresh failed: $code")
+                // [T-oauth-keep-credentials] Mark (never delete) on a rejected grant.
+                if (isRefreshRejected(code, body, DEFAULT_FATAL_REFRESH_CODES)) markNeedsReauth(refresh)
                 return@withContext false
             }
             val json = JSONObject(body)
@@ -498,6 +500,11 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
                     throw Exception("xAI OAuth state mismatch — possible CSRF, refusing to exchange")
                 }
 
+                // [T-android-oauth-foreground-exchange] The callback lands while the
+                // user is still in the Custom Tab, i.e. with Minis in the background,
+                // where the OS blocks this app's network (DNS answers "no address").
+                // Exchange only once the user is back.
+                OAuthForegroundGate.awaitForeground(TAG)
                 exchangeCodeForToken(code)
             }
 

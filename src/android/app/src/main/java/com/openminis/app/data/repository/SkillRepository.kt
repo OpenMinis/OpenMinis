@@ -8,6 +8,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +27,7 @@ import java.io.InputStream
 import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -54,6 +56,90 @@ class SkillRepository(private val context: Context) {
          *  before the next export sweeps it. 24h matches iOS — long enough that
          *  any Save-to-Files / AirDrop / upload consumer has finished. */
         private const val EXPORT_TTL_MS = 24L * 3600 * 1000
+
+        /** Pure SKILL.md frontmatter parser; lives on the companion so JVM unit
+         *  tests can drive it without a Context. */
+        internal fun parseSkillMd(content: String): ParsedSkill? {
+            // CRLF / CR endings are already handled by `lines()` and `trim()`,
+            // but a leading UTF-8 BOM (Windows Notepad) is not whitespace to
+            // `trimStart()` and hid the opening fence, so the file was rejected.
+            val trimmed = content.removePrefix("﻿").trimStart()
+            if (!trimmed.startsWith("---")) return null
+
+            // Find the closing `---` on a line by itself (matches iOS — and avoids
+            // false matches against horizontal rules later in the document).
+            val lines = trimmed.lines()
+            var frontmatterEndLine = -1
+            for (i in 1 until lines.size) {
+                if (lines[i].trim() == "---") {
+                    frontmatterEndLine = i
+                    break
+                }
+            }
+            if (frontmatterEndLine < 0) return null
+
+            var name = ""
+            var description = ""
+            var version = "1.0.0"
+
+            var i = 1
+            while (i < frontmatterEndLine) {
+                val line = lines[i]
+                val colonIdx = line.indexOf(':')
+                if (colonIdx < 0) { i++; continue }
+                val key = line.substring(0, colonIdx).trim().lowercase()
+                val rawValue = line.substring(colonIdx + 1).trim()
+
+                // YAML block scalar: `|` keeps newlines, `>` folds them into spaces.
+                // Body lines continue while they are indented (or empty); a
+                // dedented line ends the block.
+                //
+                // T151: also accept the YAML chomping indicators `>-`, `>+`, `|-`,
+                // `|+` (and any explicit indentation digit suffix). Real-world
+                // skill frontmatter — qbt-hub, for one — opens its description
+                // with `description: >-` so trailing newlines are stripped, but
+                // the previous strict `==` match treated that as a plain string
+                // literal, leaving the renderer to display the raw `>-` marker.
+                val isBlockScalar = rawValue.startsWith("|") || rawValue.startsWith(">")
+                val resolved: String
+                if (isBlockScalar && i + 1 < frontmatterEndLine) {
+                    val fold = rawValue.startsWith(">")
+                    val blockLines = mutableListOf<String>()
+                    var j = i + 1
+                    while (j < frontmatterEndLine) {
+                        val next = lines[j]
+                        if (next.isEmpty() || next[0].isWhitespace()) {
+                            blockLines.add(next.trim())
+                        } else break
+                        j++
+                    }
+                    resolved = if (fold) {
+                        blockLines.joinToString(" ").trim()
+                    } else {
+                        blockLines.joinToString("\n").trim('\n')
+                    }
+                    i = j
+                } else {
+                    resolved = rawValue
+                    i++
+                }
+
+                when (key) {
+                    "name" -> name = resolved
+                    "description" -> description = resolved
+                    "version" -> version = resolved
+                }
+            }
+
+            if (name.isBlank()) return null
+
+            val bodyStartLine = frontmatterEndLine + 1
+            val body = if (bodyStartLine < lines.size) {
+                lines.subList(bodyStartLine, lines.size).joinToString("\n").trim('\n')
+            } else ""
+
+            return ParsedSkill(name, description, version, body)
+        }
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -113,6 +199,15 @@ class SkillRepository(private val context: Context) {
     private val skillsDir: File
         get() = File(context.filesDir, "minis-global/skills")
 
+    // [T-android-skill-scan-parity] Declared before init{}: Kotlin initializes
+    // properties in source order and init{} already calls loadAll().
+    /** Every in-memory edit goes through [mutateSkills] so a background [loadAll] can tell whether the list changed under it. */
+    private val skillsLock = Any()
+    private var mutationSeq = 0L // guarded by skillsLock
+    private val reloadRequests = Channel<String>(Channel.CONFLATED)
+    private val forceReloadPending = AtomicBoolean(false)
+    @Volatile private var lastDiskSignature: Long? = null
+
     init {
         // [T-android-safemode-lateinit-crash-147] Never let a bad skill take
         // the whole app down. This constructor runs inline in
@@ -136,6 +231,7 @@ class SkillRepository(private val context: Context) {
         runCatching { installBundledSkills() }.onFailure {
             Log.e(TAG, "installBundledSkills failed — continuing: ${it.message}", it)
         }
+        startReloadWorker()
     }
 
     // -- CRUD --
@@ -157,7 +253,7 @@ class SkillRepository(private val context: Context) {
 
         insertDb(skill)
         writeSkillMd(skill)
-        _skills.value = _skills.value + skill
+        mutateSkills { it + skill }
         Log.i(TAG, "Added skill: ${skill.id}")
         return skill
     }
@@ -176,7 +272,7 @@ class SkillRepository(private val context: Context) {
             arrayOf<Any>(updated.name, updated.description, updated.version, updated.updatedAt, id)
         )
         writeSkillMd(updated)
-        _skills.value = _skills.value.map { if (it.id == id) updated else it }
+        mutateSkills { list -> list.map { if (it.id == id) updated else it } }
         return true
     }
 
@@ -185,14 +281,14 @@ class SkillRepository(private val context: Context) {
         db.execSQL("DELETE FROM session_skill_overrides WHERE skill_id=?", arrayOf(id))
         val dir = File(skillsDir, id)
         dir.deleteRecursively()
-        _skills.value = _skills.value.filter { it.id != id }
+        mutateSkills { list -> list.filter { it.id != id } }
         Log.i(TAG, "Deleted skill: $id")
     }
 
     fun setEnabled(id: String, enabled: Boolean) {
         db.execSQL("UPDATE skills SET is_enabled=? WHERE id=?", arrayOf<Any>(if (enabled) 1 else 0, id))
-        _skills.value = _skills.value.map {
-            if (it.id == id) it.copy(isEnabled = enabled) else it
+        mutateSkills { list ->
+            list.map { if (it.id == id) it.copy(isEnabled = enabled) else it }
         }
     }
 
@@ -227,7 +323,7 @@ class SkillRepository(private val context: Context) {
      * session id ([toReal]) once `ensureSession()` creates the real DB row.
      * Without this hop, a pre-first-message skill toggle stays bound to the
      * draft key and becomes invisible the next time the chat is opened
-     * under its real id — exactly the symptom XIN reported. Paired with
+     * under its real id — exactly the symptom a user reported. Paired with
      * [MCPRepository.renameSessionOverrides].
      */
     fun renameSessionOverrides(fromDraft: String, toReal: String) {
@@ -310,7 +406,8 @@ class SkillRepository(private val context: Context) {
                 val names = omitted.take(maxUndisclosed).joinToString(", ") { it.name }
                 append("\n\n")
                 append(omitted.size).append(" more skills not shown above: ").append(names)
-                append(". List /var/minis/skills/ or grep to search all.")
+                // [T-prompt-search-neutral] Names no search tool (iOS parity).
+                append(". List or search /var/minis/skills/ to find the rest.")
             }
         }
     }
@@ -327,11 +424,10 @@ class SkillRepository(private val context: Context) {
             "UPDATE skills SET use_count = use_count + 1 WHERE id=?",
             arrayOf<Any>(skillId)
         )
-        var next = _skills.value.map { if (it.id == skillId) bumped else it }
-        if (bumped.useCount > NORMALIZE_THRESHOLD) {
-            next = normalizeUseCounts(next)
+        mutateSkills { list ->
+            val next = list.map { if (it.id == skillId) bumped else it }
+            if (bumped.useCount > NORMALIZE_THRESHOLD) normalizeUseCounts(next) else next
         }
-        _skills.value = next
     }
 
     private fun normalizeUseCounts(list: List<Skill>): List<Skill> {
@@ -413,7 +509,7 @@ class SkillRepository(private val context: Context) {
                 )
             )
             writeSkillMd(replaced)
-            _skills.value = _skills.value.map { if (it.id == id) replaced else it }
+            mutateSkills { list -> list.map { if (it.id == id) replaced else it } }
             return replaced
         }
         return add(
@@ -539,7 +635,7 @@ class SkillRepository(private val context: Context) {
                 "UPDATE skills SET updated_at=? WHERE id=?",
                 arrayOf<Any>(bumped.updatedAt, skill.id)
             )
-            _skills.value = _skills.value.map { if (it.id == skill.id) bumped else it }
+            mutateSkills { list -> list.map { if (it.id == skill.id) bumped else it } }
             if (!outcome.isComplete) {
                 Log.w(TAG, "importFromGitHub partial for ${skill.id}: ${outcome.reason ?: "${outcome.filesFailed} file(s) failed"}")
             }
@@ -800,7 +896,7 @@ class SkillRepository(private val context: Context) {
             "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
             arrayOf<Any>(refreshed.name, refreshed.description, refreshed.version, refreshed.updatedAt, skillId)
         )
-        _skills.value = _skills.value.map { if (it.id == skillId) refreshed else it }
+        mutateSkills { list -> list.map { if (it.id == skillId) refreshed else it } }
         return refreshed
     }
 
@@ -824,7 +920,7 @@ class SkillRepository(private val context: Context) {
             "UPDATE skills SET name=?, updated_at=? WHERE id=?",
             arrayOf<Any>(refreshed.name, refreshed.updatedAt, skillId)
         )
-        _skills.value = _skills.value.map { if (it.id == skillId) refreshed else it }
+        mutateSkills { list -> list.map { if (it.id == skillId) refreshed else it } }
         return true
     }
 
@@ -1157,7 +1253,7 @@ class SkillRepository(private val context: Context) {
                 arrayOf<Any>(updated.description, bundledVersion, updated.updatedAt, bundledId)
             )
             writeSkillMd(updated)
-            _skills.value = _skills.value.map { if (it.id == bundledId) updated else it }
+            mutateSkills { list -> list.map { if (it.id == bundledId) updated else it } }
             Log.i(TAG, "Upgraded bundled skill: $bundledId → v$bundledVersion")
         } else {
             // Fresh install
@@ -1187,14 +1283,93 @@ class SkillRepository(private val context: Context) {
      * path), not overwriting any preserved DB toggle.
      */
     fun reloadFromDisk() {
-        loadAll()
+        requestReload("reloadFromDisk", force = true)
+    }
+
+    /**
+     * [T-android-skill-scan-parity] Queue a background rescan. Mirrors how iOS
+     * keeps disk work off the send path: SkillStore.skillPromptFragment() only
+     * reads the in-memory list, and disk is reconciled on discrete events
+     * (foreground, file_write/file_edit of a SKILL.md, the debounced fakefs
+     * notifier after shell activity, backup restore).
+     *
+     * Requests are conflated and served one at a time on [Dispatchers.IO].
+     * With [force] false the scan is skipped unless [SkillDiskSignature]
+     * differs from the one taken at the last scan — one stat per skill
+     * directory, so a shell command that never touched /var/minis/skills costs
+     * a few milliseconds off the main thread instead of a full reload on it.
+     */
+    fun requestReload(reason: String, force: Boolean = false) {
+        if (force) forceReloadPending.set(true)
+        reloadRequests.trySend(reason)
+    }
+
+    private fun startReloadWorker() {
+        backgroundScope.launch {
+            for (reason in reloadRequests) {
+                val force = forceReloadPending.getAndSet(false)
+                runCatching {
+                    val signature = SkillDiskSignature.compute(skillsDir)
+                    if (!force && signature == lastDiskSignature) return@runCatching
+                    val started = System.currentTimeMillis()
+                    loadAllCommitted()
+                    lastDiskSignature = signature
+                    Log.i(TAG, "reload reason=$reason force=$force skills=${_skills.value.size} tookMs=${System.currentTimeMillis() - started}")
+                }.onFailure {
+                    Log.e(TAG, "background reload failed reason=$reason: ${it.message}", it)
+                }
+            }
+        }
     }
 
     // -- Internal --
 
-    private fun loadAll() {
+    private inline fun mutateSkills(transform: (List<Skill>) -> List<Skill>) {
+        synchronized(skillsLock) {
+            _skills.value = transform(_skills.value)
+            mutationSeq++
+        }
+    }
+
+    /**
+     * Run [loadAll] until its result can be published without discarding a
+     * concurrent [mutateSkills]. A scan that raced an add/update simply runs
+     * again — it then reads the DB row that edit wrote. Three attempts cover
+     * any realistic burst; after that the last scan wins, and the DB (which
+     * every edit wrote first) is still correct for the next reload.
+     */
+    private fun loadAllCommitted() {
+        repeat(3) { if (loadAll(requireSeq = true)) return }
+        loadAll(requireSeq = false)
+    }
+
+    private fun loadAll(requireSeq: Boolean = false): Boolean {
+        val seqAtStart = synchronized(skillsLock) { mutationSeq }
         // Load from DB
         val dbSkills = mutableListOf<Skill>()
+        // [T-android-skill-scan-parity] One listing of skillsDir up front, then
+        // set lookups. The circuit breaker used to re-query every row and stat
+        // every SKILL.md once PER missing skill — O(missing x total). A user
+        // with 283 of 490 skills missing paid ~139k stat() calls plus 283
+        // Log.e lines per load, about two seconds, and that ran on the main
+        // thread on every send.
+        val storageReady = skillsDir.isDirectory
+        val onDisk = SkillDiskSignature.skillIdsOnDisk(skillsDir)
+        val customIds = mutableListOf<String>()
+        db.rawQuery("SELECT id, import_source FROM skills", null).use { c ->
+            while (c.moveToNext()) {
+                if (ImportSource.from(c.getString(1)) != ImportSource.BUNDLED) customIds.add(c.getString(0))
+            }
+        }
+        val missingCustom = customIds.count { it !in onDisk }
+        val pruneAllowed = storageReady && !SkillDiskSignature.breakerTripped(customIds.size, missingCustom)
+        if (missingCustom > 0 && !pruneAllowed) {
+            if (!storageReady) {
+                Log.w(TAG, "skillsDir unready, skipping orphan pruning for $missingCustom skill(s)")
+            } else {
+                Log.e(TAG, "Circuit breaker tripped ($missingCustom / ${customIds.size} missing). Keeping all orphan rows to prevent mass data wipe.")
+            }
+        }
         // [T-android-safemode-lateinit-crash-147] `use` so the cursor is closed
         // even when a row throws — the old code only reached close() on the
         // success path and leaked on any failure.
@@ -1229,9 +1404,10 @@ class SkillRepository(private val context: Context) {
             // Only one location to check, unlike iOS's Library+rootfs pair:
             // PRootKernel.registerGlobalBindMounts binds /var/minis/skills
             // straight to this same filesDir/minis-global/skills.
-            if (importSource != ImportSource.BUNDLED &&
-                !File(skillsDir, "$id/SKILL.md").exists()
-            ) {
+            // [T-android-skill-circuit-breaker] Pruning is decided once per load
+            // (pruneAllowed above), never when storage is unready or when a
+            // large share of custom skills is missing at once.
+            if (importSource != ImportSource.BUNDLED && id !in onDisk && pruneAllowed) {
                 db.execSQL("DELETE FROM skills WHERE id=?", arrayOf(id))
                 db.execSQL("DELETE FROM session_skill_overrides WHERE skill_id=?", arrayOf(id))
                 Log.i(TAG, "Pruned orphan skill row (no SKILL.md on disk): $id")
@@ -1345,11 +1521,15 @@ class SkillRepository(private val context: Context) {
         }
 
         // Auto-discover skills on disk without DB entries
-        val onDisk = skillsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
-        for (dir in onDisk) {
+        val known = dbSkills.mapTo(HashSet(dbSkills.size)) { it.id }
+        for (dirName in onDisk) {
+            val dir = File(skillsDir, dirName)
             val skillMd = File(dir, "SKILL.md")
-            if (skillMd.exists() && dbSkills.none { it.id == dir.name }) {
-                val parsed = parseSkillMd(skillMd.readText())
+            if (dirName !in known) {
+                // The listing was taken at the top of loadAll; on the background
+                // worker a shell `rm -rf` can land in between, so a vanished
+                // file skips this entry instead of aborting the whole reload.
+                val parsed = runCatching { parseSkillMd(skillMd.readText()) }.getOrNull()
                 if (parsed != null) {
                     val skill = Skill(
                         id = dir.name,
@@ -1365,7 +1545,11 @@ class SkillRepository(private val context: Context) {
             }
         }
 
-        _skills.value = dbSkills
+        synchronized(skillsLock) {
+            if (requireSeq && mutationSeq != seqAtStart) return false
+            _skills.value = dbSkills
+        }
+        return true
     }
 
     private fun insertDb(skill: Skill) {
@@ -1441,85 +1625,6 @@ class SkillRepository(private val context: Context) {
      * stateless.
      */
     fun parseSkillMdPublic(content: String): ParsedSkill? = parseSkillMd(content)
-
-    private fun parseSkillMd(content: String): ParsedSkill? {
-        val trimmed = content.trimStart()
-        if (!trimmed.startsWith("---")) return null
-
-        // Find the closing `---` on a line by itself (matches iOS — and avoids
-        // false matches against horizontal rules later in the document).
-        val lines = trimmed.lines()
-        var frontmatterEndLine = -1
-        for (i in 1 until lines.size) {
-            if (lines[i].trim() == "---") {
-                frontmatterEndLine = i
-                break
-            }
-        }
-        if (frontmatterEndLine < 0) return null
-
-        var name = ""
-        var description = ""
-        var version = "1.0.0"
-
-        var i = 1
-        while (i < frontmatterEndLine) {
-            val line = lines[i]
-            val colonIdx = line.indexOf(':')
-            if (colonIdx < 0) { i++; continue }
-            val key = line.substring(0, colonIdx).trim().lowercase()
-            val rawValue = line.substring(colonIdx + 1).trim()
-
-            // YAML block scalar: `|` keeps newlines, `>` folds them into spaces.
-            // Body lines continue while they are indented (or empty); a
-            // dedented line ends the block.
-            //
-            // T151: also accept the YAML chomping indicators `>-`, `>+`, `|-`,
-            // `|+` (and any explicit indentation digit suffix). Real-world
-            // skill frontmatter — qbt-hub, for one — opens its description
-            // with `description: >-` so trailing newlines are stripped, but
-            // the previous strict `==` match treated that as a plain string
-            // literal, leaving the renderer to display the raw `>-` marker.
-            val isBlockScalar = rawValue.startsWith("|") || rawValue.startsWith(">")
-            val resolved: String
-            if (isBlockScalar && i + 1 < frontmatterEndLine) {
-                val fold = rawValue.startsWith(">")
-                val blockLines = mutableListOf<String>()
-                var j = i + 1
-                while (j < frontmatterEndLine) {
-                    val next = lines[j]
-                    if (next.isEmpty() || next[0].isWhitespace()) {
-                        blockLines.add(next.trim())
-                    } else break
-                    j++
-                }
-                resolved = if (fold) {
-                    blockLines.joinToString(" ").trim()
-                } else {
-                    blockLines.joinToString("\n").trim('\n')
-                }
-                i = j
-            } else {
-                resolved = rawValue
-                i++
-            }
-
-            when (key) {
-                "name" -> name = resolved
-                "description" -> description = resolved
-                "version" -> version = resolved
-            }
-        }
-
-        if (name.isBlank()) return null
-
-        val bodyStartLine = frontmatterEndLine + 1
-        val body = if (bodyStartLine < lines.size) {
-            lines.subList(bodyStartLine, lines.size).joinToString("\n").trim('\n')
-        } else ""
-
-        return ParsedSkill(name, description, version, body)
-    }
 
     private fun slugify(name: String): String =
         name.lowercase()

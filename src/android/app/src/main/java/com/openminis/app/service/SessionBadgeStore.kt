@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.asStateFlow
  * [T-android-session-paused-badge] Per-session badge-state queue shown in the
  * session-list cell's icon corner.
  *
- * Architecture mirror of the iOS design (spec /tmp/fix_session_paused_badge.md):
+ * Architecture mirror of the iOS design:
  * every session holds an ordered queue of [SessionBadgeState] values. The head
  * of the queue is what the cell renders; pushing a new state (e.g. [PAUSED]
  * when a background interruption is detected) prepends to the queue so it

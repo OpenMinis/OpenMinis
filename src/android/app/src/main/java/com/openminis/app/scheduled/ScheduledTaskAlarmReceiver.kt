@@ -59,7 +59,13 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                     }
                     // Schedule the next occurrence FIRST so a long-running
                     // prompt doesn't block tomorrow's fire even if we crash.
-                    manager.rescheduleNext(taskId)
+                    // [T-android-scheduled-fire-claim] False for a stale second
+                    // delivery of a relative trigger's fire: nothing to run.
+                    if (!manager.rescheduleNext(taskId)) return@withTimeout
+                    // [T-android-scheduled-triggers] Run the row as it is NOW:
+                    // rescheduleNext just advanced an interval's anchor and
+                    // count, and the fire's envelope shows the NEXT fire time.
+                    val current = manager.get(taskId) ?: task
 
                     // [GH#197] waitForCompletion=false is load-bearing, not a
                     // tweak. With the default (true) this call suspends until
@@ -79,7 +85,7 @@ class ScheduledTaskAlarmReceiver : BroadcastReceiver() {
                     // completion notification are finished off ScheduledAgent-
                     // Runner's app-scoped bgScope, which outlives this
                     // receiver.
-                    ScheduledAgentRunner.run(appContext, task, waitForCompletion = false)
+                    ScheduledAgentRunner.run(appContext, current, waitForCompletion = false, scheduledFire = true)
                 }
             } catch (t: Throwable) {
                 // Includes TimeoutCancellationException. The task stays

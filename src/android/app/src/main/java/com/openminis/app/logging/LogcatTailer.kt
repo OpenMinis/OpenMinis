@@ -14,7 +14,15 @@ import java.io.InputStreamReader
  * is only needed to read other apps' logs). Tested on Pixel 4a (API 33) and
  * Pixel 6 (API 34) — works in DEBUG builds without any manifest changes.
  */
-internal class LogcatTailer(private val sink: (String) -> Unit) {
+internal class LogcatTailer(
+    /**
+     * [T-android-log-level] Lowest logcat priority captured for tags not
+     * silenced below: 'V' (everything) at Verbose, 'I' at Info (default), which
+     * drops framework/library Log.d/Log.v chatter.
+     */
+    private val minPriority: Char = 'V',
+    private val sink: (String) -> Unit,
+) {
 
     private var process: java.lang.Process? = null
     private var thread: Thread? = null
@@ -50,7 +58,7 @@ internal class LogcatTailer(private val sink: (String) -> Unit) {
             val pid = android.os.Process.myPid().toString()
             val pb = ProcessBuilder(
                 "logcat", "-v", "time", "-T", "1", "--pid=$pid",
-                "View:S", "ViewRootImpl:S", "BLASTBufferQueue_Java:S", "*:V",
+                "View:S", "ViewRootImpl:S", "BLASTBufferQueue_Java:S", "*:$minPriority",
             ).redirectErrorStream(true)
             val p = pb.start()
             process = p

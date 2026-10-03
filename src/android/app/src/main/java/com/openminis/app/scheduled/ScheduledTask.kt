@@ -1,6 +1,7 @@
 package com.openminis.app.scheduled
 
 import org.json.JSONArray
+import com.openminis.app.data.model.ThinkingLevel
 import org.json.JSONObject
 import java.util.Calendar
 import java.util.UUID
@@ -54,6 +55,25 @@ data class ScheduledRun(
 enum class ScheduledRepeatMode { ONCE, DAILY, WEEKDAYS, CUSTOM }
 
 /**
+ * [T-android-scheduled-triggers] How a task decides when to fire. Port of iOS
+ * `AgentJobTrigger` (once / loop / cron / on-completion), persisted and armed
+ * through AlarmManager instead of an in-process timer.
+ *
+ *  - [CALENDAR]: the original model and the default — a time of day plus
+ *    [ScheduledTask.repeatMode] / days / window. Every task written before
+ *    this existed is one, so the in-app editor's tasks are untouched.
+ *  - [AFTER]: once, [ScheduledTask.delaySec] after [ScheduledTask.anchorMs]
+ *    (`--after 30m`).
+ *  - [INTERVAL]: every [ScheduledTask.intervalSec] from the anchor, at most
+ *    [ScheduledTask.maxFires] times (`--interval 10m --count 6`); unbounded
+ *    when maxFires is null.
+ *  - [ON_COMPLETION]: once, when the scheduled task or agent job named by
+ *    [ScheduledTask.onCompletionOf] finishes; `{{result}}` in the prompt is
+ *    replaced by that result. No alarm: fired by [ScheduledCompletionTriggers].
+ */
+enum class ScheduledTriggerKind { CALENDAR, AFTER, INTERVAL, ON_COMPLETION }
+
+/**
  * What the task does when it fires. Mirrors the iOS App Intent set.
  *  - [NewSession]: run [ScheduledTask.prompt] in a brand-new chat.
  *  - [AppendToSession]: append the prompt to an existing chat (follow-up).
@@ -64,11 +84,19 @@ sealed class ScheduledTargetMode {
     object NewSession : ScheduledTargetMode()
     data class AppendToSession(val sessionId: String) : ScheduledTargetMode()
     data class RerunMessage(val sessionId: String, val messageId: String) : ScheduledTargetMode()
+    /**
+     * [T-p2-agent-series] ≈ iOS `minis-scheduled --target child-of-current`:
+     * run the prompt as an AGENT in a hidden child session of [sessionId],
+     * and post the result back into that chat as an <agent_callback>
+     * message (rendered as a callback card — there is no delegate block).
+     */
+    data class ChildOfCurrent(val sessionId: String) : ScheduledTargetMode()
 
     fun encode(): String = when (this) {
         NewSession -> "NEW_SESSION"
         is AppendToSession -> "APPEND_TO:$sessionId"
         is RerunMessage -> "RERUN:$sessionId:$messageId"
+        is ChildOfCurrent -> "CHILD_OF:$sessionId"
     }
 
     /** Session this task targets, or null for NEW_SESSION. */
@@ -77,6 +105,7 @@ sealed class ScheduledTargetMode {
             NewSession -> null
             is AppendToSession -> sessionId
             is RerunMessage -> sessionId
+            is ChildOfCurrent -> sessionId
         }
 
     companion object {
@@ -84,6 +113,9 @@ sealed class ScheduledTargetMode {
             if (raw.isNullOrEmpty() || raw == "NEW_SESSION") return NewSession
             if (raw.startsWith("APPEND_TO:")) {
                 return AppendToSession(raw.removePrefix("APPEND_TO:"))
+            }
+            if (raw.startsWith("CHILD_OF:")) {
+                return ChildOfCurrent(raw.removePrefix("CHILD_OF:"))
             }
             if (raw.startsWith("RERUN:")) {
                 // RERUN:<sessionId>:<messageId> — split on the FIRST colon only,
@@ -115,6 +147,16 @@ data class ScheduledTask(
     // When non-null, ScheduledAgentRunner writes it onto the new session row so the
     // chat picks up the same group/entry the user chose for the task.
     val modelBinding: String? = null,
+    // [T-android-scheduled-task-thinking] Reasoning effort for this task's run.
+    // null = "inherit" — the session resolves its own level from the bound
+    // group's default (or OFF), exactly as before this field existed, so every
+    // task written by an older build keeps its current behaviour.
+    val thinkingLevel: ThinkingLevel? = null,
+    // [T-scheduled-tool-prefill] A tool call executed before the model is
+    // asked anything; the model then only summarises its result. null = the
+    // old behaviour (the model reads the prompt and decides), which is what
+    // every task written before this field existed deserializes to.
+    val prefillToolCall: PrefilledToolCall? = null,
     val enabled: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
     // [T-android-scheduled-tasks-full] Optional active window. The task only
@@ -133,7 +175,60 @@ data class ScheduledTask(
     // "Run records" menu opens a screen backed by this. Capped at
     // MAX_RUN_HISTORY by the manager when appending.
     val runHistory: List<ScheduledRun> = emptyList(),
+    // [T-scheduled-task-detail] Total fires ever recorded. [runHistory] is
+    // capped at MAX_RUN_HISTORY, so its size stops counting after 50; this
+    // does not. null on tasks written before it existed — see [firesSoFar].
+    val fireCount: Int? = null,
+    // [T-android-scheduled-triggers] See [ScheduledTriggerKind]. All optional
+    // with defaults that reproduce the calendar model, so a task written before
+    // these existed deserializes to exactly what it was.
+    val triggerKind: ScheduledTriggerKind = ScheduledTriggerKind.CALENDAR,
+    /** [ScheduledTriggerKind.AFTER]: seconds from [anchorMs] to the fire. */
+    val delaySec: Long? = null,
+    /** [ScheduledTriggerKind.INTERVAL]: seconds between fires (>= 60). */
+    val intervalSec: Long? = null,
+    /** [ScheduledTriggerKind.INTERVAL]: total fires; null = until deleted. */
+    val maxFires: Int? = null,
+    /** [ScheduledTriggerKind.ON_COMPLETION]: the task id or agent job id to wait for. */
+    val onCompletionOf: String? = null,
+    /**
+     * AFTER / INTERVAL: when the current countdown started — creation, the
+     * last alarm fire (INTERVAL), or re-enabling. Absolute, so a reboot or a
+     * killed process resumes the same schedule instead of restarting it.
+     */
+    val anchorMs: Long? = null,
+    /**
+     * AFTER / INTERVAL: alarm fires since the last (re)start. Counted when the
+     * alarm fires, not when the run completes, so the count can never race the
+     * next fire. A manual "Run now" does not count (iOS's `fireNow` does; on
+     * Android it is kept off the count so it cannot use up an interval's
+     * --count or finish its schedule early).
+     */
+    val triggeredCount: Int? = null,
 ) {
+
+    val isCalendar: Boolean get() = triggerKind == ScheduledTriggerKind.CALENDAR
+
+    /** AFTER / INTERVAL count from [anchorMs]. */
+    val usesAnchor: Boolean
+        get() = triggerKind == ScheduledTriggerKind.AFTER || triggerKind == ScheduledTriggerKind.INTERVAL
+
+    /** Fires at most once, then disables itself (and stays listed). */
+    val isOneShot: Boolean get() = when (triggerKind) {
+        ScheduledTriggerKind.CALENDAR -> repeatMode == ScheduledRepeatMode.ONCE
+        ScheduledTriggerKind.AFTER, ScheduledTriggerKind.ON_COMPLETION -> true
+        ScheduledTriggerKind.INTERVAL -> false
+    }
+
+    /** INTERVAL fires still to come; null when unbounded or not an interval. */
+    val remainingFires: Int?
+        get() = if (triggerKind == ScheduledTriggerKind.INTERVAL) {
+            maxFires?.let { (it - (triggeredCount ?: 0)).coerceAtLeast(0) }
+        } else null
+
+    /** [T-scheduled-task-detail] Fires recorded so far, falling back to the
+     *  history length for tasks that predate [fireCount]. */
+    val firesSoFar: Int get() = fireCount ?: runHistory.size
 
     /**
      * Wall-clock ms of the next firing time for this task, taking
@@ -147,6 +242,26 @@ data class ScheduledTask(
      */
     fun nextTriggerMs(now: Long = System.currentTimeMillis()): Long? {
         if (!enabled) return null
+
+        // [T-android-scheduled-triggers] The relative triggers. An overdue
+        // slot (the phone was off, the process dead) answers `now`: the alarm
+        // then fires once, late, and INTERVAL continues from there — the same
+        // catch-up iOS's sleepUntil gives a missed deadline.
+        when (triggerKind) {
+            ScheduledTriggerKind.AFTER -> {
+                if ((triggeredCount ?: 0) >= 1) return null
+                val d = delaySec ?: return null
+                return maxOf(now, (anchorMs ?: createdAt) + d * 1000)
+            }
+            ScheduledTriggerKind.INTERVAL -> {
+                val iv = intervalSec ?: return null
+                if (maxFires != null && (triggeredCount ?: 0) >= maxFires) return null
+                return maxOf(now, (anchorMs ?: createdAt) + iv * 1000)
+            }
+            // Event-driven: no clock time at all.
+            ScheduledTriggerKind.ON_COMPLETION -> return null
+            ScheduledTriggerKind.CALENDAR -> Unit
+        }
 
         // Earliest instant we may fire: max(now, start-of-startDate). This lets
         // a task created today with a future startDate wait until that day.
@@ -214,6 +329,8 @@ data class ScheduledTask(
         put("targetMode", targetMode.encode())
         if (modelId != null) put("modelId", modelId)
         if (modelBinding != null) put("modelBinding", modelBinding)
+        if (thinkingLevel != null) put("thinkingLevel", thinkingLevel.name)
+        if (prefillToolCall != null) put("prefillToolCall", prefillToolCall.toJson())
         put("enabled", enabled)
         put("createdAt", createdAt)
         if (startDateMs != null) put("startDateMs", startDateMs)
@@ -224,6 +341,14 @@ data class ScheduledTask(
         if (runHistory.isNotEmpty()) {
             put("runHistory", JSONArray().apply { runHistory.forEach { put(it.toJson()) } })
         }
+        if (fireCount != null) put("fireCount", fireCount)
+        if (triggerKind != ScheduledTriggerKind.CALENDAR) put("trigger", triggerKind.name)
+        if (delaySec != null) put("delaySec", delaySec)
+        if (intervalSec != null) put("intervalSec", intervalSec)
+        if (maxFires != null) put("maxFires", maxFires)
+        if (onCompletionOf != null) put("onCompletionOf", onCompletionOf)
+        if (anchorMs != null) put("anchorMs", anchorMs)
+        if (triggeredCount != null) put("triggeredCount", triggeredCount)
     }
 
     companion object {
@@ -244,6 +369,9 @@ data class ScheduledTask(
             targetMode = ScheduledTargetMode.decode(o.optString("targetMode", null)),
             modelId = if (o.has("modelId")) o.optString("modelId", null) else null,
             modelBinding = if (o.has("modelBinding")) o.optString("modelBinding", null) else null,
+            thinkingLevel = o.optString("thinkingLevel", "").takeIf { it.isNotEmpty() }
+                ?.let { ThinkingLevel.parseOrNull(it) },
+            prefillToolCall = PrefilledToolCall.fromJson(o.optJSONObject("prefillToolCall")),
             enabled = o.optBoolean("enabled", true),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             startDateMs = if (o.has("startDateMs")) o.optLong("startDateMs") else null,
@@ -260,6 +388,21 @@ data class ScheduledTask(
                     }
                 }
             } ?: emptyList(),
+            fireCount = if (o.has("fireCount")) o.optInt("fireCount") else null,
+            // An unknown value (written by a newer build) reads as CALENDAR,
+            // which at worst fires on the stored time of day rather than never.
+            triggerKind = runCatching {
+                ScheduledTriggerKind.valueOf(o.optString("trigger", "CALENDAR"))
+            }.getOrDefault(ScheduledTriggerKind.CALENDAR),
+            delaySec = if (o.has("delaySec")) o.optLong("delaySec") else null,
+            intervalSec = if (o.has("intervalSec")) o.optLong("intervalSec") else null,
+            maxFires = if (o.has("maxFires")) o.optInt("maxFires") else null,
+            onCompletionOf = if (o.has("onCompletionOf")) o.optString("onCompletionOf", null) else null,
+            anchorMs = if (o.has("anchorMs")) o.optLong("anchorMs") else null,
+            triggeredCount = if (o.has("triggeredCount")) o.optInt("triggeredCount") else null,
         )
+
+        /** `{{result}}` in an on-completion prompt, replaced by the upstream's result. */
+        const val RESULT_PLACEHOLDER = "{{result}}"
     }
 }

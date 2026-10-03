@@ -4,6 +4,10 @@ import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.openai.OpenAIProvider
+import com.openminis.app.provider.thinking.ThinkingResolveContext
+import com.openminis.app.provider.thinking.ThinkingRule
+import com.openminis.app.provider.thinking.ThinkingRuleResolver
+import com.openminis.app.provider.thinking.ThinkingWireFormat
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -16,8 +20,8 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Regression safety-net for the thinking/reasoning wire-format rules catalogued in
- * `/tmp/thinking_rules_evidence.md` §A (17 rules mined from git history).
+ * Regression safety-net for the thinking/reasoning wire-format rules (17 rules mined
+ * from past regressions; each test cites the rule and the commit that fixed it).
  *
  * WHY THIS EXISTS: the dominant failure mode for these rules is SILENT DEGRADATION —
  * not a thrown error, but a field quietly landing at the wrong path, or a tier
@@ -139,7 +143,7 @@ class ThinkingRulesRegressionTest {
 
     /**
      * Rule: Mistral — no thinking request parameter may EVER be sent.
-     * evidence §A "[Mistral] 完全禁止一切 reasoning 字段" · 4592ca9b (422
+     * Ref: "[Mistral] every reasoning field is strictly forbidden" · 4592ca9b (422
      * `extra_forbidden body.reasoning`) · OpenMinis#87.
      * This is the single most likely rule to be broken by a future refactor, because
      * it is a pure absence — nothing in the body points at it.
@@ -269,7 +273,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: Mistral — `reasoning_content` is forbidden on assistant history too.
      * The request schema and the message schema have DIFFERENT strictness: only
-     * `AssistantMessage` is `additionalProperties:false`. evidence §A · 29065ca0 / 0839f019.
+     * `AssistantMessage` is `additionalProperties:false`. Ref: 29065ca0 / 0839f019.
      */
     @Test
     fun `mistral strips reasoning_content from assistant history`() {
@@ -291,7 +295,7 @@ class ThinkingRulesRegressionTest {
      * root key is rejected at schema validation BEFORE model dispatch — which is why
      * the reporter saw every model fail and why turning thinking OFF did not help
      * (the `{"type":"disabled"}` branch still emitted the key).
-     * evidence §A "[Venice] 未知根键…" · 84f5c9e1 · OpenMinis#86.
+     * Ref: "[Venice] unknown root key…" · 84f5c9e1 · OpenMinis#86.
      */
     @Test
     fun `venice never receives root thinking key even when off`() {
@@ -312,7 +316,7 @@ class ThinkingRulesRegressionTest {
 
     /**
      * Rule: families that declare NO effort tiers keep the legacy self-reasoning skip.
-     * evidence §A "[数据驱动重构]" · 22647505 — the inverse case of the GLM report.
+     * Ref: "[data-driven refactor]" · 22647505 — the inverse case of the GLM report.
      */
     @Test
     fun `undeclared glm family sends no thinking field`() {
@@ -332,7 +336,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: a model DECLARING effort tiers is driven by declared capability, not by
      * its family name — the fix for "GLM 5.2 ignores the thinking level while Hermes
-     * on the same relay honours it". evidence §A · 22647505 / 47dc71b3.
+     * on the same relay honours it". Ref: 22647505 / 47dc71b3.
      */
     @Test
     fun `declared glm model receives clamped root reasoning_effort`() {
@@ -350,7 +354,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: the requested tier is clamped ONTO the declared set — asking for a tier the
      * model never declared must not reach the wire. `["high","max"]` is the most common
-     * sparse shape in the catalog. evidence §A · 47dc71b3.
+     * sparse shape in the catalog. Ref: 47dc71b3.
      */
     @Test
     fun `sparse declared set clamps xhigh onto a declared tier`() {
@@ -368,7 +372,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: ULTRA is a client-side "Max + orchestration" concept and must NEVER reach a
      * backend as the literal string "ultra" — both MAX and ULTRA map to "max".
-     * evidence §A "[GPT-5.6 / ULTRA]" · b38bf3d5.
+     * Ref: "[GPT-5.6 / ULTRA]" · b38bf3d5.
      */
     @Test
     fun `ultra never reaches the wire as a literal`() {
@@ -382,6 +386,28 @@ class ThinkingRulesRegressionTest {
         )
     }
 
+    /**
+     * [T-gpt6-astra] gpt-6-astra reuses the 5.6-sol/terra tier wholesale. Its
+     * upstream metadata lists an "ultra" wire value, and the temptation is to
+     * special-case it; the rule is that ULTRA is client-side only, so the
+     * ceiling comes from the id rule and ULTRA still leaves as "max".
+     */
+    @Test
+    fun `gpt-6-astra reaches max by id rule and sends ultra as max`() {
+        val m = model("gpt-6-astra")
+        assertEquals(
+            "undeclared gpt-6-astra must reach MAX through the id rule",
+            ThinkingLevel.MAX,
+            m.catalogMaxThinkingLevel,
+        )
+        val body = capture(model = m, level = ThinkingLevel.ULTRA)
+        assertEquals(
+            "ULTRA on gpt-6-astra must go out as 'max', never 'ultra': $body",
+            "max",
+            body.optString("reasoning_effort", null),
+        )
+    }
+
     // ============================================================ OFF semantics
 
     /**
@@ -389,7 +415,7 @@ class ThinkingRulesRegressionTest {
      * At OFF the field must be OMITTED — sending "minimal" killed the whole request
      * on-device (iPhone 11, api.xiaomimimo.com): no reply at all, strictly worse than
      * the vendor-default reasoning the change was meant to avoid.
-     * evidence §A "[MiMo / Agnes] OFF 时必须完全省略字段" · c5efeb1e.
+     * Ref: "[MiMo / Agnes] OFF must omit the field entirely" · c5efeb1e.
      */
     @Test
     fun `mimo omits reasoning_effort entirely when off`() {
@@ -406,7 +432,7 @@ class ThinkingRulesRegressionTest {
      * Rule: OFF-tier injection is an ALLOWLIST, not a blanket rule. Vendors with
      * undocumented off semantics keep field omission; only official OpenAI ("none")
      * and Volcano Ark ("minimal") are on the list.
-     * evidence §A "[全局] thinking-off 显式值是 ALLOWLIST" · ff60c818.
+     * Ref: "[global] explicit thinking-off values are an ALLOWLIST" · ff60c818.
      */
     @Test
     fun `unknown custom base omits the off tier`() {
@@ -422,7 +448,7 @@ class ThinkingRulesRegressionTest {
 
     /**
      * Rule: Volcano Ark IS on the allowlist and takes the documented smallest tier.
-     * evidence §A · ff60c818 (`volces`/`ark.` base or seed/doubao model → "minimal").
+     * Ref: ff60c818 (`volces`/`ark.` base or seed/doubao model → "minimal").
      */
     @Test
     fun `volcano ark sends minimal as its off tier`() {
@@ -446,7 +472,7 @@ class ThinkingRulesRegressionTest {
      * be nested inside the `thinking` object; doing so made it an unknown nested key
      * with no root tier at all, so every V4 request silently ran at the vendor default.
      * The paired negative assertion is the whole point: the positive one alone passed
-     * for 3 months. evidence §A "[DeepSeek V4] …根级兄弟" · 847822eb.
+     * for 3 months. Ref: "[DeepSeek V4] …root-level siblings" · 847822eb.
      */
     @Test
     fun `deepseek v4 sends thinking and reasoning_effort as root siblings`() {
@@ -466,7 +492,7 @@ class ThinkingRulesRegressionTest {
 
     /**
      * Rule: thinking is ON by default on DeepSeek V4, so OFF must be sent EXPLICITLY.
-     * evidence §A · 9d4d4f2e / 847822eb.
+     * Ref: 9d4d4f2e / 847822eb.
      */
     @Test
     fun `deepseek v4 explicitly disables when off`() {
@@ -485,7 +511,7 @@ class ThinkingRulesRegressionTest {
      * Rule: Ark/Azure re-host third-party families behind a uniform OpenAI surface where
      * thinking is controlled ONLY by `reasoning_effort` — the vendor-native `thinking:{}`
      * shape is not honoured there. Same model id, different endpoint, different shape.
-     * evidence §A "[Volcengine Ark / Azure] 统一 reasoning_effort" · ba055121.
+     * Ref: "[Volcengine Ark / Azure] unified reasoning_effort" · ba055121.
      */
     @Test
     fun `ark hosted deepseek uses uniform reasoning_effort not vendor thinking object`() {
@@ -504,7 +530,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: Qwen sends `enable_thinking`/`thinking_budget` at BOTH root and `extra_body`
      * (DashScope expects extra_body; vLLM/SGLang accept top-level).
-     * evidence §A "[Qwen] 根级 + extra_body 双发" · 25165700.
+     * Ref: "[Qwen] sent both at root level and in extra_body" · 25165700.
      */
     @Test
     fun `qwen dual-sends thinking params at root and extra_body`() {
@@ -521,7 +547,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: DashScope enforces `thinking_budget < max_completion_tokens` STRICTLY —
      * equal values are rejected too ("[16384] must be greater than [16384]").
-     * evidence §A "[Qwen / DashScope] …等值也拒" · 8db455ff → a5a0de20 · issues #35 / #641.
+     * Ref: "[Qwen / DashScope] …equal values rejected too" · 8db455ff → a5a0de20 · issues #35 / #641.
      */
     @Test
     fun `qwen thinking_budget stays strictly below max_tokens`() {
@@ -540,7 +566,7 @@ class ThinkingRulesRegressionTest {
     /**
      * Rule: pathological max_tokens leaves no room for a positive budget strictly below
      * max, so the field must be dropped rather than emitted invalid.
-     * evidence §A · a5a0de20 ("maxTokens < 2 → drop thinking_budget entirely").
+     * Ref: a5a0de20 ("maxTokens < 2 → drop thinking_budget entirely").
      */
     @Test
     fun `qwen drops thinking_budget when max_tokens leaves no room`() {
@@ -558,7 +584,7 @@ class ThinkingRulesRegressionTest {
      * Rule: MiMo/DeepSeek REQUIRE `reasoning_content` on assistant history — the exact
      * inverse of Mistral. Neither vendor advertises supportsReasoning, so capability
      * metadata cannot distinguish them; this is why echo policy must be per-provider.
-     * evidence §A "[DeepSeek / MiMo / GLM / Kimi] 思考内容必须原样回传" · 7f88321e.
+     * Ref: "[DeepSeek / MiMo / GLM / Kimi] thinking content must be echoed back verbatim" · 7f88321e.
      */
     @Test
     fun `interleaved model echoes reasoning_content on assistant history`() {
@@ -583,7 +609,7 @@ class ThinkingRulesRegressionTest {
      * Rule: MiMo ships BOTH spellings in the wild — catalog docs say `mimo-2.5` while the
      * live API returns `mimo-v2.5`. A rule matching one spelling silently misses the
      * other, letting xhigh through to a backend that 400s on it.
-     * evidence §A "[MiMo] 模型 id 拼写变体" · 72968c4f.
+     * Ref: "[MiMo] model id spelling variants" · 72968c4f.
      * (Covered for the OFF path by `mimo omits reasoning_effort entirely when off`,
      * which iterates both spellings; this asserts the clamp side.)
      */
@@ -688,6 +714,54 @@ class ThinkingRulesRegressionTest {
     }
 
     /**
+     * [T-thinking-max-unreachable] …but a narrow declaration must never lower a ceiling
+     * a family RULE knows about. models.dev often lists an incomplete set for a model we
+     * know reaches MAX — gpt-5.6-sol has an explicit MAX rule yet commonly declares only
+     * ["low","medium","high"] — and taking the declared top verbatim hid MAX from the
+     * picker for exactly the models the rule exists to describe. Note the contrast with
+     * the test above: gpt-5.3 matches NO rule, so its narrow declaration still caps it.
+     */
+    @Test
+    fun `incomplete declaration does not lower a known rule ceiling`() {
+        assertEquals(
+            "precondition: the family rule reaches MAX",
+            ThinkingLevel.MAX,
+            ThinkingLevelCatalog.declaredMaxLevel("gpt-5.6-sol"),
+        )
+        val m = model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "medium", "high"))
+        assertEquals(
+            "an incomplete declaration must not cut the rule's ceiling to HIGH",
+            ThinkingLevel.MAX,
+            m.catalogMaxThinkingLevel,
+        )
+    }
+
+    /** The same shape one tier up: a declaration topping at xhigh must not hide MAX. */
+    @Test
+    fun `declaration topping at xhigh keeps max reachable`() {
+        val m = model("gpt-5.6-sol", reasoningEffortValues = listOf("high", "xhigh"))
+        assertEquals(ThinkingLevel.MAX, m.catalogMaxThinkingLevel)
+    }
+
+    /** A declaration reaching ABOVE the rule still wins — the original behaviour. */
+    @Test
+    fun `declaration above the rule still raises the ceiling`() {
+        val m = model("glm-5.2", reasoningEffortValues = listOf("high", "max"))
+        assertEquals(ThinkingLevel.MAX, m.catalogMaxThinkingLevel)
+    }
+
+    /** A non-reasoning model stays OFF regardless of rule or declaration. */
+    @Test
+    fun `non-reasoning model ignores both the rule and the declaration`() {
+        val m = model(
+            "gpt-5.6-sol",
+            supportsReasoning = false,
+            reasoningEffortValues = listOf("high", "max"),
+        )
+        assertEquals(ThinkingLevel.OFF, m.catalogMaxThinkingLevel)
+    }
+
+    /**
      * Guard on the fix's blast radius: a model that declares NOTHING must still resolve
      * through the legacy id-rule/default path, unchanged.
      */
@@ -708,6 +782,331 @@ class ThinkingRulesRegressionTest {
             ThinkingLevel.OFF,
             model("gpt-4o", supportsReasoning = false, reasoningEffortValues = listOf("high", "max"))
                 .catalogMaxThinkingLevel,
+        )
+    }
+
+    // ── [T23] new id / declared ceiling vs rule top / provider-scoped custom rule ──
+    //
+    // GH#356 (deepseek-flash missed the substring rule), ef95c007d (an
+    // incomplete effort declaration must not hide Max), GH#306/#311 (a custom
+    // rule has to be matchable by PROVIDER, not only by model name — MiniMax M3
+    // reached over the Anthropic-compatible protocol).
+
+    /**
+     * Rule: the bare `deepseek-flash` id DeepSeek now recommends resolves to the
+     * vendor-native sibling shape, on and off — the same contract as the legacy
+     * `deepseek-v4-*` alias. An UNDECLARED sibling id (no effort set from the
+     * catalog) still lands on the rule, so a relay publishing it under its own
+     * name gets the right shape too.
+     */
+    @Test
+    fun `deepseek-flash resolves to the vendor-native sibling shape`() {
+        val m = model("deepseek-flash", reasoningEffortValues = listOf("high", "max"))
+        val on = capture(m, ThinkingLevel.HIGH)
+        assertEquals("enabled", on.getJSONObject("thinking").getString("type"))
+        assertEquals("high", on.optString("reasoning_effort", null))
+        assertFalse("tier must be a ROOT sibling, never nested: $on", on.getJSONObject("thinking").has("reasoning_effort"))
+        val off = capture(m, ThinkingLevel.OFF)
+        assertEquals("disabled", off.getJSONObject("thinking").getString("type"))
+        assertFalse("OFF carries no tier on this shape: $off", off.has("reasoning_effort"))
+
+        val undeclared = capture(model("deepseek-flash-lite"), ThinkingLevel.MAX)
+        assertEquals("enabled", undeclared.getJSONObject("thinking").getString("type"))
+        assertEquals("the catalog rule caps at MAX, so MAX goes out as max", "max", undeclared.optString("reasoning_effort", null))
+    }
+
+    /** The anchored scope must not sweep in the chat/reasoner ids whose shape may differ. */
+    @Test
+    fun `deepseek-chat does not inherit the flash rule`() {
+        val body = capture(model("deepseek-chat", supportsReasoning = null), ThinkingLevel.HIGH)
+        assertFalse("deepseek-chat must not get the sibling thinking object: $body", body.has("thinking"))
+    }
+
+    /**
+     * ef95c007d — a declaration topping at XHIGH for a model whose family rule
+     * reaches MAX keeps MAX selectable. The ceiling is a pure function of the
+     * model, so the picker "round trip" (XHigh → Max → XHigh) resolves the same
+     * way every time; nothing about the current selection feeds back into it.
+     */
+    @Test
+    fun `declared xhigh ceiling keeps max reachable and the round trip is stable`() {
+        val m = model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "medium", "high", "xhigh"))
+        assertEquals(ThinkingLevel.MAX, m.catalogMaxThinkingLevel)
+        assertEquals(
+            "the declared tiers themselves are unchanged — only the ceiling is lifted",
+            listOf(ThinkingLevel.LOW, ThinkingLevel.MEDIUM, ThinkingLevel.HIGH, ThinkingLevel.XHIGH),
+            m.selectableThinkingLevels,
+        )
+        val provider = OpenAIProvider(apiKey = "k", model = m, basePath = server.url("/v1").toString().trimEnd('/'))
+        assertEquals(ThinkingLevel.XHIGH, provider.clampThinkingLevel(ThinkingLevel.XHIGH))
+        assertEquals(ThinkingLevel.MAX, provider.clampThinkingLevel(ThinkingLevel.MAX))
+        assertEquals("selecting XHigh again after Max must not lower anything", ThinkingLevel.XHIGH, provider.clampThinkingLevel(ThinkingLevel.XHIGH))
+        assertEquals(ThinkingLevel.MAX, provider.clampThinkingLevel(ThinkingLevel.ULTRA))
+        // The OpenAI-native family trusts its rule over an incomplete declaration
+        // and sends the tier the rule knows the backend accepts.
+        val body = capture(m, ThinkingLevel.MAX)
+        assertEquals("max", body.optString("reasoning_effort", null))
+    }
+
+    /** Contrast: an UNRULED model with the same declaration is capped at its declared top. */
+    @Test
+    fun `an unruled model keeps a narrow declaration as its ceiling`() {
+        val m = model("some-relay-reasoner", reasoningEffortValues = listOf("low", "medium", "high"))
+        assertEquals(ThinkingLevel.HIGH, m.catalogMaxThinkingLevel)
+        assertEquals("high", capture(m, ThinkingLevel.MAX).optString("reasoning_effort", null))
+    }
+
+    /**
+     * GH#306/#311 — a custom rule is keyed by the PROVIDER INSTANCE, so the same
+     * model id resolves differently depending on which instance serves it. The
+     * motivating case: MiniMax M3 through an Anthropic-compatible relay needs the
+     * DeepSeek-style sibling switch, while the same id elsewhere keeps the
+     * built-in (which emits nothing for an undeclared self-reasoning family).
+     */
+    @Test
+    fun `a custom rule is scoped to the provider instance, not the model name`() {
+        fun ctx(instanceId: String?) = ThinkingResolveContext(
+            modelId = "MiniMax-M3",
+            instanceId = instanceId,
+            supportsReasoning = true,
+            declaredEffortValues = null,
+            level = ThinkingLevel.HIGH,
+            maxTokens = 4096,
+            isOpenRouter = false,
+            usesUnifiedReasoningEffort = false,
+            isMistral = false,
+            isDashScope = false,
+            offEffort = null,
+        )
+        try {
+            ThinkingRuleResolver.setCustomRules(
+                "inst-anthropic-compat",
+                listOf(
+                    ThinkingRule(
+                        kind = ThinkingRule.Kind.CUSTOM,
+                        scope = ThinkingRule.Scope.AllModels,
+                        wireFormat = ThinkingWireFormat.DeepSeekSibling,
+                        label = "minimax-via-anthropic-compat",
+                    ),
+                ),
+            )
+            val scoped = JSONObject()
+            val scopedTrace = ThinkingRuleResolver.apply(scoped, ctx("inst-anthropic-compat"))
+            assertEquals("enabled", scoped.getJSONObject("thinking").getString("type"))
+            assertEquals("high", scoped.getString("reasoning_effort"))
+            assertEquals(ThinkingRule.Kind.CUSTOM, scopedTrace.matchedRuleKind)
+            assertEquals("minimax-via-anthropic-compat", scopedTrace.matchedRuleLabel)
+
+            val other = JSONObject()
+            val otherTrace = ThinkingRuleResolver.apply(other, ctx("inst-other"))
+            assertFalse("another instance's model must not pick up the rule: $other", other.has("thinking"))
+            assertFalse(other.has("reasoning_effort"))
+            assertEquals("openai-compatible-default", otherTrace.matchedRuleLabel)
+
+            val unscoped = JSONObject()
+            ThinkingRuleResolver.apply(unscoped, ctx(null))
+            assertFalse("no instance → built-ins only", unscoped.has("thinking"))
+
+            // End to end: the provider carries the instance id into the resolver.
+            val ok = """{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"""
+            repeat(4) { server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(ok)) }
+            val provider = OpenAIProvider(apiKey = "k", model = model("MiniMax-M3"), basePath = server.url("/v1").toString().trimEnd('/'))
+            provider.thinkingRuleInstanceId = "inst-anthropic-compat"
+            runCatching {
+                runBlocking {
+                    provider.sendMessageClamped(plainHistory(), null, 4096, null, emptyList(), emptyList(), ThinkingLevel.HIGH)
+                }
+            }
+            val wire = JSONObject(server.takeRequest().body.readUtf8())
+            assertEquals("enabled", wire.getJSONObject("thinking").getString("type"))
+        } finally {
+            ThinkingRuleResolver.setAllCustomRules(emptyMap())
+        }
+    }
+
+    // ══════════════ [M13] ThinkingMaxUnreachable — the ceiling is max(rule, declared)
+    //
+    // ef95c007d. The section above already covers the two named shapes
+    // (["low","medium","high"] and ["high","xhigh"] against gpt-5.6-sol's MAX
+    // rule). What follows is the part those rows leave open: the ceiling rule is
+    // a MAXIMUM of two independent sources, and a max() has four quadrants.
+    // Testing two of them leaves the interesting failure — a silent swap of the
+    // comparison direction — reachable, because `>` and `<` agree on any pair
+    // where one side is absent.
+
+    /**
+     * The rule is a MAXIMUM, asserted as a truth table over all four quadrants.
+     * Each quadrant had its own bug at some point in this file's history:
+     * rule-only was the original behaviour, declared-only was 47dc71b3's fix,
+     * declared-above-rule is what that fix enabled, and declared-BELOW-rule is
+     * ef95c007d — the one where an incomplete models.dev list hid MAX from the
+     * picker for exactly the models the rule exists to describe.
+     */
+    @Test
+    fun `the ceiling is the maximum of the rule top and the declared top`() {
+        // (1) rule only — no declaration to consult.
+        assertEquals(
+            "rule MAX, nothing declared → MAX",
+            ThinkingLevel.MAX,
+            model("gpt-5.6-sol").catalogMaxThinkingLevel,
+        )
+        // (2) declaration only — no rule matches this id.
+        assertEquals(
+            "no rule, declared top HIGH → HIGH",
+            ThinkingLevel.HIGH,
+            model("some-relay-reasoner", reasoningEffortValues = listOf("low", "high")).catalogMaxThinkingLevel,
+        )
+        // (3) declaration ABOVE the rule → the declaration wins (47dc71b3).
+        assertEquals(
+            "rule HIGH, declared MAX → MAX",
+            ThinkingLevel.MAX,
+            model("mimo-v2.5", reasoningEffortValues = listOf("high", "max")).catalogMaxThinkingLevel,
+        )
+        // (4) declaration BELOW the rule → the RULE wins (ef95c007d).
+        assertEquals(
+            "rule MAX, declared HIGH → MAX, never HIGH",
+            ThinkingLevel.MAX,
+            model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "high")).catalogMaxThinkingLevel,
+        )
+    }
+
+    /**
+     * The item's own example: an incomplete declaration of exactly
+     * `["low","medium"]` must not hide MAX. Two tiers is the sparsest realistic
+     * shape and the furthest below the rule — if the comparison direction were
+     * ever inverted, this is the row with the largest visible drop (MAX → MEDIUM,
+     * i.e. three tiers vanish from the picker at once).
+     */
+    @Test
+    fun `a two-tier declaration does not hide Max from a MAX-rule model`() {
+        val m = model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "medium"))
+        assertEquals(
+            "the declared top is MEDIUM, but the family rule reaches MAX",
+            ThinkingLevel.MEDIUM,
+            m.selectableThinkingLevels.last(),
+        )
+        assertEquals(
+            "…and the ceiling must follow the RULE: ${m.reasoningEffortValues}",
+            ThinkingLevel.MAX,
+            m.catalogMaxThinkingLevel,
+        )
+    }
+
+    /**
+     * The fix is scoped to the CEILING and must not touch `clampEffort`, whose job
+     * is the opposite — stopping an undeclared tier from reaching a backend that
+     * 400s on it. The two halves are asserted together because loosening the clamp
+     * is the tempting way to "finish" this fix, and it would trade this bug for
+     * that one.
+     *
+     * So for a rule-lifted model the ceiling is MAX (the user can ask) while the
+     * WIRE value for a generic-branch id stays clamped onto the declared set. The
+     * OpenAI-native branch is the deliberate exception — it trusts its own rule
+     * over an incomplete declaration — which is why both are shown here.
+     */
+    @Test
+    fun `lifting the ceiling does not loosen the wire clamp`() {
+        val nativeModel = model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "medium"))
+        assertEquals(ThinkingLevel.MAX, nativeModel.catalogMaxThinkingLevel)
+        assertEquals(
+            "openai-native trusts the rule and sends the tier as asked",
+            "max",
+            capture(nativeModel, ThinkingLevel.MAX).optString("reasoning_effort", null),
+        )
+
+        // A model with the SAME declaration on the generic branch: the clamp is
+        // untouched, so an undeclared tier is still snapped down.
+        val genericModel = model("relay-hosted-reasoner", reasoningEffortValues = listOf("low", "medium"))
+        assertEquals(
+            "generic branch: MAX is not declared, so the wire value clamps to the declared top",
+            "medium",
+            capture(genericModel, ThinkingLevel.MAX).optString("reasoning_effort", null),
+        )
+    }
+
+    /**
+     * XHigh → Max → XHigh round trip. The ceiling is a PURE function of the model
+     * — nothing about the current selection feeds back into it — so re-selecting a
+     * lower tier after the highest must not lower the ceiling or the clamp.
+     *
+     * Worth an explicit round trip because a ceiling cached per provider instance
+     * (a plausible optimisation, given `catalogMaxThinkingLevel` walks the rule
+     * list) would pass every single-shot assertion in this file and fail exactly
+     * here.
+     */
+    @Test
+    fun `an XHigh to Max to XHigh round trip is stable in both directions`() {
+        val m = model("gpt-5.6-sol", reasoningEffortValues = listOf("low", "medium"))
+        val provider = OpenAIProvider(
+            apiKey = "k", model = m, basePath = server.url("/v1").toString().trimEnd('/'),
+        )
+        val walk = listOf(
+            ThinkingLevel.XHIGH, ThinkingLevel.MAX, ThinkingLevel.XHIGH,
+            ThinkingLevel.MAX, ThinkingLevel.HIGH, ThinkingLevel.MAX, ThinkingLevel.XHIGH,
+        )
+        for ((step, level) in walk.withIndex()) {
+            assertEquals(
+                "step $step: the ceiling must not drift as the selection moves",
+                ThinkingLevel.MAX,
+                m.catalogMaxThinkingLevel,
+            )
+            assertEquals(
+                "step $step: $level must survive the clamp under a MAX ceiling",
+                level,
+                provider.clampThinkingLevel(level),
+            )
+        }
+        assertEquals(
+            "ULTRA collapses onto MAX — it is a client-side concept, never a wire tier",
+            ThinkingLevel.MAX,
+            provider.clampThinkingLevel(ThinkingLevel.ULTRA),
+        )
+    }
+
+    /**
+     * The precedence that must hold ABOVE the max(): a model that cannot reason is
+     * OFF regardless of either source. Checked before the rule chain on purpose —
+     * family rules match by id substring, so a broadened rule must not lift the
+     * ceiling of that family's non-reasoning members (`mimo-v2.5-tts` / `-asr`
+     * against the `mimo` rule is the real case).
+     */
+    @Test
+    fun `a non-reasoning family member is OFF despite both the rule and the declaration`() {
+        for (id in listOf("mimo-v2.5-tts", "mimo-v2.5-asr", "gpt-5.6-sol-audio")) {
+            assertEquals(
+                "$id cannot reason, so no rule or declaration may lift its ceiling",
+                ThinkingLevel.OFF,
+                model(
+                    id,
+                    supportsReasoning = false,
+                    reasoningEffortValues = listOf("high", "max"),
+                ).catalogMaxThinkingLevel,
+            )
+        }
+    }
+
+    /**
+     * SOURCE-GREP DRIFT GUARD on the comparison itself. Every behavioural row
+     * above reads the ceiling through `catalogMaxThinkingLevel`, and the whole fix
+     * is one comparison inside it — `ruleTop.rank > declaredTop.rank`. An inverted
+     * or `>=`-ified version of that line is the regression, and it is a one-token
+     * edit, so pin the token.
+     */
+    @Test
+    fun `the ceiling comparison still takes the higher of rule and declaration`() {
+        val src = com.openminis.app.ProductionSources.read("provider/ThinkingLevelCatalog.kt")
+        assertTrue(
+            "the ceiling must be a max() of the two sources — this line IS ef95c007d",
+            src.contains("return if (ruleTop != null && ruleTop.rank > declaredTop.rank) ruleTop else declaredTop"),
+        )
+        assertTrue(
+            "the non-reasoning check must stay AHEAD of the rule lookup",
+            src.indexOf("if (supportsReasoning == false) return ThinkingLevel.OFF") <
+                src.indexOf("val ruleTop = ThinkingLevelCatalog.declaredMaxLevel(id)"),
+        )
+        assertTrue(
+            "…and the undeclared fallback must stay the conservative XHIGH default",
+            src.contains("return ruleTop ?: ThinkingLevel.XHIGH"),
         )
     }
 }

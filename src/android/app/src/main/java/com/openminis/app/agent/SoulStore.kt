@@ -51,11 +51,11 @@ data class SoulMetadata(
      * above — that one is a round-trip holder for a rolled-back feature and is
      * never serialized, so reusing it would resurrect the old semantics.
      *
-     * Stored in frontmatter rather than a sibling file for two reasons:
-     * the system prompt is built from a whitelist (name / style / body) and
-     * never serializes frontmatter wholesale, so even a ~20 KB data URI costs
-     * zero tokens; and SOUL.md is already synced as text and copied by the
-     * memory backup, so a sibling PNG would silently not be backed up.
+     * [T-android-soul-icon-sidecar] In MEMORY this is always the data URI (or
+     * an emoji, or empty) — that has not changed. On DISK the bytes now live
+     * in a `SOUL.icon.png` sidecar and the frontmatter holds only its name;
+     * see [SoulStore.iconFileLocation] for why, and for why the two objections
+     * this comment used to record (backup coverage, sync) do not hold.
      */
     val icon: String,
     val style: String,
@@ -216,6 +216,31 @@ object SoulStore {
     fun fileLocation(context: Context): File =
         File(File(context.filesDir, MEMORY_SUBDIR), FILE_NAME)
 
+    /**
+     * [T-android-soul-icon-sidecar] The PNG holding the avatar's bytes, beside
+     * SOUL.md.
+     *
+     * A picked avatar is ~20 KB of base64. Held inline in the frontmatter it
+     * turns a small, human-readable persona file into one whose bulk is a
+     * single unreadable line: anything reading SOUL.md as text drags the
+     * payload along (a debug dump, a diff, a misread by minis-config could push
+     * 20 KB of base64 into a model's context), and a user opening SOUL.md in
+     * the file browser sees noise instead of their persona.
+     *
+     * The split exists ONLY at the disk boundary — [load] folds the sidecar
+     * back in and [save] writes it out, so `SoulMetadata.icon` still carries
+     * the data URI exactly as before and every consumer (the settings picker,
+     * SoulIcon.decode, minis-config's summary) is untouched.
+     *
+     * Two objections were recorded against this when the inline form was
+     * chosen, and both have since been checked and do not hold:
+     *   - Backup: `BackupExporter.exportMemory` walks the memory directory and
+     *     copies every file it finds, so a sibling PNG IS backed up.
+     *   - Sync: Android has no SOUL sync path at all (SoulV2 is iOS/iCloud).
+     */
+    fun iconFileLocation(context: Context): File =
+        File(File(context.filesDir, MEMORY_SUBDIR), SoulIcon.SIDECAR_NAME)
+
     // -- Body length rules (language-aware) ----------------------------
     //
     // The personality body has a hard cap applied at every write surface
@@ -355,18 +380,50 @@ lang: "auto"
         val file = fileLocation(context)
         if (!file.exists()) return null
         return try {
-            SoulMDParser.parse(file.readText())
+            val parsed = SoulMDParser.parse(file.readText())
+            parsed.copy(metadata = parsed.metadata.copy(icon = resolveIconForRead(context, parsed.metadata.icon)))
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "SOUL.md load failed: ${t.message}")
             null
         }
     }
 
+    /**
+     * [T-android-soul-icon-sidecar] Turn a stored `icon:` value into the form
+     * every consumer expects — a data URI, an emoji, or empty.
+     *
+     * Three shapes reach here and all three must keep working, because SOUL.md
+     * travels between builds and platforms:
+     *   - the sidecar filename  -> read the PNG, return a data URI
+     *   - an inline data URI    -> return as-is (written by an older build, or
+     *                              by a platform that has not moved yet)
+     *   - an emoji / empty      -> return as-is
+     *
+     * A sidecar reference whose file is missing resolves to "" rather than
+     * leaving the literal filename in `icon`: downstream that string would be
+     * classified as unsupported and shown as a broken value, whereas "" is the
+     * well-defined "no icon, use the default sparkle".
+     */
+    private fun resolveIconForRead(context: Context, raw: String): String {
+        if (!SoulIcon.isSidecarRef(raw)) return raw
+        val png = runCatching { iconFileLocation(context).takeIf { it.isFile }?.readBytes() }.getOrNull()
+        if (png == null || png.isEmpty()) {
+            AppLogger.warning(TAG, "SOUL icon sidecar missing or unreadable — treating as no icon")
+            return ""
+        }
+        return SoulIcon.dataUri(png)
+    }
+
     /** Atomic write through a `.tmp` sibling, then rename. */
     fun save(context: Context, file: SoulFile) {
         val target = fileLocation(context)
         target.parentFile?.mkdirs()
-        val text = SoulMDParser.serialize(file)
+        // [T-android-soul-icon-sidecar] Move the bytes out to the sidecar and
+        // store its NAME in the frontmatter. What goes on disk changes; what
+        // callers hold in memory does not — `file` is untouched, and the
+        // cached metadata below still carries the data URI.
+        val onDisk = file.copy(metadata = file.metadata.copy(icon = persistIconSidecar(context, file.metadata.icon)))
+        val text = SoulMDParser.serialize(onDisk)
         val tmp = File(target.parentFile, "${target.name}.tmp")
         tmp.writeText(text)
         if (!tmp.renameTo(target)) {
@@ -377,6 +434,36 @@ lang: "auto"
             tmp.delete()
         }
         _cachedMetadata.value = file.metadata
+    }
+
+    /**
+     * [T-android-soul-icon-sidecar] Write (or clear) the sidecar to match
+     * [icon], and return the value that should go in the frontmatter.
+     *
+     * Falls back to storing the icon INLINE when the sidecar cannot be written.
+     * That is deliberate: a disk error must cost the user a tidy file, never
+     * their avatar. Returning the filename after a failed write would point the
+     * frontmatter at a file that does not exist, and the next load would
+     * resolve it to "" — silently losing the icon.
+     */
+    private fun persistIconSidecar(context: Context, icon: String): String {
+        val sidecar = iconFileLocation(context)
+        val png = SoulIcon.pngBytes(icon)
+        if (png == null) {
+            // Emoji, empty, or already a sidecar ref: no image bytes to keep.
+            // Remove a stale sidecar so clearing the icon does not leave the
+            // previous avatar's bytes orphaned on disk.
+            if (!SoulIcon.isSidecarRef(icon)) runCatching { sidecar.delete() }
+            return icon
+        }
+        return runCatching {
+            sidecar.parentFile?.mkdirs()
+            sidecar.writeBytes(png)
+            SoulIcon.SIDECAR_NAME
+        }.getOrElse {
+            AppLogger.warning(TAG, "SOUL icon sidecar write failed (${it.message}) — storing inline")
+            icon
+        }
     }
 
     /**

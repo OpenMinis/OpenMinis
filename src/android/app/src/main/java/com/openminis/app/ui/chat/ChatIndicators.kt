@@ -35,6 +35,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.R
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import com.openminis.app.ui.components.decorativePingPong
 
 // [T-android-split-chat] Self-contained "thinking / streaming" dot indicators
 // extracted verbatim from ChatScreen.kt. `internal` so the chat package can
@@ -42,22 +45,20 @@ import com.openminis.app.ui.theme.ChatColors
 
 @Composable
 internal fun BouncingDots(color: Color) {
-    val infiniteTransition = rememberInfiniteTransition(label = "bounce")
+    // [T-android-decorative-anim-perf] Was three infinite transitions read in
+    // composition and animated through PADDING — a layout-phase property, so
+    // every frame recomposed and re-laid-out the row. Now one shared 30 fps
+    // tick, read inside the layer lambda, moving translationY only.
+    val tick = rememberDecorativeTick()
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         repeat(3) { i ->
-            val offset by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(350, delayMillis = i * 120),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot_$i",
-            )
             Box(
                 modifier = Modifier
                     .size(4.dp)
-                    .padding(top = (-offset).dp.coerceAtLeast(0.dp))
+                    .graphicsLayer {
+                        val p = decorativePingPong(decorativePhase(tick.value, 700, i * 120))
+                        translationY = -2.dp.toPx() * p
+                    }
                     .background(color, CircleShape),
             )
         }
@@ -67,24 +68,21 @@ internal fun BouncingDots(color: Color) {
 // iOS-style streaming "..." after tool title — 3 dots bouncing inline with text
 @Composable
 internal fun StreamingDotsText() {
-    val infiniteTransition = rememberInfiniteTransition(label = "streamDots")
+    // [T-android-decorative-anim-perf] `Modifier.offset(y = …)` in its
+    // non-lambda form is a layout-phase read; the dots re-laid-out the pill
+    // title row every frame. Layer translation instead, from the shared tick.
+    val tick = rememberDecorativeTick()
     Row {
         repeat(3) { i ->
-            val offset by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -3f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(350, delayMillis = i * 120, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "sdot_$i",
-            )
             Text(
                 text = ".",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.offset(y = offset.dp),
+                modifier = Modifier.graphicsLayer {
+                    val p = decorativePingPong(decorativePhase(tick.value, 700, i * 120))
+                    translationY = -3.dp.toPx() * p
+                },
             )
         }
     }
@@ -155,7 +153,9 @@ internal fun CompactProgressIndicator(
 
 @Composable
 internal fun TypingIndicator() {
-    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+    // [T-android-decorative-anim-perf] Shared 30 fps tick instead of a private
+    // 90 fps infinite transition; the layer-lambda read below was already right.
+    val tick = rememberDecorativeTick()
     // Live Soul name → "<custom name> is thinking…" when the user renamed
     // the assistant in Soul settings. SoulStore.cachedMetadata is a StateFlow
     // that's updated on save (SoulSettingsScreen) and at app start
@@ -176,21 +176,15 @@ internal fun TypingIndicator() {
         // Animated bouncing dots
         val dots = listOf(".", ".", ".")
         dots.forEachIndexed { index, dot ->
-            val offsetY by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -6f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(400, delayMillis = index * 150, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot_bounce_$index",
-            )
             Text(
                 text = dot,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = ChatColors.tertiaryText,
-                modifier = Modifier.graphicsLayer { translationY = offsetY },
+                modifier = Modifier.graphicsLayer {
+                    val p = decorativePingPong(decorativePhase(tick.value, 800, index * 150))
+                    translationY = -6.dp.toPx() * p
+                },
             )
         }
     }

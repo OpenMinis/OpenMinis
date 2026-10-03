@@ -19,7 +19,7 @@ import com.openminis.app.data.repository.ProviderRepository
  * Exposes `ProviderInstance` fields under `providers.<id>.…`. Mirrors
  * iOS `ProvidersCollection`.
  *
- * [T-minis-config-provider-add] Add is OPEN (per user decision: writes
+ * [T-minis-config-provider-add] Add is OPEN (by design: writes
  * are agent-permitted, reads of credentials remain guarded). Remove
  * stays denied — yanking a provider may break tool calls already in
  * flight, and the user's revertable choice is to disable it instead

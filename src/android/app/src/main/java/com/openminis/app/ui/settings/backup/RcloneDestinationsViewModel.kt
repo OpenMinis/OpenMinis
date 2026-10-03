@@ -67,6 +67,65 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * [T-android-backup-local-folder] Save a SAF-picked folder as a
+     * destination. Returns the name it was saved under, or null when the save
+     * was rejected (duplicate name, same folder already added) — the error is
+     * published on [error] for the UI to show.
+     *
+     * The caller has already taken the persistable permission; this only
+     * records the destination.
+     */
+    fun addLocalFolder(treeUri: String, displayPath: String): String? {
+        val pretty = prettyTreePath(displayPath)
+        val name = uniqueLocalName(pretty)
+        return try {
+            store.addLocalFolder(name = name, treeUri = treeUri, displayPath = pretty)
+            refresh()
+            name
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Couldn't add that folder."
+            null
+        }
+    }
+
+    /**
+     * Turn a SAF tree document id into something worth showing in a row.
+     *
+     * The raw ids are provider-internal: `primary:Documents/Backups` for
+     * internal storage, `1A2B-3C4D:Backups` for an SD card. The volume prefix
+     * before the colon is not a folder the user has ever seen, and the row
+     * template already prefixes a `/`, so "primary:Documents" would render as
+     * "/primary:Documents". Keep the part after the colon.
+     *
+     * A non-externalstorage provider (Drive, Dropbox) uses an opaque id with no
+     * colon at all; those pass through unchanged rather than being mangled,
+     * since anything is better than an empty subtitle.
+     */
+    private fun prettyTreePath(treeDocumentId: String): String =
+        treeDocumentId.substringAfter(':', treeDocumentId).trim('/')
+            .ifBlank { treeDocumentId }
+
+    /**
+     * A display name for a picked folder: the last path segment, made unique
+     * against what is already saved.
+     *
+     * Destination names are the identity of a record (they key removal and the
+     * enable switch), so a user who adds "Documents" on internal storage and
+     * "Documents" on an SD card must not end up with one entry. Rather than
+     * making them type a name for something they just picked visually, the
+     * collision is resolved with a numeric suffix.
+     */
+    private fun uniqueLocalName(displayPath: String): String {
+        val base = displayPath.trimEnd('/').substringAfterLast('/')
+            .ifBlank { "Folder" }
+        val taken = store.remotes.map { it.name }.toSet()
+        if (base !in taken) return base
+        var n = 2
+        while ("$base $n" in taken) n++
+        return "$base $n"
+    }
+
+    /**
      * Register a candidate remote in rclone's in-memory config and list its
      * root, so the add-server form can browse for a destination folder BEFORE
      * the remote is permanently saved. Uses a temporary name; the real save

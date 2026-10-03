@@ -12,28 +12,68 @@ enum LLMProviderFactory {
     }
 
     /// Create an LLMProvider for the given entry, looking up its ProviderInstance and credentials.
-    static func makeProvider(for entry: ModelEntry) async throws -> any LLMProvider {
+    /// - Parameter sessionId: the conversation this provider serves, or nil
+    ///   when the call belongs to none (title generation, quick test, Vision).
+    ///   Only used by the OpenCode channel.
+    ///
+    ///   Prefer `makeProvider(for:resolveSessionId:)` for anything attached to a
+    ///   live conversation: a fixed value here is captured once, and a draft's
+    ///   promotion to a real session would not be picked up.
+    static func makeProvider(for entry: ModelEntry, sessionId: String? = nil) async throws -> any LLMProvider {
+        try await makeProvider(for: entry, resolveSessionId: { sessionId })
+    }
+
+    /// Create an LLMProvider whose OpenCode session id is resolved **per
+    /// request** rather than captured now.
+    ///
+    /// [T-opencode-dedicated-channel] This is the form every conversation
+    /// should use. A provider outlives the draft→session promotion: a new chat
+    /// builds its provider while `AIChatViewModel.sessionId` is still nil, and
+    /// the real UUID only exists once `ensureSession()` persists the row on the
+    /// first send. Capturing the id here left the FIRST turn of every new
+    /// conversation with no `x-opencode-session` — a hard 400 from OpenCode Go,
+    /// and cross-turn cache instability for anything that got past it.
+    static func makeProvider(for entry: ModelEntry,
+                             resolveSessionId: @escaping @Sendable () -> String?) async throws -> any LLMProvider {
         let store = ProviderConfigStore.shared
         guard let instance = store.instance(for: entry.providerInstanceId) else {
             throw FactoryError.noInstance
         }
+        // [T-model-custom-params] / [T-opencode-dedicated-channel] One seam for
+        // every OpenAI-family branch: the dedicated OpenCode channel, then the
+        // entry's own overrides. Chained here rather than inside each `make*`
+        // builder so the branches below cannot drift apart on which one
+        // remembered to apply them.
+        //
+        // The channel is attached only for instances that belong to it, and it
+        // installs a per-request hook rather than a snapshot header — see
+        // `OpenCodeChannel.attach`.
+        func finish(_ p: OpenAIProvider) -> OpenAIProvider {
+            if instance.isOpenCodeChannel {
+                OpenCodeChannel.attach(to: p, resolveSessionId: resolveSessionId)
+            }
+            return applyModelOverrides(p, entry: entry)
+        }
+        let openCode = finish
         switch instance.providerType {
         case .anthropic:
             return makeAnthropicProvider(instance: instance, model: entry.model)
         case .gemini:
             return await makeGeminiProvider(instance: instance, model: entry.model)
         case .openAI:
-            return makeOpenAIProvider(instance: instance, model: entry.model)
+            return openCode(makeOpenAIProvider(instance: instance, model: entry.model))
         case .antigravity:
             return await makeAntigravityProvider(instance: instance, model: entry.model)
         case .openRouter:
-            return makeOpenRouterProvider(instance: instance, model: entry.model)
+            return openCode(makeOpenRouterProvider(instance: instance, model: entry.model))
         case .openAIResponses:
-            return makeOpenAIResponsesProvider(instance: instance, model: entry.model)
+            return openCode(makeOpenAIResponsesProvider(instance: instance, model: entry.model))
         case .xAI:
-            return makeXAIProvider(instance: instance, model: entry.model)
+            return openCode(makeXAIProvider(instance: instance, model: entry.model))
         case .kimiCode:
-            return makeKimiProvider(instance: instance, model: entry.model)
+            return openCode(makeKimiProvider(instance: instance, model: entry.model))
+        case .githubCopilot:
+            return openCode(makeCopilotProvider(instance: instance, model: entry.model))
         case .unsupported:
             throw FactoryError.voiceOnlyProvider
         }
@@ -54,6 +94,74 @@ enum LLMProviderFactory {
     static func applyAzure(_ provider: OpenAIProvider, instance: ProviderInstance) -> OpenAIProvider {
         if instance.azureMode { provider.isAzure = true }
         return provider
+    }
+
+    // MARK: - OpenCode Go
+    //
+    // [T-opencode-dedicated-channel] The header injection that used to live
+    // here (`openCodeSessionHeader` / `isOpenCodeBaseURL` /
+    // `applyOpenCodeSession`) has MOVED to `OpenCodeChannel`, and changed
+    // shape while moving.
+    //
+    // It is no longer a base-URL sniff that stamps `extraHeaders` at
+    // construction. Two things were wrong with that and neither was fixable by
+    // improving the sniff: a provider is built while a new chat is still a
+    // draft, so the captured id was nil for the FIRST turn of every
+    // conversation (a hard 400 from OpenCode Go, then cache instability); and
+    // sniffing asks "does this URL look like OpenCode" when the question is
+    // "did the user configure this instance as OpenCode", which a self-hosted
+    // relay answers differently.
+    //
+    // Channel membership is now `ProviderInstance.isOpenCodeChannel`, and the
+    // id is resolved per request through `perRequestHeaders`. See
+    // `OpenCodeChannel` for the full rationale.
+
+    /// [T-model-custom-params] Carry the entry's user overrides onto the
+    /// provider: custom headers, temperature, top_p and extra body params.
+    ///
+    /// Applied at construction, next to the other `apply*` steps, because the
+    /// overrides belong to the ENTRY and the provider only knows its
+    /// `LLMModel` — the entry is the single place that pairs a model with the
+    /// user's edits to it.
+    ///
+    /// Headers go through `extraHeaders`, which every OpenAI request builder
+    /// already applies. They are merged LAST so a per-model header wins over a
+    /// provider-wide one; that is the point of setting it on one model. The
+    /// reserved auth/routing keys are refused rather than merged — overwriting
+    /// `Authorization` here would silently break the request with a value the
+    /// settings screen never intended to be a credential.
+    ///
+    /// Entirely no-op when the entry has no overrides, so an unconfigured
+    /// model builds exactly the request it did before.
+    @discardableResult
+    static func applyModelOverrides(_ provider: OpenAIProvider, entry: ModelEntry) -> OpenAIProvider {
+        let o = entry.overrides
+        if let headers = o.customHeaders, !headers.isEmpty {
+            for (k, v) in headers where !isReservedOverrideHeader(k) {
+                provider.extraHeaders[k] = v
+            }
+        }
+        if let t = o.temperature { provider.overrideTemperature = t }
+        if let p = o.topP { provider.overrideTopP = p }
+        if let extra = o.extraBodyParams, !extra.isEmpty {
+            provider.overrideExtraBody = extra
+        }
+        return provider
+    }
+
+    /// Headers a per-model override must never set.
+    ///
+    /// `Authorization` / `api-key` / `x-api-key` carry the credential the
+    /// provider just resolved; `Content-Type` and `Content-Length` describe a
+    /// body the encoder owns; `Host` routes the request. Letting a text field
+    /// in the model editor replace any of these turns a settings typo into a
+    /// failed or misrouted call with no obvious cause.
+    static func isReservedOverrideHeader(_ name: String) -> Bool {
+        let reserved: Set<String> = [
+            "authorization", "api-key", "x-api-key", "anthropic-version",
+            "content-type", "content-length", "host",
+        ]
+        return reserved.contains(name.lowercased())
     }
 
     @discardableResult
@@ -225,7 +333,45 @@ enum LLMProviderFactory {
 
     /// Kimi Code / Coding Plan — OpenAI-compatible coding upstream reached with
     /// the device-code OAuth bearer. Mirrors makeXAIProvider (custom base +
-    /// OAuth bearer through OpenAIProvider). See the Kimi Code OAuth design notes.
+    /// OAuth bearer through OpenAIProvider).
+    /// [T-copilot-provider] GitHub Copilot. UNOFFICIAL — see CopilotConstants.
+    ///
+    /// Rides `OpenAIProvider` because the chat surface below
+    /// `api.githubcopilot.com` is OpenAI-compatible; what is Copilot-specific is
+    /// the credential and a fixed set of headers, and both have a seam here
+    /// already (`oauthTokenProvider`, `extraHeaders`).
+    ///
+    /// The token closure returns the SHORT-LIVED session token, minting one from
+    /// the stored GitHub token whenever the cached one is near expiry — so the
+    /// two-layer lifetime is invisible above this line.
+    ///
+    /// The headers applied here are the static ones. `X-Initiator` and
+    /// `Copilot-Vision-Request` genuinely vary per request, and this builder
+    /// cannot see the message list; they are handled at the request site rather
+    /// than pinned to a wrong constant value here.
+    ///
+    /// [T-copilot-per-request-headers] That request site is now real. The
+    /// closure below is called by the OpenAI request builders with the outgoing
+    /// body, which is the first point that knows whether this turn is
+    /// agent-driven and whether images are attached. Before this, the per-request
+    /// headers were computed by a function nothing called, so they never shipped.
+    static func makeCopilotProvider(instance: ProviderInstance, model: LLMModel) -> OpenAIProvider {
+        let iid = instance.id
+        let provider = OpenAIProvider(
+            oauthTokenProvider: { try await CopilotOAuthManager.shared.validSessionToken(instanceId: iid) },
+            model: model
+        )
+        provider.customBaseURL = instance.effectiveCustomBaseURL ?? CopilotConstants.apiBaseURL
+        // Endpoints are `/chat/completions` and `/models` directly under the
+        // host — no `/v1` segment, unlike most OpenAI-compatible vendors.
+        provider.appendV1Suffix = false
+        provider.extraHeaders.merge(CopilotConstants.baseHeaders) { _, new in new }
+        provider.perRequestHeaders = { body in
+            CopilotConstants.perRequestHeaders(forBody: body)
+        }
+        return provider
+    }
+
     static func makeKimiProvider(instance: ProviderInstance, model: LLMModel) -> OpenAIProvider {
         let customBase = instance.effectiveCustomBaseURL ?? "https://api.kimi.com/coding"
         // The default Kimi coding base is `…/coding` WITHOUT `/v1`; the real
@@ -239,6 +385,24 @@ enum LLMProviderFactory {
             let key = ProviderKeychainHelper.loadAPIKey(instanceId: instance.id) ?? ""
             return applyCustomUserAgent(OpenAIProvider(apiKey: key, model: model, customBaseURL: customBase, appendV1Suffix: appendV1), instance: instance)
         case .oauth:
+            // [T-kimi-manual-token-ignored] A manually-pasted bearer token has
+            // to be honoured here, exactly as the Anthropic / Gemini / xAI
+            // branches do. "Or Configure Manually" saves the token under
+            // `manual-oauth-token` with `credentialType: .oauth`, and its own
+            // footer names Kimi as the intended use case ("For third-party
+            // Coding Plans (e.g. MiniMax, Kimi) … enter the API base URL and
+            // bearer token manually"). Without this check the token was stored
+            // and displayed as configured, then ignored: the branch went
+            // straight to the device-flow manager, which found no device-flow
+            // token and failed with "Kimi: no OAuth token found" — an error that
+            // makes no sense to a user who just supplied one.
+            if let manualToken = ProviderKeychainHelper.loadOAuthString(
+                instanceId: instance.id, account: "manual-oauth-token") {
+                return applyCustomUserAgent(
+                    OpenAIProvider(apiKey: manualToken, model: model,
+                                   customBaseURL: customBase, appendV1Suffix: appendV1),
+                    instance: instance)
+            }
             let iid = instance.id
             let provider = OpenAIProvider(
                 oauthTokenProvider: { try await KimiOAuthManager.shared.validAccessToken(instanceId: iid) },

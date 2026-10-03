@@ -349,7 +349,25 @@ fun MountedFoldersScreen(
             confirmButton = {
                 MinisTextButton(onClick = {
                     showPickerIntro = false
-                    pickerLauncher.launch(initialPickerUri())
+                    // [T-android-mount-picker-anf] OpenDocumentTree fires
+                    // ACTION_OPEN_DOCUMENT_TREE, and some OEM ROMs ship without a
+                    // resolvable DocumentsUI (field crash: OnePlus 8T / ColorOS,
+                    // ActivityNotFoundException straight out of
+                    // startActivityForResult). Catch it and tell the user instead
+                    // of dying. A resolveActivity pre-check is deliberately NOT
+                    // used as a gate: under package-visibility filtering it can
+                    // report null on devices where the picker launches fine, which
+                    // would disable mounting for everyone to protect a few.
+                    try {
+                        pickerLauncher.launch(initialPickerUri())
+                    } catch (e: android.content.ActivityNotFoundException) {
+                        com.openminis.app.logging.AppLogger.warning("MountedFolders", "document-tree picker unavailable: ${e.message}")
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.mount_picker_unavailable),
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
                 }) {
                     Text(stringResource(R.string.mount_picker_intro_continue))
                 }

@@ -623,10 +623,21 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
     /// process a bundled-file ZIP (importSkillFromSyncWithAsset) MUST honour
     /// a `false` return and abort the ZIP unpack/prune — otherwise the prune
     /// step would still delete local bundled files against a stale record.
+    ///
+    /// `fallbackName` is a name the CALLER already knows from its own metadata,
+    /// used only when parsing `content` fails to produce one. Backup restore
+    /// passes the name recorded in skills.jsonl: if that skill's SKILL.md has
+    /// malformed frontmatter (no leading `---`, broken YAML), `parse` yields
+    /// `defaultSkillName` and the correct name sitting in the backup record
+    /// would otherwise be thrown away — the skill restores as
+    /// "Untitled Skill" even though the file is intact.
+    /// [T-skill-restore-untitled] Sync callers pass nil and keep today's
+    /// behaviour, since for them the SKILL.md body is the only source of truth.
     @discardableResult
     func importSkillFromSync(
         skillId: String, content: String, source: SkillImportSource,
-        isEnabled: Bool, installedAt: Date, updatedAt: Date
+        isEnabled: Bool, installedAt: Date, updatedAt: Date,
+        fallbackName: String? = nil
     ) -> Bool {
         // [T-icloud-cloud-overwrites-local-edits] Local-newer guard. Skill
         // files (SKILL.md + bundled files) are user-editable; below we
@@ -645,7 +656,21 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
                 return false
             }
         }
-        let parsed = Self.parse(skillMD: content)
+        var parsed = Self.parse(skillMD: content)
+
+        // [T-skill-restore-untitled] Resolve the name BEFORE it is used, so the
+        // slug below, the Skill struct and the DB row all agree. Only a parse
+        // that fell back to the placeholder defers to the caller's name; a real
+        // parsed name always wins, because the file is the source of truth
+        // whenever it can actually be read.
+        if parsed.name == Self.defaultSkillName,
+           let fallbackName,
+           !fallbackName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           fallbackName != Self.defaultSkillName {
+            AppLogger(category: "SkillSync").info(
+                "[IMPORT] '\(skillId)' SKILL.md parse yielded the placeholder name; using caller-supplied name '\(fallbackName)'")
+            parsed.name = fallbackName
+        }
 
         // If a local skill exists with the same slugified name but a different ID,
         // remove the old one to prevent duplicates.
@@ -1088,6 +1113,14 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
             try? fm.createDirectory(at: rootfsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? content.write(to: rootfsFile, atomically: true, encoding: .utf8)
 
+            // [T-ios-skill-backup-fakefs] A file at a NEW relative path needs a
+            // meta.db row or the guest cannot see it until the next cold-start
+            // mount walk — the same per-file registration importFromArchive
+            // and the GitHub importer do. No-op for paths already registered.
+            let linuxPath = "/var/minis/skills/\(skillId)/\(relativePath)"
+            ensureParentDirsInMetaDB(for: linuxPath)
+            ensureFakefsMetadata(for: linuxPath, isDirectory: false)
+
             // Update skill's updatedAt and mark dirty so bundled file changes trigger iCloud sync
             if let idx = skills.firstIndex(where: { $0.id == skillId }) {
                 skills[idx].updatedAt = Date()
@@ -1245,7 +1278,7 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
         return skills.contains(where: { $0.id == candidate }) ? candidate : nil
     }
 
-    // MARK: - Prompt Fragment (Claude Code style: metadata only)
+    // MARK: - Prompt Fragment (progressive disclosure: metadata only)
 
     /// Maximum number of skill metadata entries to include in the prompt.
     private static let maxSkillMetadataCount = 20
@@ -1490,7 +1523,7 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
                 let skillFile = skillsDir.appendingPathComponent(id).appendingPathComponent("SKILL.md")
                 var resolvedName = name
                 var resolvedDesc = description
-                let body: String
+                var body: String = ""
                 if let content = try? String(contentsOf: skillFile, encoding: .utf8) {
                     let parsed = Self.parse(skillMD: content)
                     body = parsed.body
@@ -1539,9 +1572,34 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
                         let parsed = Self.parse(skillMD: rootfsContent)
                         body = parsed.body
                     } else {
-                        // Skill files deleted from both locations — remove from DB
-                        dbDeleteSkill(id: id)
-                        continue
+                        // [T-ios-skill-circuit-breaker] Circuit Breaker:
+                        // Guard against mass pruning when container or rootfs mount is unready on cold start/crash.
+                        var isDir: ObjCBool = false
+                        let storageReady = fm.fileExists(atPath: skillsDir.path, isDirectory: &isDir) && isDir.boolValue
+                        var totalCustom = 0
+                        var missingCustom = 0
+                        let sqlCount = "SELECT id, import_source FROM skills WHERE import_source != 'bundled'"
+                        var cStmt: OpaquePointer?
+                        if sqlite3_prepare_v2(db, sqlCount, -1, &cStmt, nil) == SQLITE_OK {
+                            while sqlite3_step(cStmt) == SQLITE_ROW {
+                                totalCustom += 1
+                                let sId = String(cString: sqlite3_column_text(cStmt, 0))
+                                let f1 = skillsDir.appendingPathComponent(sId).appendingPathComponent("SKILL.md")
+                                let f2 = rootfsSkillsDir.appendingPathComponent(sId).appendingPathComponent("SKILL.md")
+                                if !fm.fileExists(atPath: f1.path) && !fm.fileExists(atPath: f2.path) {
+                                    missingCustom += 1
+                                }
+                            }
+                            sqlite3_finalize(cStmt)
+                        }
+                        let tripped = storageReady && totalCustom >= 3 && missingCustom >= 3 && (Double(missingCustom) / Double(totalCustom) >= 0.40)
+                        if !storageReady || tripped {
+                            AppLogger(category: "SkillStore").error("Circuit breaker tripped or storage unready (\(missingCustom)/\(totalCustom) missing). Aborting dbDeleteSkill for \(id) to prevent mass data wipe.")
+                        } else {
+                            // Skill files deleted from both locations — remove from DB
+                            dbDeleteSkill(id: id)
+                            continue
+                        }
                     }
                 }
 

@@ -80,6 +80,11 @@ import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.browser.UserAgentProfile
 import com.openminis.app.ui.chat.StandardChatSheet
 import kotlinx.coroutines.launch
+import com.openminis.app.ui.components.DecorativeSpinner
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import com.openminis.app.ui.components.decorativePingPong
+import androidx.compose.ui.graphics.graphicsLayer
 
 /**
  * Bottom sheet presenting the browser tab pool with tab bar, URL bar,
@@ -335,7 +340,10 @@ fun BrowserSheet(
                 if (isAgentBusy) {
                     AgentBrowsingOverlay(
                         accent = accent,
-                        onTakeover = { tabPool.releaseAllTabs() },
+                        // [T-android-browser-release-all-semantics] Takeover
+                        // hands the wheel to the user — the page they are
+                        // looking at must stay exactly as it is.
+                        onTakeover = { tabPool.releaseAllTabsToUser() },
                     )
                 }
             }
@@ -542,12 +550,10 @@ private fun ToolbarIcon(
 /** Globe icon with a spinning arc border when loading. */
 @Composable
 private fun BrowserAddressBarIcon(isLoading: Boolean, accent: Color) {
-    val transition = rememberInfiniteTransition(label = "addrIcon")
-    val angle by transition.animateFloat(
-        initialValue = 0f, targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(1000, easing = LinearEasing)),
-        label = "angle",
-    )
+    // [T-android-decorative-anim-perf] Clock only while loading (nothing to
+    // spin otherwise), and the rotation moves to the layer lambda below —
+    // `.rotate(angle)` read the value in composition, recomposing the icon
+    // every frame on top of the spinner's own animation.
     Box(
         modifier = Modifier.size(24.dp),
         contentAlignment = Alignment.Center,
@@ -559,12 +565,16 @@ private fun BrowserAddressBarIcon(isLoading: Boolean, accent: Color) {
             tint = if (isLoading) accent else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (isLoading) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .size(22.dp)
-                    .rotate(angle),
+            // [T-android-decorative-anim-perf] DecorativeSpinner, not Material's:
+            // rotating Material's indicator from our clock still left its OWN
+            // InfiniteTransition asking for every frame, which is the whole
+            // reason the chat spinners were swapped. A page load during agent
+            // browsing is long-lived, so this one matters.
+            DecorativeSpinner(
                 color = accent,
+                modifier = Modifier.size(22.dp),
                 strokeWidth = 1.5.dp,
+                periodMs = 1000,
             )
         }
     }
@@ -573,12 +583,11 @@ private fun BrowserAddressBarIcon(isLoading: Boolean, accent: Color) {
 /** Breathing-light overlay shown when the agent is controlling the browser. */
 @Composable
 private fun AgentBrowsingOverlay(accent: Color, onTakeover: () -> Unit) {
-    val transition = rememberInfiniteTransition(label = "breathing")
-    val breathingAlpha by transition.animateFloat(
-        initialValue = 0.3f, targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(1500), RepeatMode.Reverse),
-        label = "breathingAlpha",
-    )
+    // [T-android-decorative-anim-perf] The breathing dot used to rebuild
+    // `accent.copy(alpha = …)` in composition every frame; now the alpha is
+    // a layer property read from the shared tick and the background colour
+    // is constant.
+    val tick = rememberDecorativeTick()
 
     Box(
         modifier = Modifier
@@ -596,7 +605,10 @@ private fun AgentBrowsingOverlay(accent: Color, onTakeover: () -> Unit) {
             Box(
                 modifier = Modifier
                     .size(8.dp)
-                    .background(accent.copy(alpha = breathingAlpha), CircleShape),
+                    .graphicsLayer {
+                        alpha = 0.3f + 0.7f * decorativePingPong(decorativePhase(tick.value, 3000))
+                    }
+                    .background(accent, CircleShape),
             )
             Spacer(Modifier.width(12.dp))
             Text(

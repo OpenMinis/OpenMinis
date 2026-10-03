@@ -835,6 +835,12 @@ enum MigrationError: Error, LocalizedError {
     case pushDidNotDrain(remaining: Int)
     case v1FetchFailed(reason: String)
     case zoneDeleteFailed(zone: String, reason: String)
+    /// [T-icloud-zone-delete-resurrect] The delete call itself reported
+    /// success, but the zone was still in the private database when we read
+    /// it back — i.e. a running sync engine re-created it. Distinct from
+    /// `zoneDeleteFailed` so the UI can explain the actual cause (an engine
+    /// owns this zone) rather than blaming CloudKit.
+    case zoneResurrected(zone: String)
     /// Sentinel: the current phase didn't finish in its window but is
     /// still making progress in the background (CK-throttled). Caller
     /// should suspend the state machine and resume on next app launch.
@@ -849,6 +855,8 @@ enum MigrationError: Error, LocalizedError {
             return "v1 fetch failed: \(r)"
         case .zoneDeleteFailed(let z, let r):
             return "Failed to delete v1 zone \(z): \(r)"
+        case .zoneResurrected(let z):
+            return "Zone \(z) was deleted but immediately re-created by a running sync engine. Turn off iCloud Sync, then delete it again."
         case .deferredUntilNextLaunch(let n):
             return "Deferred — \(n) records still in queue, will resume on next launch"
         }
@@ -996,6 +1004,117 @@ enum V1FetcherShim {
             return true
         default:
             return false
+        }
+    }
+
+    /// [T-icloud-zone-delete-resurrect] Zones the user deletes from the Zones
+    /// inventory must STAY deleted. Both sync engines hold a CKSyncEngine whose
+    /// pending database changes re-create the zones they own — v1 re-adds
+    /// `device-<myId>` AND the legacy bare `devices` zone
+    /// (CloudSyncEngine.queueZonesAndDeviceRecord), v2 re-adds the three
+    /// `minis-*` zones (ICloudSharedZoneTransport). A plain
+    /// `deleteRecordZone` therefore succeeds and the zone reappears seconds
+    /// later, which is exactly the "deleted it, still in the list" report.
+    ///
+    /// So the delete is bracketed: quiesce whichever engine owns the zone
+    /// first, then delete, then read the zone list back to confirm. Without the
+    /// read-back a resurrected zone is indistinguishable from a successful
+    /// delete, which is how this shipped silently.
+    ///
+    /// Returns normally only when the zone is verified absent.
+    static func purgeZone(zoneName: String) async throws {
+        guard #available(iOS 17.0, *) else { return }
+        // Quiesce the owner BEFORE deleting, so no pending `saveZone` is
+        // sitting in an engine's queue waiting to land after our delete.
+        let owner = ZoneOwner.owning(zoneName: zoneName)
+        await owner.quiesce()
+        do {
+            try await deleteOwnZone(zoneName: zoneName)
+            // Tombstone BEFORE resuming: `resume()` restarts the engine, whose
+            // very first act is to re-queue zone creation. Recording the purge
+            // first is what makes the delete outlive the resume — and the next
+            // launch, where start() would otherwise re-create it unprompted.
+            owner.markPurged(zoneName: zoneName)
+            // Read back. `allRecordZones` is the same call the inventory uses,
+            // so "gone here" means "gone in the list the user is looking at".
+            let container = CKContainer(identifier: ICloudSharedZoneTransport.containerIdentifier)
+            let remaining = try await container.privateCloudDatabase.allRecordZones()
+            if remaining.contains(where: { $0.zoneID.zoneName == zoneName }) {
+                logger.error("[SyncMigration] zone \(zoneName) reappeared after delete — engine re-created it")
+                throw MigrationError.zoneResurrected(zone: zoneName)
+            }
+            logger.info("[SyncMigration] zone purge verified: \(zoneName)")
+        } catch {
+            // Restore the engine on failure; a failed delete must not leave
+            // sync switched off behind the user's back.
+            await owner.resume()
+            throw error
+        }
+        await owner.resume()
+    }
+
+    /// Which engine re-creates a given zone, and how to hold it still while we
+    /// delete. Resolved by zone name because that is what the inventory row
+    /// carries, and it is the same naming both engines key off.
+    @available(iOS 17.0, *)
+    enum ZoneOwner {
+        case v1
+        case v2
+        case none
+
+        static func owning(zoneName: String) -> ZoneOwner {
+            if zoneName == ICloudSharedZoneTransport.sharedZoneName
+                || zoneName == ICloudSharedZoneTransport.devicesZoneName
+                || zoneName == ICloudSharedZoneTransport.secretsZoneName {
+                return .v2
+            }
+            // v1 owns its per-device zone AND the legacy bare "devices" zone
+            // (CloudSyncEngine.devicesZoneName) — the `[?]` row users hit.
+            if zoneName.hasPrefix("device-") || zoneName == "devices" {
+                return .v1
+            }
+            return .none
+        }
+
+        @MainActor
+        func quiesce() async {
+            switch self {
+            case .v1:
+                // Drops the CKSyncEngine (and its queued saveZone changes)
+                // without touching the user's `cloudSync.enabled` preference.
+                CloudSyncEngine.shared.suspendForZonePurge()
+            case .v2:
+                await SyncCore.shared.suspendForZonePurge()
+            case .none:
+                break
+            }
+        }
+
+        @MainActor
+        func resume() async {
+            switch self {
+            case .v1:
+                await CloudSyncEngine.shared.resumeAfterZonePurge()
+            case .v2:
+                await SyncCore.shared.resumeAfterZonePurge()
+            case .none:
+                break
+            }
+        }
+
+        /// Record the delete durably so the owning engine does not re-create
+        /// the zone — neither when it resumes moments from now, nor on any
+        /// later launch.
+        ///
+        /// Only v1 gets a tombstone. Its zones are legacy and the user is
+        /// deliberately reclaiming that space. A v2 zone is where sync
+        /// actively lives, so suppressing its re-creation would quietly break
+        /// sync instead of freeing space; deleting one is a data-clearing
+        /// action, and v2 legitimately rebuilds it on the next run.
+        @MainActor
+        func markPurged(zoneName: String) {
+            guard case .v1 = self else { return }
+            CloudSyncEngine.markZonePurged(zoneName)
         }
     }
 

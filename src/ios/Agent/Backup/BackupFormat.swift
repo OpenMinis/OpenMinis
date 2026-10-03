@@ -416,6 +416,30 @@ struct BackupRecordEnvelope<Payload: Codable>: Codable {
 /// restoring an old definition onto a newer build would resurrect or duplicate
 /// a rule the app already defines. The exporter reads
 /// `allCustomThinkingRuleIds()`, whose SQL is `WHERE is_builtin = 0`.
+/// [T-subagent-own-store] One sub agent definition, as carried in
+/// `data/sub_agents.jsonl`.
+///
+/// Same approach as BackupThinkingRuleRecord below: field-for-field the shape
+/// of the sync record (`SyncedSubAgentV3`), so there is one definition of what
+/// a portable sub agent is rather than two that can drift.
+///
+/// The BUILT-IN is never written here. It ships with the app and its name and
+/// description are canonical (the delegating model matches on them), so
+/// restoring an old package's copy onto a newer build could resurrect stale
+/// canonical text — the same reasoning that keeps built-in thinking rules out.
+struct BackupSubAgentRecord: Codable {
+    var id: String
+    var name: String
+    var subAgentDescription: String
+    var instructions: String
+    var modelGroupId: String?
+    /// [T-subagent-thinking-override] ThinkingLevel raw value, nil = not set.
+    /// Optional so a package written before the field existed still decodes.
+    var thinkingLevelOverride: String?
+    var sortOrder: Int
+    var updatedAt: Date
+}
+
 struct BackupThinkingRuleRecord: Codable {
     var id: String
     var instanceId: String

@@ -32,7 +32,6 @@ enum ChatStoreSyncHydrators {
             merger: { record in await mergeMessage(record: record) },
             deletionApplier: { id in await deleteMessage(id: id) }
         )
-
         h.register(
             recordType: "CompactMarkerV2",
             builder: { id in await buildCompactMarker(id: id) },
@@ -61,19 +60,7 @@ enum ChatStoreSyncHydrators {
             builder: { _ in await buildProviderConfig() },
             merger: { record in await mergeProviderConfig(record: record) }
         )
-        // [T-mcp-per-server-sync] Legacy whole-file servers.json record.
-        // New devices NEVER emit it (builder returns nil — leftover upsert
-        // dirty rows drain as no-ops; the one-time op=delete row still
-        // pushes). The merger is kept so a peer on an old build can seed
-        // our list — applied per-server (union) instead of a file
-        // overwrite, so a stale whole-file snapshot can't clobber
-        // per-item state. MCPStore.scheduleLegacyRecordCleanupIfNeeded
-        // removes the cloud record once items have been pushed.
-        h.register(
-            recordType: "MCPServersV2",
-            builder: { _ -> PortableRecord? in nil },
-            merger: { record in await mergeMCPServers(record: record) }
-        )
+
         h.register(
             recordType: "MCPServerItem",
             builder: { id in await buildMCPServerItem(id: id) },
@@ -108,6 +95,12 @@ enum ChatStoreSyncHydrators {
             builder: { id in await buildProviderThinkingRuleV3(id: id) },
             merger: { record in await mergeProviderThinkingRuleV3(record: record) },
             deletionApplier: { id in await deleteProviderThinkingRuleV3(id: id) }
+        )
+        h.register(
+            recordType: "SubAgentV3",
+            builder: { id in await buildSubAgentV3(id: id) },
+            merger: { record in await mergeSubAgentV3(record: record) },
+            deletionApplier: { id in await deleteSubAgentV3(id: id) }
         )
         // Legacy whole-file env-vars record. New devices NEVER emit it
         // (builder returns nil — caller treats nil as "this builder
@@ -188,6 +181,10 @@ enum ChatStoreSyncHydrators {
         // doesn't know the field exists — only the former may clear local.
         let folderFieldPresent = record.fields["folderId"] != nil
         let folderId = optionalStringField(record, "folderId")
+        // [T-p1-delegate-task] Same presence idiom for the child linkage.
+        let parentFieldPresent = record.fields["parentSessionId"] != nil
+        let parentSessionId = optionalStringField(record, "parentSessionId")
+        let parentToolUseId = optionalStringField(record, "parentToolUseId")
 
         var session = ChatSession(
             id: id, title: title, category: category, modelId: modelId,
@@ -202,7 +199,10 @@ enum ChatStoreSyncHydrators {
             modelBinding: modelBinding,
             remotePinnedAtRaw: pinnedAt,
             remoteFolderId: folderId,
-            remoteHasFolderField: folderFieldPresent
+            remoteHasFolderField: folderFieldPresent,
+            remoteParentSessionId: parentSessionId,
+            remoteParentToolUseId: parentToolUseId,
+            remoteHasParentField: parentFieldPresent
         )
     }
 
@@ -661,35 +661,6 @@ enum ChatStoreSyncHydrators {
 
     // MARK: - MCPServers (legacy whole-file, inbound-only)
 
-    /// [T-mcp-per-server-sync] Apply an inbound legacy whole-file snapshot
-    /// from a peer still on the pre-per-item build. Decomposed into
-    /// per-server applies (union + per-entry LWW) instead of the old
-    /// whole-file overwrite, so a stale snapshot cannot clobber servers
-    /// added locally or received as MCPServerItem records. Deletes are not
-    /// expressible through this legacy path (acceptable: old-build peers
-    /// couldn't sync at all — their whitelist never included the type).
-    private static func mergeMCPServers(record: PortableRecord) async {
-        guard let json = stringField(record, "serversJson"),
-              let data = json.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rawServers = root["mcpServers"] as? [String: Any] else { return }
-        let remoteUpdatedAt = dateField(record, "updatedAt") ?? record.updatedAt
-        for (name, rawEntry) in rawServers {
-            guard let obj = rawEntry as? [String: Any],
-                  let entryData = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
-                  let entryJson = String(data: entryData, encoding: .utf8) else { continue }
-            let entryUpdated = (obj["updatedAt"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? remoteUpdatedAt
-            let entryCreated = (obj["createdAt"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? remoteUpdatedAt
-            await MainActor.run {
-                MCPStore.shared.applyRemoteServerItem(
-                    name: name, entryJson: entryJson,
-                    remoteCreatedAt: entryCreated, remoteUpdatedAt: entryUpdated
-                )
-            }
-        }
-        logger.info("[SyncCore] applied legacy MCPServersV2 as \(rawServers.count) per-server merges")
-    }
-
     // MARK: - MCPServerItem (per-server)
 
     /// Build a per-server record. `id` is the server name (also the CK
@@ -900,6 +871,9 @@ enum ChatStoreSyncHydrators {
                 .components(separatedBy: ",").filter { !$0.isEmpty }
         )
         await ChatStore.shared.upsertSyncDevice(device)
+        // [T-icloud-device-heartbeat] Discovery is reported long after the
+        // fact; one line per peer record makes it diagnosable from a log.
+        logger.info("[Discovery] peer=\(id.prefix(8)) name=\(device.deviceName) lastSeen=\(device.lastSeen) via=engine")
     }
 
     // MARK: - Helper
@@ -941,18 +915,42 @@ enum ChatStoreSyncHydrators {
     private static func buildSoul() async -> PortableRecord? {
         let url = await MainActor.run { SoulStore.fileURL }
         let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else {
+        guard fm.fileExists(atPath: url.path) else {
             logger.info("[SyncCore] buildSoul: SOUL.md missing on disk, skipping push")
             return nil
         }
+        // [T-soul-icon-sidecar] The icon's bytes now live in SOUL.icon.png and
+        // the frontmatter holds only the filename — but the wire format is
+        // deliberately UNCHANGED, still one self-contained `contentMarkdown`
+        // blob with the icon inlined as base64. Two reasons: no CloudKit
+        // schema change, and a peer running a build that predates the sidecar
+        // still receives a working icon instead of a dangling filename that
+        // means nothing in its own container.
+        //
+        // So read through SoulStore (which folds the sidecar back in) rather
+        // than shipping the raw file, whose `icon: "SOUL.icon.png"` would
+        // arrive as an unresolvable reference.
+        guard let file = await MainActor.run(body: { SoulStore.load() }) else {
+            logger.info("[SyncCore] buildSoul: SOUL.md unreadable, skipping push")
+            return nil
+        }
+        let text = await MainActor.run { SoulStore.serializedForWire(file) }
         // Use the file's mtime as updatedAt so a peer's older snapshot
         // can't clobber a locally newer edit just because clocks drift.
+        //
+        // [T-soul-icon-sidecar] Take the LATER of SOUL.md and the icon
+        // sidecar. `SoulStore.save` rewrites SOUL.md on every change so its
+        // mtime normally already moves, but the record's payload now depends
+        // on two files: if the sidecar is ever the only one to change, an
+        // mtime read from SOUL.md alone would date the push to before the edit
+        // it carries and let a peer's older copy win LWW.
+        let iconURL = await MainActor.run { SoulStore.iconFileURL }
         let mtime: Date = {
-            if let attrs = try? fm.attributesOfItem(atPath: url.path),
-               let d = attrs[.modificationDate] as? Date { return d }
-            return Date()
+            func modified(_ u: URL) -> Date? {
+                (try? fm.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date
+            }
+            let dates = [modified(url), modified(iconURL)].compactMap { $0 }
+            return dates.max() ?? Date()
         }()
         let synced = SyncedSoul(contentMarkdown: text, updatedAt: mtime)
         return SyncableTypeRegistry.shared.metadata(for: "SoulV2")?.buildPortable(synced)
@@ -1399,7 +1397,24 @@ enum ChatStoreSyncHydrators {
                 type: "ProviderModelEntryV3", id: rawId, remoteUpdatedAt: entryUpdatedAt)
         }
         if recentlyDeleted {
-            logger.info("[v3] mergeProviderModelEntryV3 SKIP (recently deleted locally): id=\(id.prefix(16))")
+            // [T-sync-trace-log-volume] DEBUG, not INFO — unlike its eight
+            // sibling SKIP lines in this file.
+            //
+            // The guard itself is load-bearing (it blocks the iCloud-echo
+            // resurrection fixed in 244afc1ec) and is NOT changed. What changes
+            // is only how loudly the non-event is announced: model entries are
+            // by far the most numerous record type — a single sampled pass
+            // carried 200 of them — so once a device accumulates tombstones this
+            // one line repeats per entry per cycle forever. Measured: 114 lines
+            // in a two-minute sample, 78 of them the SAME id, 62% of all
+            // SyncCore output.
+            //
+            // The eight siblings stay at INFO: instances, groups, folders,
+            // skills, MCP servers, env vars, thinking rules and sub agents are
+            // few, so one line each is proportionate. The batch summary
+            // ("inbound from iCloud: applied=… skipped=… blocked=…") still
+            // reports the aggregate at INFO either way.
+            logger.debug("[v3] mergeProviderModelEntryV3 SKIP (recently deleted locally): id=\(id.prefix(16))")
             return
         }
         let applied = await db.upsertEntryFromInbound(
@@ -1703,6 +1718,94 @@ enum ChatStoreSyncHydrators {
         await db.deleteThinkingRule(id: id)
         logger.info("[v3] deleted ProviderThinkingRuleV3 \(id.prefix(8))")
         await ProviderConfigStore.shared.reloadThinkingRuleCache()
+    }
+
+    // MARK: - SubAgentV3 (T-subagent-own-store)
+
+    /// Outbound. nil when the definition no longer exists locally (deleted
+    /// between the markDirty and the push) — the caller drops the dirty row.
+    private static func buildSubAgentV3(id: String) async -> PortableRecord? {
+        guard let def = SubAgentStore.shared.subAgent(id: id) else { return nil }
+        let synced = SyncedSubAgentV3(
+            id: def.id,
+            name: def.name,
+            subAgentDescription: def.description,
+            instructions: def.instructions,
+            modelGroupId: def.modelGroupId,
+            thinkingLevelOverride: def.thinkingLevelOverride?.rawValue,
+            isBuiltIn: def.isBuiltIn ? 1 : 0,
+            sortOrder: def.sortOrder,
+            updatedAt: def.updatedAt
+        )
+        return SyncableTypeRegistry.shared
+            .metadata(for: "SubAgentV3")?
+            .buildPortable(synced)
+    }
+
+    /// Inbound upsert.
+    ///
+    /// [T-subagent-sync-dedupe] This is where the name-dedupe from 07351c6d1
+    /// now runs. Moving to per-record sync changed WHERE it belongs but not
+    /// whether it is needed: ids are per-device UUIDs while the model addresses
+    /// agents by NAME, so two devices that each add "coding-agent" still
+    /// produce two records that are distinct by id and indistinguishable to the
+    /// model. Feeding the incoming definition through
+    /// `SubAgentRoster.merge(local:remote:)` collapses that pair with the same
+    /// deterministic rule as before — newer updatedAt wins, ties break on the
+    /// lexicographically smaller id, so both devices independently reach the
+    /// same winner and stop re-uploading rival rosters.
+    private static func mergeSubAgentV3(record: PortableRecord) async {
+        let id = record.id.id
+        // [T-icloud-record-delete-resurrection] Same guard the provider mergers
+        // use: an agent just deleted here must not be re-inserted by a
+        // fetchRecentV2 that raced ahead of the op=delete reaching the cloud.
+        if await ChatStore.shared.isRecentlyDeletedRecord(
+            type: "SubAgentV3", id: id,
+            remoteUpdatedAt: dateField(record, "updatedAt") ?? Date()) {
+            logger.info("[v3] mergeSubAgentV3 SKIP (recently deleted locally): id=\(id.prefix(8))")
+            return
+        }
+        guard let name = stringField(record, "name"), !name.isEmpty else {
+            logger.warning("[v3] mergeSubAgentV3 SKIP (no name) id=\(id.prefix(8))")
+            return
+        }
+        let incoming = SubAgentDefinition(
+            id: id,
+            name: name,
+            description: stringField(record, "description") ?? "",
+            instructions: stringField(record, "instructions") ?? "",
+            modelGroupId: optionalStringField(record, "modelGroupId"),
+            // [T-subagent-thinking-override] Absent from an older peer's record
+            // → nil → "not set", which is the pre-feature behaviour.
+            thinkingLevelOverride: optionalStringField(record, "thinkingLevelOverride")
+                .flatMap { ThinkingLevel(rawValue: $0) },
+            isBuiltIn: (intField(record, "isBuiltIn") ?? 0) != 0,
+            sortOrder: intField(record, "sortOrder") ?? 0,
+            updatedAt: dateField(record, "updatedAt") ?? Date()
+        )
+        let store = SubAgentStore.shared
+        let before = store.subAgents
+        let merged = SubAgentRoster.merge(local: before, remote: [incoming]) {
+            logger.info("[v3] mergeSubAgentV3: \($0)")
+        }
+        guard merged != before else {
+            logger.info("[v3] mergeSubAgentV3 SKIPPED (local newer or identical) id=\(id.prefix(8))")
+            return
+        }
+        store.applyMergedFromSync(merged)
+        logger.info("[v3] mergeSubAgentV3 APPLIED id=\(id.prefix(8)) roster=\(merged.count)")
+    }
+
+    /// Inbound delete. The local record really is removed — the tombstone
+    /// written by the ORIGINATING device is what stops the resurrection race.
+    private static func deleteSubAgentV3(id: String) async {
+        let store = SubAgentStore.shared
+        guard store.subAgent(id: id) != nil else { return }
+        // Route through the roster directly rather than removeSubAgent(id:),
+        // which would emit a fresh op=delete markDirty and echo our peer's
+        // delete back at the cloud.
+        store.applyMergedFromSync(store.subAgents.filter { $0.id != id })
+        logger.info("[v3] deleted SubAgentV3 \(id.prefix(8))")
     }
 
     private static func deleteProviderModelGroupV3(id: String) async {

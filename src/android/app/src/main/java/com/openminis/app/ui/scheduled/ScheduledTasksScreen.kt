@@ -278,6 +278,23 @@ private fun ScheduledTaskRow(
 }
 
 internal fun formatScheduleSummary(task: ScheduledTask): String {
+    val nextSuffix = task.nextTriggerMs()?.let {
+        " · next ${SimpleDateFormat("MMM d HH:mm", Locale.getDefault()).format(Date(it))}"
+    } ?: ""
+    // [T-android-scheduled-triggers] Tasks the assistant created with
+    // minis-scheduled's relative triggers, described in the CLI's own terms.
+    when (task.triggerKind) {
+        com.openminis.app.scheduled.ScheduledTriggerKind.AFTER ->
+            return "Once after ${com.openminis.app.scheduled.ScheduledTaskDetailModel.formatDuration(task.delaySec ?: 0L)}$nextSuffix"
+        com.openminis.app.scheduled.ScheduledTriggerKind.INTERVAL -> {
+            val every = com.openminis.app.scheduled.ScheduledTaskDetailModel.formatDuration(task.intervalSec ?: 0L)
+            val count = task.maxFires?.let { " ×$it (${task.remainingFires} left)" } ?: ""
+            return "Every $every$count$nextSuffix"
+        }
+        com.openminis.app.scheduled.ScheduledTriggerKind.ON_COMPLETION ->
+            return "After ${task.onCompletionOf.orEmpty().take(8)} finishes"
+        com.openminis.app.scheduled.ScheduledTriggerKind.CALENDAR -> Unit
+    }
     val time = "%02d:%02d".format(task.timeOfDayHour, task.timeOfDayMinute)
     val repeat = when (task.repeatMode) {
         ScheduledRepeatMode.ONCE -> "Once"

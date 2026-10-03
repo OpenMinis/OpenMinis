@@ -61,12 +61,6 @@
 // CppJieba Chinese word segmentation (ObjC++ wrapper)
 #import "JiebaWrapper.h"
 
-// Recorder for -[NSConcreteMutableAttributedString attribute:atIndex:
-// effectiveRange:] — captures the last 10 queries into a tiny ring so
-// the HangDetector dump can show what the typesetter was asking about
-// at stall time.
-#import "AttributeQueryRecorder.h"
-
 #endif /* MinisApp_Bridging_Header_h */
 
 // rclone static library (deps/frameworks/Rclone.xcframework) — see RcloneBridge.swift

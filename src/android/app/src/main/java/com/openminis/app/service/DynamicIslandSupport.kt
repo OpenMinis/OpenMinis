@@ -18,10 +18,10 @@ import android.util.Log
  *      reflects the *system + per-app user grant* (the user can disable Live
  *      Updates for this app from system settings), so it can flip at runtime.
  *
- * The probe is intentionally NOT cached: callers re-query it each time the app
- * becomes foreground-visible (spec §3) so a permission the user toggled off in
- * system settings is picked up without needing a process restart. It's a cheap
- * synchronous call.
+ * The probe is cached only briefly (see [capableCache]): callers re-query it
+ * each time the app becomes foreground-visible (spec §3) so a permission the
+ * user toggled off in system settings is picked up without needing a process
+ * restart.
  *
  * As of 2026-07 this only actually returns true on Pixel 6+ hardware running
  * the Android 16 QPR that shipped Live Updates; on every other device the guard
@@ -38,17 +38,66 @@ object DynamicIslandSupport {
      * right now. Runtime-safe on all API levels — returns false pre-36 without
      * touching any 36-only symbol.
      */
+    /**
+     * [T-android-island-capability-cache] Memoized result of the capability
+     * probe below. `null` until first asked.
+     *
+     * The probe is a binder round trip (`getSystemService` +
+     * `canPostPromotedNotifications`). It was being re-asked TWICE per second for as long as a
+     * task ran: the chip ticker calls `isPromotedChipActive()` each tick and
+     * `buildPromotedNotification()` asks again while building the very
+     * notification that tick posts. With decorative animations fixed, those
+     * binder calls were the single largest remaining app-side cost in a
+     * profile of a running tool (24 samples, the top two app frames).
+     *
+     * [T-android-island-capability-ttl] It CAN change while the process
+     * lives: the answer reflects the per-app Live Updates grant the user
+     * toggles in system settings (see the class KDoc). Cached forever, a
+     * revoke left applyOverlayState suppressing the floating capsule while the
+     * system refused the promoted chip — neither surface showed — and a later
+     * grant stayed invisible until the process died. So the cache now expires
+     * after [CAPABILITY_TTL_MS] and can be dropped explicitly via
+     * [invalidateCapabilityCache] (the settings screen's ON_RESUME re-probe).
+     * At 2 asks/second a 5 s TTL still removes ~90% of the binder calls the
+     * memoization was introduced to save.
+     */
+    @Volatile
+    private var capableCache: Boolean? = null
+
+    /** `SystemClock.elapsedRealtime()` at which [capableCache] was filled. */
+    @Volatile
+    private var capableCachedAtMs: Long = 0L
+
+    private const val CAPABILITY_TTL_MS = 5_000L
+
+    /** Forget the cached capability so the next ask re-probes the platform. */
+    fun invalidateCapabilityCache() {
+        capableCache = null
+    }
+
+    private fun cacheCapability(capable: Boolean): Boolean {
+        capableCachedAtMs = android.os.SystemClock.elapsedRealtime()
+        capableCache = capable
+        return capable
+    }
+
     fun isDynamicIslandCapable(context: Context): Boolean {
+        // Pre-36 is a property of the OS build and truly cannot flip; no
+        // binder call is involved, so nothing to cache.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return false
+        capableCache?.let { cached ->
+            val age = android.os.SystemClock.elapsedRealtime() - capableCachedAtMs
+            if (age in 0 until CAPABILITY_TTL_MS) return cached
+        }
         return try {
             val nm = context.getSystemService(NotificationManager::class.java)
-            nm?.canPostPromotedNotifications() == true
+            cacheCapability(nm?.canPostPromotedNotifications() == true)
         } catch (t: Throwable) {
             // Defensive: some early/partial Baklava builds may throw if the
             // feature isn't fully wired. Treat any failure as "not capable"
             // so we fall back to the overlay + plain-notification path.
             Log.w(TAG, "canPostPromotedNotifications() failed: ${t.message}")
-            false
+            cacheCapability(false)
         }
     }
 

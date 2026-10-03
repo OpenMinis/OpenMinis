@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Bahasa Indonesia */
+
+"NSLocationWhenInUseUsageDescription" = "Minis menggunakan lokasi Anda untuk mencatat tempat sesi agen dimulai dalam riwayat sesi Anda.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis menggunakan lokasi di latar belakang agar tugas agen dapat terus berjalan saat aplikasi tidak dibuka. Data lokasi hanya digunakan untuk mencatat riwayat sesi.";
+"NSCalendarsUsageDescription" = "Minis mengakses Kalender agar agen AI dapat melihat jadwal Anda, memeriksa waktu luang, dan membuat acara atas nama Anda.";
+"NSCalendarsFullAccessUsageDescription" = "Minis mengakses Kalender agar agen AI dapat melihat jadwal Anda, memeriksa waktu luang, dan membuat acara atas nama Anda.";
+"NSRemindersUsageDescription" = "Minis mengakses Pengingat agar agen AI dapat mencari dan membuat pengingat atas nama Anda.";
+"NSRemindersFullAccessUsageDescription" = "Minis mengakses Pengingat agar agen AI dapat mencari dan membuat pengingat atas nama Anda.";
+"NSCameraUsageDescription" = "Minis memerlukan akses kamera untuk mengambil foto yang digunakan dalam percakapan AI.";
+"NSPhotoLibraryUsageDescription" = "Minis memerlukan akses ke Galeri Foto untuk melampirkan gambar ke percakapan AI.";
+"NSPhotoLibraryAddUsageDescription" = "Minis memerlukan izin untuk menyimpan video dan gambar ke Galeri Foto Anda.";
+"NSHealthShareUsageDescription" = "Minis mengakses HealthKit agar agen AI dapat membaca data kesehatan seperti langkah, detak jantung, tidur, dan olahraga atas nama Anda.";
+"NSHealthUpdateUsageDescription" = "Minis menulis ke HealthKit agar agen AI dapat mencatat data kesehatan seperti langkah, berat badan, dan asupan air atas nama Anda.";
+"NSContactsUsageDescription" = "Minis mengakses Kontak agar agen AI dapat mencari, menampilkan, dan mengelola kontak Anda atas nama Anda.";
+"NSAppleMusicUsageDescription" = "Minis mengakses pustaka media agar agen AI dapat menelusuri koleksi musik Anda dan mengatur pemutaran.";
+"NSMicrophoneUsageDescription" = "Minis memerlukan akses mikrofon untuk input suara dalam percakapan.";
+"NSSpeechRecognitionUsageDescription" = "Minis menggunakan pengenalan suara untuk mengubah ucapan Anda menjadi pesan teks.";
+"NSHomeKitUsageDescription" = "Minis mengakses HomeKit agar agen AI dapat memeriksa dan mengontrol perangkat rumah pintar Anda atas nama Anda.";
+"NSAlarmKitUsageDescription" = "Minis menggunakan AlarmKit agar agen AI dapat menyetel alarm dan pengatur waktu atas nama Anda.";
+"NSLocalNetworkUsageDescription" = "Mesin virtual memerlukan akses jaringan untuk koneksi jaringan SLIRP.";

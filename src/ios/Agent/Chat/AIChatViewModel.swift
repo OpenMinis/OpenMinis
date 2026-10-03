@@ -23,14 +23,32 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// they can be re-viewed via the `read_image` tool.
     static let kImageContextKeepCount = 20
 
-    // MARK: - Image byte budgets (T-imgsize-13b7d81c)
+    // MARK: - Image byte budgets (T-imgsize-13b7d81c, T-image-budget-base64)
     //
-    // Anthropic rejects requests whose total inline image payload exceeds
-    // 30 MB ("Downloaded image content cannot exceed 30MB" — the 30 MB
-    // applies to decoded image bytes, NOT the base64-inflated wire form,
-    // so we budget in raw bytes too). Other providers have similar but
-    // undocumented caps. We enforce a tighter, pre-encoding budget so the
-    // request never reaches the wire too big:
+    // [T-image-budget-base64] These budgets are measured in BASE64 bytes —
+    // the size the image actually occupies in the request body — not in raw
+    // decoded bytes.
+    //
+    // The original comment here reasoned that Anthropic's 30 MB limit applies
+    // to decoded image bytes, so budgeting in raw bytes was equivalent. That
+    // is true of Anthropic's own per-image content rule, but it is NOT the
+    // constraint that was actually breaking requests: gateways in front of
+    // several providers (OpenAI and Anthropic both observed) enforce a 32 MB
+    // limit on the HTTP REQUEST BODY, and images travel that body base64
+    // encoded, which inflates them by 4/3. A 25 MB raw budget therefore put
+    // ~33.3 MB on the wire before a single byte of text history or tool
+    // schema — over the cap on its own, which is exactly the
+    // "request too large (~32 MB, limit 32 MB)" failure users hit.
+    //
+    // Budgeting in base64 bytes makes the number mean what it says: the
+    // ceiling is what we are about to send. Raw-byte sizes are converted
+    // with `estimatedBase64Length` at every comparison instead of the
+    // constants being scaled down, so there is no rounding drift and the
+    // headroom below stays exact rather than approximate.
+    //
+    // Other providers have similar but undocumented caps. We enforce a
+    // tighter, pre-encoding budget so the request never reaches the wire
+    // too big:
     //
     //   - Per image: 5 MB after JPEG re-encode. The Anthropic SDK's own
     //     per-image soft hint; well under the 30 MB request cap and
@@ -45,8 +63,46 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     //   - Above the message cap, additional images are dropped to a text
     //     placeholder (same fallback the count cap already uses).
 
-    /// Hard ceiling per single image after compression. Matches the
-    /// Anthropic SDK's per-image hint; well below the 30 MB request cap.
+    /// [T-image-budget-base64] Bytes `rawBytes` will occupy once base64
+    /// encoded into the request body: 4 output bytes per 3 input bytes,
+    /// rounded up to the next 4-byte group (which is what padding produces).
+    ///
+    /// Exact for the encoding itself, so no fudge factor is needed. It
+    /// deliberately does NOT model the JSON string overhead around the
+    /// payload (quotes, the `data:` prefix, escaping) — those are tens of
+    /// bytes against megabytes, and the budgets already reserve headroom for
+    /// the rest of the body.
+    ///
+    /// Computed rather than measured: base64-encoding every candidate image
+    /// just to learn its length would cost a full copy of each image's bytes
+    /// on every request-budget pass, for a number this returns exactly.
+    ///
+    /// Mirrors Android's `ImageBudget.estimatedBase64Length`.
+    static func estimatedBase64Length(_ rawBytes: Int) -> Int {
+        guard rawBytes > 0 else { return 0 }
+        return ((rawBytes + 2) / 3) * 4
+    }
+
+    /// [T-image-budget-base64] Inverse of `estimatedBase64Length`: the largest
+    /// raw byte count that still encodes within `base64Budget`.
+    ///
+    /// Needed because the compressor ladder (`compressedImageDataUnderBudget`)
+    /// measures its output in RAW bytes — it is comparing `data.count` against
+    /// the target it was handed. Feeding it a base64 budget directly would
+    /// silently let it stop compressing at 5 MB raw, i.e. ~6.7 MB on the wire,
+    /// which is the very overshoot this change removes. So budgets cross that
+    /// boundary through here.
+    ///
+    /// Mirrors Android's `ImageBudget.rawBytesForBase64Budget`.
+    static func rawBytesForBase64Budget(_ base64Budget: Int) -> Int {
+        guard base64Budget > 0 else { return 0 }
+        return (base64Budget / 4) * 3
+    }
+
+    /// Hard ceiling per single image after compression, measured in BASE64
+    /// bytes (see `estimatedBase64Length`). 5 MB of wire payload is ~3.75 MB
+    /// of decoded image, still comfortably above what the compressor ladder
+    /// targets for a readable photo.
     static let kPerImageMaxBytes = 5 * 1024 * 1024
 
     /// Hard ceiling across all inlined images in one user message.
@@ -118,19 +174,42 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         return until > Date()
     }
 
-    /// Enter the post-stop hold: pause SyncCore (blocks push) for the grace
-    /// window and arm a timer that releases at the deadline. Called when the
-    /// agent loop transitions to idle.
+    /// Enter the post-stop hold for the PULL side only, and release the push
+    /// immediately. Called when the agent loop transitions to idle.
+    ///
+    /// [T-icloud-sync-tier1-push-on-idle] This used to also call
+    /// `SyncCore.pause(for: 60)`, holding every outbound record for a full
+    /// minute after the loop ended. That pause never protected anything:
+    /// the on-screen overwrite it was added for (c74a3a313, 2026-06-01) is
+    /// caused by a PULL-driven reload replacing in-memory content, which the
+    /// `isSyncHeld` guard in `reloadMessagesFromDB` and the cancel guard from
+    /// ebe9cb844 already prevent — and our own pushed records come back as
+    /// `ownEcho` and never trigger a reload. Measured cost of the pause on
+    /// two devices: 60 of the 96–160 s it took a finished turn to appear on
+    /// the peer. `persistAgentMessage` is awaited before `isProcessing`
+    /// flips, so on every normal completion the records are already durable
+    /// here; on cancel the kept partial is memory-only and is never marked
+    /// dirty until it persists, so nothing unpersisted can be pushed either.
+    ///
+    /// So: end this vm's send deferral and flush NOW (the store still holds
+    /// the send back if another loop is running), and keep only the pull
+    /// hold — `postStopSyncHoldUntil` + the timer — so a peer change that
+    /// arrived mid-turn is merged at the hold's release, not the instant the
+    /// candidate lands.
     @MainActor
     private func beginPostStopSyncHold() {
         let until = Date().addingTimeInterval(Self.postStopSyncHoldSeconds)
         postStopSyncHoldUntil = until
-        SyncCore.shared.pause(for: Self.postStopSyncHoldSeconds)
         postStopSyncHoldTimer?.invalidate()
         postStopSyncHoldTimer = Timer.scheduledTimer(withTimeInterval: Self.postStopSyncHoldSeconds, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.releasePostStopSyncHold(reason: "timer-60s") }
         }
-        logger.info("[SyncHold] BEGIN hold until \(until) (\(Int(Self.postStopSyncHoldSeconds))s) sid=\(self.sessionId?.prefix(8) ?? "nil")")
+        let owner = String(vmInstanceId)
+        Task {
+            await ChatStore.shared.endSyncSendDeferral(owner: owner)
+            await ChatStore.shared.flushPendingSyncDirty()
+        }
+        logger.info("[SyncHold] BEGIN pull-hold until \(until) (\(Int(Self.postStopSyncHoldSeconds))s), push released now sid=\(self.sessionId?.prefix(8) ?? "nil")")
     }
 
     /// Release the hold early/at-deadline and run one catch-up sync: resume
@@ -142,10 +221,22 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         postStopSyncHoldUntil = nil
         postStopSyncHoldTimer?.invalidate()
         postStopSyncHoldTimer = nil
-        logger.info("[SyncHold] RELEASE reason=\(reason) sid=\(self.sessionId?.prefix(8) ?? "nil") — resuming sync + catch-up")
-        SyncCore.shared.resume()
-        // Push: flush whatever the agent turn marked dirty.
-        Task { await ChatStore.shared.flushPendingSyncDirty() }
+        // [T-p0-sync-defer-refcount] Another session's loop may still be
+        // streaming. Its own hold/release will resume + flush when IT finishes
+        // (SyncCore.pause is deadline-bounded, so skipping resume here can't
+        // strand it). Only release this vm's deferral and let the store decide
+        // whether anything is still holding the send back.
+        let owner = String(vmInstanceId)
+        let othersActive = SessionActivityTracker.shared.activeSessions.contains { $0 != self.sessionId }
+        logger.info("[SyncHold] RELEASE reason=\(reason) sid=\(self.sessionId?.prefix(8) ?? "nil") othersActive=\(othersActive) — \(othersActive ? "deferring catch-up to the running session" : "resuming sync + catch-up")")
+        // [T-icloud-sync-tier1-push-on-idle] Push was already released and
+        // flushed in beginPostStopSyncHold; SyncCore was never paused, so
+        // there is nothing to resume. `endSyncSendDeferral` is set-based and
+        // idempotent — call it again only as a belt-and-braces for the
+        // paths that reach here without having gone through begin (deinit,
+        // background). It does not re-flush.
+        _ = othersActive
+        Task { await ChatStore.shared.endSyncSendDeferral(owner: owner) }
         // Pull: replay a deferred reload now that it's safe.
         if pendingSyncReloadOnIdle, !isProcessing, sessionId != nil {
             pendingSyncReloadOnIdle = false
@@ -172,6 +263,17 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     private var bgHintForegroundObserver: Any?
     private var snapshotForegroundObserver: Any?
     private var detachedLoopEndObserver: Any?
+    /// [T-ios-switch-model-ghost-retry] Observes `.sessionModelBindingChanged`
+    /// so a mid-conversation model switch tears down work aimed at the model
+    /// being switched away from. The notification was already being posted by
+    /// `SessionModelPicker`; until this, nothing listened to it.
+    private var modelBindingChangeObserver: Any?
+    /// [T-ios-switch-model-next-request] Set when the user picks a different
+    /// model while a HEALTHY turn is in flight. The running agent loop checks
+    /// it at the top of each iteration — i.e. before its next LLM request —
+    /// and swaps to the newly bound model there, so the switch takes effect
+    /// without interrupting the stream or tool call already under way.
+    var pendingModelSwitch = false
     /// Timestamp of the most recent background-entry, used to detect that a
     /// long-running browser task actually spanned a background period.
     private var bgHintBackgroundEntryDate: Date?
@@ -279,6 +381,25 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             logger.info("[BlocksLost] DETACHED reload — agent loop ended on another VM, reloading. sid=\(sid.prefix(8)) vm=\(self.vmInstanceId)")
             Task { @MainActor in
                 await self.reloadMessagesFromDB(reason: "detachedVMLoopEnd")
+            }
+        }
+
+        // [T-ios-switch-model-ghost-retry] A model switch must stop whatever is
+        // still aimed at the model being switched away from. `SessionModelPicker`
+        // has always posted this; nothing observed it, so the old model's agent
+        // loop kept retrying and its errors kept surfacing over the new model's
+        // working replies.
+        modelBindingChangeObserver = NotificationCenter.default.addObserver(
+            forName: .sessionModelBindingChanged, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let self, let sid = self.sessionId else { return }
+            // Only THIS conversation's switch. The notification is global and
+            // carries its session id, so a switch in another chat (or from a
+            // background/scheduled binding write) must not cancel this one.
+            guard let notifSid = notification.userInfo?["sessionId"] as? String,
+                  notifSid == sid else { return }
+            Task { @MainActor in
+                self.cancelWorkBoundToPreviousModel(reason: "user switched model")
             }
         }
 
@@ -463,6 +584,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // and deinit is nonisolated; `_deinitSnapshot` is updated on the
         // main actor during normal flow so we can read it here safely.
         logger.info("🔄SESSION [vm=\(vmId)] deinit lastKnown: \(self._deinitSnapshot)")
+        // [T-p0-sync-defer-refcount] A vm evicted mid-hold never reaches
+        // releasePostStopSyncHold (the timer holds self weakly); drop its
+        // deferral so it cannot pin iCloud sends off forever.
+        let owner = String(vmId)
+        Task { await ChatStore.shared.endSyncSendDeferral(owner: owner) }
         if let observer = fontChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -479,6 +605,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = detachedLoopEndObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = modelBindingChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -517,6 +646,58 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             }
         }
         if !transitionSuspended { objectWillChange.send() }
+    }
+
+    // MARK: - [T-vmcache-release] Non-destructive teardown
+
+    /// Free everything a cached VM holds for DISPLAY, without touching any
+    /// work it owns.
+    ///
+    /// This is the counterpart to `cancel()`, and the distinction is the whole
+    /// point of it. `cancel()` is the user pressing Stop: it drops queued
+    /// delegations and calls `AgentJobRegistry.cancelAll(parent:silent:)`.
+    /// Eviction used to call exactly that, so a cache-size policy silently
+    /// killed live sub agents and logged them as
+    /// `reason=user stopped the conversation (silent)` — see 761be79da.
+    ///
+    /// A release, by contrast, must be invisible to the model and to the job
+    /// registry: nothing is cancelled, nothing is reported, and every durable
+    /// record has already been written (the sub agent result lands in SQLite
+    /// via `persistFinalDelegateResult`, and `then.followUpParent` re-creates
+    /// this VM through `getOrCreate` + `loadSession` if it needs it). What is
+    /// dropped is only what can be rebuilt from the database.
+    @MainActor
+    func releaseForEviction() {
+        releaseRenderState()
+        // Deliberately NOT touched: `currentTask`, AgentJobRegistry jobs,
+        // SessionActivityTracker, browserTabPool ownership. A VM reaching here
+        // has already been vetted by `isEvictable`, which refuses anything with
+        // a live loop or live children — so there is no in-flight work to stop,
+        // and if that guard is ever loosened the work must SURVIVE, not die.
+        logger.info("♻️ releaseForEviction session=\(self.sessionId ?? "nil") vm=\(self.vmInstanceId) messages=\(self.messages.count)")
+    }
+
+    /// Drop render-only state (parsed markdown + laid-out attributed strings)
+    /// while keeping the message text itself.
+    ///
+    /// Used both by eviction and by a child conversation leaving the screen:
+    /// a sub agent that nobody is watching should not keep TextKit layout
+    /// trees alive for output only the model reads. Everything dropped here is
+    /// regenerated lazily on the next render.
+    @MainActor
+    func releaseRenderState() {
+        var cleared = 0
+        for msg in messages {
+            for block in msg.blocks {
+                if block.cachedAttributedString != nil { block.cachedAttributedString = nil; cleared += 1 }
+                if block.cachedMarkdown != nil { block.cachedMarkdown = nil }
+            }
+            // The per-message renderer lives in a STATIC cache that VM
+            // eviction never reached (it is keyed by message id, not session),
+            // so it has to be dropped explicitly or it outlives everything.
+            SelectableMarkdownView.dropRenderer(for: msg.id)
+        }
+        if cleared > 0 { logger.info("♻️ releaseRenderState session=\(self.sessionId ?? "nil") cleared=\(cleared) block cache(s)") }
     }
 
     // MARK: - Published State
@@ -563,12 +744,85 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// Updated on every isProcessing flip and on send entry.
     nonisolated(unsafe) var _deinitSnapshot: String = "isProcessing=false session=nil draft=nil"
 
+    // [T-ios-context-usage-hint] Context-window occupancy, published so the
+    // composer can render the ambient glow live and the placeholder line
+    // once per finished turn. Recomputed by publishContextUsage() whenever
+    // a message's usage lands or a session loads; nil when no assistant turn
+    // has reported usage yet (some providers never do — the feature then
+    // stays hidden instead of showing 0%).
+    @Published private(set) var contextUsage: ContextUsage?
+    /// One request per finished user-visible turn; the composer's Coordinator
+    /// acts on each generation exactly once (debounced there).
+    @Published private(set) var contextUsageHint: ContextUsageHint?
+    private var contextUsageHintGeneration = 0
+    /// [T-ctx-usage-after-compact] The message whose stamped usage was taken
+    /// BEFORE the latest compaction in this session. Its `latestContextTokens`
+    /// is the size of the context the compaction replaced, so while it is
+    /// still the newest usage-bearing message, `publishContextUsage()` shows
+    /// the measured post-compaction size instead. Cleared implicitly: the next
+    /// turn stamps usage on a newer message, which no longer matches.
+    var usageReportSupersededByCompaction: UUID?
+    /// [T-ios-context-usage-realtime-crossing] Shared by the mid-loop crossing
+    /// path and the loop-end path so the two never announce the same tier
+    /// twice within seconds. Internal (not private) so the session-load
+    /// extension can reset it.
+    var contextTierTracker = ContextTierCrossingTracker()
+
+    /// [T-ctx-measure-outbound] Calibration state for `ContextSizeMeter`.
+    ///
+    /// Replaces `liveContextTokensForCapacity`, a mirror of the newest API
+    /// report that the capacity guard folded in with `max()`. That number
+    /// described the previous request and nothing but another successful call
+    /// could replace it, so after a compaction it kept the guard above the line
+    /// and the loop re-compacted until it gave up (see ContextSizeMeter).
+    ///
+    /// `contextCalibrationRatios` — provider count / our estimate, taken from the
+    ///   same request, PER MODEL: a ratio mostly reflects the provider's
+    ///   tokenizer, so one learned on model A does not describe model B after a
+    ///   switch. `lastLearnedCalibration` is the newest ratio of any model; a
+    ///   model with none of its own borrows it with a margin (see
+    ///   ContextSizeMeter.ratio(for:)).
+    /// `contextFixedTokens` — estimated system prompt + tool schemas, refreshed
+    ///   every loop iteration; seeded from the last stamped turn on load so the
+    ///   send-time check has it before any loop has run.
+    /// `lastDispatchEstimate` — estimate of the request currently in flight,
+    ///   paired with its report when usage arrives.
+    var contextCalibrationRatios: [String: Double] = [:]
+    var lastLearnedCalibration: Double? = nil
+    /// The session the in-memory ratios were learned for (see seedContextCalibration).
+    var calibrationSessionId: String? = nil
+    /// [T-ctx-warmup-fit] Per compaction marker: how many leading warm-up
+    /// messages were dropped to fit. Decided once, then reused, so the request
+    /// prefix stays stable across turns (see trimWarmUpToFit).
+    var warmUpDropByMarker: [String: Int] = [:]
+    var contextFixedTokens = 0
+    var lastDispatchEstimate = 0
+    /// [T-ctx-overflow-attribute-dispatch] Model id and window of the request
+    /// in flight, so a rejection is attributed to the model that received it.
+    var lastDispatchModelId: String?
+    var lastDispatchWindow = 0
+    /// The ratio and calibrated size used for the request in flight, so its
+    /// response can be scored against the prediction ([CtxMeter] actual).
+    var lastDispatchRatio: Double = 1.0
+    var lastDispatchPredicted = 0
+    /// Whether an uncalibrated send past an extrapolated "over the window"
+    /// verdict has already been spent (see the in-loop guard). One per piece
+    /// of provider evidence: an accepted response re-arms it, a rejection
+    /// spends it, and it survives Retry.
+    var sentPastExtrapolatedLimitThisLoop = false
+
     @Published var isProcessing = false {
         didSet {
             _deinitSnapshot = "isProcessing=\(isProcessing) session=\(sessionId ?? "nil") draft=\(draftId ?? "nil")"
             if isProcessing && !oldValue {
-                // Agent loop starting — defer iCloud sync sends until completion
-                Task { await ChatStore.shared.setSyncSendDeferred(true) }
+                // Agent loop starting — defer iCloud sync sends until completion.
+                // [T-p0-sync-defer-refcount] Owner-keyed: two sessions can run
+                // loops concurrently (ViewModelCache + SessionConcurrencyManager),
+                // and a plain bool let the first loop to finish un-defer sync
+                // under the one still streaming. The deferral for this vm is
+                // released in releasePostStopSyncHold (or deinit).
+                let owner = String(vmInstanceId)
+                Task { await ChatStore.shared.beginSyncSendDeferral(owner: owner) }
                 // [T-ios-defer-icloud-sync-after-stop] A new turn supersedes any
                 // pending post-stop hold; clear it WITHOUT a catch-up sync (the
                 // new turn re-pauses sync via setSyncSendDeferred anyway).
@@ -594,6 +848,56 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 // runs on release (60s timer / leave session / background).
                 beginPostStopSyncHold()
                 StreamingHangLogger.shared.release(reason: "isProcessing=false session=\(sessionId ?? "nil")")
+                // [T-p0-programmatic-prompt] A silent (programmatic) turn ends
+                // here whether it completed or was cancelled; never let the
+                // flag leak into the user's next manual send.
+                // [T-subagent-callback-no-keyboard] Hand the fact forward first:
+                // this didSet runs before SwiftUI's onChange, so the auto-focus
+                // observer would otherwise see an already-cleared flag and pop
+                // the keyboard on a sub agent's callback.
+                turnWasSilentProgrammatic = programmaticSilentTurn
+                programmaticSilentTurn = false
+                // [T-ios-context-usage-hint] Offer the usage line for this
+                // turn. Only for a turn the user started and let finish:
+                // a cancelled turn's usage is whatever call happened to be
+                // in flight, and a silent sub-agent callback is not the
+                // user's turn at all. The composer must also be empty —
+                // the label is hidden behind typed text anyway, so the
+                // request would just expire unseen. The Coordinator adds
+                // its own debounce on top so a burst of quick turns shows
+                // the line once, for the last of them.
+                publishContextUsage()
+                // [T-ios-context-usage-realtime-crossing] Keep the shared tier
+                // record in step with the final usage (a cancelled or
+                // queued-turn path may have landed usage the mid-loop observer
+                // never saw), and skip the line when the mid-loop path already
+                // announced this very tier moments ago — the label would just
+                // repaint the same text and the voice panel would re-show it.
+                let loopEndNow = Date()
+                if let tier = contextUsage?.tier { _ = contextTierTracker.observe(tier, now: loopEndNow) }
+                if !userDidCancel, !turnWasSilentProgrammatic, inputText.isEmpty,
+                   let usage = contextUsage {
+                    if contextTierTracker.recentlyFired(for: usage.tier, now: loopEndNow) {
+                        logger.info("[ContextUsageHint] loop-end → dedup: mid-loop crossing hint for \(usage.tier) fired <\(Int(ContextTierCrossingTracker.minInterval))s ago (\(usage.usedTokens)/\(usage.windowTokens))")
+                    } else {
+                        contextUsageHintGeneration += 1
+                        contextUsageHint = ContextUsageHint.make(usage: usage, generation: contextUsageHintGeneration)
+                        contextTierTracker.markFired(usage.tier, now: loopEndNow)
+                        logger.info("[ContextUsageHint] loop-end → hint gen\(contextUsageHintGeneration) '\(contextUsageHint?.text ?? "")' (\(usage.usedTokens)/\(usage.windowTokens))")
+                    }
+                } else {
+                    logger.info("[ContextUsageHint] loop-end → NO hint: cancel=\(userDidCancel) silent=\(turnWasSilentProgrammatic) inputEmpty=\(inputText.isEmpty) usage=\(contextUsage.map { "\($0.usedTokens)/\($0.windowTokens)" } ?? "nil")")
+                }
+                // [T-p0-programmatic-prompt] Rescue drain. Every drain runs in
+                // some loop's epilogue BEFORE that loop flips isProcessing to
+                // false, so a prompt enqueued in the await-gap between the
+                // epilogue's drain and this flip has no consumer — it would sit
+                // in promptQueue until the user's next turn. Start one now.
+                // cancel() owns its own resume (resumeQueueAfterCancel) and
+                // sets userDidCancel first, so it is excluded here.
+                if !promptQueue.isEmpty && !userDidCancel {
+                    startDrainIfIdle(reason: "loop-ended-with-queued-prompts")
+                }
                 // [T-ios-ui-frozen-on-tool-while-loop-runs] Force one snapshot
                 // re-apply from the CURRENT in-memory messages at loop end.
                 //
@@ -786,11 +1090,42 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// isProcessing handler, and publishing it would re-render the whole chat
     /// on every retry for no visual reason.
     var turnStartedByRetry = false
+
+    /// [T-longctx-persona-reminder-cachebreak] Context size at which the
+    /// long-context persona reminder was last appended to `agentHistory`, or
+    /// nil when this session has not been reminded yet.
+    ///
+    /// Drives the re-arm interval in `personaReminderIsDue(contextTokens:)`.
+    /// Intentionally NOT persisted: on a fresh launch it starts nil and
+    /// `personaReminderAlreadyInHistory()` recovers the state from history
+    /// itself, which is self-healing and survives reload / iCloud restore
+    /// without adding a schema column.
+    var lastPersonaReminderContextTokens: Int?
+
+    /// [T-subagent-callback-no-keyboard] True when the turn that just ended was
+    /// started programmatically and silently — a sub agent's progress report or
+    /// completion callback arriving via `submitProgrammaticPrompt(silent:)`.
+    ///
+    /// `programmaticSilentTurn` cannot serve here: it is cleared inside
+    /// `isProcessing`'s own `didSet`, which runs BEFORE SwiftUI delivers the
+    /// `onChange`, so the view would always read false. This flag is set from
+    /// the same place and read (and consumed) by the auto-focus observer.
+    ///
+    /// Why it matters: the observer treats every `isProcessing → false` edge as
+    /// "a reply arrived, ready the composer". A background sub agent reporting
+    /// in drives a full parent turn, so each progress callback raised the
+    /// keyboard while the user was reading — a focus change they never asked
+    /// for. Same reasoning as `turnStartedByRetry`: the ORIGIN of the turn
+    /// decides, not its outcome.
+    ///
+    /// Not @Published — read synchronously in the isProcessing handler.
+    var turnWasSilentProgrammatic = false
     /// Transient banner / toast message for in-loop notices (e.g. "older
     /// N image(s) elided from request to fit 25MB budget"). Set by the
     /// request-level image budget pass when it had to drop history images;
     /// UI clears it after a short display window.
     @Published var transientNotice: String?
+
     @Published var autoRetryAttempt: Int = 0
     @Published var autoRetryCountdown: Int = 0
     /// [T-ios-empty-after-toolresult-reminder] Guards the one-shot
@@ -912,6 +1247,13 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     var pendingSendText: String?
     /// Attachments held back while the compact-before-send prompt is shown.
     var pendingSendAttachments: [InputAttachment] = []
+    /// [T-programmatic-prompt-no-composer] True when `pendingSendText` came
+    /// from the composer, i.e. the user typed it. A programmatic prompt can
+    /// reach the same holding area (send()'s .needsCompact / .exhausted
+    /// branches run for every caller), and `cancelCompactBeforeSend` must not
+    /// pour a job's prompt into the user's draft — it restores only their own
+    /// text.
+    var pendingSendIsFromComposer = false
     /// When true, skip the needsCompactBeforeSend check (used after compactAndSend to avoid loop).
     var skipCompactCheck = false
     /// When false, memory_write tool calls are skipped (returns "Memory disabled") in this session.
@@ -956,6 +1298,101 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     var currentModelContextWindow: Int? {
         guard let entry = resolveCurrentEntry() else { return nil }
         return effectiveContextWindow(for: entry.model)
+    }
+
+    /// [T-ios-context-usage-hint] Recompute `contextUsage` from the newest
+    /// assistant message that carries a non-zero `latestContextTokens`, against
+    /// the current model's window. Publishes only on change, so the repeated
+    /// calls from the usage-write sites and session loads do not churn the
+    /// composer. Sets nil (hiding glow + hint) when either side is unknown.
+    ///
+    /// [T-ios-context-usage-realtime-crossing] `liveContextTokens` lets the
+    /// running agent loop publish the context size of the API call that just
+    /// returned, before that usage is stamped on the message at turn end —
+    /// this is what makes the glow follow a multi-tool turn in real time
+    /// instead of changing colour only when the whole turn finishes. The
+    /// message-side usage (and the footer capsule) is untouched.
+    func publishContextUsage(liveContextTokens: Int? = nil) {
+        let reported = messages.last(where: {
+            $0.role == .assistant && ($0.usage?.latestContextTokens ?? 0) > 0
+        })
+        var used = liveContextTokens ?? (reported?.usage?.latestContextTokens ?? 0)
+        // [T-ctx-usage-after-compact] A report taken before the latest
+        // compaction describes the context that compaction replaced. Showing
+        // it after a manual or automatic compaction made the glow and the
+        // placeholder read as if compaction had done nothing. Until a newer
+        // turn reports, use the measured size of what will actually be sent.
+        // `isCompactedHistory` covers a reload, where the in-memory marker
+        // from the compaction itself is gone.
+        if liveContextTokens == nil, cachedLatestMarker != nil, let reported,
+           reported.id == usageReportSupersededByCompaction || reported.isCompactedHistory {
+            ensureContextFixedTokens()
+            let measured = measureOutboundContextTokens()
+            if measured > 0 { used = measured }
+        }
+        let window = currentModelContextWindow ?? 0
+        let next: ContextUsage? = (used > 0 && window > 0)
+            ? ContextUsage(usedTokens: used, windowTokens: window) : nil
+        if next != contextUsage { contextUsage = next }
+    }
+
+    /// [T-ctx-usage-after-compact] Called when a compaction (manual or
+    /// automatic — every path goes through `compactBefore`) has installed its
+    /// marker. Re-measures the glow from the compacted context and issues a
+    /// new placeholder line with the post-compaction estimate, superseding the
+    /// pre-compaction figure the composer was still showing. Without this the
+    /// line kept the old percentage until the user typed, so compaction looked
+    /// like it had no effect.
+    func announceContextUsageAfterCompaction() {
+        usageReportSupersededByCompaction = messages.last(where: {
+            $0.role == .assistant && ($0.usage?.latestContextTokens ?? 0) > 0
+        })?.id
+        // Live measured size, not the message-derived path: it also works when
+        // no turn has reported usage yet.
+        publishMeasuredContextUsage()
+        guard let usage = contextUsage else {
+            logger.info("[ContextUsageHint] post-compact → NO hint: usage unknown")
+            return
+        }
+        let now = Date()
+        // Record the (usually lower) tier so a later climb back over 70% / 80%
+        // counts as a fresh upward crossing and is announced again.
+        _ = contextTierTracker.observe(usage.tier, now: now)
+        guard inputText.isEmpty else {
+            logger.info("[ContextUsageHint] post-compact → NO hint: composer not empty (\(usage.usedTokens)/\(usage.windowTokens))")
+            return
+        }
+        contextUsageHintGeneration += 1
+        // Deliberately not `markFired`: the next turn's loop-end line carries
+        // the real reported size and must not be deduplicated against this
+        // estimate.
+        contextUsageHint = ContextUsageHint.make(usage: usage, generation: contextUsageHintGeneration)
+        logger.info("[ContextUsageHint] post-compact → hint gen\(contextUsageHintGeneration) '\(contextUsageHint?.text ?? "")' (\(usage.usedTokens)/\(usage.windowTokens))")
+    }
+
+    /// [T-ios-context-usage-realtime-crossing] Called after every API call
+    /// inside the agent loop with that call's context size. Publishes the
+    /// live usage (glow) and raises the placeholder line immediately when the
+    /// tier crosses 70% / 80% upward for the first time since it was last
+    /// below — the loop-end path stays as the fallback for turns that end
+    /// without a crossing. Same eligibility as the loop-end hint: a turn the
+    /// user started and has not cancelled, with an empty composer.
+    private func noteContextUsageMidLoop(liveContextTokens: Int) {
+        // [T-ctx-measure-outbound] The report now feeds the capacity guard by
+        // calibrating ContextSizeMeter (calibrateContextSize, at the call site)
+        // rather than being mirrored in as a raw size.
+        publishContextUsage(liveContextTokens: liveContextTokens)
+        guard let usage = contextUsage else { return }
+        let now = Date()
+        guard contextTierTracker.observe(usage.tier, now: now) else { return }
+        guard !userDidCancel, !programmaticSilentTurn, inputText.isEmpty else {
+            logger.info("[ContextUsageHint] mid-loop crossing → \(usage.tier) NOT shown: cancel=\(userDidCancel) silent=\(programmaticSilentTurn) inputEmpty=\(inputText.isEmpty) (\(usage.usedTokens)/\(usage.windowTokens))")
+            return
+        }
+        contextUsageHintGeneration += 1
+        contextUsageHint = ContextUsageHint.make(usage: usage, generation: contextUsageHintGeneration)
+        contextTierTracker.markFired(usage.tier, now: now)
+        logger.info("[ContextUsageHint] mid-loop crossing → \(usage.tier) hint gen\(contextUsageHintGeneration) '\(contextUsageHint?.text ?? "")' (\(usage.usedTokens)/\(usage.windowTokens))")
     }
 
     /// Whether the current model (or any model in the group) supports reasoning/thinking.
@@ -1032,7 +1469,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             return instance.customBaseURL?.isEmpty == false
         case .openRouter, .xAI, .kimiCode:
             return true
-        case .anthropic, .gemini, .antigravity, .unsupported:
+        // [T-copilot-provider] Copilot's /models reports `supports.thinking`
+        // per model, so an explicit false there is authoritative — it belongs
+        // with the strict group, not the permissive one.
+        case .anthropic, .gemini, .antigravity, .githubCopilot, .unsupported:
             return false
         }
     }
@@ -1111,7 +1551,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 level = "budget: \(AnthropicAgentProvider.thinkingBudget(for: model, maxTokens: 64000, level: thinkLvl))"
             case .gemini:
                 level = thinkLvl.displayName
-            case .openAI, .openAIResponses, .openRouter, .xAI, .kimiCode:
+            case .openAI, .openAIResponses, .openRouter, .xAI, .kimiCode, .githubCopilot:
                 level = OpenAIAgentProvider.reasoningEffort(for: model, level: thinkLvl) ?? "—"
             case .unsupported:
                 level = "—"
@@ -1137,6 +1577,22 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     @Published var attachments: [InputAttachment] = []
     /// Number of videos currently being imported from the photo picker.
     @Published var loadingVideoCount = 0
+
+    // [T-paste-placeholder] Session-scoped buffer for long pasted texts.
+    //
+    // A long paste no longer becomes a .txt attachment (models treat files
+    // through a different, often worse, path than inline text). Instead the
+    // text is stashed here and a `[pasted#N]` literal is inserted at the
+    // caret; send() expands the literals back to the original text.
+    //
+    // Deliberately memory-only: the composer draft itself (`inputText`) is
+    // never persisted, so buffer and draft share one lifetime by
+    // construction — there is no "draft survived but buffer didn't" state to
+    // degrade from. `nextPasteId` is monotonically increasing per vm
+    // lifetime so ids are never reused while any draft that references them
+    // can still exist.
+    @Published var pastedTexts: [PastedText] = []
+    var nextPasteId = 1
 
     /// Old iOS releases visibly jitter when the actively streaming markdown block
     /// re-self-sizes during user scroll/deceleration. While this flag is set, the
@@ -1286,7 +1742,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     var isTruncatingForRetry = false
 
     // MARK: - Browser
-    let browserTabPool = BrowserTabPool()
+    /// `var`, not `let`: a helper (child) vm adopts its PARENT's pool so both
+    /// agents browse in one tab set (T-p2-shared-workspace). Per-agent default
+    /// tabs keep them from stepping on each other — see BrowserTabPool.owner.
+    var browserTabPool = BrowserTabPool()
     /// When true, the agent loop pauses at the next checkpoint to let the user operate the browser.
     @Published var browserTakeoverActive = false
 
@@ -1482,7 +1941,20 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // floor. Ordered before the `canSpeakNow` guard, which folds in
         // `isMuted` and would otherwise return early.
         unmuteForExplicitReadAloud()
-        guard canSpeakNow, !text.isEmpty else { return }
+        // [T-issue316-read-selection-enable] `canSpeakNow` also folds in the
+        // read-replies MASTER switch, which defaults to off — so for anyone who
+        // never turned reply-TTS on, "Read Selection" hit the guard below and
+        // returned silently while "Read from Start" worked, because that path
+        // enables the switch itself. Do the same here: picking this menu item is
+        // an explicit request to hear something, exactly as it is for
+        // `readReplyFromStart` and `activateReadAloudState`, which were the only
+        // two of the three read-aloud entry points doing this. Setting
+        // `speakEnabled` persists via `VoiceOutputState.isEnabled`'s didSet.
+        if !speakEnabled { speakEnabled = true }
+        guard canSpeakNow, !text.isEmpty else {
+            VoiceLog.log("speakText SKIP — canSpeakNow=\(canSpeakNow) capturing=\(VoiceModePreference.shared.isCapturing) empty=\(text.isEmpty)")
+            return
+        }
         isReadingAloud = true
         syncSpeechStateToGlobal(registerActive: true)
         // Reply TTS (System + cloud are the SAME source/intent) — declare it once
@@ -1818,6 +2290,19 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         return _cachedTimeString
     }
 
+    /// [T-ctx-measure-outbound] The send-time capacity check runs before any
+    /// agent loop has built this turn's system prompt, and a transcript written
+    /// before calibration pairs existed seeds no fixed share. Without one the
+    /// check would judge history alone and under-read by the whole system
+    /// prompt + tool schemas. The base prompt and default tools are the bulk of
+    /// it; the loop replaces this with the exact figure (skills, MCP and memory
+    /// fragments included) before its first request.
+    func ensureContextFixedTokens() {
+        guard contextFixedTokens == 0 else { return }
+        contextFixedTokens = ContextSizeMeter.estimateFixedTokens(systemPrompt: baseSystemPrompt,
+                                                                  tools: makeAgentTools())
+    }
+
     private var baseSystemPrompt: String {
         // [T-soul-md] Layer 1 is rendered by SystemPromptBuilder, which
         // owns the "You are <name>, a capable AI assistant running on an
@@ -1826,7 +2311,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // Personality section from SOUL.md's body. The original wording
         // is preserved inside SystemPromptBuilder.identityTemplate so we
         // don't regress model behavior that depended on it.
-        SystemPromptBuilder.identitySection()
+        (helperConfig != nil ? helperIdentitySection : SystemPromptBuilder.identitySection())
             + "You should proactively use shell commands to accomplish the user's tasks — installing packages (apk add), "
             + "writing and running scripts, managing files, networking, and any other operations a Linux terminal can perform.\n\n"
             + "Available tools:\n"
@@ -1847,14 +2332,26 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // Minis has no in-app scheduler (see 'Scheduled tasks'), so the only
             // truthful alternatives are poll-now or tell-the-user-nothing-runs.
             + "Execution discipline for long-running or dispatched work: make tool calls immediately instead of describing intentions, and keep working until the task is complete. "
-            + "Without a scheduler or timed-callback tool, `delay` is your ONLY wait mechanism within a turn — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. "
+            + "Within a turn, `delay` is your wait mechanism — to follow up on something still running, chain delay-then-check calls at a task-appropriate interval until you have the result or hit a sensible retry cap. For a check that should happen AFTER this turn ends, register it with `minis-scheduled` (see the CLI list) — it fires a new turn later, best effort while the app is alive. "
             + "NEVER end a turn with a promise of future action: 'I'll keep monitoring', 'will sync the result later', and ending right after a single still-running status check with 'let's keep waiting' are all the same violation — once your turn ends, NOTHING runs until the user's next message. "
-            + "If polling to completion is genuinely not worth blocking the turn, close honestly instead: state that the task keeps running in the background, that you will only learn its outcome when the user next messages (or they ask you to check), and — if it must fire on a schedule beyond this conversation — point them to an Apple Shortcuts automation per 'Scheduled tasks' later in this prompt.\n"
+            + "If polling to completion is genuinely not worth blocking the turn, close honestly instead: either register a `minis-scheduled` follow-up (say so, with its id) or state that you will only learn the outcome when the user next messages; for anything that must fire even if the app is killed, point them to an Apple Shortcuts automation per 'Scheduled tasks' later in this prompt.\n"
             + "- file_read: Read file contents (faster than cat).\n"
             + "- file_write: Create new files or overwrite existing files (faster than echo/tee).\n"
             + "- file_edit: Edit existing files with exact string replacement (old_string → new_string). Preferred over file_write for modifications — always file_read first.\n"
-            + "- browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). "
-            + "Starts with a desktop Safari user agent. Use screenshot to see the page.\n"
+            // [T-tools-master-switch] Settings › Tools off ⇒ neither bullet:
+            // the tool is not in the schema, so the prompt must not claim it.
+            + (!Self.toolEnabled(.browser) ? "" :
+               "- browser_use: Web browsing (navigate, screenshot, click, type, get_text, scroll, scroll_and_collect, get_readable, get_backbone, fetch, etc.). "
+               + "Starts with a desktop Safari user agent. Use screenshot to see the page.\n")
+            // [T-p1-delegate-task] Only the parent tier sees helpers; the bullet
+            // ships in the same build as the tool (the 2026-07-17/20 lesson:
+            // a capability the prompt does not describe honestly gets misused).
+            + ((isHelper || !Self.toolEnabled(.agents)) ? "" :
+               "- subagent_task: Delegate a self-contained task to a sub agent that runs its own tool loop in an isolated hidden session, and inspect or stop the ones you started. Full contract in the tool schema. Two things it does not say: the `<agent_callback>` result and progress messages are written by the system, not typed by the user; and while a sub agent runs the user sees it in the tool bar and can watch or stop it.\n")
+            // [T-sub-agents-v1] The roster the model chooses from, same gate as
+            // the bullet above. Generated from the same list the tool schema's
+            // enumValues use, so a name can never appear in one and not the other.
+            + ((isHelper || !Self.toolEnabled(.agents)) ? "" : Self.subAgentRosterSection())
             + "- memory_write: Save a memory entry to today's daily log (YYYY-MM-DD.md). Use proactively to note user preferences, project patterns, and important context.\n"
             + "- memory_get: Recall memories with keyword search. Check memory at the start of new topics to leverage past knowledge.\n\n"
             + "Current time (approximate): \(approximateTimeString) (\(TimeZone.current.identifier)). "
@@ -1872,8 +2369,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             + "  minis://attachments/file.png  →  /var/minis/attachments/file.png\n"
             + "  minis://workspace/data.csv    →  /var/minis/workspace/data.csv\n"
             + "  minis://shared/project/f.txt  →  /var/minis/shared/project/f.txt\n\n"
-            + "IMPORTANT: minis:// URLs are app-internal — they are NOT web URLs. Do NOT pass minis:// action URLs (open_terminal, views, settings) to browser_use — those are app deep links, use Markdown links in chat instead. "
-            + "However, minis:// resource URLs CAN be opened in browser_use with navigate. All directories under /var/minis/ are accessible: workspace, attachments, offloads, shared, etc. "
+            // [T-tools-master-switch] browser_use guidance only when the tool exists.
+            + (!Self.toolEnabled(.browser) ? "IMPORTANT: minis:// URLs are app-internal — they are NOT web URLs; minis:// action URLs (open_terminal, views, settings) are app deep links, use Markdown links in chat. "
+               : "IMPORTANT: minis:// URLs are app-internal — they are NOT web URLs. Do NOT pass minis:// action URLs (open_terminal, views, settings) to browser_use — those are app deep links, use Markdown links in chat instead. "
+               + "However, minis:// resource URLs CAN be opened in browser_use with navigate. All directories under /var/minis/ are accessible: workspace, attachments, offloads, shared, etc. ")
             + "The built-in browser fully supports minis:// — HTML pages and all sub-resources (JS, CSS, images, fonts, etc.) referenced via minis:// absolute URLs or relative paths resolve correctly within the current session. "
             + "When building multi-file web projects, use file_write to create files in the same directory (e.g. /var/minis/workspace/myapp/), "
             + "then reference sub-resources with relative paths in HTML (e.g. <link href=\"style.css\">, <script src=\"app.js\">, <img src=\"logo.png\">). "
@@ -1934,7 +2433,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             + "overlap <img1> <img2> [img3...] (detect vertical overlapping regions between consecutive image pairs — uses anchor row scan + multi-row verification to find exact stitch points; returns overlap_px, confidence, and region coordinates). Both similarity and overlap accept --threshold 0.0-1.0 (default 0.9). overlap also accepts --skip-top <px> and --skip-bottom <px> to exclude fixed UI (status bar, tab bar) that would cause false matches.\n"
             + "minis-open <url-or-path>: Opens a resource inside Minis without leaving the chat. Accepts http/https URLs (→ built-in WebKit preview) and chat-resource file paths under /var/minis/** (→ built-in file preview, routed by extension: images to the image viewer, .md to markdown preview, .html to HTML preview, .pdf/office docs to QuickLook, audio/video to the media player, else share sheet). Examples: `minis-open https://example.com`, `minis-open /var/minis/workspace/report.md`, `minis-open /var/minis/attachments/chart.png`. Prefer this over `apple-open` for anything that can be previewed in-app so the user doesn't lose conversation context. Use `apple-open` for non-web schemes (tel:, mailto:, maps://, settings, etc.) or when the user explicitly wants the system handler.\n"
             + "minis-sessions-cli: Manage chat sessions. `list` recent or by date range, `search --keywords` cross-session, `messages --id` to read, `send` to create/continue a session, `retry` to re-run, `status` to check, `open` to navigate the app UI. Run --help for full options.\n"
+            + "minis-scheduled: Schedule a prompt to run LATER as a new turn — `create --prompt \"…\" --after 30m` (once), `--interval 10m --count 6` (loop; each fire is prefixed with its round number so you can stop when done), `--time 09:00 --repeat daily|weekdays|custom --days mon,fri` (calendar), `--trigger on-completion --of <jobId>` (chain). `--target new` (default, a new chat) | `follow-up` (this chat)" + (Self.toolEnabled(.agents) && !isHelper ? " | `child-of-current` (a hidden helper whose answer is posted back here)" : "") + ". `list`, `delete --id`, `enable/disable --id`, `run --id`. Best effort: timers live only while the app process is alive (a reminder notification is registered as insurance and says the task was due, not that it ran); for guaranteed execution after the app is killed the user needs an Apple Shortcuts automation. Run --help for details.\n"
+            + (Self.toolEnabled(.agents) && !isHelper ? "(Do NOT use minis-scheduled to delegate work you could hand to subagent_task.)\n" : "")
             + "minis-model-use: Invoke other LLM models pre-configured by the user. "
+            + "This is a single, tool-less request to one specific model. "
+            + (Self.toolEnabled(.agents) && !isHelper ? "For delegating a whole task that needs tools and multiple rounds, use the subagent_task tool instead. " : "")
             + "You have \(ProviderConfigStore.shared.resolvedAgentLoopEntries.count) model(s) available. "
             + "Use `minis-model-use list` to see them (includes each model's modality capabilities like image_output, audio_output, etc.), "
             + "`search <query>` to filter by name/provider. "
@@ -1952,11 +2455,13 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             + "Example: {\"messages\":[{\"role\":\"user\",\"content\":\"<prompt>\"}],\"generation_config\":{\"size\":\"1024x1024\",\"n\":1}}. "
             + "IMPORTANT: image generation is SLOW (typically 1-5 min) — a single long blocking call with a large timeout (e.g. timeout: 600) is correct here (one render, one wait); use `delay` chains only when repeatedly CHECKING on something, not for one slow command. "
             + "Run with --help for full usage.\n"
-            + "minis-browser-use: CLI wrapper around the in-app browser_use tool — accepts the exact same actions and parameters as the browser_use tool call, just exposed as `<action> --flag value` pairs (or `--json '<obj>'`). "
-            + "Run `minis-browser-use` with no arguments (or --help) for the full action list. "
-            + "Example: `minis-browser-use navigate --url https://example.com`. "
-            + "Prefer this over the browser_use tool call when you need multi-step or batch browser flows: write a bash script that chains multiple minis-browser-use invocations (scrape N pages in a loop, click-through forms, navigate→extract→navigate pipelines) and run it with shell_execute. "
-            + "Output is JSON, same shape as the tool call result.\n"
+            // [T-tools-master-switch] The CLI is the same capability; hidden with the tool.
+            + (!Self.toolEnabled(.browser) ? ""
+               : "minis-browser-use: CLI wrapper around the in-app browser_use tool — accepts the exact same actions and parameters as the browser_use tool call, just exposed as `<action> --flag value` pairs (or `--json '<obj>'`). "
+               + "Run `minis-browser-use` with no arguments (or --help) for the full action list. "
+               + "Example: `minis-browser-use navigate --url https://example.com`. "
+               + "Prefer this over the browser_use tool call when you need multi-step or batch browser flows: write a bash script that chains multiple minis-browser-use invocations (scrape N pages in a loop, click-through forms, navigate→extract→navigate pipelines) and run it with shell_execute. "
+               + "Output is JSON, same shape as the tool call result.\n")
             + "Interactive terminal: minis://open_terminal opens a terminal for tasks that require interactive stdin (passwords, ssh, TUI apps like htop/vi). "
             + "Write it as a Markdown link in your response — the app opens it when tapped. "
             + "The optional init_command parameter pre-fills (NOT executes) a command; it MUST be fully percent-encoded (spaces → %20, & → %26, | → %7C, etc.). "
@@ -1972,7 +2477,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             + "[Set ENV_NAME](minis://settings/environments?create_key=ENV_NAME&create_value=&create_note=Used%20by%20XYZ) — "
             + "the user can tap it to open the Environment Variables page with the key and optional note pre-filled. "
             + "create_note is optional; fill it with a brief description of what the variable is used for (e.g. 'API key for OpenAI', 'Used by XYZ skill'); URL-encode it.\n"
-            + "- Settings deep links: when you tell the user \"go to Settings → X\" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), skills, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use).\n"
+            + "- Settings deep links: when you tell the user \"go to Settings → X\" or want to point them at a specific setting, prefer a Markdown link `[Label](minis://settings/<path>)` over plain prose. Available paths: providers (list), providers/<instanceId> (one provider), model-groups (incl. Agent Loop), model-groups/<groupId>, usage (token usage), tools (CyberAgent tools: browser + agents switch), skills, memory, storage, shared-folders (Shared Folders: /var/minis/{shared,skills,memory}), mount-external (Mount External Folders), logs, appearance, background, about, permissions, environments[?create_key=K&create_value=V[&create_note=N]], rootfs (also reachable as mirrors). Unknown paths fall back to Settings home, but prefer the exact path so users land where they want. These settings/action links are app deep links — render them as Markdown links in chat"
+            + (Self.toolEnabled(.browser) ? " (same action-vs-resource rule as the minis:// section above: only /var/minis resource URLs may go to browser_use)" : "")
+            + ".\n"
             + "- To check if a variable is set, use `[ -n \"$VAR\" ] && echo 'set' || echo 'not set'`. "
             + "NEVER use echo $VAR, printenv VAR, or any command that would output the actual value into the conversation context.\n\n"
             + "Memory system:\n"
@@ -1985,7 +2492,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             + "- What NOT to remember: passwords, API keys, tokens, secrets, or any sensitive credentials. Warn the user about the risk first; only proceed if they explicitly confirm.\n"
             + "- Keep memories concise, factual, and general-purpose — avoid noise that won't be useful later.\n\n"
             + "Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended, so in-app scheduled scripts may not run as expected. "
-            + "For recurring tasks that must fire beyond the current conversation, tell the user to set up an automation in Apple Shortcuts — it is the only reliable way to trigger periodic execution on iOS. "
+            + "Use `minis-scheduled` for follow-ups and recurring prompts that only need to fire while Minis stays open (it is best effort and dies with the app process). "
+            + "For recurring tasks that must fire even after the app is killed, tell the user to set up an automation in Apple Shortcuts — that is the only guaranteed way to trigger periodic execution on iOS. "
             + "(Waiting or polling WITHIN the current turn is different — that is what shell_execute `delay` chains are for, per the shell_execute notes above.)"
     }
 
@@ -2017,8 +2525,29 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
     /// Session ID for persistence integration. Set by the view on appear.
     var sessionId: String? {
-        didSet { browserTabPool.sessionId = sessionId }
+        didSet {
+            // A helper shares its parent's pool; never restamp it with the
+            // child's id (that would move tab persistence to the child).
+            if helperConfig == nil { browserTabPool.sessionId = sessionId }
+            // [T-opencode-dedicated-channel] Keep the off-MainActor mirror in
+            // step. This `didSet` is the single choke point every promotion
+            // path flows through (ensureSessionReturningId, loadSession, the
+            // RPC/intent entry points), so mirroring here means no caller has
+            // to remember to do it.
+            openCodeSessionBox.value = sessionId
+        }
     }
+
+    /// [T-opencode-dedicated-channel] Off-MainActor mirror of `sessionId`, read
+    /// by the OpenCode channel's per-request header hook.
+    ///
+    /// The hook runs wherever the request is built, which is not guaranteed to
+    /// be the MainActor, while `sessionId` is MainActor-isolated state — so it
+    /// cannot be read directly from a `@Sendable` closure. This box is the
+    /// hand-off: written on main by the `didSet` above, read under a lock by
+    /// the hook. Held by the VM (not global) because the id is per
+    /// conversation.
+    let openCodeSessionBox = OpenCodeSessionBox()
 
     /// The draft ID assigned by the parent view (e.g. "__new__<UUID>").
     /// Included in `.sessionDidCreate` notification so the parent can correlate.
@@ -2074,6 +2603,21 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// Whether a title generation request is currently in-flight.
     var isTitleGenerating = false
 
+    /// [T-ios-switch-model-ghost-retry] Generation token for the detached
+    /// title-generation Task.
+    ///
+    /// That Task resolves its model ONCE (`resolveSubEntry()`, which with no
+    /// per-session sub model is the PRIMARY entry) and then retries up to 3
+    /// times with a 1.5s gap. Without a token, a model switch during that
+    /// window left it calling the model the user had just abandoned — one of
+    /// the two ghost-retry sources in this bug.
+    ///
+    /// `cancelWorkBoundToPreviousModel` bumps this; the Task compares it
+    /// before each attempt and bails on a mismatch. A plain bool could not do
+    /// the job: title generation legitimately re-runs later (more turns
+    /// arrive), and a bool would either block the new run or be reset by it.
+    var titleGenEpoch: UInt = 0
+
     /// Unified conversation history used by both Anthropic and Gemini agent loops.
     var agentHistory: [AgentMessage] = []
 
@@ -2118,6 +2662,28 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     // task so cancel() can stop it. [T-compact-queued-drain]
     var currentTask: Task<Void, Never>?
     var compactTask: Task<Void, Never>?
+
+    /// [T-ios-compact-task-binding] Which entry point started the compaction
+    /// `compactTask` is currently holding.
+    ///
+    /// This exists because cancel()'s cleanup is NOT uniform across entry
+    /// points: only compact-and-send has queued prompts to roll back. Once
+    /// every entry point binds `compactTask` (previously only two of five did),
+    /// cancelling a long-press compaction would otherwise run the
+    /// compact-and-send rollback — emptying `promptQueue` and bouncing someone
+    /// else's queued message into the input box. The origin lets cancel() undo
+    /// only what this particular compaction actually set up.
+    enum CompactOrigin {
+        /// `/compact` slash command, or the toolbar item.
+        case slashCommand
+        /// Long-press a message → "Compact Above".
+        case longPress
+        /// User sent a message that needed compaction first; prompts are queued.
+        case beforeSend
+        /// Debug JSON-RPC (DEBUG builds only).
+        case debugRPC
+    }
+    var compactOrigin: CompactOrigin?
     var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     /// [T-ios-bgkeepalive-diag] Process-wide count of LIVE
@@ -2147,6 +2713,50 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     /// Set by cancel() so the task's error handler knows this was a user stop.
     /// Internal-access so concurrent tool extensions can read it. [T-concurrent-tools]
     var userDidCancel = false
+    /// [T-stop-sibling-subagent] Set when the user stops a sub agent from its
+    /// card rather than stopping this conversation outright.
+    ///
+    /// Kept separate from `userDidCancel` on purpose. `userDidCancel` is read
+    /// all over the loop's ending path — it removes placeholder blocks, marks
+    /// the turn interrupted and drives `handleUserCancelledCleanup`. Setting it
+    /// from a card would put the parent through a stop it never asked for. This
+    /// flag says only "results delivered from now on must not restart the
+    /// conversation", which is the whole of what the card's Stop means for the
+    /// parent. Cleared whenever a new turn begins.
+    var delegationResultsMuted = false
+    /// [T-p0-programmatic-prompt] True while the current turn was started by
+    /// `submitProgrammaticPrompt(silent: true)`; suppresses the send and
+    /// completion haptics for that turn only. Cleared on every
+    /// isProcessing → false transition.
+    var programmaticSilentTurn = false
+    /// [T-p1-delegate-task] Non-nil on a helper (child) vm. Drives the
+    /// helper-specific prompt, tool set, turn cap and skill scope.
+    var helperConfig: HelperConfig?
+    /// [T-agent-model-identity] What the latest served turn of this vm's
+    /// loop actually ran on (entry after fallback + the API-reported model).
+    /// Read by the parent's HelperRunner / AgentJobRegistry for agent
+    /// sessions; harmless bookkeeping on every other vm.
+    @Published var lastEffectiveModel: EffectiveModelRecord?
+    /// [T-agent-wrapup-turn] Set by the parent's budget watcher when a
+    /// helper's wall-clock budget runs out: the loop then gives the child ONE
+    /// more turn without tools to write its deliverable (see runAgentLoop).
+    var helperWrapUpRequested = false
+    /// [T-sub-agents-steer] Course corrections the parent queued for a running
+    /// sub agent, delivered at the top of its next loop turn.
+    ///
+    /// Deliberately NOT delivered by interrupting: an in-flight tool call is
+    /// never cut, so a steer that lands while the child is inside a 2-minute
+    /// shell command is read when that command returns. That is the whole point
+    /// of steering rather than cancelling — the work so far is kept.
+    ///
+    /// Written by the parent's tool call on the main actor and drained by the
+    /// child's loop on the same actor, so no lock is needed.
+    var pendingSteerMessages: [String] = []
+    /// [T-p0-programmatic-prompt] Ids of queued prompts that arrived through
+    /// `submitProgrammaticPrompt(silent: true)`. A drain started by
+    /// `startDrainIfIdle` consults this to decide whether the turn it runs is
+    /// silent (only when EVERY prompt it drains is programmatic).
+    var silentQueuedPromptIds = Set<UUID>()
     /// Reentrancy guard for `drainQueuedPrompts()`. After a Stop with queued
     /// prompts, `cancel()` hands off to a fresh Task via `resumeQueueAfterCancel()`,
     /// but the original (superseded) send/retry/resume Task ALSO reaches its own
@@ -2208,9 +2818,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
     // MARK: - Send Message
 
-    func send() {
+    /// - Parameter overrideText: [T-programmatic-prompt-no-composer] the prompt
+    ///   to send, for callers that are not the composer (a job callback, a
+    ///   scheduled trigger, the CLI, a Shortcut). nil — the user's own tap —
+    ///   means "take the draft", and is the only case that clears it. Passing
+    ///   the text here keeps a background turn from reading, overwriting, or
+    ///   emptying whatever the user is typing at that moment.
+    func send(overrideText: String? = nil) {
         // Read-only mode — cannot send messages
         guard remoteDeviceId == nil else { return }
+        // Every `inputText = ""` below is guarded by this: the composer is
+        // emptied only when the composer is what was sent.
+        let usingComposer = overrideText == nil
 
         // [T-ios-retry-keyboard] A real send clears the retry origin, so the
         // flag can never leak from a retried turn into the next fresh one and
@@ -2223,7 +2842,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // so in practice this just prunes failed chips the user left in place.
         attachments.removeAll { $0.loadState != .ready }
 
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // [T-paste-mediaref] The draft's `[Pasted#N]` literals are NO LONGER
+        // expanded here. They now survive into agentHistory and the stored
+        // message; the full text is inlined only when a request is built
+        // (applyRequestImageBudget → expandPastedPlaceholdersForRequest) and
+        // persisted as a compact `.mediaRef` (buildRawMessage).
+        //
+        // Why: expanding here put the whole paste into `parts_json` as one
+        // giant `.text`, so every later render of that message had to typeset
+        // it — the same super-linear CoreText cost behind the 50KB tool-result
+        // and 1M-char paste-preview watchdog kills. The model still sees the
+        // text inline at the same position; only the local storage differs.
+        let text = (overrideText ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
         let pendingAttachments = attachments
         #if DEBUG
         logger.info("🔑DRAFT [vm=\(self.vmInstanceId)] send() text=\(text.count)ch attachments=\(pendingAttachments.count) isProcessing=\(self.isProcessing) sessionId=\(self.sessionId ?? "nil") draftId=\(self.draftId ?? "nil") inputText='\(String(self.inputText.prefix(30)))'")
@@ -2284,14 +2914,16 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     logger.info("[Context] Near capacity — auto-compacting (\(sessionSource == "shortcut" ? "shortcut session" : "autoCompactEnabled"))")
                     pendingSendText = text
                     pendingSendAttachments = pendingAttachments
-                    inputText = ""
+                    pendingSendIsFromComposer = usingComposer
+                    if usingComposer { inputText = "" }
                     attachments = []
                     compactAndSend()
                     return
                 }
                 pendingSendText = text
                 pendingSendAttachments = pendingAttachments
-                inputText = ""
+                pendingSendIsFromComposer = usingComposer
+                if usingComposer { inputText = "" }
                 attachments = []
                 showCompactBeforeSendPrompt = true
                 logger.info("[Context] Near capacity — prompting user to compact before send")
@@ -2307,7 +2939,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 }
                 pendingSendText = text
                 pendingSendAttachments = pendingAttachments
-                inputText = ""
+                pendingSendIsFromComposer = usingComposer
+                if usingComposer { inputText = "" }
                 attachments = []
                 showContextExhaustedPrompt = true
                 logger.info("[Context] Exhausted — prompting user to start new session or clear chat")
@@ -2315,15 +2948,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             }
         }
 
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if !programmaticSilentTurn {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
         autoRetryAttempt = 0
         autoRetryCountdown = 0
         canResume = false
         committedBlockCount = 0
         prevCommittedBlockCount = 0
         userDidCancel = false
+        delegationResultsMuted = false
 
-        inputText = ""
+        if usingComposer { inputText = "" }
 
         // If editing a previous message, truncate conversation from that point first
         if let editIdx = editingMessageIndex {
@@ -2390,8 +3026,16 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         }
 
         // Note: toolSnapshots are NOT cleared here so the floating toolbar shows the full session history
+        // [T-paste-live-bubble-card] The bubble text KEEPS the `[Pasted#N]`
+        // literal (user requirement: the marker shows where the pasted content
+        // sits in the message), and the bubble is BORN with its paste cards —
+        // planned here synchronously, files written to the planned ids by
+        // consumePastedDraft below. Attaching cards after the first render
+        // never showed them on device.
+        let pastePlanned = planPastedCards(for: text)
         let displayText = text.isEmpty && pendingAttachments.isEmpty ? "" : text
         let userMsg = ChatMessage(role: .user, content: displayText)
+        userMsg.attachments = pastePlanned.metas
         // [T-ios-user-attach-two-phase-birth] Attach the user's OWN selection before
         // the row is inserted, so the cell is born with its final height.
         //
@@ -2460,9 +3104,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // call.
             let inlineBudget = Self.kImageContextKeepCount
             var inlinedImages = 0
-            // Cumulative bytes of all inlined image payloads in this message.
-            // Once this passes kMessageImageMaxBytes the remaining images are
-            // dropped to a text placeholder instead of being base64-inlined.
+            // Cumulative BASE64 bytes of all inlined image payloads in this
+            // message — i.e. the space they take in the request body, not
+            // their decoded size ([T-image-budget-base64]). Once this passes
+            // kMessageImageMaxBytes the remaining images are dropped to a text
+            // placeholder instead of being base64-inlined.
             // T-imgsize-13b7d81c.
             var cumulativeImageBytes = 0
 
@@ -2534,18 +3180,24 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 if attachment.kind == .image {
                     if inlinedImages < inlineBudget {
                         let resized = await MainActor.run { Self.resizedImageData(data, maxLongEdge: 2000) } ?? data
+                        // [T-image-budget-base64] The ladder measures its output
+                        // in RAW bytes, so hand it the raw equivalent of the
+                        // per-image base64 budget; every comparison below is
+                        // then done in base64 bytes, the unit the budgets are in.
+                        let perImageRawTarget = Self.rawBytesForBase64Budget(Self.kPerImageMaxBytes)
                         let compressed: Data = await MainActor.run {
-                            Self.compressedImageDataUnderBudget(resized, targetMaxBytes: Self.kPerImageMaxBytes).data
+                            Self.compressedImageDataUnderBudget(resized, targetMaxBytes: perImageRawTarget).data
                         }
-                        let stillOversize = compressed.count > Self.kPerImageMaxBytes
-                        let wouldOverflowMessage = (cumulativeImageBytes + compressed.count) > Self.kMessageImageMaxBytes
+                        let compressedB64 = Self.estimatedBase64Length(compressed.count)
+                        let stillOversize = compressedB64 > Self.kPerImageMaxBytes
+                        let wouldOverflowMessage = (cumulativeImageBytes + compressedB64) > Self.kMessageImageMaxBytes
                         if wouldOverflowMessage {
                             // Drop to placeholder rather than risk a 413 on
                             // the whole message — the user keeps the file on
                             // disk and can still reference it via shell tools.
                             let placeholder = Self.imagePlaceholderText(data: data, originalPath: linuxPath, snapshotPath: nil)
                             userParts.append(.text(placeholder))
-                            logger.warning("📎[SEND-ASYNC]   image \(i) dropped to placeholder — cumulative \(cumulativeImageBytes) + this \(compressed.count) > \(Self.kMessageImageMaxBytes) message budget")
+                            logger.warning("📎[SEND-ASYNC]   image \(i) dropped to placeholder — cumulative \(cumulativeImageBytes) + this \(compressedB64) (base64 of \(compressed.count) raw) > \(Self.kMessageImageMaxBytes) message budget")
                         } else {
                             let ext = attachment.cacheURL.pathExtension.lowercased()
                             let mime: String
@@ -2564,8 +3216,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                             userParts.append(.text("[attached image: \(linuxPath)]"))
                             userParts.append(.imageData(data: compressed, mimeType: mime, linuxPath: linuxPath))
                             inlinedImages += 1
-                            cumulativeImageBytes += compressed.count
-                            logger.info("📎[SEND-ASYNC]   image \(inlinedImages)/\(inlineBudget) inlined: orig=\(data.count) resized=\(resized.count) final=\(compressed.count) cumulative=\(cumulativeImageBytes)/\(Self.kMessageImageMaxBytes) mime=\(mime) stillOversize=\(stillOversize)")
+                            cumulativeImageBytes += compressedB64
+                            logger.info("📎[SEND-ASYNC]   image \(inlinedImages)/\(inlineBudget) inlined: orig=\(data.count) resized=\(resized.count) final=\(compressed.count) base64=\(compressedB64) cumulative=\(cumulativeImageBytes)/\(Self.kMessageImageMaxBytes) mime=\(mime) stillOversize=\(stillOversize)")
                             if stillOversize {
                                 logger.warning("📎[SEND-ASYNC]   image \(i) still over per-image budget after compression ladder — Provider may 413; sent anyway")
                             }
@@ -2595,7 +3247,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // short-circuit (81e43b58) serve it for the rest of the turn —
             // the truncated bubble with a seemingly detached tile.
             //
-            // Field report 2026-08-09 (msg F70F81DD, image via the system share
+            // Field report 2026-08-09 (image via the system share
             // sheet) reproduced exactly this on a build where `AttachMount` had
             // zero hits across the whole log: est=48 attachCount=0 at insert,
             // est=118 attachCount=1 some 350ms later, and no idx=0 real measure
@@ -2603,7 +3255,9 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // they do more attachment I/O — which 988f67b8's own message called
             // out while still leaving this site unpatched.
             await MainActor.run {
-                userMsg.attachments = attachmentMetas
+                // [T-paste-live-bubble-card] Keep the birth-time paste cards —
+                // a plain assignment here would wipe them.
+                userMsg.attachments = attachmentMetas + pastePlanned.metas
                 if !attachmentMetas.isEmpty {
                     NotificationCenter.default.post(name: .minisUserAttachmentsMounted,
                                                     object: userMsg.id)
@@ -2633,8 +3287,34 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 ))
             }
 
+            // [T-paste-single-split] Expand `[Pasted#N]` literals HERE, at the
+            // draft→AgentMessage boundary, so agentHistory always carries the
+            // full pasted content and every downstream provider/compaction/
+            // retry path is correct without a request-time expansion step.
+            var pastedStoredParts: [String: [ContentPart]] = [:]
             if !text.isEmpty {
-                userParts.append(.text(text))
+                if let consumed = await self.consumePastedDraft(text, sessionId: sid,
+                                                               plannedFileIds: pastePlanned.plan) {
+                    userParts.append(.text(consumed.modelText))
+                    pastedStoredParts[consumed.modelText] = consumed.storedParts
+                    // [T-paste-live-bubble-card] The bubble was born with the
+                    // planned cards; this only reconciles ids the plan missed
+                    // (a chip removed mid-send leaves a dead card at worst).
+                    // Never added to attachmentMetas — the paste must not
+                    // enter the <user-attached-files> XML the model reads.
+                    let extra = consumed.liveCardMetas.filter { meta in
+                        !pastePlanned.metas.contains(where: { $0.path == meta.path })
+                    }
+                    if !extra.isEmpty {
+                        await MainActor.run {
+                            userMsg.attachments.append(contentsOf: extra)
+                            NotificationCenter.default.post(name: .minisUserAttachmentsMounted,
+                                                            object: userMsg.id)
+                        }
+                    }
+                } else {
+                    userParts.append(.text(text))
+                }
             }
             let userMessage = AgentMessage(role: .user, parts: userParts)
             let userIdx = self.agentHistory.count
@@ -2642,7 +3322,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
             // Persist user message and write the DB id back into agentHistory so
             // compact can later resolve boundaries by id.
-            if let persistedId = await self.persistAgentMessage(userMessage), userIdx < self.agentHistory.count {
+            if let persistedId = await self.persistAgentMessage(userMessage, pastedParts: pastedStoredParts), userIdx < self.agentHistory.count {
                 self.agentHistory[userIdx].dbMessageId = persistedId
             }
 
@@ -2763,10 +3443,34 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         autoRetryCountdown = 0
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
 
-        // Clear the error on the existing assistant message
-        lastMsg.error = nil
-        lastMsg.streamInterruptCount = 0
+        // [T-ios-stale-error-banner] The tail row's error used to be cleared
+        // here; `clearSupersededErrors` above now does that for every row, not
+        // just the last, because a rate-limit fallback appends a NEW carrier row
+        // per failure and the earlier ones were never candidates for a
+        // tail-only clear. The agentHistory-keyed persisted clear below is kept:
+        // it targets the DB row this sweep cannot see.
+
+        // [T-compact-retry-stale-status] Sweep any compact status row left by a
+        // FAILED compaction before this retry runs.
+        //
+        // Those rows ("Compaction failed: …" / "Compaction cancelled.") are
+        // in-memory only and describe one finished attempt. Only `compactBefore`
+        // swept them, so after `compact → fail → retry` the notice stayed in the
+        // transcript while the retried turn streamed underneath it — the chat
+        // read as though a compaction were still pending or had just applied
+        // here, which is what made a later compact look like it had already run
+        // to this point. The retried turn is a fresh state; the old attempt's
+        // status does not describe it.
+        //
+        // Deliberately does NOT touch `.compactDivider` rows or
+        // `isCompactedHistory` flags: those record a compaction that genuinely
+        // SUCCEEDED, and a failed compaction never sets them (compactBefore
+        // returns at its failure branch well before the divider insert), so
+        // there is no false "already compacted" state to unwind — only this
+        // stale caption.
+        clearCompactStatusRows()
 
         // [T-error-persist-retry-clear-ios] Also clear the PERSISTED error_info,
         // and do it BEFORE agentHistory.removeLast() below severs the only link
@@ -2821,12 +3525,12 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // which occurs after partial cancellation or interrupted streaming.
         var allRetryToolUseIds = Set<String>()
         for msg in agentHistory { for part in msg.parts {
-            if case .toolUse(let id, _, _) = part { allRetryToolUseIds.insert(id) }
+            if case .toolUse(let id, _, _, _) = part { allRetryToolUseIds.insert(id) }
         }}
         for i in (0..<agentHistory.count).reversed() {
             guard agentHistory[i].role == .user else { continue }
             let cleaned = agentHistory[i].parts.filter { part in
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part { return allRetryToolUseIds.contains(id) }
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part { return allRetryToolUseIds.contains(id) }
                 return true
             }
             if cleaned.isEmpty { agentHistory.remove(at: i) }
@@ -2835,9 +3539,14 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             }
         }
 
+        // [T-ios-stale-error-banner] Was a bare `errorMessage = nil`, which cleared
+        // only the transient top banner. The row-attached error cards (and their
+        // persisted error_info) stayed in the transcript while the continued turn
+        // streamed underneath them. Runs BEFORE the index is captured: the sweep
+        // can remove empty carrier rows, which would shift `messages.count`.
+        clearSupersededErrors(reason: "retry", keeping: lastMsg)
         let existingMsgIdx = messages.count - 1
         let existingBlockCount = lastMsg.blocks.count
-        errorMessage = nil
         isProcessing = true
         isNearBottom = true
         forceScrollToBottom.send()
@@ -2947,6 +3656,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
 
         // Safety: trim any uncommitted blocks (should be no-op with new cancel flow).
         // [T-ios-retry-wipes-prior-text] Same fix as retry(): the blind
@@ -2985,9 +3695,14 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             }
         }
 
+        // [T-ios-stale-error-banner] Was a bare `errorMessage = nil`, which cleared
+        // only the transient top banner. The row-attached error cards (and their
+        // persisted error_info) stayed in the transcript while the continued turn
+        // streamed underneath them. Runs BEFORE the index is captured: the sweep
+        // can remove empty carrier rows, which would shift `messages.count`.
+        clearSupersededErrors(reason: "resume", keeping: lastMsg)
         let existingMsgIdx = messages.count - 1
         let existingBlockCount = lastMsg.blocks.count
-        errorMessage = nil
         isProcessing = true
 
         ensureKernelBooted()
@@ -3102,6 +3817,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
         errorMessage = nil
         // Nothing partial to preserve, so the resume()/retry() block-trimming
         // has no counterpart here: the new reply starts from an empty row.
@@ -3228,6 +3944,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         isTruncatingForRetry = true
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
         guard let idx = messages.firstIndex(where: { $0.id == messageId }),
               messages[idx].role == .user else {
             isTruncatingForRetry = false
@@ -3359,6 +4076,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         isTruncatingForRetry = true
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
         guard let idx = messages.firstIndex(where: { $0.id == messageId }),
               messages[idx].role == .user else {
             isTruncatingForRetry = false
@@ -3641,6 +4359,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // its agentHistory entry + everything after) and re-run fresh.
             canResume = false
             userDidCancel = false
+            delegationResultsMuted = false
             messages.removeSubrange(asstMsgIdx...)
             // [T-ios-retry-ui-clear] mirror the sub-message path: force a
             // top-level publish so the UI clears immediately on this tick
@@ -3654,7 +4373,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             var dropFromEntry: Int? = nil
             outer0: for (ei, entry) in agentHistory.enumerated() where entry.role == .assistant {
                 for part in entry.parts {
-                    if case .toolUse(let id, _, _) = part, id == targetToolUseId {
+                    if case .toolUse(let id, _, _, _) = part, id == targetToolUseId {
                         dropFromEntry = ei
                         break outer0
                     }
@@ -3677,6 +4396,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
         canResume = false
         userDidCancel = false
+        delegationResultsMuted = false
 
         // --- Sub-message cut ---
         // 1. UI: trim this assistant message's blocks to before the target,
@@ -3707,7 +4427,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         var cutPartIdx: Int? = nil
         outer: for (ei, entry) in agentHistory.enumerated() where entry.role == .assistant {
             for (pi, part) in entry.parts.enumerated() {
-                if case .toolUse(let id, _, _) = part, id == targetToolUseId {
+                if case .toolUse(let id, _, _, _) = part, id == targetToolUseId {
                     cutEntryIdx = ei
                     cutPartIdx = pi
                     break outer
@@ -3737,8 +4457,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         let removedParts = agentHistory[entryIdx].parts[partIdx...].map { p -> String in
             switch p {
             case .text(let t): return "text(\(t.count)ch)"
-            case .toolUse(let id, let name, _): return "TU(\(name),\(id.prefix(8)))"
-            case .toolResult(let id, _, _, _, _, _, _, _): return "TR(\(id.prefix(8)))"
+            case .toolUse(let id, let name, _, _): return "TU(\(name),\(id.prefix(8)))"
+            case .toolResult(let id, _, _, _, _, _, _, _, _): return "TR(\(id.prefix(8)))"
             case .imageData: return "image"
             }
         }
@@ -3862,6 +4582,37 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
+        // [T-paste-mediaref] Re-hydrate pasted content into the draft.
+        //
+        // Since the paste is stored as a `.mediaRef` and the `[Pasted#N]`
+        // literal is NOT kept in the stored `.text`, `msg.content` carries only
+        // the surrounding prose. Editing such a message would therefore drop
+        // the pasted content entirely — the user edits one sentence and
+        // silently loses the 8000 characters they pasted. Restore each ref into
+        // the buffer under a FRESH id (ids are per-vm-lifetime and the old one
+        // may now be taken) and append its literal so the placeholder chip
+        // reappears and send() can re-split it.
+        // [T-paste-mediaref] KNOWN GAP, deliberately not papered over.
+        //
+        // A paste is stored as a `.mediaRef` and its `[Pasted#N]` literal is not
+        // kept in the stored `.text`, so `msg.content` — the only thing this
+        // function can see — carries just the surrounding prose. Editing such a
+        // message therefore cannot re-hydrate the paste into the draft.
+        //
+        // ChatMessage has no link back to its RawMessage (no db id, no parts),
+        // and the candidates for guessing one are all unsound: matching "the
+        // longest history text part not in content" mis-fires on ordinary long
+        // messages, and index-mapping messages→agentHistory has no maintained
+        // correspondence. Rather than silently drop the user's pasted content
+        // or restore the wrong text, surface the gap and leave the original
+        // message intact until a real message↔parts link exists.
+        if messageHasPastedRef(idx) {
+            errorMessage = AppLocalized(
+                "This message contains pasted content that can't be edited yet. Send a new message instead."
+            )
+            return
+        }
+
         inputText = text
         editingMessageIndex = idx
 
@@ -3907,6 +4658,113 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         logger.info("✏️ cancelEdit")
     }
 
+    /// [T-ios-switch-model-ghost-retry] Stop everything still aimed at the
+    /// PREVIOUS model when the user switches model mid-conversation.
+    ///
+    /// The bug this exists for: a turn fails with a 5xx, the user picks a
+    /// different model from the header menu, the new model answers normally —
+    /// and the gateway log still shows the OLD model being retried twice more,
+    /// with its errors popping up over the working conversation. Pressing Stop
+    /// first made it go away, which is the tell: `cancel()` tears the in-flight
+    /// work down and switching model did not. Switching only wrote the new
+    /// binding (`SessionModelPicker.bindToEntry/bindToGroup`) and posted
+    /// `.sessionModelBindingChanged`, which NOTHING observed.
+    ///
+    /// Two survivors kept the old model alive:
+    ///   1. **The agent loop.** `currentTask` is still parked in
+    ///      `streamWithAutoRetry`'s countdown (`Task.sleep`) or mid-ladder. Its
+    ///      countdown does re-read the binding, but only between attempts —
+    ///      the attempt already in flight, and every `streamWithAutoRetry` call
+    ///      that was handed a captured `provider:`, still belong to the old
+    ///      model.
+    ///   2. **Title generation.** `generateSessionTitleIfNeeded` captures
+    ///      `resolveSubEntry()` ONCE before its detached `Task`, and with no
+    ///      per-session sub model that resolves to the PRIMARY entry. It then
+    ///      retries 3× — so a first-turn failure keeps calling the old model
+    ///      after the switch, on its own schedule.
+    ///
+    /// This is deliberately NOT `cancel()`. Stop means "stop this conversation":
+    /// it drops queued delegations, cancels live sub agents and kills scheduled
+    /// timers. Switching model means "use a different model from here on" — sub
+    /// agents, timers and shell commands are not addressed to the old model and
+    /// must survive. So this cancels the model-bound work only.
+    ///
+    /// Safe to call when nothing is running: every branch is guarded, and the
+    /// common case (switching model on an idle conversation) does nothing.
+    ///
+    /// [T-ios-switch-model-next-request] The loop is only cancelled while its
+    /// auto-retry ladder is live. Cancelling unconditionally (the first version
+    /// of this seam) also killed HEALTHY turns: switching model while a reply
+    /// was streaming or a tool was running threw away the output being read and
+    /// left the message in the resumable "interrupted" state. Users expect the
+    /// switch to apply to the next request instead, silently.
+    ///
+    /// Why the ladder is the right line: the provider is captured per attempt,
+    /// so the only thing that keeps calling the abandoned model after a switch
+    /// is the retry ladder, parked in its countdown and about to fire the next
+    /// attempt at the old model — the ghost retry this seam was written for.
+    /// That attempt is unwanted by definition, so cancelling it costs nothing.
+    /// A turn that is merely streaming or running tools is left alone and
+    /// flagged via `pendingModelSwitch`; the loop swaps to the new model before
+    /// its next LLM request. Same rule as Android (ef4a06e4d), which also moves
+    /// the switch to the next request rather than the next turn.
+    @MainActor
+    func cancelWorkBoundToPreviousModel(reason: String) {
+        let hasLoop = currentTask != nil
+        let retryLadderLive = autoRetryAttempt > 0 || autoRetryCountdown > 0
+        let hadLoop = hasLoop && retryLadderLive
+        let hadTitleGen = isTitleGenerating
+
+        if hasLoop && !retryLadderLive {
+            pendingModelSwitch = true
+            logger.info("🔀 model switch (\(reason)): turn in flight and healthy — letting it continue; the next request will use the new model")
+        }
+        guard hadLoop || hadTitleGen else {
+            if !hasLoop {
+                logger.info("🔀 model switch (\(reason)): nothing in flight, nothing to cancel")
+            }
+            return
+        }
+        logger.info("🔀 model switch (\(reason)): cancelling work bound to the previous model — retryLadder=\(hadLoop) titleGen=\(hadTitleGen)")
+
+        if hadLoop {
+            // The loop is ending, so there is no next request to apply a
+            // pending switch to; the next turn resolves the new binding anyway.
+            pendingModelSwitch = false
+            // Mark as user-initiated so the loop's error handler treats the
+            // CancellationError as an interruption (message marked resumable)
+            // rather than surfacing the old model's error — the whole point is
+            // that the user has already moved on from it.
+            userDidCancel = true
+            currentTask?.cancel()
+            currentTask = nil
+            // Clear the retry UI immediately; a stale "retrying in 5s…" under
+            // the new model is exactly the ghost the user reported seeing.
+            autoRetryAttempt = 0
+            autoRetryCountdown = 0
+            isProcessing = false
+        }
+
+        if hadTitleGen {
+            // The detached title Task re-checks this generation token before
+            // each attempt and bails when it no longer matches, so the captured
+            // old-model entry cannot be used again.
+            titleGenEpoch &+= 1
+            isTitleGenerating = false
+        }
+    }
+
+    /// [T-ios-switch-model-next-request] The model-specific part of the system
+    /// prompt, exactly as the agent loop appends it after `baseSystemPrompt`
+    /// (capability fragment, then behaviour fragment, each preceded by a blank
+    /// line). Used to swap those fragments in place on a mid-turn switch.
+    static func modelPromptFragments(_ model: LLMModel) -> String {
+        var s = ""
+        if let cap = model.capabilityPromptFragment { s += "\n\n" + cap }
+        if let behavior = model.agentBehaviorPromptFragment { s += "\n\n" + behavior }
+        return s
+    }
+
     func cancel() {
         let lastBlocks = (messages.last?.role == .assistant) ? messages.last!.blocks.count : -1
         let lastRole = messages.last.map { $0.role == .assistant ? "assistant" : "user" } ?? "nil"
@@ -3922,6 +4780,39 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         isSuspended = false
         if let sid = sessionId {
             SessionConcurrencyManager.shared.cancelWait(sessionId: sid)
+            // [T-sub-agents-busy] Stop means stop everything this conversation
+            // has in flight, including sub agents delegated in the background.
+            // The composer now shows Stop while only they are running, so it
+            // has to actually stop them; leaving them alive would tick the
+            // button back to Stop and post a result the user just cancelled.
+            // Each cancelled job still reports back through its own callback.
+            if !isHelper {
+                // [T-sub-agents-queue] Drop the backlog FIRST: cancelling a
+                // running job drains the queue, which would start the very
+                // delegations the user just stopped.
+                AgentJobRegistry.shared.dropQueuedDelegations(parent: sid, reason: "user stopped the conversation")
+                // silent: a cancelled job normally reports back so a waiting
+                // model learns what happened — but here the callback IS what
+                // the user is stopping. Delivered, it wakes the parent, which
+                // reads "cancelled" as a sub-task that failed and delegates it
+                // again: three agents go grey and a fresh one starts, with
+                // nothing touched. Stop has to leave the conversation quiet.
+                AgentJobRegistry.shared.cancelAll(parent: sid, reason: "user stopped the conversation", silent: true)
+            }
+            // [T-scheduled-session-ownership] Also stop the TIMERS this
+            // conversation created. `cancelAll(parent:)` above only reaches
+            // `.childOfCurrent` jobs, so a `--target follow-up`/`new` loop
+            // started from here survived Stop and kept firing into the chat the
+            // user had just silenced — the one thing Stop is supposed to
+            // guarantee.
+            //
+            // NOT silent, unlike the sub agent sweep above: that one is quiet
+            // because a cancelled delegation would otherwise wake the parent
+            // and get re-delegated. A timer has no such loop — the user
+            // deliberately cancelled it, and the model should see that its
+            // schedule is gone rather than wait for a fire that never comes.
+            AgentJobRegistry.shared.cancelScheduled(createdBy: sid,
+                                                    reason: "user stopped the conversation")
         }
         stopCurrentCommand()
         // If the loop is suspended waiting for foreground, resume it so
@@ -3963,18 +4854,39 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // Cancel compact task if running — the task's CancellationError handler
         // will update the status message and clean up state.
         if isCompacting {
+            let origin = compactOrigin
             compactTask?.cancel()
             compactTask = nil
-            // Restore all queued compact-and-send messages back to input
-            // (use the last one for inputText since it's the most recent)
-            for queued in promptQueue {
-                messages.removeAll { $0.queuedPromptId == queued.id }
+            compactOrigin = nil
+            // [T-ios-compact-task-binding] Roll the queue back ONLY for the
+            // entry point that created it.
+            //
+            // This block undoes compact-and-send's setup: that path enqueues
+            // the user's message and shows it as a queued bubble before
+            // compacting, so cancelling must put the text back in the input
+            // box. Every other entry point (long-press, /compact, debug RPC)
+            // compacts an existing conversation and enqueues nothing.
+            //
+            // Before the entry points were unified, long-press compaction was
+            // an unretained task that `compactTask?.cancel()` could not reach,
+            // so this block never ran for it. Now that it can, running it
+            // unconditionally would be a new bug: cancelling a long-press
+            // compaction while a compact-and-send prompt happened to be queued
+            // would delete that prompt's bubble, overwrite the input box with
+            // its text, and drop the queue — destroying a message the user is
+            // still waiting on.
+            if origin == .beforeSend {
+                // Restore all queued compact-and-send messages back to input
+                // (use the last one for inputText since it's the most recent)
+                for queued in promptQueue {
+                    messages.removeAll { $0.queuedPromptId == queued.id }
+                }
+                if let last = promptQueue.last {
+                    inputText = last.text
+                    attachments = last.attachments
+                }
+                promptQueue.removeAll()
             }
-            if let last = promptQueue.last {
-                inputText = last.text
-                attachments = last.attachments
-            }
-            promptQueue.removeAll()
         }
         endBackgroundProcessing()
 
@@ -4025,6 +4937,55 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 // must be refreshed alongside count/sortOrder.
                 self.lastKnownDbOrderHash = Self.computeOrderHash(of: dbMessages)
             }
+            self.isProcessing = false
+            self.endBackgroundProcessing()
+        }
+    }
+
+    /// [T-p0-programmatic-prompt] Start a drain when NO loop is running.
+    ///
+    /// The seven existing drain sites are all loop epilogues (send/retry/
+    /// resume/orphan-tail/retryFromMessage/resumeQueueAfterCancel/post-compact)
+    /// — there is no idle-time consumer. `submitProgrammaticPrompt` checks
+    /// isProcessing and enqueues in one synchronous @MainActor step, which
+    /// closes the classic check-then-act window, but a prompt can still be
+    /// enqueued while `isProcessing` is true AFTER the epilogue's drain already
+    /// returned (the epilogues await DB reads between the drain and the flip).
+    /// The isProcessing didSet calls this on the flip; callers may also call it
+    /// directly. Mirrors resumeQueueAfterCancel minus the cancel bookkeeping.
+    func startDrainIfIdle(reason: String) {
+        guard remoteDeviceId == nil else { return }
+        guard !isProcessing, !isDrainingQueue, !isCompacting, !postCompactDrainPending else {
+            logger.info("📨[DRAIN] startDrainIfIdle(\(reason)) skipped — isProcessing=\(self.isProcessing) draining=\(self.isDrainingQueue) compacting=\(self.isCompacting) postCompactPending=\(self.postCompactDrainPending)")
+            return
+        }
+        guard !promptQueue.isEmpty else { return }
+        logger.info("📨[DRAIN] startDrainIfIdle(\(reason)) — \(self.promptQueue.count) prompt(s), no loop running")
+        currentTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.userDidCancel = false
+            self.canResume = false
+            // Silent iff nothing a user typed is in this batch.
+            let batch = self.promptQueue
+            self.programmaticSilentTurn = !batch.isEmpty && batch.allSatisfy { self.silentQueuedPromptIds.contains($0.id) }
+            self.silentQueuedPromptIds.subtract(batch.map(\.id))
+            self.isProcessing = true
+            self.beginBackgroundProcessing()
+            await self.drainQueuedPrompts()
+            // Same stop-handover rule as every other epilogue: a Stop during
+            // the drained run hands state ownership to cancel().
+            guard !Task.isCancelled else {
+                logger.info("📨[DRAIN] idle-drain epilogue skipped (task cancelled) session=\(self.sessionId ?? "nil")")
+                return
+            }
+            if let sid = self.sessionId {
+                let dbMessages = await ChatStore.shared.loadMessages(sessionId: sid)
+                self.lastKnownDbSortOrder = dbMessages.last?.sortOrder ?? self.lastKnownDbSortOrder
+                self.lastKnownDbCount = dbMessages.count
+                self.lastKnownDbOrderHash = Self.computeOrderHash(of: dbMessages)
+            }
+            logger.info("📨[DRAIN] idle-drain DONE session=\(self.sessionId ?? "nil")")
+            self.playCompletionHaptic()
             self.isProcessing = false
             self.endBackgroundProcessing()
         }
@@ -4088,6 +5049,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             try? FileManager.default.createDirectory(at: uploadsDir, withIntermediateDirectories: true)
 
             var combinedParts: [AgentContentPart] = []
+            var drainPastedParts: [String: [ContentPart]] = [:]
             for prompt in queued {
                 if !prompt.attachments.isEmpty {
                     let (attParts, attMetas) = self.processAttachments(prompt.attachments, uploadsDir: uploadsDir, nowStr: nowStr)
@@ -4105,14 +5067,34 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     }
                 }
                 if !prompt.text.isEmpty {
-                    combinedParts.append(.text(prompt.text))
+                    // [T-paste-single-split] Queued drafts consume their pasted
+                    // literals at the same boundary send() does; files land on
+                    // the ids planned at enqueue so the born-with cards stay
+                    // valid ([T-paste-live-bubble-card]).
+                    if let consumed = await self.consumePastedDraft(prompt.text, sessionId: sid,
+                                                                   plannedFileIds: prompt.pastePlan) {
+                        combinedParts.append(.text(consumed.modelText))
+                        drainPastedParts[consumed.modelText] = consumed.storedParts
+                        if let chatMsg = self.messages.first(where: { $0.queuedPromptId == prompt.id }) {
+                            let extra = consumed.liveCardMetas.filter { meta in
+                                !chatMsg.attachments.contains(where: { $0.path == meta.path })
+                            }
+                            if !extra.isEmpty {
+                                chatMsg.attachments.append(contentsOf: extra)
+                                NotificationCenter.default.post(name: .minisUserAttachmentsMounted,
+                                                                object: chatMsg.id)
+                            }
+                        }
+                    } else {
+                        combinedParts.append(.text(prompt.text))
+                    }
                 }
             }
 
             let queueAgentMsg = AgentMessage(role: .user, parts: combinedParts)
             let qIdx = self.agentHistory.count
             self.agentHistory.append(queueAgentMsg)
-            if let pid = await self.persistAgentMessage(queueAgentMsg), qIdx < self.agentHistory.count {
+            if let pid = await self.persistAgentMessage(queueAgentMsg, pastedParts: drainPastedParts), qIdx < self.agentHistory.count {
                 self.agentHistory[qIdx].dbMessageId = pid
             }
 
@@ -4215,6 +5197,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         try? FileManager.default.createDirectory(at: qUploadsDir, withIntermediateDirectories: true)
 
         var qCombinedParts: [AgentContentPart] = []
+        var qPastedParts: [String: [ContentPart]] = [:]
         for prompt in queued {
             if !prompt.attachments.isEmpty {
                 let (attParts, attMetas) = processAttachments(prompt.attachments, uploadsDir: qUploadsDir, nowStr: qNowStr)
@@ -4229,7 +5212,25 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 }
             }
             if !prompt.text.isEmpty {
-                qCombinedParts.append(.text(prompt.text))
+                // [T-paste-single-split] Same boundary consumption as send();
+                // files land on the enqueue-planned ids ([T-paste-live-bubble-card]).
+                if let consumed = await consumePastedDraft(prompt.text, sessionId: qSid,
+                                                           plannedFileIds: prompt.pastePlan) {
+                    qCombinedParts.append(.text(consumed.modelText))
+                    qPastedParts[consumed.modelText] = consumed.storedParts
+                    if let chatMsg = messages.first(where: { $0.queuedPromptId == prompt.id }) {
+                        let extra = consumed.liveCardMetas.filter { meta in
+                            !chatMsg.attachments.contains(where: { $0.path == meta.path })
+                        }
+                        if !extra.isEmpty {
+                            chatMsg.attachments.append(contentsOf: extra)
+                            NotificationCenter.default.post(name: .minisUserAttachmentsMounted,
+                                                            object: chatMsg.id)
+                        }
+                    }
+                } else {
+                    qCombinedParts.append(.text(prompt.text))
+                }
             }
         }
 
@@ -4266,7 +5267,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         let queueMsg = AgentMessage(role: .user, parts: qCombinedParts)
         let queueIdx = agentHistory.count
         agentHistory.append(queueMsg)
-        if let pid = await persistAgentMessage(queueMsg, snapshots: [:]), queueIdx < agentHistory.count {
+        if let pid = await persistAgentMessage(queueMsg, snapshots: [:], pastedParts: qPastedParts), queueIdx < agentHistory.count {
             agentHistory[queueIdx].dbMessageId = pid
         }
         // Cache markdown on the completed assistant message before starting a new one
@@ -4280,6 +5281,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // Clear "thinking" indicator + store usage on the just-finished assistant message
             messages[msgIdx].isAwaitingModelResponse = false
             messages[msgIdx].usage = turnUsage
+            publishContextUsage()
+            // [T-usage-capsule-time] Stamped with the usage, not before: this
+            // is the moment the turn is declared finished, and the capsule
+            // that shows the usage shows this clock beside it.
+            messages[msgIdx].completedAt = Date()
         }
         // Start a new assistant message so the next response appears below the queued user message
         messages.append(ChatMessage(role: .assistant, content: "", blocks: []))
@@ -4316,8 +5322,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             var tus: [String] = []
             var trs: [String] = []
             for part in msg.parts {
-                if case .toolUse(let id, _, _) = part { tus.append(String(id.prefix(8))); tuIds.insert(id) }
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part { trs.append(String(id.prefix(8))); trIds.insert(id) }
+                if case .toolUse(let id, _, _, _) = part { tus.append(String(id.prefix(8))); tuIds.insert(id) }
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part { trs.append(String(id.prefix(8))); trIds.insert(id) }
             }
             var hasText = false
             for part in msg.parts { if case .text(let t) = part, !t.isEmpty { hasText = true } }
@@ -4331,10 +5337,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         var orphanTU: [String] = []
         for (_, msg) in agentHistory.enumerated() {
             for part in msg.parts {
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part, !tuIds.contains(id) {
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part, !tuIds.contains(id) {
                     orphanTR.append(String(id.prefix(8)))
                 }
-                if case .toolUse(let id, _, _) = part, !trIds.contains(id) {
+                if case .toolUse(let id, _, _, _) = part, !trIds.contains(id) {
                     orphanTU.append(String(id.prefix(8)))
                 }
             }
@@ -4410,6 +5416,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 case .browserTool: return "browser"
                 case .readImageTool: return "readImage"
                 case .memoryTool: return "memory"
+                case .delegateTool: return SubAgentDefinition.toolName
                 case .info: return "info"
                 }
             }()
@@ -4429,6 +5436,12 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     }
 
     private func playCompletionHaptic() {
+        // [T-p0-programmatic-prompt] A turn started by submitProgrammaticPrompt
+        // (CLI / Shortcut / job) has no user tap behind it — a buzz out of
+        // nowhere is a bug, not feedback. The flag is cleared at loop end
+        // (isProcessing didSet), so a queued programmatic prompt drained inside
+        // the user's own turn still gets the user's completion haptic.
+        guard !programmaticSilentTurn else { return }
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
     }
 
@@ -4459,6 +5472,77 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         carrier.error = displayDesc
         messages.append(carrier)
         Task { await self.persistErrorInfo(displayDesc) }
+    }
+
+    /// [T-ios-stale-error-banner] Drop error banners that a newly starting turn
+    /// has superseded, in memory and in the DB.
+    ///
+    /// An error is attached to a message row (`ChatMessage.error`, drawn
+    /// unconditionally by the footer's `if let error = message.error`), so it is
+    /// pinned to its position in the transcript. Once the conversation moves
+    /// past it — a retry, a Resume tap, an auto-fallback to another provider, a
+    /// queued turn draining — the row stays exactly where it was while
+    /// successful tool blocks and replies pile up UNDERNEATH it. The reported
+    /// case: "Provider error: Rate limited" sat mid-transcript with a completed
+    /// sub-agent result, two thinking blocks and three tool calls below it, and
+    /// the session still running. The user asked whether it was deliberate.
+    ///
+    /// `retry()` already cleared the tail row's error and its persisted
+    /// `error_info`, but only the tail row and only on that one path. Every
+    /// other way a turn resumes left the banner behind, and a rate-limit
+    /// fallback (the screenshot) appends a fresh carrier row each time, so the
+    /// old ones were never even candidates for the tail-only clear.
+    ///
+    /// Sweeps ALL rows rather than just the last: a session can accumulate
+    /// several carriers across failures, and they are all equally stale once
+    /// the turn is under way. An empty carrier row (no blocks, no content — the
+    /// shape `reportTurnFailure` creates) has nothing left to show once its
+    /// error is gone, so it is removed outright instead of leaving a blank
+    /// bubble. Rows with real content keep everything but the error.
+    ///
+    /// Deliberately NOT called on a turn that is merely queued or on session
+    /// load: the banner must survive until something actually supersedes it,
+    /// which is the whole point of [T-ios-error-banner-lost] persisting it.
+    func clearSupersededErrors(reason: String, keeping keep: ChatMessage? = nil) {
+        // Identity of the rows that actually carried an error, captured BEFORE
+        // clearing. Only these are removal candidates: an assistant row can be
+        // legitimately empty without ever having failed (the in-flight bubble a
+        // turn streams into, a queued placeholder), and deleting one of those
+        // would take a live row out of the transcript.
+        var erroredRows: [ObjectIdentifier: Bool] = [:]
+        for msg in messages where msg.error != nil {
+            erroredRows[ObjectIdentifier(msg)] = true
+            msg.error = nil
+            msg.streamInterruptCount = 0
+        }
+        let clearedCount = erroredRows.count
+        var removedCarriers = 0
+        messages.removeAll { msg in
+            guard erroredRows[ObjectIdentifier(msg)] == true else { return false }
+            // `keep` is the row a retry/resume is about to stream INTO. It can
+            // itself be a bare carrier (retry on a failure that produced no
+            // bubble), and removing it would strand the caller's resume index
+            // and the block count taken from it.
+            guard msg !== keep else { return false }
+            // Only a row with nothing left to show goes: `reportTurnFailure`
+            // creates exactly this shape (no blocks, no text, no usage). A row
+            // that failed mid-reply keeps its content and loses only the error.
+            let isEmptyCarrier = msg.role == .assistant
+                && msg.blocks.isEmpty
+                && msg.content.isEmpty
+                && msg.usage == nil
+            if isEmptyCarrier { removedCarriers += 1 }
+            return isEmptyCarrier
+        }
+        errorMessage = nil
+        guard clearedCount > 0 || removedCarriers > 0 else { return }
+        logger.info("[StaleError] \(reason): cleared \(clearedCount) row error(s), removed \(removedCarriers) empty carrier row(s)")
+        // Clear the persisted copy too, or the next session load re-materialises
+        // the banner this sweep just removed. `ChatMessage` carries no DB id
+        // (only `AgentMessage` does), so this goes through the same
+        // agentHistory-keyed helper the error was written with — passing nil
+        // targets the row `persistErrorInfo` would have stamped.
+        Task { await self.persistErrorInfo(nil) }
     }
 
     private func handleUserCancelledCleanup() {
@@ -4722,6 +5806,22 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
     }
 
     private func runAgentLoop(resumingAt existingMsgIdx: Int? = nil, committedBlocks: Int? = nil) async throws {
+        do {
+            try await runAgentLoopCore(resumingAt: existingMsgIdx, committedBlocks: committedBlocks)
+        } catch {
+            // [T-ctx-measure-outbound] A context-length rejection is the one
+            // ground truth that our size estimate was too low (a borrowed ratio
+            // after a model switch, a stale one on a legacy session, content the
+            // estimator under-reads). Raise the ratio so the retry / next send
+            // compacts instead of being rejected again, then surface the error
+            // exactly as before.
+            let text = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+            noteContextOverflow(errorText: text, modelId: nil)
+            throw error
+        }
+    }
+
+    private func runAgentLoopCore(resumingAt existingMsgIdx: Int? = nil, committedBlocks: Int? = nil) async throws {
         // REPRO-DIAG(2026-05-16): bump global round counter and emit a clear
         // BEGIN/END marker so the user can grep `ROUND \d+` to slice the log
         // by attempt. A "round" = one runAgentLoop invocation, which is
@@ -4734,8 +5834,29 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
         let loopSetupStart = CFAbsoluteTimeGetCurrent()
 
+        // [T-ios-stale-error-banner] Every turn funnels through here — a send, a
+        // retry, a Resume, a queued prompt draining, and the auto-fallback that
+        // re-enters after a provider error. Sweeping here is what covers the
+        // reported case, which none of the entry-point clears could: a rate
+        // limit on one model appended a carrier row, the fallback recovered on
+        // the next model, and the loop carried on with the red card frozen
+        // mid-transcript above the successful output.
+        //
+        // Safe to run unconditionally at the TOP of the loop: any error this
+        // turn produces is attached later, by the epilogues below.
+        clearSupersededErrors(reason: "agent-loop-start",
+                              keeping: existingMsgIdx.flatMap { messages.indices.contains($0) ? messages[$0] : nil })
+
         // [T-ios-empty-after-toolresult-reminder] Fresh turn → allow one reminder retry.
         didInjectEmptyToolReminderThisRun = false
+
+        // [T-ios-switch-model-next-request] A switch flagged during an earlier
+        // turn is reflected in the entry resolved just below; don't re-apply
+        // it. This reset must come BEFORE that resolve: a switch landing
+        // during the `await makeAgentProvider` below sets the flag again, and
+        // clearing it after the await would run the whole turn on the old
+        // model.
+        pendingModelSwitch = false
 
         // Resolve provider from ProviderConfigStore
         guard let entry = resolveCurrentEntry() else {
@@ -4749,11 +5870,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // Set extended cache TTL globally for Anthropic request patching
         RequestBodyPatcher.setExtendedCacheTTL(self.enhancedCacheEnabled)
 
-        // Restore persisted thought signatures for Gemini session resume
-        if let geminiProvider = provider as? GeminiAgentProvider, !pendingThoughtSignatures.isEmpty {
-            geminiProvider.restoreToolCallMetadata(pendingThoughtSignatures)
-            pendingThoughtSignatures = [:]
-        }
+        // [T-gemini-signature-restore] Signatures are applied inside
+        // `makeAgentProvider`, so every provider this loop builds (initial,
+        // group fallback, mid-stream failover, model switch during a retry
+        // countdown) gets them — not just this first one. The map is NOT
+        // cleared here: it is the session's record and later providers need it.
 
         var activeGroupId: String?  // non-nil when using a group (enables fallback)
         var activeEntryId: String? = entry.id
@@ -4781,10 +5902,15 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 activeGroupId = gid
             }
         }
-        let tools = makeAgentTools()
+        var tools = makeAgentTools()
+        var helperWrapUpInjected = false
+        // [T-subagent-turn-countdown] Fired once, a few rounds before the cliff.
+        var helperTurnWarningInjected = false
 
         var userSystemPrompt = baseSystemPrompt
-        let activeModel = ProviderConfigStore.shared.entry(for: entry.id)?.model ?? selectedModel
+        // `var` for [T-ios-switch-model-next-request]: a mid-turn model switch
+        // replaces it so the next request carries the new model's limits.
+        var activeModel = ProviderConfigStore.shared.entry(for: entry.id)?.model ?? selectedModel
         if let capFragment = activeModel.capabilityPromptFragment {
             userSystemPrompt += "\n\n" + capFragment
         }
@@ -4793,13 +5919,16 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         }
 
         // Inject enabled skill metadata into system prompt
-        if let sid = sessionId,
+        // [T-p1-delegate-task] A helper inherits the PARENT session's skill
+        // and MCP enablement (the user configured those for the conversation
+        // that spawned it; the child session has no overrides of its own).
+        if let sid = helperConfig?.parentSessionId ?? sessionId,
            let skillFragment = SkillStore.shared.skillPromptFragment(for: sid) {
             userSystemPrompt += "\n\n" + skillFragment
         }
 
         // [T-mcp-integration-ios] Inject Top-20 enabled MCP server metadata.
-        if let sid = sessionId,
+        if let sid = helperConfig?.parentSessionId ?? sessionId,
            let mcpFragment = MCPStore.shared.systemPromptSnippet(for: sid) {
             userSystemPrompt += "\n\n" + mcpFragment
         }
@@ -4890,13 +6019,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // Build sets of all tool_use IDs and tool_result IDs.
         var allToolUseIds = Set<String>()
         var allToolResultIds = Set<String>()
+        // [T-responses-tool-id-normalize] Pair on the same key the wire uses —
+        // the Responses path carries "<call_id>|<fc_id>" and matches on the
+        // call_id half. Comparing raw ids here could both MISS a real orphan
+        // and, worse, delete a correctly paired tool_result whose sibling
+        // happens to carry the other id form.
         for msg in agentHistory {
             for part in msg.parts {
-                if case .toolUse(let id, _, _) = part {
-                    allToolUseIds.insert(id)
+                if case .toolUse(let id, _, _, _) = part {
+                    allToolUseIds.insert(Self.pairingKey(id))
                 }
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part {
-                    allToolResultIds.insert(id)
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part {
+                    allToolResultIds.insert(Self.pairingKey(id))
                 }
             }
         }
@@ -4909,8 +6043,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             guard msg.role == .user else { continue }
             let beforeCount = msg.parts.count
             let cleanedParts = msg.parts.filter { part in
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part {
-                    if !allToolUseIds.contains(id) {
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part {
+                    if !allToolUseIds.contains(Self.pairingKey(id)) {
                         logger.warning("Removing orphaned tool_result id=\(id) at history[\(i)]")
                         removedOrphanedResults += 1
                         return false
@@ -4936,8 +6070,8 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         allToolResultIds.removeAll()
         for msg in agentHistory {
             for part in msg.parts {
-                if case .toolResult(let id, _, _, _, _, _, _, _) = part {
-                    allToolResultIds.insert(id)
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part {
+                    allToolResultIds.insert(Self.pairingKey(id))
                 }
             }
         }
@@ -4946,7 +6080,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         for (i, msg) in agentHistory.enumerated() {
             guard msg.role == .assistant else { continue }
             let orphanedToolUses = msg.parts.compactMap { part -> (String, String)? in
-                if case .toolUse(let id, let name, _) = part, !allToolResultIds.contains(id) {
+                if case .toolUse(let id, let name, _, _) = part, !allToolResultIds.contains(Self.pairingKey(id)) {
                     return (id, name)
                 }
                 return nil
@@ -4991,8 +6125,163 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // that keeps hitting the threshold can't compact forever; when the cap
         // is reached and we're still near capacity, the loop stops as exhausted.
         var compactionsThisLoop = 0
-        loopLabel: while turnCount < Self.maxAgentTurns {
+        // [T-ctx-measure-outbound] Set when an in-loop compaction left the
+        // outbound request no smaller; cleared when a response arrives (new
+        // content may make the next compaction worthwhile again).
+        var lastInLoopCompactionMadeNoProgress = false
+        // [T-ctx-valve-retry-keeps-spent] The valve is deliberately NOT reset
+        // here. A provider rejection spends it (noteContextOverflow) but is
+        // recorded after the loop has ended, so resetting at the next loop's
+        // start — i.e. the user's Retry — threw that away and re-sent the
+        // exact request just rejected. It is re-armed only by evidence: an
+        // accepted response below, or a different session's calibration.
+        // [T-p1-delegate-task] Helpers get a much tighter ceiling (design §4.3).
+        let turnCap = helperConfig?.maxTurns ?? Self.maxAgentTurns
+        loopLabel: while turnCount < turnCap {
             defer { turnCount += 1 }
+            // [T-ios-switch-model-next-request] The user picked another model
+            // while this turn was running. Apply it HERE, before the next
+            // request — the stream / tool call that was in flight when they
+            // switched finished on the old model, undisturbed.
+            //
+            // Keyed off the explicit flag, not "the binding changed": group
+            // fallback also rewrites the binding on success, and must not be
+            // mistaken for a user switch (that would yank the turn back off
+            // the fallback entry it just moved to).
+            if pendingModelSwitch {
+                pendingModelSwitch = false
+                if let newEntry = resolveCurrentEntry(), newEntry.id != activeEntryId {
+                    let oldEntryId = activeEntryId
+                    let promptModel = ProviderConfigStore.shared.entry(for: activeEntryId ?? "")?.model ?? activeModel
+                    provider = await makeAgentProvider(for: newEntry)
+                    activeEntryId = newEntry.id
+                    activeGroupId = nil
+                    if let sid = sessionId,
+                       let binding = ProviderConfigStore.shared.binding(for: sid),
+                       case .group(let gid, _) = binding.primarySource {
+                        activeGroupId = gid
+                    }
+                    activeModel = newEntry.model
+                    // Swap only the model-specific fragments. They always sit
+                    // right after the base prompt (both the setup code and the
+                    // fallback rebuild add them first), so replacing that
+                    // prefix leaves skills / MCP / memory untouched.
+                    let oldPrefix = baseSystemPrompt + Self.modelPromptFragments(promptModel)
+                    if userSystemPrompt.hasPrefix(oldPrefix) {
+                        userSystemPrompt = baseSystemPrompt + Self.modelPromptFragments(newEntry.model)
+                            + String(userSystemPrompt.dropFirst(oldPrefix.count))
+                    } else {
+                        logger.warning("🔀 model switch: system prompt prefix did not match — kept previous model fragments")
+                    }
+                    noteEffectiveEntry(activeEntryId)
+                    logger.info("🔀 model switch applied at next request: \(oldEntryId ?? "nil") → \(newEntry.id) turn=\(turnCount + 1)")
+                }
+            }
+            // [T-agent-wrapup-turn] A helper that reaches its last permitted
+            // round (or whose budget the parent has called time on) must not
+            // end on a tool call: the parent only ever receives the child's
+            // final TEXT, and a run that stopped mid-tool returned "(no final
+            // text)", pushing the parent to dig through the child transcript
+            // itself. Take the tools away for this one turn and ask for the
+            // deliverable, the way a person would say "time's up, write it up".
+            if helperConfig != nil, !helperWrapUpInjected,
+               helperWrapUpRequested || turnCount == turnCap - 1 {
+                helperWrapUpInjected = true
+                tools = []
+                let note = Self.helperWrapUpPrompt(reason: helperWrapUpRequested ? .budget : .turns)
+                if let lastIdx = agentHistory.indices.last, agentHistory[lastIdx].role == .user {
+                    agentHistory[lastIdx].parts.append(.text(note))
+                } else {
+                    agentHistory.append(AgentMessage(role: .user, parts: [.text(note)]))
+                }
+                logger.info("[delegate_task] wrap-up turn injected reason=\(helperWrapUpRequested ? "budget" : "turns") turn=\(turnCount + 1)/\(turnCap)")
+            }
+            // [T-subagent-turn-countdown] Warn BEFORE the tools are gone.
+            //
+            // The wrap-up block above is a cliff: it fires on the last round
+            // with tools already withdrawn, so a child that spent its budget
+            // investigating learns it is out of rounds at the exact moment it
+            // can no longer write anything. That is the reported failure — "it
+            // could only reply with a message, it could not save the file".
+            // The cap is intentional; being ambushed by it is not.
+            //
+            // So hand it the one fact it cannot work out for itself: how many
+            // rounds remain. Tools still work on this turn, which is what makes
+            // the warning actionable rather than an epitaph. Skipped once the
+            // wrap-up has fired — the count is zero then and the wrap-up says
+            // so more forcefully.
+            if helperConfig != nil, !helperWrapUpInjected, !helperTurnWarningInjected {
+                let remaining = turnCap - 1 - turnCount
+                // `Self.`: on iOS these live on AIChatViewModel (HelperRunner.swift is
+                // an extension of it, not a type, unlike the Android object).
+                if remaining >= 1, remaining <= Self.turnWarningLead {
+                    helperTurnWarningInjected = true
+                    let note = Self.turnBudgetWarning(remaining: remaining)
+                    if let lastIdx = agentHistory.indices.last, agentHistory[lastIdx].role == .user {
+                        agentHistory[lastIdx].parts.append(.text(note))
+                    } else {
+                        agentHistory.append(AgentMessage(role: .user, parts: [.text(note)]))
+                    }
+                    logger.info("[subagent_task] turn budget warning injected remaining=\(remaining) turn=\(turnCount + 1)/\(turnCap)")
+                }
+            }
+            // [T-sub-agents-steer] Deliver any course corrections the parent
+            // queued while this turn's predecessor was running. Same shape as
+            // the wrap-up injection above: appended to the pending user message
+            // so it costs no extra turn, and read at a loop boundary so the
+            // tool call that was in flight completed normally.
+            //
+            // After the wrap-up block on purpose: if both land on the same
+            // turn, the child sees the steer first and the "write it up now"
+            // instruction last, which is the order that keeps the deliverable.
+            if helperConfig != nil, !pendingSteerMessages.isEmpty {
+                let steers = pendingSteerMessages
+                pendingSteerMessages.removeAll()
+                let note = steers
+                    .map { "[Course correction from the delegating agent] \($0)" }
+                    .joined(separator: "\n")
+                // [T-subagent-steer-visible] Persist it as a real user message
+                // in the CHILD's own transcript, then let the normal history
+                // path carry it — instead of only appending to `agentHistory`.
+                //
+                // A steer is the parent doing what a person does when they
+                // interject mid-task, so it belongs in the conversation the
+                // same way. Appended to `agentHistory` alone it reached the
+                // model and nothing else: opening the sub agent's transcript
+                // showed it changing direction with nothing to explain why,
+                // and a relaunch (which rebuilds `agentHistory` from the DB)
+                // lost the instruction outright.
+                //
+                // Written as its own message rather than folded into the
+                // preceding one, so it keeps its own row, timestamp and cell.
+                let steerMsg = AgentMessage(role: .user, parts: [.text(note)])
+                let steerIdx = agentHistory.count
+                agentHistory.append(steerMsg)
+                let uiMsg = ChatMessage(role: .user, content: note)
+                // Insert BEFORE the assistant message this turn is streaming
+                // into, not at the end. `runAgentLoop` appends that assistant
+                // bubble before the loop starts, so `messages` already ends
+                // with it — appending put the correction visually AFTER the
+                // reply it was meant to steer, at the very bottom of the
+                // transcript, reading as though it arrived too late to matter.
+                // It belongs where a person's interjection would go: above the
+                // turn that answers it.
+                let insertAt = (msgIdx >= 0 && msgIdx <= messages.count) ? msgIdx : messages.count
+                messages.insert(uiMsg, at: insertAt)
+                // The assistant message this loop writes into just shifted down
+                // by one. Not adjusted by hand: the LOOP-RESYNC guard a few
+                // lines below already re-finds it by `runMsgId` on exactly this
+                // condition (`messages[msgIdx].id != runMsgId`) and runs in the
+                // same iteration. Incrementing here too would move the index
+                // past the message and leave the resync nothing wrong to fix.
+                if let raw = await buildRawMessage(steerMsg) {
+                    await ChatStore.shared.appendMessages([raw])
+                    if steerIdx < agentHistory.count {
+                        agentHistory[steerIdx].dbMessageId = raw.id
+                    }
+                }
+                logger.info("[subagent_task] steer delivered count=\(steers.count) turn=\(turnCount + 1)/\(turnCap)")
+            }
             // [LoopHeartbeat] (#181) One line per loop iteration. If the loop
             // wedges on an await, the last heartbeat pins which iteration it
             // died in, even when every other diagnostic is missing.
@@ -5044,9 +6333,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // image bytes are removed first.
             trimOldImagesFromHistory()
 
+            // [T-ctx-measure-outbound] The system prompt and tool schemas ride
+            // on every request; measure them exactly for this iteration (they
+            // can change mid-loop, e.g. the helper wrap-up path) so the guards
+            // below and the calibration pair see the real fixed share.
+            contextFixedTokens = ContextSizeMeter.estimateFixedTokens(systemPrompt: userSystemPrompt, tools: tools)
+
             // Context window management: offload old tool content if approaching limit
             let activeModelForOffload = ProviderConfigStore.shared.entry(for: activeEntryId ?? "")?.model ?? selectedModel
-            offloadContextIfNeeded(model: activeModelForOffload, lastContextTokens: turnUsage.latestContextTokens)
+            // [T-ctx-measure-outbound] Judged on the outbound measurement, not
+            // `turnUsage.latestContextTokens`: after an in-loop compaction that
+            // report still describes the pre-compaction request.
+            offloadContextIfNeeded(model: activeModelForOffload, lastContextTokens: measureOutboundContextTokens())
 
             // [T-chat-auto-compact-inloop] In-loop context guard. checkContext-
             // BeforeSend only runs at the SEND entry point; a single turn that
@@ -5067,18 +6365,27 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // it) — but the overall maxAgentTurns ceiling is NEVER reset by a
             // compaction, or a loop that keeps compacting could run forever and
             // defeat the runaway backstop.
-            switch checkContextBeforeSend() {
+            switch checkContextBeforeSend(site: "in-loop") {
             case .ok:
                 break
             case .needsCompact:
                 let compactAnchorId = messages.last(where: {
                     $0.role != .compactDivider && $0.role != .systemInfo && !$0.isCompactedHistory
                 })?.id
+                // [T-ctx-measure-outbound] A compaction that did not shrink the
+                // outbound request is not retried: the loop used to spend its
+                // whole budget re-compacting when the SIZE it judged by was the
+                // thing that was wrong. Only real progress earns another pass.
                 if compactionsThisLoop < Self.maxInLoopCompactions,
+                   !lastInLoopCompactionMadeNoProgress,
                    let anchorId = compactAnchorId {
                     compactionsThisLoop += 1
-                    logger.info("[Context] In-loop near capacity — auto-compacting (\(compactionsThisLoop)/\(Self.maxInLoopCompactions)) turnCount=\(turnCount)")
+                    let sizeBefore = measureOutboundContextTokens()
+                    logger.info("[Context] In-loop near capacity — auto-compacting (\(compactionsThisLoop)/\(Self.maxInLoopCompactions)) turnCount=\(turnCount) measured=\(sizeBefore)")
                     await compactBefore(anchorId, allowDuringProcessing: true)
+                    let sizeAfter = measureOutboundContextTokens()
+                    lastInLoopCompactionMadeNoProgress = sizeAfter >= sizeBefore
+                    logger.info("[Context] In-loop compact result: measured \(sizeBefore) → \(sizeAfter)\(lastInLoopCompactionMadeNoProgress ? " (no progress — will not retry)" : "")")
 
                     // [T-ios-inloop-compact-divider-order] GH#235. Seal the
                     // bubble this run has been writing into and continue in a
@@ -5130,9 +6437,30 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     turnCount -= 1   // cancel this iteration's defer increment
                     continue
                 }
-                // Already compacted the cap this loop and still near capacity —
-                // fall through to the same stop path as exhaustion.
-                logger.info("[Context] In-loop still near capacity after \(compactionsThisLoop) compaction(s) — stopping loop as exhausted")
+                // [T-ctx-measure-outbound] Compaction has done all it can. Being
+                // above the compact THRESHOLD is not a reason to abandon the
+                // turn — that line leaves headroom by design — so send while the
+                // request still fits the window, and only stop when it does not.
+                let settle = settleWithoutCompacting()
+                if settle.step == .sendWithinWindow {
+                    logger.info("[Context] In-loop above compact threshold after \(compactionsThisLoop) compaction(s) but within the window — sending")
+                    break
+                }
+                // [T-ctx-measure-outbound] "Over the window" here can be an
+                // extrapolation: the calibrated size is estimate × a ratio
+                // learned on OTHER content (or borrowed from another model).
+                // Stopping on it alone could wedge the session for good — no
+                // request goes out, so nothing ever corrects the ratio, and it is
+                // re-seeded on reload. So if the uncalibrated estimate fits, send
+                // once and let the provider decide: a success recalibrates, a
+                // rejection raises the ratio (noteContextOverflow) and the next
+                // stop is then backed by the provider's own count.
+                if settle.step == .sendUncalibratedOnce {
+                    sentPastExtrapolatedLimitThisLoop = true
+                    logger.warning("[Context] In-loop: calibrated size is over the window but the raw estimate fits (\(settle.measurement.history + settle.measurement.fixed)) — sending once for the provider to decide (ratio=\(String(format: "%.2f", settle.measurement.ratio)))")
+                    break
+                }
+                logger.info("[Context] In-loop still over the window after \(compactionsThisLoop) compaction(s) — stopping loop as exhausted")
                 fallthrough
             case .exhausted:
                 logger.info("[Context] In-loop exhausted — stopping loop with resumable notice (turnCount=\(turnCount))")
@@ -5179,7 +6507,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     case .text(let t):
                         let preview = String(t.prefix(200))
                         partSummaries.append("text(\(t.count)ch): \"\(preview)\(t.count > 200 ? "..." : "")\"")
-                    case .toolUse(let id, let name, _):
+                    case .toolUse(let id, let name, _, _):
                         // Anthropic ids start with the literal 8-char prefix
                         // `toolu_01`, so `prefix(8)` collapses every Anthropic
                         // tool_use to the same string in the trace and masks
@@ -5187,7 +6515,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                         // (T-ios-concurrent-toolcall-dup-id). Use prefix(20)
                         // so concurrent calls are visibly distinct.
                         partSummaries.append("tool_use(\(name), id:\(id.prefix(20)))")
-                    case .toolResult(let id, let name, let content, let isError, let imgData, _, _, _):
+                    case .toolResult(let id, let name, let content, let isError, let imgData, _, _, _, _):
                         let head = String(content.prefix(200))
                         let tail = content.count > 400 ? String(content.suffix(200)) : ""
                         let errTag = isError ? " [ERROR]" : ""
@@ -5216,7 +6544,45 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             fallbackReasons.removeAll()
             // Phase B: route through effectiveAgentHistory() so compact summary is
             // synthesized at inference time instead of baked into agentHistory.
-            let contextHistory = effectiveAgentHistory()
+            var contextHistory = effectiveAgentHistory()
+            // [T-longctx-persona-reminder-cachebreak] Past ~100k tokens,
+            // remind the model that the user's SOUL.md / GLOBAL.md rules at
+            // the head of the system prompt still apply (issue #37).
+            //
+            // This used to rewrite the outbound copy's LAST message on every
+            // round, which broke the prompt cache (the "last message" differs
+            // each round, so already-cached history kept changing) and fused
+            // the reminder onto tool_result content (a file_read looked like
+            // it carried an injected tag). Now it is APPENDED to agentHistory
+            // as its own persisted message, at most once per
+            // `kPersonaReminderRearmTokens` of context growth — earlier bytes
+            // are never touched, so the cache prefix still hits.
+            if personaReminderIsDue(contextTokens: turnUsage.latestContextTokens) {
+                appendPersonaReminderToHistory(contextTokens: turnUsage.latestContextTokens)
+                contextHistory = effectiveAgentHistory()
+                logger.info("[PersonaReminder] appended at ~\(turnUsage.latestContextTokens) ctx tokens (agentHistory.count=\(self.agentHistory.count))")
+            }
+            // [T-request-imgsize-primary-path] Apply the request-level image
+            // budget HERE, on the primary request.
+            //
+            // It was previously applied only on the empty-response retry and
+            // the two group-fallback paths — every one of which runs AFTER a
+            // request has already failed. The request that actually carries the
+            // conversation was never budgeted, so a session that accumulated
+            // enough screenshots / read_image results went out at full size and
+            // the provider rejected it with request_too_large; the fallback
+            // attempts then budgeted correctly but were pointed at the same
+            // oversized history, so every model in the group failed in turn.
+            // Present since the original port (74661a2eb), which wired up the
+            // three fallback call sites and missed this one. Android's mirror
+            // (ChatViewModel.kt) has always applied it at its single send site.
+            // [T-ctx-measure-outbound] Record our estimate of THIS request so the
+            // provider's count for it can calibrate the meter, and size
+            // `max_tokens` from it. Taken before the image budget, like every
+            // other measurement, so estimate and calibration stay comparable.
+            let dispatchInputTokens = recordContextDispatch(history: contextHistory, model: activeModel)
+            logger.info("[CtxMeter] dispatch model=\(activeModel.id) estimate=\(self.lastDispatchEstimate) ratio=\(String(format: "%.3f", self.lastDispatchRatio)) predicted=\(dispatchInputTokens) maxTokens=\(self.dynamicMaxTokens(provider: provider, model: activeModel, lastContextTokens: dispatchInputTokens))")
+            contextHistory = applyRequestImageBudget(contextHistory)
             // [T-msgidx-oob] Re-resync before subscripting. The loop-top resync
             // (~line 4698) is not sufficient for this site: the in-loop
             // compaction guard above runs `await compactBefore(...)` in between,
@@ -5240,11 +6606,15 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 systemPrompt: userSystemPrompt,
                 tools: tools,
                 model: activeModel,
-                lastContextTokens: turnUsage.latestContextTokens,
+                lastContextTokens: dispatchInputTokens,
                 chatMessage: messages[msgIdx],
                 activeGroupId: &activeGroupId,
                 activeEntryId: &activeEntryId
             )
+            // [T-agent-model-identity] activeEntryId is now the entry this
+            // turn is served on (group fallback inside the call above may
+            // have moved it) — record it before any event is consumed.
+            noteEffectiveEntry(activeEntryId)
             // [StreamDiag] (#181) The stream object now exists. Note this is
             // "request accepted / stream handle obtained", NOT first byte — the
             // first actual SSE event is logged by [StreamDiag] event #1 in
@@ -5257,6 +6627,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // Returns true if a switch occurred.
             @discardableResult
             func applyFallbackSwitch() async -> Bool {
+                noteEffectiveEntry(activeEntryId)
                 guard activeEntryId != prevEntryId, let newEntryId = activeEntryId,
                       let newEntry = ProviderConfigStore.shared.entry(for: newEntryId) else {
                     return false
@@ -5270,12 +6641,16 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 if let behaviorFragment = newEntry.model.agentBehaviorPromptFragment {
                     userSystemPrompt += "\n\n" + behaviorFragment
                 }
-                if let sid = sessionId,
+                // [T-ios-helper-fallback-parent-skills] Same key as the setup
+                // path: a helper uses its PARENT's skill / MCP enablement.
+                // Keying on the child id here made a sub-agent that fell back
+                // lose the parent's skills and MCP servers mid-run.
+                if let sid = helperConfig?.parentSessionId ?? sessionId,
                    let skillFragment = SkillStore.shared.skillPromptFragment(for: sid) {
                     userSystemPrompt += "\n\n" + skillFragment
                 }
                 // [T-mcp-integration-ios] Inject Top-20 enabled MCP metadata.
-                if let sid = sessionId,
+                if let sid = helperConfig?.parentSessionId ?? sessionId,
                    let mcpFragment = MCPStore.shared.systemPromptSnippet(for: sid) {
                     userSystemPrompt += "\n\n" + mcpFragment
                 }
@@ -5330,9 +6705,42 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // HTTP 200) and the endTurn-with-zero-output path (OpenAI gpt-5.5
             // on long contexts: `finish_reason=stop` with no text/tool/reasoning).
             func isEmptyResponse(_ r: StreamResult) -> Bool {
-                let hasReasoning = !(r.reasoningContent ?? "").isEmpty
+                // [T-ios-reasoning-only-empty-turn] A turn that produced ONLY
+                // reasoning — no text, no tool call — and then stopped is not a
+                // legitimate turn, it is a stall the user sees as "the run just
+                // ended".
+                //
+                // `!hasReasoning` was added by 5af31fe21 so "reasoning-only
+                // legitimate turns still pass", and that case is real: with
+                // interleaved thinking the model emits a reasoning block and
+                // then CALLS A TOOL, so the turn continues. What distinguishes
+                // it is the stop reason — `.toolUse` means the loop goes on and
+                // the reasoning was a prelude to work. `.endTurn` (or a nil
+                // stop) with nothing but reasoning means the model finished
+                // while owing an answer, which is exactly the GPT-5.6 Terra /
+                // Codex OAuth failure reported after a sub-agent callback: one
+                // round of empty reasoning, stop, no text, no tool call.
+                //
+                // So the reasoning exemption now applies only to a turn that
+                // actually continues. Keeping it any broader let the
+                // pathological case skip the empty-response classifier
+                // entirely: no reminder, no transient retry, no group
+                // fallback — the turn was treated as a SUCCESS and the run
+                // silently ended.
+                //
+                // [T-ios-tooluse-stop-no-entries] The `.toolUse` exemption is
+                // gone too. Tool entries are appended while the stream runs
+                // (at each tool block's end, see processStreamEvents), so by
+                // the time this runs a turn that really called a tool already
+                // has a non-empty `toolEntries` and is not empty anyway. The
+                // exemption therefore only ever matched `.toolUse` with ZERO
+                // entries — e.g. a proxy whose tool_call deltas lack `index`
+                // are skipped but `finish_reason` still says tool_calls — and
+                // that turn then fell into `guard !toolEntries.isEmpty` and
+                // ended the run silently, while the same shape without
+                // reasoning was retried.
                 return r.assistantText.isEmpty && r.toolEntries.isEmpty
-                    && !hasReasoning && !r.isStreamInterrupted
+                    && !r.isStreamInterrupted
                     && r.stopReason != .maxTokens
                     // A refusal (Anthropic safety classifier decline) is deterministic:
                     // the content is empty but retrying the identical request just gets
@@ -5370,12 +6778,25 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     // SINGLE round. The per-run flag ensures this fires at most
                     // once, so it can never loop; if the reminder round is also
                     // empty we report an error (below) instead of a silent stall.
-                    guard !didInjectEmptyToolReminderThisRun, lastEffectiveMessageIsToolResult() else {
+                    //
+                    // [T-ios-callback-tail-empty-turn] The same "the model owes
+                    // us a reply" situation arises with a second tail shape the
+                    // tool-result predicate never matched: a bare
+                    // `<agent_callback kind="finished">` user message, which
+                    // `AgentJobRegistry.runThen` auto-delivers with no
+                    // instruction after it. GPT-5.6 Terra over Codex OAuth
+                    // answers that with one round of empty reasoning and a stop
+                    // ~70% of the time, and Retry re-sends the identical
+                    // history, so it usually stalls again. Both shapes now earn
+                    // the one-shot reminder, each with its own wording.
+                    let tailIsToolResult = lastEffectiveMessageIsToolResult()
+                    let tailIsBareCallback = !tailIsToolResult && lastEffectiveMessageIsBareAgentCallback()
+                    guard !didInjectEmptyToolReminderThisRun, tailIsToolResult || tailIsBareCallback else {
                         logger.error("🔁STREAM empty response (no content, no stop reason) — treating as transient error")
                         throw LLMError.transientError(message: "Server returned an empty response (overloaded or upstream error)")
                     }
                     didInjectEmptyToolReminderThisRun = true
-                    logger.error("🔁STREAM empty after tool result — injecting <system-reminder> and retrying one round")
+                    logger.error("🔁STREAM empty after \(tailIsToolResult ? "tool result" : "agent callback") — injecting <system-reminder> and retrying one round")
                     // [T-msgidx-oob] Re-resync before subscripting: the stream
                     // we just consumed is a suspension point, so `messages` may
                     // have been mutated meanwhile (iCloud inbound rebuild,
@@ -5396,10 +6817,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     }
                     let reminderStream = try await streamWithAutoRetry(
                         provider: provider,
-                        messages: applyRequestImageBudget(historyWithEmptyToolResultReminder()),
+                        messages: applyRequestImageBudget(tailIsToolResult ? historyWithEmptyToolResultReminder() : historyWithEmptyCallbackReminder()),
                         systemPrompt: userSystemPrompt,
                         tools: tools,
-                        maxTokens: dynamicMaxTokens(provider: provider, model: activeModel, lastContextTokens: turnUsage.latestContextTokens),
+                        maxTokens: dynamicMaxTokens(provider: provider, model: activeModel, lastContextTokens: dispatchInputTokens),
                         chatMessage: messages[msgIdx]
                     )
                     let reminderResult = try await processStreamEvents(
@@ -5419,8 +6840,18 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 } else {
                     streamResult = result
                 }
-            } catch let streamError as LLMError where streamError.isRetryable {
-                logger.error("🔁STREAM mid-stream retryable error, entering autoRetry: \(streamError.localizedDescription)")
+            } catch let streamError as LLMError where streamError.isRetryable || streamError.isFallbackable {
+                // [T-fallback-midstream-fallbackable] `isRetryable` and
+                // `isFallbackable` are DISJOINT sets (see LLMError's two
+                // switches): retryable = networkError/transientError,
+                // fallbackable = providerError/rateLimited/invalidAPIKey.
+                // Matching only the first meant a 400/429/401 raised AFTER the
+                // stream opened matched no catch at all and propagated straight
+                // out of the loop — the group never got a chance to fall back,
+                // even though the same error before the stream opened does fall
+                // back immediately. The inner catch below already uses this
+                // wider condition; this aligns the outer one with it.
+                logger.error("🔁STREAM mid-stream error (retryable=\(streamError.isRetryable) fallbackable=\(streamError.isFallbackable)): \(streamError.localizedDescription)")
                 // Resync msgIdx by stable id before touching messages — the
                 // array may have been shrunk by a concurrent path (user
                 // delete, reloadMessagesFromDB, compactBefore) during the
@@ -5452,8 +6883,15 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                 // to group fallback for mid-stream errors too.
                 let midStreamFbStrategy = activeGroupId
                     .flatMap { ProviderConfigStore.shared.group(for: $0) }?.fallbackStrategy ?? .limited
-                if midStreamFbStrategy == .always {
-                    logger.error("🔀STREAM always-strategy, skipping autoRetry — direct group fallback: \(streamError.localizedDescription)")
+                // [T-fallback-midstream-fallbackable] A fallbackable error takes
+                // the same direct-fallback path regardless of strategy, exactly
+                // as it does before the stream opens (streamWithGroupFallback's
+                // `catch ... where error.isFallbackable` advances immediately
+                // rather than spending the retry ladder). Retrying the SAME
+                // model on a 400/401 cannot succeed — the request is malformed
+                // or the key is bad — and on a 429 it is actively harmful.
+                if midStreamFbStrategy == .always || streamError.isFallbackable {
+                    logger.error("🔀STREAM \(midStreamFbStrategy == .always ? "always-strategy" : "fallbackable error"), skipping autoRetry — direct group fallback: \(streamError.localizedDescription)")
                     if let eid = activeEntryId, let entry = ProviderConfigStore.shared.entry(for: eid) {
                         let inst = ProviderConfigStore.shared.instance(for: entry.providerInstanceId)?.label ?? entry.model.provider
                         fallbackReasons.append((model: entry.model.displayName, instance: inst, reason: streamError.fallbackReason))
@@ -5472,7 +6910,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                         systemPrompt: userSystemPrompt,
                         tools: tools,
                         model: activeModel,
-                        lastContextTokens: turnUsage.latestContextTokens,
+                        lastContextTokens: dispatchInputTokens,
                         chatMessage: messages[msgIdx],
                         msgIdx: msgIdx,
                         activeGroupId: &activeGroupId,
@@ -5493,7 +6931,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                             messages: applyRequestImageBudget(effectiveAgentHistory()),
                             systemPrompt: userSystemPrompt,
                             tools: tools,
-                            maxTokens: dynamicMaxTokens(provider: provider, model: activeModel, lastContextTokens: turnUsage.latestContextTokens),
+                            maxTokens: dynamicMaxTokens(provider: provider, model: activeModel, lastContextTokens: dispatchInputTokens),
                             chatMessage: messages[msgIdx]
                         )
                         let retryResult = try await processStreamEvents(
@@ -5546,7 +6984,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                             systemPrompt: userSystemPrompt,
                             tools: tools,
                             model: activeModel,
-                            lastContextTokens: turnUsage.latestContextTokens,
+                            lastContextTokens: dispatchInputTokens,
                             chatMessage: messages[msgIdx],
                             msgIdx: msgIdx,
                             activeGroupId: &activeGroupId,
@@ -5563,6 +7001,33 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             let stopReason = streamResult.stopReason
             turnUsage = streamResult.turnUsage
             logger.info("📐 Context after API: latestContextTokens=\(turnUsage.latestContextTokens) (in:\(turnUsage.inputTokens) cache_read:\(turnUsage.cacheReadTokens) cache_create:\(turnUsage.cacheCreationTokens))")
+            // [T-ios-context-usage-realtime-crossing] Every API call in the
+            // loop reports a fresh context size; feed it to the glow and the
+            // first-crossing detector now instead of waiting for turn end.
+            if turnUsage.latestContextTokens > 0 {
+                noteContextUsageMidLoop(liveContextTokens: turnUsage.latestContextTokens)
+                // [T-ctx-measure-outbound] Pair the report with our estimate of
+                // the same request. The pair (not the raw report) is what the
+                // capacity guard uses from here on, and what a reopened session
+                // re-seeds from.
+                // The model that actually served it: a group fallback may have
+                // switched entries during this call.
+                let servedModelId = ProviderConfigStore.shared.entry(for: activeEntryId ?? "")?.model.id ?? activeModel.id
+                if calibrateContextSize(reportedTokens: turnUsage.latestContextTokens, servedModelId: servedModelId) {
+                    turnUsage.estimatedRequestTokens = lastDispatchEstimate
+                    turnUsage.estimatedFixedTokens = contextFixedTokens
+                    turnUsage.calibrationModelId = servedModelId
+                }
+                lastInLoopCompactionMadeNoProgress = false
+                // [T-ctx-valve-rearm] An accepted request is fresh evidence, so
+                // the once-per-evidence uncalibrated send is available again.
+                // With a smoothed ratio one success no longer pulls a too-high
+                // ratio all the way down; without this the NEXT iteration of the
+                // same loop could stop as "over the window" right after the
+                // provider accepted a same-size request. A rejection does not
+                // re-arm it, so a real overflow still stops.
+                sentPastExtrapolatedLimitThisLoop = false
+            }
 
             // Track session-level token stats
             let iterationStreamDuration = streamEnd.timeIntervalSince(iterationStreamStart)
@@ -5695,6 +7160,15 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             for tu in toolEntries {
                 if let sig = tu.metadata?.thoughtSignature { sigMap[tu.id] = sig }
             }
+            // [T-gemini-signature-restore] Keep them on the session too, not
+            // just on the row we are about to write. A provider built LATER in
+            // this same run (group fallback, mid-stream failover) starts with an
+            // empty metadata map and would otherwise treat the calls this turn
+            // just made as unsigned — downgrading history the loop itself
+            // produced seconds earlier.
+            for (id, sig) in sigMap {
+                pendingThoughtSignatures[id] = ToolCallMetadata(thoughtSignature: sig)
+            }
 
             // If no tool uses, this turn is done — persist and break.
             guard !toolEntries.isEmpty else {
@@ -5742,7 +7216,7 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     // [T-ios-fable5-empty-response] Anthropic safety classifier declined the
                     // request (HTTP 200, stop_reason="refusal", input tokens billed, empty
                     // content). On Fable 5 this fires as a false-positive on ordinary turns
-                    // that carry the large Claude Code agentic system prompt + tool set — the
+                    // that carry the large agentic system prompt + tool set (OAuth path) — the
                     // exact reason the model detail page's Quick Test (no system prompt, no
                     // tools) succeeds while a real conversation returns empty. Retrying the
                     // identical request just gets declined again, so we surface it directly
@@ -5764,7 +7238,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     // Re-fetch the entry from the store: `entry` was captured at
                     // loop start, so a context-window edit made during a long
                     // agent run would otherwise judge by the stale value here.
-                    let freshModel = ProviderConfigStore.shared.entry(for: entry.id)?.model ?? entry.model
+                    // [T-ios-switch-model-next-request] Judge against the entry
+                    // that actually served this request (`activeEntryId` follows
+                    // a mid-turn switch and group fallback), not the turn start.
+                    let freshModel = ProviderConfigStore.shared.entry(for: activeEntryId ?? entry.id)?.model ?? activeModel
                     let maxCtx = effectiveContextWindow(for: freshModel)
                     let curCtx = estimateContextTokens()
                     if maxCtx > 0 && curCtx > Int(Double(maxCtx) * 0.7) {
@@ -5831,6 +7308,26 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
                     // [T-ios-inloop-compact-freeze] msgIdx now points at the fresh
                     // assistant message — retarget the stable anchor with it.
                     if msgIdx < messages.count { runMsgId = messages[msgIdx].id }
+                    canResume = false
+                    turnUsage = TokenUsage()
+                    continue
+                }
+                // [T-subagent-steer-continues-loop] A steer that arrived while
+                // this turn was converging keeps the loop alive, exactly as a
+                // queued user message does above.
+                //
+                // The steer is consumed at the TOP of an iteration, so it is
+                // only ever read if another iteration happens. When the child
+                // answered without calling a tool — the common case for a
+                // finishing agent — the loop broke here and the correction was
+                // left in `pendingSteerMessages` for `finish()` to report as a
+                // "missed steer": the parent was told the sub agent never saw
+                // it, and from the user's side the instruction simply had no
+                // effect. Continuing gives the next iteration something to
+                // deliver, which is what makes a steer behave like the
+                // mid-task interjection it is meant to be.
+                if helperConfig != nil, !pendingSteerMessages.isEmpty {
+                    logger.info("[subagent_task] steer arrived at loop end — continuing for another turn")
                     canResume = false
                     turnUsage = TokenUsage()
                     continue
@@ -6028,12 +7525,35 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
 
             // If user cancelled during tool execution, commit everything and stop.
             // History is now properly paired: assistant(tool_use) + user(tool_result).
-            if cancelledDuringToolExecution || self.userDidCancel {
-                logger.info("⏹️ User cancelled during tool execution — committed \(toolResultParts.count) tool result(s), stopping agent loop")
+            // [T-agent-wrapup-turn] A helper whose running tool was stopped
+            // by the parent's budget watcher (not by a person) must NOT end
+            // here: the cancelled tool result is committed and the loop goes
+            // round once more, where the wrap-up turn is injected.
+            if cancelledDuringToolExecution, helperConfig != nil, helperWrapUpRequested, !self.userDidCancel {
+                logger.info("[delegate_task] tool stopped for wrap-up — committed \(toolResultParts.count) tool result(s), continuing to the wrap-up turn")
+                self.prevCommittedBlockCount = self.committedBlockCount
+                committedBlockCount = messages[msgIdx].blocks.count
+                self.committedBlockCount = committedBlockCount
+                continue
+            }
+            // [T-stop-sibling-subagent] `delegationResultsMuted` lands here for
+            // the sibling case: the user stopped a sub agent from its card, so
+            // the parent was never cancelled and this break never fired. The
+            // tool results ARE committed above (the transcript keeps what the
+            // finished agents came back with) — what stops is sending them to
+            // the model, which is what re-delegated a fresh agent seconds after
+            // the user pressed Stop (real case 2026-09-07 19:59:08).
+            if cancelledDuringToolExecution || self.userDidCancel || self.delegationResultsMuted {
+                logger.info("⏹️ User cancelled during tool execution — committed \(toolResultParts.count) tool result(s), stopping agent loop (muted=\(self.delegationResultsMuted))")
                 self.prevCommittedBlockCount = self.committedBlockCount
                 committedBlockCount = messages[msgIdx].blocks.count
                 self.committedBlockCount = committedBlockCount
                 messages[msgIdx].usage = turnUsage
+                publishContextUsage()
+                // [T-usage-capsule-time] A stopped turn is finished too — the
+                // capsule renders whenever usage exists, so the clock has to
+                // be set on every path that sets usage or it would be blank.
+                messages[msgIdx].completedAt = Date()
                 hitTurnLimit = false
                 break
             }
@@ -6053,7 +7573,11 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
             // it as in-loop context for the previous turn and never gave it its
             // own response (the #579 bug). Breaking → fresh turn avoids the merge
             // entirely while still inserting/un-queuing the message immediately.
-            if !promptQueue.isEmpty {
+            // [T-p2-gentle-job-injection] Only a USER follow-up earns the
+            // interrupt. Job results (`deferUntilIdle`) stay queued and ride
+            // the finish-branch injection once this turn's plan has converged
+            // — the parent's own long tool chain runs to completion first.
+            if promptQueue.contains(where: { !$0.deferUntilIdle }) {
                 logger.info("📨[QueueInterrupt] \(self.promptQueue.count) queued prompt(s) — interrupting after current tool call to start a standalone turn")
                 self.prevCommittedBlockCount = self.committedBlockCount
                 committedBlockCount = messages[msgIdx].blocks.count
@@ -6122,11 +7646,16 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         // turnCount to max and slap a fake "200 turns hit" error on every
         // ordinary completion — exactly the v1.4.0-dev bug user hit.)
         if hitTurnLimit, msgIdx >= 0, msgIdx < messages.count {
-            logger.warning("⚠️ runAgentLoop hit maxAgentTurns=\(Self.maxAgentTurns) — finalizing as resumable")
-            messages[msgIdx].error =
-                "Stopped after \(Self.maxAgentTurns) agent turns to prevent runaway tool use. " +
-                "The model kept calling tools without finishing — tap Resume to continue from here, " +
-                "or send a new message to start over."
+            // [T-agent-wrapup-turn] Report the cap that actually applied: a
+            // helper stops at helperConfig.maxTurns, not the 200 of a
+            // normal chat, and it is not "runaway" — its wrap-up turn simply
+            // did not produce a final answer.
+            logger.warning("⚠️ runAgentLoop hit turnCap=\(turnCap) — finalizing as resumable")
+            messages[msgIdx].error = helperConfig != nil
+                ? "The agent used all \(turnCap) tool rounds without writing a final answer."
+                : "Stopped after \(turnCap) agent turns to prevent runaway tool use. " +
+                  "The model kept calling tools without finishing — tap Resume to continue from here, " +
+                  "or send a new message to start over."
             canResume = true
         }
 
@@ -6134,6 +7663,10 @@ final class AIChatViewModel: ObservableObject, SpeechControlling {
         guard msgIdx < messages.count else { return }
         messages[msgIdx].isAwaitingModelResponse = false
         messages[msgIdx].usage = turnUsage
+        publishContextUsage()
+        // [T-usage-capsule-time] The ordinary end of a turn — see the field's
+        // note for why this is not `timestamp`.
+        messages[msgIdx].completedAt = Date()
 
         // Safety net: force-close any tool blocks still stuck in non-terminal status.
         // This can happen when stream interruptions, retries, or edge cases leave

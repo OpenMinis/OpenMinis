@@ -22,6 +22,7 @@ static const NSInteger DEFAULT_LIMIT = 100;
 /// below; forward-declared so the reminder LIST command (which appears earlier
 /// in this file) can report an existing geofence too.
 static NSDictionary *reminder_location_dict(EKReminder *reminder);
+static void reminder_put_due(NSMutableDictionary *d, EKReminder *r);   // [T-reminders-date-only]
 
 static NSString *const HELP_TEXT =
     @"apple-calendar - Query and manage iOS calendar events and reminders\n"
@@ -61,6 +62,9 @@ static NSString *const HELP_TEXT =
      "  --title <title>      Event title (required)\n"
      "  --start <datetime>   Start time (required)\n"
      "  --end <datetime>     End time (required)\n"
+     "  --all-day            Create an all-day event spanning the --start and --end\n"
+     "                       days (times are ignored). Implied when both --start and\n"
+     "                       --end are bare dates (YYYY-MM-DD).\n"
      "  --calendar <name>    Calendar to add to\n"
      "  --location <loc>     Event location\n"
      "  --notes <text>       Event notes\n"
@@ -78,7 +82,12 @@ static NSString *const HELP_TEXT =
      "\n"
      "REMIND OPTIONS:\n"
      "  --title <title>      Reminder title (required)\n"
-     "  --due <datetime>     Due date\n"
+     "  --due <datetime>     Due date. With a time of day (2026-08-25T09:00) this also\n"
+     "                       schedules a system notification, like setting a time in the\n"
+     "                       Reminders app. A date-only due (2026-08-25) does not.\n"
+     "  --notify <on|off>    Force the notification on or off, overriding that default.\n"
+     "                       on requires --due. Independent of geofence alerts below —\n"
+     "                       a reminder can have both.\n"
      "  --list <name>        Reminder list name\n"
      "  --priority <0-9>     Priority level\n"
      "  --notes <text>       Reminder notes\n"
@@ -96,6 +105,9 @@ static NSString *const HELP_TEXT =
      "  --title <title>      New title\n"
      "  --start <datetime>   New start time\n"
      "  --end <datetime>     New end time\n"
+     "  --all-day            Make it an all-day event (times are ignored). Implied\n"
+     "                       when the dates given are bare (YYYY-MM-DD). To go back\n"
+     "                       to a timed event, pass --start/--end with a time.\n"
      "  --calendar <name>    Move to a different calendar\n"
      "  --location <loc>     New location\n"
      "  --notes <text>       New notes\n"
@@ -115,7 +127,11 @@ static NSString *const HELP_TEXT =
      "UPDATE-REMINDER OPTIONS:\n"
      "  --id <reminder_id>   Reminder ID (required)\n"
      "  --title <title>      New title\n"
-     "  --due <datetime>     New due date\n"
+     "  --due <datetime>     New due date. An existing notification moves with it. If\n"
+     "                       there was none, one is added when the new due names a time\n"
+     "                       of day (same rule as REMIND).\n"
+     "  --notify <on|off>    Force the notification on or off. on requires a due date.\n"
+     "                       Leaves any geofence alert untouched.\n"
      "  --list <name>        Move to a different list\n"
      "  --priority <0-9>     New priority\n"
      "  --notes <text>       New notes\n"
@@ -137,6 +153,7 @@ static NSString *const HELP_TEXT =
      "  apple-calendar list --days 7 --compact -q\n"
      "  apple-calendar freebusy --start 2026-02-24T09:00 --end 2026-02-24T18:00\n"
      "  apple-calendar create --title \"Meeting\" --start 2026-02-25T14:00 --end 2026-02-25T15:00\n"
+     "  apple-calendar create --title \"Offsite\" --start 2026-12-01 --end 2026-12-02 --all-day\n"
      "  # Every Friday at 23:00, forever — one native recurring event, not many copies:\n"
      "  apple-calendar create --title \"Book train ticket home\" \\\n"
      "      --start 2026-02-27T23:00 --end 2026-02-27T23:15 --recur weekly --recur-days fri\n"
@@ -157,6 +174,38 @@ static EKEventStore *eventStore(void) {
         _eventStore = [[EKEventStore alloc] init];
     });
     return _eventStore;
+}
+
+// [T-issue282-exact-list-match] Resolve a WRITE-target calendar/list by EXACT
+// case-insensitive title. Substring matching is fine for the list-view
+// filters ("show me lists containing Work") but was disastrous for write
+// targets: "Work" could land in "Workout" depending on enumeration order,
+// and a miss silently fell back to the default list while reporting ok:true.
+// On no match this returns nil and fills *errorOut with an invalid_args
+// error naming every candidate, so the caller aborts instead of guessing.
+static EKCalendar *noff_resolve_calendar_exact(NSString *name,
+                                               EKEntityType entityType,
+                                               NSString *action,
+                                               NSDictionary **errorOut) {
+    NSArray<EKCalendar *> *cals = [eventStore() calendarsForEntityType:entityType];
+    for (EKCalendar *cal in cals) {
+        if ([cal.title localizedCaseInsensitiveCompare:name] == NSOrderedSame) {
+            return cal;
+        }
+    }
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    for (EKCalendar *cal in cals) {
+        if (cal.title.length > 0) [titles addObject:[NSString stringWithFormat:@"'%@'", cal.title]];
+    }
+    NSString *kind = (entityType == EKEntityTypeReminder) ? @"reminder list" : @"calendar";
+    NSString *msg = [NSString stringWithFormat:
+        @"No %@ named '%@' (exact match, case-insensitive). Available: %@",
+        kind, name,
+        titles.count > 0 ? [titles componentsJoinedByString:@", "] : @"(none)"];
+    if (errorOut) {
+        *errorOut = noff_json_error(TOOL_NAME, action, NOFF_ERR_INVALID_ARGS, msg);
+    }
+    return nil;
 }
 
 // Serial queue to prevent concurrent authorization dialogs
@@ -460,10 +509,9 @@ int calendar_cmd_reminders(int argc, char **argv, int stdout_fd, BOOL compact, B
         d[@"list"] = r.calendar.title ?: @"";
         d[@"priority"] = @(r.priority);
         d[@"notes"] = r.notes ?: [NSNull null];
-        if (r.dueDateComponents) {
-            NSDate *due = [[NSCalendar currentCalendar] dateFromComponents:r.dueDateComponents];
-            d[@"due"] = due ? noff_format_date(due) : [NSNull null];
-        }
+        // [T-reminders-date-only] due + is_all_day; [T-reminders-url] url.
+        reminder_put_due(d, r);
+        d[@"url"] = r.URL.absoluteString ?: [NSNull null];
         // [T-reminders-location-alarm] Present only for geofenced reminders, so
         // existing time-only output is unchanged.
         NSDictionary *rLoc = reminder_location_dict(r);
@@ -802,6 +850,18 @@ static int cmd_create(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
         return NOFF_EXIT_INVALID_ARGS;
     }
 
+    // [T-calendar-all-day] All-day when asked explicitly, or when both bounds
+    // are bare dates: a date without a time cannot describe a timed event, so
+    // treating "2026-12-01" as midnight-to-midnight-of-the-same-instant (a zero
+    // length event at 00:00) was never what the caller meant. Normalised BEFORE
+    // the recurrence rule is built so a weekly rule anchors on the day, not on
+    // whatever time-of-day the parser defaulted to.
+    BOOL allDay = noff_has_flag(argc, argv, "--all-day")
+               || (noff_is_date_only_string(startStr) && noff_is_date_only_string(endStr));
+    if (allDay) {
+        noff_all_day_bounds(startDate, endDate, &startDate, &endDate);
+    }
+
     // Parse the recurrence flags BEFORE building the event, so a malformed rule
     // fails the command outright instead of quietly saving a one-off event that
     // the user believes repeats.
@@ -819,6 +879,9 @@ static int cmd_create(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
     event.title = title;
     event.startDate = startDate;
     event.endDate = endDate;
+    // Set AFTER the dates: EventKit keeps the flag and the range independent,
+    // and the range above is already day-aligned when this is YES.
+    event.allDay = allDay;
     if (recurRule) {
         [event addRecurrenceRule:recurRule];
     }
@@ -835,15 +898,18 @@ static int cmd_create(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
         [event addAlarm:alarm];
     }
 
-    // Find calendar by name if specified
+    // Find calendar by EXACT name if specified — a miss is an error, never a
+    // silent fall-through to the default. [T-issue282-exact-list-match]
     NSString *calName = noff_find_arg(argc, argv, "--calendar");
     if (calName) {
-        for (EKCalendar *cal in [eventStore() calendarsForEntityType:EKEntityTypeEvent]) {
-            if ([cal.title localizedCaseInsensitiveContainsString:calName]) {
-                event.calendar = cal;
-                break;
-            }
+        NSDictionary *matchErr = nil;
+        EKCalendar *target = noff_resolve_calendar_exact(calName, EKEntityTypeEvent,
+                                                         @"create", &matchErr);
+        if (!target) {
+            noff_emit_json(stdout_fd, matchErr, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
         }
+        event.calendar = target;
     }
     if (!event.calendar) {
         event.calendar = [eventStore() defaultCalendarForNewEvents];
@@ -869,7 +935,17 @@ static int cmd_create(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
         @"start": noff_format_date(startDate),
         @"end": noff_format_date(endDate),
         @"calendar": event.calendar.title ?: @"",
+        // [T-issue282-return-list-id] calendarIdentifier + source uniquely
+        // identify the target even when two calendars share a title (two
+        // "Work" calendars, iCloud vs Local, exist in the field) — the title
+        // string alone cannot tell the caller where the record landed.
+        @"calendar_id": event.calendar.calendarIdentifier ?: @"",
+        @"calendar_source": event.calendar.source.title ?: @"",
         @"is_recurring": @(event.hasRecurrenceRules),
+        // Read back from the saved event, not the flag we set, so the caller
+        // sees what EventKit actually kept (it can reject the flag on some
+        // calendar sources). Same key `list` emits, so both shapes agree.
+        @"is_all_day": @(event.isAllDay),
     } mutableCopy];
     // Echo the stored rule back (read from the saved event, not the object we
     // built) so the caller can confirm what EventKit actually kept.
@@ -966,15 +1042,93 @@ static int cmd_update(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
     if (title) event.title = title;
 
     NSString *startStr = noff_find_arg(argc, argv, "--start");
-    if (startStr) {
-        NSDate *d = noff_parse_date(startStr);
-        if (d) event.startDate = d;
+    NSString *endStr = noff_find_arg(argc, argv, "--end");
+
+    // [T-calendar-all-day-to-timed] Clear `allDay` BEFORE writing the dates.
+    //
+    // Device-measured (iPhone 11, iOS 27): while `allDay` is still YES,
+    // EventKit silently DISCARDS writes to startDate/endDate — the save
+    // succeeds, reports allDay:NO, and keeps 00:00:00–23:59:59. Passing a
+    // timed `--start`/`--end` to an all-day event therefore cleared the flag
+    // but left the times untouched, which is not what the caller asked for and
+    // not what the command claimed to do.
+    //
+    // Deliberately asymmetric with the all-day direction below, where the flag
+    // is set AFTER the dates (`create` documents that order and it is correct
+    // there — the range must already be day-aligned when the flag goes on).
+    // Turning all-day OFF has the opposite requirement: the flag must be down
+    // before the writes land, or they are dropped.
+    //
+    // Gated on an actual timed argument so an all-day event whose title is
+    // being edited is untouched, and so the all-day branch below still sees the
+    // original state.
+    BOOL clearsAllDay = (startStr && !noff_is_date_only_string(startStr))
+                     || (endStr && !noff_is_date_only_string(endStr));
+    if (clearsAllDay && event.isAllDay && !noff_has_flag(argc, argv, "--all-day")) {
+        event.allDay = NO;
     }
 
-    NSString *endStr = noff_find_arg(argc, argv, "--end");
-    if (endStr) {
-        NSDate *d = noff_parse_date(endStr);
-        if (d) event.endDate = d;
+    // Assign end FIRST when it moves earlier than the current start, and start
+    // first otherwise. EventKit rejects (or silently corrects) a state where
+    // end < start, and an all-day event sitting at 23:59:59 makes that easy to
+    // hit: writing `--start 14:00` alone is fine, but moving a whole event
+    // BACKWARDS (start 09:00 while end is still 23:59) then writing end 10:30
+    // passes through a valid state either way. The risky order is the one that
+    // would leave end < start in between, so pick the other one.
+    NSDate *newStart = startStr ? noff_parse_date(startStr) : nil;
+    NSDate *newEnd = endStr ? noff_parse_date(endStr) : nil;
+    if (newStart && newEnd) {
+        // Both supplied: no transient state can be wrong if we write the one
+        // that widens the range first.
+        if ([newStart compare:event.endDate] == NSOrderedDescending) {
+            event.endDate = newEnd;
+            event.startDate = newStart;
+        } else {
+            event.startDate = newStart;
+            event.endDate = newEnd;
+        }
+    } else {
+        if (newStart) event.startDate = newStart;
+        if (newEnd) event.endDate = newEnd;
+    }
+
+    // [T-calendar-all-day] Same rule `create` applies, against the event's
+    // CURRENT bounds: all-day when asked explicitly, or when every date the
+    // caller supplied is a bare date. A date without a time cannot describe a
+    // timed event (see cmd_create).
+    //
+    // Two differences from create, both forced by update's shape:
+    //  - `--start` / `--end` are optional here, so the bare-date inference only
+    //    fires on the arguments actually PASSED. Inferring from an absent
+    //    argument would silently convert a timed event into an all-day one on
+    //    an unrelated `--title` edit.
+    //  - Normalisation runs over `event.startDate` / `event.endDate` after the
+    //    assignments above, so a lone `--all-day` (no dates) still day-aligns
+    //    the bounds the event already has.
+    //
+    // Converting back to timed is `--start` / `--end` with a real time, exactly
+    // as the issue specifies — no `--not-all-day`: passing a time already says
+    // it, and a second flag meaning the same thing is one more way to disagree
+    // with itself.
+    BOOL sawDateArg = (startStr != nil || endStr != nil);
+    BOOL allBareDates = sawDateArg
+        && (!startStr || noff_is_date_only_string(startStr))
+        && (!endStr || noff_is_date_only_string(endStr));
+    if (noff_has_flag(argc, argv, "--all-day") || allBareDates) {
+        NSDate *s = event.startDate, *e = event.endDate;
+        if (s && e) {
+            noff_all_day_bounds(s, e, &s, &e);
+            event.startDate = s;
+            event.endDate = e;
+        }
+        // Set AFTER the dates, matching create: EventKit keeps the flag and the
+        // range independent.
+        event.allDay = YES;
+    } else if (sawDateArg) {
+        // An explicit timed range on an all-day event turns it back into a
+        // timed one — otherwise the flag would survive and EventKit would keep
+        // rendering it across the whole day regardless of the hours given.
+        event.allDay = NO;
     }
 
     NSString *location = noff_find_arg(argc, argv, "--location");
@@ -995,12 +1149,16 @@ static int cmd_update(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
 
     NSString *calName = noff_find_arg(argc, argv, "--calendar");
     if (calName) {
-        for (EKCalendar *cal in [eventStore() calendarsForEntityType:EKEntityTypeEvent]) {
-            if ([cal.title localizedCaseInsensitiveContainsString:calName]) {
-                event.calendar = cal;
-                break;
-            }
+        // [T-issue282-exact-list-match] Exact match or error — the old
+        // substring miss silently kept the event's previous calendar.
+        NSDictionary *matchErr = nil;
+        EKCalendar *target = noff_resolve_calendar_exact(calName, EKEntityTypeEvent,
+                                                         @"update", &matchErr);
+        if (!target) {
+            noff_emit_json(stdout_fd, matchErr, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
         }
+        event.calendar = target;
     }
 
     NSError *saveErr = nil;
@@ -1019,6 +1177,12 @@ static int cmd_update(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL 
         @"start": event.startDate ? noff_format_date(event.startDate) : @"",
         @"end": event.endDate ? noff_format_date(event.endDate) : @"",
         @"calendar": event.calendar.title ?: @"",
+        @"calendar_id": event.calendar.calendarIdentifier ?: @"",       // [T-issue282-return-list-id]
+        @"calendar_source": event.calendar.source.title ?: @"",
+        // [T-calendar-all-day] Read back from the SAVED event, not the flag we
+        // set — EventKit can reject it on some calendar sources. Same key
+        // `create` and `list` emit, so all three shapes agree.
+        @"is_all_day": @(event.isAllDay),
     };
     noff_emit_json(stdout_fd, noff_json_envelope(TOOL_NAME, @"update", data), compact, quiet);
     return NOFF_EXIT_SUCCESS;
@@ -1053,6 +1217,10 @@ static int cmd_delete(int argc, char **argv, int stdout_fd, BOOL compact, BOOL q
 
     NSString *eventTitle = event.title ?: @"";
     NSString *calTitle = event.calendar.title ?: @"";
+    // [T-issue282-return-list-id] Captured before the delete — the event
+    // object is gone by the time the echo dict is built.
+    NSString *calId = event.calendar.calendarIdentifier ?: @"";
+    NSString *calSource = event.calendar.source.title ?: @"";
     // Capture the resolved occurrence's start before removal so we can verify the right
     // instance is gone (the series master may still exist after a single-occurrence delete).
     NSDate *targetStart = event.startDate;
@@ -1094,6 +1262,8 @@ static int cmd_delete(int argc, char **argv, int stdout_fd, BOOL compact, BOOL q
         @"id": eventId,
         @"title": eventTitle,
         @"calendar": calTitle,
+        @"calendar_id": calId,
+        @"calendar_source": calSource,
         @"deleted": @YES,
     };
     noff_emit_json(stdout_fd, noff_json_envelope(TOOL_NAME, @"delete", data), compact, quiet);
@@ -1282,6 +1452,143 @@ static int apply_location_alarm_args(int argc, char **argv, EKReminder *reminder
     return 0;
 }
 
+// ── [T-reminders-due-alarm] Time alarms for reminders (GH#251) ──
+//
+// `dueDateComponents` is metadata only. Apple's "Setting an Alarm" is explicit
+// that a notification comes from an EKAlarm, not from the due date — so a
+// reminder created with just `--due` sat silently past its time, while one
+// given a time in the Reminders app banner-notified as expected. The Reminders
+// app itself adds an alarm when you set a due TIME; this mirrors that.
+
+/// Whether a `--due` string carries a time of day, not just a calendar date.
+///
+/// `noff_parse_date` returns an NSDate, which cannot distinguish "2026-08-25"
+/// from "2026-08-25T00:00" after the fact — both land on midnight. The
+/// distinction only survives in the INPUT, so this inspects the string.
+///
+/// Matching the parser's accepted forms (NativeOffloadUtils.m):
+///   * relative offsets (-2h, -30m, -7d) resolve to "now minus X", which always
+///     has a real time of day;
+///   * ISO 8601 / "yyyy-MM-dd'T'HH:mm[:ss]" carry an explicit clock time;
+///   * bare "yyyy-MM-dd" does not.
+/// A 'T' (or a space, for tolerance) followed by a digit is what separates the
+/// last case from the others.
+static BOOL due_string_has_time_of_day(NSString *dueStr) {
+    if (dueStr.length == 0) return NO;
+    if ([dueStr hasPrefix:@"-"]) return YES;              // relative → now-based
+    NSRange sep = [dueStr rangeOfCharacterFromSet:
+                   [NSCharacterSet characterSetWithCharactersInString:@"T "]];
+    if (sep.location == NSNotFound) return NO;            // date-only
+    NSUInteger next = sep.location + sep.length;
+    if (next >= dueStr.length) return NO;                 // trailing separator
+    return [[NSCharacterSet decimalDigitCharacterSet]
+            characterIsMember:[dueStr characterAtIndex:next]];
+}
+
+// ── [T-reminders-date-only] Date-only due dates (GH#286) ──
+//
+// A reminder due "on a day" and one due "at 00:00 that day" are different
+// things to EventKit: the first has dueDateComponents WITHOUT hour/minute and
+// the Reminders app shows it as an all-day item; the second shows a jarring
+// "12:00 AM". `--due 2026-02-25` used to produce the second, because the
+// components always included Hour|Minute of the parsed midnight.
+
+/// dueDateComponents for `due`: date units only when `dateOnly`, otherwise
+/// date + hour + minute (the previous behaviour, unchanged for timed dues).
+static NSDateComponents *reminder_due_components(NSDate *due, BOOL dateOnly) {
+    NSCalendarUnit units = NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay;
+    if (!dateOnly) units |= NSCalendarUnitHour | NSCalendarUnitMinute;
+    return [[NSCalendar currentCalendar] components:units fromDate:due];
+}
+
+/// True when the reminder's due carries no time of day (an all-day reminder,
+/// whether created here or in the Reminders app).
+static BOOL reminder_is_all_day(EKReminder *r) {
+    NSDateComponents *c = r.dueDateComponents;
+    return c != nil && c.hour == NSDateComponentUndefined;
+}
+
+/// Write `due` and `is_all_day` into an output dict, shared by list, create
+/// and update. An all-day due is reported as "yyyy-MM-dd", built from the
+/// stored components rather than through a date + formatter, so no time zone
+/// shift can move it to the neighbouring day. A timed due keeps the existing
+/// ISO 8601 form.
+static void reminder_put_due(NSMutableDictionary *d, EKReminder *r) {
+    NSDateComponents *c = r.dueDateComponents;
+    if (!c) return;
+    BOOL allDay = reminder_is_all_day(r);
+    d[@"is_all_day"] = @(allDay);
+    if (allDay && c.year != NSDateComponentUndefined
+        && c.month != NSDateComponentUndefined && c.day != NSDateComponentUndefined) {
+        d[@"due"] = [NSString stringWithFormat:@"%04ld-%02ld-%02ld",
+                     (long)c.year, (long)c.month, (long)c.day];
+        return;
+    }
+    NSDate *due = [[NSCalendar currentCalendar] dateFromComponents:c];
+    d[@"due"] = due ? noff_format_date(due) : [NSNull null];
+}
+
+// ── [T-reminders-url] Native URL field (GH#286) ──
+//
+// EKReminder has a first-class `URL` (EKCalendarItem.URL). The CLI never wired
+// it, so a link could only live in --notes and could not be read back as a
+// field. Verified on device (iOS 26, iPhone 11): the value is stored and
+// round-trips through EventKit, but the system Reminders app does NOT display
+// EKReminder.URL — its own "Notes and URL" link lives in storage EventKit does
+// not expose. The help text says so, and suggests --notes when the user needs
+// to see the link in the Reminders app.
+
+/// Parse `--url`: must be an absolute URL with a scheme. nil + *err on failure.
+static NSURL *parse_reminder_url(NSString *raw, NSString **err) {
+    NSString *t = [raw stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSURL *url = t.length ? [NSURL URLWithString:t] : nil;
+    if (!url || url.scheme.length == 0) {
+        if (err) *err = [NSString stringWithFormat:
+            @"--url must be an absolute URL with a scheme (e.g. https://example.com/page); got '%@'.", raw];
+        return nil;
+    }
+    return url;
+}
+
+/// Resolve `--notify on|off` (also accepting true/false/1/0/yes/no).
+/// Returns YES if the flag was present and understood, writing the value to
+/// `*out`; NO if absent or malformed, with `*malformed` telling the two apart.
+static BOOL parse_notify_flag(int argc, char **argv, BOOL *out, BOOL *malformed) {
+    *malformed = NO;
+    NSString *s = noff_find_arg(argc, argv, "--notify");
+    if (!s) return NO;
+    NSString *v = [s lowercaseString];
+    if ([v isEqualToString:@"on"] || [v isEqualToString:@"true"] ||
+        [v isEqualToString:@"1"] || [v isEqualToString:@"yes"]) { *out = YES; return YES; }
+    if ([v isEqualToString:@"off"] || [v isEqualToString:@"false"] ||
+        [v isEqualToString:@"0"] || [v isEqualToString:@"no"]) { *out = NO; return YES; }
+    *malformed = YES;
+    return NO;
+}
+
+/// Remove every TIME alarm from a reminder, leaving geofence alarms alone.
+///
+/// The two kinds coexist on one reminder — a task can fire at 9am AND on
+/// arrival — so this filters on `absoluteDate` rather than clearing `alarms`
+/// wholesale the way the event `--alarm` path does. `apply_location_alarm_args`
+/// is the owner of the geofence side and is deliberately untouched here.
+static void remove_time_alarms(EKReminder *reminder) {
+    for (EKAlarm *a in [reminder.alarms copy] ?: @[]) {
+        if (a.absoluteDate && a.proximity == EKAlarmProximityNone) {
+            [reminder removeAlarm:a];
+        }
+    }
+}
+
+/// True if the reminder already carries a time alarm.
+static BOOL has_time_alarm(EKReminder *reminder) {
+    for (EKAlarm *a in reminder.alarms ?: @[]) {
+        if (a.absoluteDate && a.proximity == EKAlarmProximityNone) return YES;
+    }
+    return NO;
+}
+
 int calendar_cmd_remind(int argc, char **argv, int stdout_fd, int stderr_fd, BOOL compact, BOOL quiet) {
     NSString *authErr = nil;
     if (!requestRemindersAccess(&authErr)) {
@@ -1310,10 +1617,15 @@ int calendar_cmd_remind(int argc, char **argv, int stdout_fd, int stderr_fd, BOO
         NSDate *due = noff_parse_date(dueStr);
         if (due) {
             dueDate = due;
-            reminder.dueDateComponents = [[NSCalendar currentCalendar]
-                components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
-                            NSCalendarUnitHour | NSCalendarUnitMinute)
-                fromDate:due];
+            // [T-reminders-date-only] "2026-02-25" → an all-day reminder, not
+            // one due at 12:00 AM.
+            reminder.dueDateComponents = reminder_due_components(due, noff_is_date_only_string(dueStr));
+            // [T-issue282-sync-start-anchor] Keep the hidden start anchor in
+            // lockstep with due. EventKit uses startDateComponents as the
+            // recurrence anchor internally; leaving it stale after a due
+            // change is a latent divergence (CalDAV DTSTART, other system
+            // consumers) even though completion-rescheduling reads due.
+            reminder.startDateComponents = reminder.dueDateComponents;
         }
     }
 
@@ -1347,6 +1659,21 @@ int calendar_cmd_remind(int argc, char **argv, int stdout_fd, int stderr_fd, BOO
     NSString *notes = noff_find_arg(argc, argv, "--notes");
     if (notes) reminder.notes = notes;
 
+    // [T-reminders-url] Validated before save, so a malformed link fails the
+    // command instead of creating a reminder without it.
+    NSString *urlStr = noff_find_arg(argc, argv, "--url");
+    if (urlStr) {
+        NSString *urlErr = nil;
+        NSURL *url = parse_reminder_url(urlStr, &urlErr);
+        if (!url) {
+            NSDictionary *err = noff_json_error(TOOL_NAME, @"remind",
+                                                 NOFF_ERR_INVALID_ARGS, urlErr);
+            noff_emit_json(stdout_fd, err, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
+        }
+        reminder.URL = url;
+    }
+
     NSString *priorityStr = noff_find_arg(argc, argv, "--priority");
     if (priorityStr) reminder.priority = (NSUInteger)[priorityStr integerValue];
 
@@ -1368,18 +1695,51 @@ int calendar_cmd_remind(int argc, char **argv, int stdout_fd, int stderr_fd, BOO
         return NOFF_EXIT_NOT_AVAILABLE;
     }
 
-    // Find reminder list by name
+    // Find reminder list by EXACT name — a miss is an error with the
+    // candidate lists, never a silent default (issue #282: batch-created
+    // reminders all landed in the wrong list while reporting ok:true).
+    // [T-issue282-exact-list-match]
     NSString *listName = noff_find_arg(argc, argv, "--list");
     if (listName) {
-        for (EKCalendar *cal in [eventStore() calendarsForEntityType:EKEntityTypeReminder]) {
-            if ([cal.title localizedCaseInsensitiveContainsString:listName]) {
-                reminder.calendar = cal;
-                break;
-            }
+        NSDictionary *matchErr = nil;
+        EKCalendar *target = noff_resolve_calendar_exact(listName, EKEntityTypeReminder,
+                                                         @"remind", &matchErr);
+        if (!target) {
+            noff_emit_json(stdout_fd, matchErr, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
         }
+        reminder.calendar = target;
     }
     if (!reminder.calendar) {
         reminder.calendar = [eventStore() defaultCalendarForNewReminders];
+    }
+
+    // [T-reminders-due-alarm] Attach the time alarm that actually produces the
+    // notification (GH#251). Default: on when --due names a time of day, off
+    // for a date-only due — which is what the Reminders app does, and avoids
+    // banner-ing someone at midnight for a "sometime Tuesday" task.
+    // --notify on|off overrides either way. Explicit `--notify on` without a
+    // due date is a mistake worth naming: there is no instant to fire at.
+    BOOL notifyFlag = NO, notifyMalformed = NO;
+    BOOL notifyGiven = parse_notify_flag(argc, argv, &notifyFlag, &notifyMalformed);
+    if (notifyMalformed) {
+        NSDictionary *err = noff_json_error(TOOL_NAME, @"remind",
+                                             NOFF_ERR_INVALID_ARGS,
+                                             @"--notify expects on or off.");
+        noff_emit_json(stdout_fd, err, compact, quiet);
+        return NOFF_EXIT_INVALID_ARGS;
+    }
+    if (notifyGiven && notifyFlag && !dueDate) {
+        NSDictionary *err = noff_json_error(TOOL_NAME, @"remind",
+                                             NOFF_ERR_INVALID_ARGS,
+                                             @"--notify on requires --due: a notification needs a time to fire at.");
+        noff_emit_json(stdout_fd, err, compact, quiet);
+        return NOFF_EXIT_INVALID_ARGS;
+    }
+    BOOL wantNotify = notifyGiven ? notifyFlag
+                                  : (dueDate != nil && due_string_has_time_of_day(dueStr));
+    if (wantNotify && dueDate) {
+        [reminder addAlarm:[EKAlarm alarmWithAbsoluteDate:dueDate]];
     }
 
     // [T-reminders-location-alarm] Attach a geofence alarm when location args
@@ -1406,9 +1766,25 @@ int calendar_cmd_remind(int argc, char **argv, int stdout_fd, int stderr_fd, BOO
         @"id": reminder.calendarItemIdentifier ?: @"",
         @"title": title,
         @"list": reminder.calendar.title ?: @"",
+        // [T-issue282-return-list-id] Unique list identity — titles collide
+        // across sources (two "Work" lists, iCloud vs Local).
+        @"list_id": reminder.calendar.calendarIdentifier ?: @"",
+        @"list_source": reminder.calendar.source.title ?: @"",
     } mutableCopy];
     NSDictionary *locInfo = reminder_location_dict(reminder);
     if (locInfo) data[@"location"] = locInfo;
+    // [T-reminders-date-only] Echo the stored due (date-only as yyyy-MM-dd)
+    // and whether it is all-day; [T-reminders-url] and the link.
+    reminder_put_due(data, reminder);
+    data[@"url"] = reminder.URL.absoluteString ?: [NSNull null];
+    // [T-reminders-due-alarm] Echo whether a notification was attached, and
+    // when. The default is inferred from the shape of --due, so the caller
+    // should not have to guess which way it went — this is the field that
+    // answers "will this actually buzz?" without a follow-up list call.
+    if (dueDate) {
+        data[@"notify"] = @(has_time_alarm(reminder));
+        if (has_time_alarm(reminder)) data[@"notify_at"] = noff_format_date(dueDate);
+    }
     // [T-reminders-recurrence] Echo the stored rule so the caller can confirm
     // what was actually saved without a follow-up list call (same rationale as
     // the event create path).
@@ -1469,30 +1845,63 @@ int calendar_cmd_update_reminder(int argc, char **argv, int stdout_fd, BOOL comp
     if (title) reminder.title = title;
 
     NSString *dueStr = noff_find_arg(argc, argv, "--due");
+    NSDate *newDueDate = nil;
     if (dueStr) {
         NSDate *due = noff_parse_date(dueStr);
         if (due) {
-            reminder.dueDateComponents = [[NSCalendar currentCalendar]
-                components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay |
-                            NSCalendarUnitHour | NSCalendarUnitMinute)
-                fromDate:due];
+            newDueDate = due;
+            // [T-reminders-date-only] Converts either way: a date-only --due
+            // makes the reminder all-day, a timed one gives it a time again.
+            reminder.dueDateComponents = reminder_due_components(due, noff_is_date_only_string(dueStr));
+            // [T-issue282-sync-start-anchor] Same lockstep as create — an
+            // update that moves due must move the recurrence anchor with it,
+            // or the stored start keeps pointing at the ORIGINAL create date.
+            reminder.startDateComponents = reminder.dueDateComponents;
         }
     }
 
     NSString *notes = noff_find_arg(argc, argv, "--notes");
     if (notes) reminder.notes = notes;
 
+    // [T-reminders-url] --url sets/replaces the link, --clear-url removes it.
+    NSString *updUrlStr = noff_find_arg(argc, argv, "--url");
+    BOOL clearUrl = noff_has_flag(argc, argv, "--clear-url");
+    if (updUrlStr && clearUrl) {
+        NSDictionary *err = noff_json_error(TOOL_NAME, @"update",
+                                             NOFF_ERR_INVALID_ARGS,
+                                             @"--url and --clear-url are mutually exclusive.");
+        noff_emit_json(stdout_fd, err, compact, quiet);
+        return NOFF_EXIT_INVALID_ARGS;
+    }
+    if (updUrlStr) {
+        NSString *urlErr = nil;
+        NSURL *url = parse_reminder_url(updUrlStr, &urlErr);
+        if (!url) {
+            NSDictionary *err = noff_json_error(TOOL_NAME, @"update",
+                                                 NOFF_ERR_INVALID_ARGS, urlErr);
+            noff_emit_json(stdout_fd, err, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
+        }
+        reminder.URL = url;
+    } else if (clearUrl) {
+        reminder.URL = nil;
+    }
+
     NSString *priorityStr = noff_find_arg(argc, argv, "--priority");
     if (priorityStr) reminder.priority = (NSUInteger)[priorityStr integerValue];
 
     NSString *listName = noff_find_arg(argc, argv, "--list");
     if (listName) {
-        for (EKCalendar *cal in [eventStore() calendarsForEntityType:EKEntityTypeReminder]) {
-            if ([cal.title localizedCaseInsensitiveContainsString:listName]) {
-                reminder.calendar = cal;
-                break;
-            }
+        // [T-issue282-exact-list-match] Exact match or error — the old
+        // substring miss silently kept the reminder's previous list.
+        NSDictionary *matchErr = nil;
+        EKCalendar *target = noff_resolve_calendar_exact(listName, EKEntityTypeReminder,
+                                                         @"update", &matchErr);
+        if (!target) {
+            noff_emit_json(stdout_fd, matchErr, compact, quiet);
+            return NOFF_EXIT_INVALID_ARGS;
         }
+        reminder.calendar = target;
     }
 
     // [T-reminders-recurrence] Same builder / flags as create and as
@@ -1522,6 +1931,53 @@ int calendar_cmd_update_reminder(int argc, char **argv, int stdout_fd, BOOL comp
         reminder.recurrenceRules = nil;
     }
     if (updRecurRule) reminder.recurrenceRules = @[updRecurRule];
+
+    // [T-reminders-due-alarm] Keep the notification in step with the due date
+    // (GH#251). Four cases, in the order they are decided:
+    //
+    //   --notify off        → drop any time alarm, keep the due date.
+    //   --notify on         → (re)attach one at the effective due date.
+    //   --due, no --notify  → an EXISTING time alarm is re-pointed at the new
+    //                         date (a stale alarm firing at the old time is a
+    //                         bug, not a feature); if there was none, apply the
+    //                         same default as `remind` — attach when the new
+    //                         --due names a time of day.
+    //   neither             → leave alarms exactly as they are.
+    //
+    // Time alarms only: `remove_time_alarms` filters on absoluteDate so a
+    // geofence set by --lat/--lng survives, and vice versa.
+    BOOL updNotify = NO, updNotifyMalformed = NO;
+    BOOL updNotifyGiven = parse_notify_flag(argc, argv, &updNotify, &updNotifyMalformed);
+    if (updNotifyMalformed) {
+        NSDictionary *err = noff_json_error(TOOL_NAME, @"update",
+                                             NOFF_ERR_INVALID_ARGS,
+                                             @"--notify expects on or off.");
+        noff_emit_json(stdout_fd, err, compact, quiet);
+        return NOFF_EXIT_INVALID_ARGS;
+    }
+    if (updNotifyGiven && updNotify && !effectiveDue) {
+        NSDictionary *err = noff_json_error(TOOL_NAME, @"update",
+                                             NOFF_ERR_INVALID_ARGS,
+                                             @"--notify on requires the reminder to have a due date: pass --due, or set one first.");
+        noff_emit_json(stdout_fd, err, compact, quiet);
+        return NOFF_EXIT_INVALID_ARGS;
+    }
+    if (updNotifyGiven) {
+        remove_time_alarms(reminder);
+        if (updNotify && effectiveDue) {
+            [reminder addAlarm:[EKAlarm alarmWithAbsoluteDate:effectiveDue]];
+        }
+    } else if (newDueDate) {
+        BOOL had = has_time_alarm(reminder);
+        remove_time_alarms(reminder);
+        // [T-reminders-date-only] Moving to a date-only due must NOT re-point
+        // an existing alarm to the new day's midnight — that is the 00:00
+        // notification this fix removes. Pass --notify on to keep one.
+        if (!noff_is_date_only_string(dueStr)
+            && (had || due_string_has_time_of_day(dueStr))) {
+            [reminder addAlarm:[EKAlarm alarmWithAbsoluteDate:newDueDate]];
+        }
+    }
 
     // [T-reminders-location-alarm] --clear-location removes an existing
     // geofence (there is otherwise no way to undo one from the CLI); the
@@ -1555,15 +2011,21 @@ int calendar_cmd_update_reminder(int argc, char **argv, int stdout_fd, BOOL comp
         @"title": reminder.title ?: @"",
         @"completed": @(reminder.isCompleted),
         @"list": reminder.calendar.title ?: @"",
+        @"list_id": reminder.calendar.calendarIdentifier ?: @"",        // [T-issue282-return-list-id]
+        @"list_source": reminder.calendar.source.title ?: @"",
         @"priority": @(reminder.priority),
         @"notes": reminder.notes ?: [NSNull null],
+        @"url": reminder.URL.absoluteString ?: [NSNull null],       // [T-reminders-url]
     } mutableCopy];
-    if (reminder.dueDateComponents) {
-        NSDate *due = [[NSCalendar currentCalendar] dateFromComponents:reminder.dueDateComponents];
-        data[@"due"] = due ? noff_format_date(due) : [NSNull null];
-    }
+    reminder_put_due(data, reminder);                               // [T-reminders-date-only]
     NSDictionary *updLoc = reminder_location_dict(reminder);
     if (updLoc) data[@"location"] = updLoc;
+    // [T-reminders-due-alarm] Always reported here, unconditionally: after an
+    // update the caller's question is "does this still notify?", and the answer
+    // may have changed without --notify being passed at all (a --due edit
+    // re-points an existing alarm). Reporting only when a flag was given would
+    // hide exactly the case worth confirming.
+    data[@"notify"] = @(has_time_alarm(reminder));
     if (reminder.hasRecurrenceRules && reminder.recurrenceRules.count > 0) {
         data[@"recurrence"] = recurrence_to_dict(reminder.recurrenceRules.firstObject);
     }
@@ -1617,6 +2079,8 @@ int calendar_cmd_complete_reminder(int argc, char **argv, int stdout_fd, BOOL co
         @"title": reminder.title ?: @"",
         @"completed": @(reminder.isCompleted),
         @"list": reminder.calendar.title ?: @"",
+        @"list_id": reminder.calendar.calendarIdentifier ?: @"",        // [T-issue282-return-list-id]
+        @"list_source": reminder.calendar.source.title ?: @"",
     };
     noff_emit_json(stdout_fd, noff_json_envelope(TOOL_NAME, @"complete", data), compact, quiet);
     return NOFF_EXIT_SUCCESS;
@@ -1651,6 +2115,9 @@ int calendar_cmd_delete_reminder(int argc, char **argv, int stdout_fd, BOOL comp
 
     NSString *title = reminder.title ?: @"";
     NSString *list = reminder.calendar.title ?: @"";
+    // [T-issue282-return-list-id] Captured before the delete.
+    NSString *listId = reminder.calendar.calendarIdentifier ?: @"";
+    NSString *listSource = reminder.calendar.source.title ?: @"";
 
     NSError *removeErr = nil;
     BOOL removed = [eventStore() removeReminder:reminder commit:YES error:&removeErr];
@@ -1666,6 +2133,8 @@ int calendar_cmd_delete_reminder(int argc, char **argv, int stdout_fd, BOOL comp
         @"id": reminderId,
         @"title": title,
         @"list": list,
+        @"list_id": listId,
+        @"list_source": listSource,
         @"deleted": @YES,
     };
     noff_emit_json(stdout_fd, noff_json_envelope(TOOL_NAME, @"delete", data), compact, quiet);

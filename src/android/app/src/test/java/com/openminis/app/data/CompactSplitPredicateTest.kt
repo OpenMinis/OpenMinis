@@ -79,6 +79,79 @@ class CompactSplitPredicateTest {
         assertTrue(shouldSplitOnError(IllegalStateException("something odd")))
     }
 
+    // ── [OpenMinis#377] parameter rejections: refused, not too big ───────
+
+    @Test
+    fun `an unsupported-parameter 400 does not split`() {
+        // Issue #377: compaction sent `reasoning.effort:"none"` to a model that
+        // does not accept it and halved 963 → 481 → 240 → 120 messages, failing
+        // four times on one unchanged parameter. Halving cannot fix a parameter.
+        assertFalse(
+            shouldSplitOnError(
+                LLMError.ProviderError(
+                    "[400] reasoning.effort: 'none' is not supported. " +
+                        "Supported values are: 'low', 'medium', 'high', 'xhigh' and 'max'.",
+                    httpStatus = 400,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `other parameter rejections do not split`() {
+        for (m in listOf(
+            "[400] invalid_request_error: unknown field 'reasoning'",
+            "[422] extra_forbidden body.reasoning",
+            "Model grok-build-0.1 does not support parameter reasoningEffort",
+            "[400] Unsupported parameter: 'temperature'",
+        )) {
+            assertFalse("must not split: $m", shouldSplitOnError(LLMError.ProviderError(m, httpStatus = 400)))
+        }
+    }
+
+    @Test
+    fun `an over-length 400 still splits`() {
+        // The critical non-regression. Over-length refusals are ALSO HTTP 400 —
+        // keying the rule on the status code alone would have disabled
+        // splitting for the exact case it exists to serve.
+        assertTrue(
+            shouldSplitOnError(
+                LLMError.ProviderError(
+                    "[400] context_length_exceeded: input too long",
+                    httpStatus = 400,
+                ),
+            ),
+        )
+        assertTrue(
+            shouldSplitOnError(
+                LLMError.ProviderError(
+                    "[400] This model's maximum context length is 128000 tokens",
+                    httpStatus = 400,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `a message mixing both signals errs towards splitting`() {
+        // Burden of proof stays on NOT retrying: anything that looks even
+        // slightly like a size problem keeps the split path.
+        assertTrue(
+            shouldSplitOnError(
+                LLMError.ProviderError(
+                    "[400] invalid_request_error: input exceeds the context window",
+                    httpStatus = 400,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `5xx and status-less errors are unaffected`() {
+        assertTrue(shouldSplitOnError(LLMError.ProviderError("upstream boom", httpStatus = 500)))
+        assertTrue(shouldSplitOnError(LLMError.ProviderError("no status here")))
+    }
+
     @Test
     fun `the amplification path is closed for the reported failure modes`() {
         // Spelled out as the regression guard: each of these previously

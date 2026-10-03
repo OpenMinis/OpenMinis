@@ -98,7 +98,7 @@ import java.io.ByteArrayOutputStream
  *  for this session never appeared in the `/` picker even though the
  *  prompt-injection path ([SkillRepository.skillPromptFragment]) already
  *  honored the override — the agent knew about the skill but the user
- *  couldn't surface it via slash. (DM 𝙓𝙄𝙉 304891.)
+ *  couldn't surface it via slash.
  */
 internal fun ChatViewModel.filteredSlashCommands(): List<SlashCommand> {
     val filter = _slashFilter.value.lowercase()

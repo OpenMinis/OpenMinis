@@ -1,5 +1,7 @@
 package com.openminis.app.ui
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import coil.request.ImageRequest
 import coil.size.Precision
 
@@ -66,4 +68,59 @@ object DisplayBitmapLimits {
     fun ImageRequest.Builder.limitDisplaySize(): ImageRequest.Builder =
         size(MAX_DISPLAY_EDGE_PX, MAX_DISPLAY_EDGE_PX)
             .precision(Precision.INEXACT)
+
+    /**
+     * [T-android-tool-thumb-fullres-decode] Longest-edge ceiling for a bitmap
+     * that is only ever drawn as a small thumbnail (tool-call preview tiles).
+     *
+     * The tool thumbnails for `browser_use` / `read_image` decoded the saved
+     * screenshot with a bare `BitmapFactory.decodeFile` — a 1080x2400 capture
+     * is ~10 MB of ARGB_8888, and bitmap pixels live in the NATIVE heap on
+     * Android 8+, invisible to the Java heap and to ART's GC pressure. In a
+     * long agentic conversation every such block that scrolls into view holds
+     * its own full-resolution copy for as long as it stays composed, and the
+     * "borrow the previous screenshot" fallback multiplies one file into N
+     * copies. Scrolling a long session therefore grew native memory until the
+     * allocator aborted (SIGABRT, self-abort — the Scudo OOM signature).
+     *
+     * 512 px covers any thumbnail up to ~185 dp at 2.75x density with room to
+     * spare, at ~1 MB instead of ~10 MB per screenshot.
+     */
+    const val MAX_THUMBNAIL_EDGE_PX = 512
+
+    /**
+     * Power-of-two `inSampleSize` that brings `max(width, height)` to at most
+     * [maxEdge]. Pure arithmetic, so it is unit-testable without a decoder.
+     * Returns 1 for images already within the bound (never upsamples).
+     */
+    fun sampleSizeFor(width: Int, height: Int, maxEdge: Int): Int {
+        if (width <= 0 || height <= 0 || maxEdge <= 0) return 1
+        var sample = 1
+        while (width / sample > maxEdge || height / sample > maxEdge) sample *= 2
+        return sample
+    }
+
+    /**
+     * Decode [path] for display with its longest edge bounded by [maxEdge].
+     *
+     * Two-pass decode: bounds first (`inJustDecodeBounds`, allocates nothing),
+     * then a sampled decode so the oversized bitmap is never allocated at all —
+     * the same shape as `ImageBudget.compressBytes` on the network path and
+     * `limitDisplaySize()` on the Coil path. Returns null on any failure, which
+     * is what every caller already did with its bare `decodeFile` + catch.
+     */
+    fun decodeFileBounded(path: String, maxEdge: Int = MAX_DISPLAY_EDGE_PX): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            null
+        } else {
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxEdge)
+            }
+            BitmapFactory.decodeFile(path, opts)
+        }
+    } catch (_: Throwable) {
+        null
+    }
 }

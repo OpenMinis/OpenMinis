@@ -88,25 +88,100 @@ object VisionGroupResolver {
     fun candidates(repo: ProviderRepository, context: Context?, seed: Int = 0): List<Pair<ProviderInstance, ModelEntry>> =
         repo.resolveVisionCandidates(loadBalanceSeed = seed)
 
+    /**
+     * [T-android-image-path-metadata] Path note appended AFTER the pixels for a
+     * model that CAN see images.
+     *
+     * A vision model was getting the bytes and nothing else, so it could look at
+     * the picture but had no idea where it lived. That rules out every
+     * file-level follow-up the sandbox makes possible — re-reading at higher
+     * fidelity, cropping, OCR, EXIF, a checksum, converting it — none of which
+     * the pixels alone support.
+     *
+     * The wording carries one load-bearing clarification: it states that the
+     * path IS the image already shown above, not an additional one. Without
+     * that, N images plus N path notes read as 2N images, and a model asked
+     * "how many pictures did I send?" answers wrongly — or worse, it calls
+     * read_image on a path believing it is fetching something new.
+     *
+     * Returns null when there is no path to report (never persisted, or an
+     * older history row), so nothing is appended rather than printing "null".
+     *
+     * English-only by design: model-facing instruction text, not UI.
+     */
+    fun visionImagePathNote(path: String?): String? {
+        val p = path?.takeIf { it.isNotBlank() } ?: return null
+        return "[The image shown above is also saved at $p — this is that same image, " +
+            "not an additional one. Use the path only if you need to work on the file " +
+            "itself (re-read it at full resolution, crop, OCR, inspect metadata).]"
+    }
+
     /** Name of the configured Vision Group, for UI/logging. null when unset. */
     fun groupName(repo: ProviderRepository): String? = repo.visionGroupName()
 
     /**
      * [T-android-vision-group / GH#182] Placeholder text a provider substitutes
-     * for image pixels when the target model has no native vision (T264 path)
-     * AND a Vision Group is configured. Unlike the historical "does not support
-     * vision input" literal, this NAMES the image and steers the model to call
-     * read_image with that path, so the image is routed through the Vision Group
-     * instead of the model guessing or reaching for shell_execute. [path] is the
-     * iSH-visible linux path (preferred) so the model can pass it straight to
-     * read_image; null when the bytes were never persisted (rare).
+     * for image pixels when the target model has no native vision (the T264
+     * path).
+     *
+     * [T-android-image-path-metadata] The path is ALWAYS surfaced, whether or
+     * not a Vision Group is configured.
+     *
+     * The previous shape gated the path on a Vision Group and otherwise emitted
+     * a bare "[Image attached but this model does not support vision input]".
+     * That was a dead end built on a false premise — that without a Vision
+     * Group there is no recourse. There is: `shell_execute` is exposed
+     * unconditionally (AgentTools) and runs in the SAME PRoot Alpine sandbox
+     * the image was written to, so a model holding the path can run `file`,
+     * `identify`, `exiftool`, Pillow, an OCR pass, a checksum — none of which
+     * need a Vision Group, and none of which it can even attempt without the
+     * path.
+     *
+     * iOS records the corroborating observation in its own version of this
+     * function: given the bare literal, a model "would try to route around" it,
+     * "in one observed case by shelling out to the `apple-vision` CLI". The
+     * model was already reaching for a shell; it simply had no path to point at
+     * and guessed at a tool that does not exist here. Handing it the real path
+     * turns that improvisation into something that can actually work.
+     *
+     * Three tiers, by what is genuinely available:
+     *  - Vision Group + path -> name read_image AND the path (best: a real
+     *    description is one call away);
+     *  - Vision Group, no path -> name read_image without one (older history
+     *    rows predate linuxPath);
+     *  - no Vision Group, path -> hand over the path and say plainly that the
+     *    file is reachable from the sandbox, WITHOUT naming read_image, which
+     *    the tool gate has not registered for this model;
+     *  - no Vision Group, no path -> the historical literal, which is now the
+     *    only genuinely recourse-free case.
+     *
+     * English-only by design: this is model-facing instruction text, not UI, and
+     * one imperative English sentence steers models of every UI locale (iOS
+     * parity).
      */
-    fun noVisionImagePlaceholder(path: String?): String {
-        val where = path ?: "the attached image"
-        return "[Image attached: $where. This model does not support native vision input, " +
-            "but a Vision Group is configured — call the read_image tool with this path to get " +
-            "a description of the image. Pass an optional `prompt` if you need to focus on " +
-            "something specific in it.]"
+    fun noVisionImagePlaceholder(path: String?, visionGroupConfigured: Boolean): String {
+        val p = path?.takeIf { it.isNotBlank() }
+        if (visionGroupConfigured) {
+            if (p == null) {
+                return "[Image attached but this model does not support native vision input. " +
+                    "A Vision Group is configured: call the read_image tool with the image's " +
+                    "path to get a description of its content.]"
+            }
+            return "[Image attached: $p. This model does not support native vision input, " +
+                "but a Vision Group is configured — call the read_image tool with this path to get " +
+                "a description of the image. Pass an optional `prompt` if you need to focus on " +
+                "something specific in it.]"
+        }
+        if (p == null) {
+            // Nothing to act on: no pixels, no path, no group.
+            return "[Image attached but this model does not support vision input]"
+        }
+        // Deliberately does NOT mention read_image: without a Vision Group that
+        // tool is not registered for this model, and inviting a call that will
+        // never resolve is worse than saying nothing about it.
+        return "[Image attached at $p. This model cannot view images directly, but the file is " +
+            "readable from the Linux sandbox — you can inspect or process it with shell_execute " +
+            "(for example `file`, `identify`, an OCR or Python/Pillow step) if the task needs it.]"
     }
 
     sealed class VisionResult {
@@ -228,7 +303,7 @@ object VisionGroupResolver {
         val apiKey = repo.usableApiKey(instance) ?: throw IllegalStateException("no credential")
         // Guard: only route to a model that actually declares image input.
         if (!entry.model.hasImageInput) throw IllegalStateException("model is not vision-capable")
-        val provider = ProviderFactory.create(instance, apiKey, entry.model, context)
+        val provider = ProviderFactory.create(instance, apiKey, entry.model, context, overrides = entry.overrides)
         android.util.Log.i("VisionGroup", "[Vision] describing via ${provider.name} model=${entry.model.id} bytes=${imageData.size}")
 
         return withTimeout(PER_ATTEMPT_TIMEOUT_MS) {

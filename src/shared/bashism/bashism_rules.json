@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "_comment": "Single source of truth for busybox-ash bashism detection (T-bash-on-demand). Loaded at runtime by BOTH iOS (bundle resource) and Android (asset). Every rule is grounded in on-device testing against Alpine 3.21.0 / BusyBox 1.37.0 ash (see /tmp/bashism_test_report.md, 2026-07-18). Patterns MUST stay inside the common ICU/java.util.regex dialect subset, MUST NOT contain nested quantifiers (ReDoS), and are matched LINE BY LINE against the script with heredoc BODIES stripped. tier: S = silent-wrong under ash (highest priority, never prune), E = loud error under ash, T1 = explicit bash reference (ensure installed, do not switch interpreter).",
+  "_comment": "Single source of truth for busybox-ash bashism detection (T-bash-on-demand). Loaded at runtime by BOTH iOS (bundle resource) and Android (asset). Every rule is grounded in on-device testing against Alpine 3.21.0 / BusyBox 1.37.0 ash (tested 2026-07-18). Patterns MUST stay inside the common ICU/java.util.regex dialect subset, MUST NOT contain nested quantifiers (ReDoS), and are matched LINE BY LINE against the script with heredoc BODIES stripped. tier: S = silent-wrong under ash (highest priority, never prune), E = loud error under ash, T1 = explicit bash reference (ensure installed, do not switch interpreter).",
   "rules": [
     {
       "name": "bash-shebang",

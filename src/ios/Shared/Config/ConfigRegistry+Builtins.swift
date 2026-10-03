@@ -496,6 +496,11 @@ extension ConfigRegistry {
         r.register(GroupsCollection())
         r.register(EnvVarsCollection())
         r.register(ThinkingRulesCollection())
+        // [T-sub-agents-cli] Sub agents are global (not per-provider), so the
+        // collection uses a plain id as its child key and needs only one
+        // `order` field rather than one per instance.
+        r.register(SubAgentsCollection())
+        r.register(SubAgentsCollection.orderField())
 
         // [T-thinking-rules-minis-config] One `order` field per provider instance.
         // These are flat fields rather than collection children because the collection
@@ -511,6 +516,49 @@ extension ConfigRegistry {
         // Aggregate read-only summary. This is the ONLY place built-in rules are
         // exposed: they are computed per request from code, never persisted and never
         // synced, so they are shown for reference but have no writable path anywhere.
+        // [T-sub-agents-cli] Aggregate view so `get subagents` alone answers
+        // "what exists, which is writable, and what is each one's model" —
+        // without it a caller has to walk every child path to find out.
+        r.register(ReadOnlyField(
+            path: "subagents",
+            displayName: "Sub agents (summary)",
+            description: "Read-only roster view. Each entry's writable paths are subagents.<id>.{name,description,instructions,model_group}; the built-in one refuses name/description and cannot be removed. Reorder with subagents.order.",
+            valueSchema: .json,
+            reader: {
+                let store = ProviderConfigStore.shared
+                let items: [ConfigValue] = SubAgentStore.shared.subAgents.map { def in
+                    var obj: [String: ConfigValue] = [
+                        "id": .string(def.id),
+                        "name": .string(def.name),
+                        "description": .string(def.description),
+                        "built_in": .bool(def.isBuiltIn),
+                        "path": .string("subagents.\(def.id)"),
+                    ]
+                    if !def.instructions.isEmpty {
+                        obj["instructions"] = .string(def.instructions)
+                    }
+                    if let gid = def.modelGroupId {
+                        obj["model_group"] = .string(store.group(for: gid)?.name ?? gid)
+                    } else {
+                        // Spelled out rather than omitted: "Auto" is a real
+                        // setting, not an absence, and the reader should not
+                        // have to infer it from a missing key.
+                        obj["model_group"] = .string("")
+                        obj["model"] = .string("auto — chosen per task")
+                    }
+                    if def.isBuiltIn {
+                        obj["note"] = .string("Built-in: name and description are fixed and it cannot be deleted; model and instructions are writable.")
+                    }
+                    return .object(obj)
+                }
+                return .object([
+                    "count": .int(items.count),
+                    "max": .int(SubAgentLimits.maxCount),
+                    "agents": .array(items),
+                ])
+            }
+        ))
+
         r.register(ReadOnlyField(
             path: "thinkingrules",
             displayName: "Thinking rules (summary)",
@@ -1123,6 +1171,29 @@ extension ConfigRegistry {
             description: "Prevents auto-lock while the agent is busy.",
             userDefaultsKey: "keepScreenAwakeDuringTasks",
             defaultValue: false
+        ))
+        // [T-tools-switches-cli] The two optional-tool switches, same keys the
+        // Settings toggles write (AgentToolSwitch.browser / .agents). Exposed so
+        // they can be scripted and so their cost can be measured — each one adds
+        // its tool schema AND its system-prompt section to every request, which
+        // is invisible until you diff the token usage with them on and off.
+        //
+        // Registered as plain AppStorage fields rather than through
+        // AgentToolSwitch so the CLI reads and writes exactly the stored value;
+        // `isEnabled` applies the same `?? defaultValue` fallback on read.
+        r.register(AppStorageBoolField(
+            path: "chat.tools.browserUse",
+            displayName: "Browser Use tool",
+            description: "Whether the assistant is offered browser_use. When off the tool is removed from the schema entirely and the system prompt drops the sentences advertising it — the model never learns it exists.",
+            userDefaultsKey: AgentToolSwitch.browser.key,
+            defaultValue: AgentToolSwitch.browser.defaultValue
+        ))
+        r.register(AppStorageBoolField(
+            path: "chat.tools.subAgents",
+            displayName: "Sub Agents tool",
+            description: "Whether the assistant is offered subagent_task. When off that tool and the sub agent roster both leave the request. Configure the agents themselves under `subagents`.",
+            userDefaultsKey: AgentToolSwitch.agents.key,
+            defaultValue: AgentToolSwitch.agents.defaultValue
         ))
         r.register(AppStorageBoolField(
             path: "chat.toolPreview",

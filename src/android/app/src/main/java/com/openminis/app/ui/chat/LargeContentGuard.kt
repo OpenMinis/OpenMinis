@@ -19,7 +19,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -209,17 +208,20 @@ internal fun LargeContentGuard(
     // real renderer runs), so the user sees a single smooth swap at stream-end
     // rather than a mid-stream flicker.
     //
-    // The render-breaker path stays as a lower-bound safety net: if a hang is
-    // *already* detected we degrade regardless of size (covers a giant unsplit
-    // table below the char threshold that still re-parses expensively per tick).
+    // [T-android-hang-false-positive] The HangDetector render breaker that used
+    // to degrade here "regardless of size" is gone. It keyed on the global hang
+    // count, so ANY 3 s main-thread gap on any screen (a lock wait on the home
+    // list, a phone waking from sleep) degraded every later streaming reply,
+    // simple ones included, until a quiet session entry reset it. Every stall
+    // recorded on the reporting device was outside the streaming renderer.
+    // Size is the only trigger now: it is about the block being drawn, and it
+    // ends with the stream.
     // [T-android-content-perf-diag] Track whether this block spent its streaming
     // life degraded, so we can log the one-time full-markdown swap (+ its parse
     // cost) when the turn ends.
     val wasDegraded = remember(stableKey) { mutableStateOf(false) }
     if (isStreaming) {
-        val breakerActive by com.openminis.app.diagnostics.HangDetector
-            .renderBreakerActive.collectAsState()
-        if (breakerActive || content.length > STREAM_DEGRADE_CHARS) {
+        if (content.length > STREAM_DEGRADE_CHARS) {
             wasDegraded.value = true
             // [T-android-content-perf-diag] Log the degrade with a structural
             // fingerprint (once per ~2K growth) so a hang report shows exactly
@@ -228,7 +230,7 @@ internal fun LargeContentGuard(
                 val s = com.openminis.app.diagnostics.ContentDiag.summarize(content)
                 AppLogger.info(
                     "Perf",
-                    "[Perf][ContentDiag] stream-degrade key=$stableKey breaker=$breakerActive " +
+                    "[Perf][ContentDiag] stream-degrade key=$stableKey " +
                         "threshold=$STREAM_DEGRADE_CHARS ${s.asLogFields()}",
                 )
                 Unit
@@ -298,8 +300,8 @@ internal fun LargeContentGuard(
 }
 
 /**
- * [T-android-render-breaker] Bounded plain-text rendering for a LIVE block
- * while the render breaker is active. Shows a one-line notice plus the tail of
+ * [T-android-streaming-regex-hang] Bounded plain-text rendering for a LIVE
+ * block over [STREAM_DEGRADE_CHARS]. Shows a one-line notice plus the tail of
  * the content (the part the user is watching grow). No markdown parse, no
  * regex, no AnnotatedString construction — a single Text layout of at most
  * [DEGRADED_TAIL_CHARS] characters per publish.

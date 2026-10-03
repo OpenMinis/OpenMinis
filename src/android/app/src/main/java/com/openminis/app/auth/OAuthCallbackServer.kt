@@ -61,7 +61,7 @@ class OAuthCallbackServer(
                     try {
                         val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                         val requestLine = reader.readLine() ?: continue
-                        Log.d(TAG, "Request: $requestLine")
+                        Log.d(TAG, "Request: ${OAuthLogRedaction.url(requestLine)}") // [T-android-oauth-log-redact]
 
                         // CORS preflight for providers (e.g. xAI) that
                         // OPTIONS /callback from their authorization page
@@ -110,7 +110,12 @@ class OAuthCallbackServer(
                             val state = params["state"]
 
                             // Send response
-                            val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
+                            // [T-android-oauth-foreground-exchange] Not "complete": the app still has
+                            // to exchange the code, and it can only do that once the user is
+                            // back in Minis (background network is blocked). Say so, so the
+                            // user returns rather than waiting on a tab that already "succeeded".
+                            // ASCII only: Content-Length below is computed from String.length.
+                            val html = "<html><body><h1>Authorization received</h1><p>Return to Minis to finish signing in.</p><script>window.close()</script></body></html>"
                             val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n$html"
                             socket.getOutputStream().write(response.toByteArray())
                             socket.close()

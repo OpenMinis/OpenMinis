@@ -1,6 +1,7 @@
 import Foundation
 
-/// Exposes ModelEntry overrides under `models.<entryUUID>.…`.
+/// Exposes ModelEntry overrides under `models.<entry_id>.…`, where entry_id is
+/// the raw "<instanceUUID>/<modelId>" `get models` prints (dots allowed).
 ///
 /// `add` creates a custom entry (isCustom=true). `remove` is allowed
 /// only for those custom entries — API-reported models can be hidden
@@ -26,12 +27,61 @@ struct ModelsCollection: ConfigCollection {
     /// }
     let addPayloadSchema: ConfigValueSchema = .json
 
+    // MARK: - Entry ids in paths
+    //
+    // [T-config-path-dotted-id] OpenMinis#390. A model's real id is its
+    // compositeKey, "<instanceUUID>/<modelId>", and model ids usually contain
+    // DOTS (glm-5.1, gpt-4.1, mimo-v2.6-pro). Paths now carry that id VERBATIM
+    // — exactly as `get models` prints it as `entry_id` — because
+    // `ConfigRegistry.splitCollectionPath` takes everything between the first
+    // and last dot as the id.
+    //
+    // Before, the resolver cut the id at its first dot, so this collection
+    // escaped dots on the way into a path ("." → "~d", "~" → "~~",
+    // [T-config-model-id-dot]). That worked, but nothing told a caller: `get`
+    // printed the raw id, the help never mentioned `~d`, and the reporter of
+    // #390 tried four escaping schemes without guessing it. The escaped form is
+    // still ACCEPTED (`lookup` below), so audit-log keys and scripts written
+    // against builds 09-18 … #390 keep resolving and reverting.
+
+    /// Decode the legacy `~d` / `~~` escape. A single left-to-right scan, not two
+    /// `replacingOccurrences` passes: sequential replaces break on ids that
+    /// contain the escape text itself (a literal "~d~" once round-tripped to
+    /// "~t.t~"). One pass consuming the escape and its argument together has no
+    /// such ambiguity.
+    private static func decodeLegacySegment(_ segment: String) -> String {
+        var out = ""
+        out.reserveCapacity(segment.count)
+        var it = segment.makeIterator()
+        while let ch = it.next() {
+            guard ch == "~" else { out.append(ch); continue }
+            switch it.next() {
+            case "~": out.append("~")
+            case "d": out.append(".")
+            case let other?: out.append(other)   // stray escape: pass through
+            case nil: out.append("~")            // trailing "~": keep it
+            }
+        }
+        return out
+    }
+
+    /// The entry a path id names: the raw id first, then the legacy escaped
+    /// form. Raw wins, so an id that literally contains "~d" is never decoded
+    /// into a different id.
+    private func lookup(_ idOrSegment: String) -> ModelEntry? {
+        if let e = entry(idOrSegment) { return e }
+        let decoded = Self.decodeLegacySegment(idOrSegment)
+        guard decoded != idOrSegment else { return nil }
+        return entry(decoded)
+    }
+
     func childIds() -> [String] {
         ProviderConfigStore.shared.config.modelEntries.map(\.id)
     }
 
-    func fields(for id: String) -> [ConfigField] {
-        guard let entry = entry(id) else { return [] }
+    func fields(for idOrSegment: String) -> [ConfigField] {
+        guard let entry = lookup(idOrSegment) else { return [] }
+        let id = entry.id
         return [
             providerInstanceId(for: id),
             modelId(for: id),
@@ -104,19 +154,21 @@ struct ModelsCollection: ConfigCollection {
         guard added else {
             throw ConfigError.invalidValue("Entry already exists for this model")
         }
+        // Used verbatim as a path id ([T-config-path-dotted-id]).
         return entry.id
     }
 
-    func remove(id: String) throws {
-        guard let entry = entry(id) else {
-            throw ConfigError.unknownPath("models.\(id)")
+    func remove(id idOrSegment: String) throws {
+        // Raw id, or the legacy escaped form ([T-config-path-dotted-id]).
+        guard let entry = lookup(idOrSegment) else {
+            throw ConfigError.unknownPath("models.\(idOrSegment)")
         }
         guard entry.isCustom else {
             throw ConfigError.permissionDenied(
-                reason: "Only custom-added models can be removed; use `set models.\(id).isHidden true` for API-reported models"
+                reason: "Only custom-added models can be removed; use `set models.\(entry.id).isHidden true` for API-reported models"
             )
         }
-        ProviderConfigStore.shared.removeEntry(id)
+        ProviderConfigStore.shared.removeEntry(entry.id)
     }
 
     // MARK: Field factories
@@ -126,7 +178,9 @@ struct ModelsCollection: ConfigCollection {
     }
 
     private func mutate(_ id: String, _ apply: (inout ModelEntry) -> Void) throws {
-        guard var e = entry(id) else { throw ConfigError.unknownPath("models.\(id)") }
+        guard var e = entry(id) else {
+            throw ConfigError.unknownPath("models.\(id)")
+        }
         apply(&e)
         ProviderConfigStore.shared.updateEntry(e)
     }

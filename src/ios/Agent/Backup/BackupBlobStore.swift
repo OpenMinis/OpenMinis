@@ -6,9 +6,9 @@ private let logger = AppLogger(category: "Backup")
 /// Content-addressed blob writer for the staging directory (§2).
 ///
 /// Deliberately built in stage 1 rather than retrofitted: the design calls this
-/// out explicitly ("blob 内容寻址此时就位；后补=返工"). Retrofitting would mean
-/// changing both the package layout and every exporter's write path after the
-/// fact.
+/// out explicitly ("content-addressed blobs go in now; adding them
+/// later means rework"). Retrofitting would mean changing both the package
+/// layout and every exporter's write path after the fact.
 ///
 /// Two jobs:
 ///   1. **Dedup by content.** The same bytes referenced from several sessions —

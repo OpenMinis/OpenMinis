@@ -218,7 +218,12 @@ let minisDocumentExtensions: Set<String> = [
 /// Resolve a minis:// URL to a host filesystem URL.
 /// Maps directly to persistent storage: Library/MinisChat/minis/<sessionId>/<subdir>/<path>
 /// No dependency on iSH boot or bind mounts.
-func resolveMinisFileURL(url: URL) -> URL? {
+///
+/// [T-minisurl-wrong-active-session] Pass `sessionId` when the caller knows
+/// which session owns the reference (e.g. a link tapped inside a specific
+/// chat) — the `activeSessionId` fallback is the frontmost-UI session and can
+/// briefly diverge during session switches or concurrent background runs.
+func resolveMinisFileURL(url: URL, sessionId: String? = nil) -> URL? {
     guard let host = url.host else {
         minisLogger.warning("[ResolveMinisURL] no host in URL: \(url.absoluteString)")
         return nil
@@ -229,8 +234,8 @@ func resolveMinisFileURL(url: URL) -> URL? {
 
     let fm = FileManager.default
 
-    // Primary: resolve via active session → persistent directory
-    if let sid = AIChatViewModel.activeSessionId {
+    // Primary: resolve via the owning session → persistent directory
+    if let sid = sessionId ?? AIChatViewModel.activeSessionId {
         for subPath in subPaths {
             let persistURL = AIChatViewModel.minisPersistentBase
                 .appendingPathComponent(sid, isDirectory: true)
@@ -1137,62 +1142,13 @@ struct MinisHTMLPreviewView: View {
 
 
 // MARK: - minis:// Document Preview
-
-import QuickLook
-
-struct MinisDocumentPreviewView: UIViewControllerRepresentable {
-    let fileURL: URL
-
-    func makeUIViewController(context: Context) -> UINavigationController {
-        let controller = QLPreviewController()
-        controller.dataSource = context.coordinator
-        context.coordinator.controller = controller
-        return UINavigationController(rootViewController: controller)
-    }
-
-    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {
-        // [T-ios-file-preview-stale-cache] QLPreviewController caches a
-        // rendered representation keyed by URL. When the agent rewrites the
-        // file in place (same path, new bytes) the controller can keep showing
-        // the earlier render. If the on-disk fingerprint (mtime/size) has
-        // changed since we last rendered, force a reloadData() so QuickLook
-        // re-reads the file. Cheap stat; only reloads on an actual change.
-        let fp = context.coordinator.currentFingerprint()
-        if fp != context.coordinator.lastFingerprint {
-            context.coordinator.lastFingerprint = fp
-            context.coordinator.controller?.reloadData()
-        }
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(fileURL: fileURL)
-    }
-
-    class Coordinator: NSObject, QLPreviewControllerDataSource {
-        let fileURL: URL
-        weak var controller: QLPreviewController?
-        var lastFingerprint: String
-
-        init(fileURL: URL) {
-            self.fileURL = fileURL
-            self.lastFingerprint = ""
-            super.init()
-            self.lastFingerprint = currentFingerprint()
-        }
-
-        /// mtime+size fingerprint of the file on disk, aligned with
-        /// minisMediaCacheKey's stat-based approach.
-        func currentFingerprint() -> String {
-            var st = stat()
-            guard stat(fileURL.path, &st) == 0 else { return "" }
-            return "\(st.st_size)|\(st.st_mtimespec.tv_sec).\(st.st_mtimespec.tv_nsec)"
-        }
-
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
-
-        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
-            fileURL as QLPreviewItem
-        }
-    }
-}
+//
+// Documents (pdf / Office / iWork / rtf) are presented from AIChatView via
+// SwiftUI's `.quickLookPreview($previewDocumentFile)` — see
+// [T-ios-office-preview-toolbar] there. The previous
+// UIViewControllerRepresentable wrapper (a bare QLPreviewController inside a
+// .sheet) never got QuickLook's system chrome: inside a sheet QL is a child
+// of the hosting controller, so no Done and no Share were installed. Its
+// [T-ios-file-preview-stale-cache] reloadData() workaround is obsolete with
+// the native presentation, which builds a fresh preview per open.
 

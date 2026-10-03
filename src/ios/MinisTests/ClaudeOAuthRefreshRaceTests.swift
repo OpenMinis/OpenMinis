@@ -16,9 +16,9 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
     // deterministic state (no real Keychain, no network).
     private final class FakeStore {
         var stored: ClaudeTokenStorage?
-        var deleteCount = 0
+        var markCount = 0
         func load() -> ClaudeTokenStorage? { stored }
-        func delete() { stored = nil; deleteCount += 1 }
+        func markNeedsReauth() { markCount += 1 }
     }
 
     private func storage(access: String, refresh: String?, expiresInMinutes: Double = 60) -> ClaudeTokenStorage {
@@ -58,19 +58,19 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
             error: invalidGrant(),
             isFatal: isFatal,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         )
 
         // The freshly-rotated credential must survive, and nothing deleted.
         XCTAssertEqual(result.accessToken, "NEW_ACCESS")
         XCTAssertEqual(result.refreshToken, "NEW_REFRESH")
-        XCTAssertEqual(store.deleteCount, 0, "stale invalid_grant must not delete a rotated token")
+        XCTAssertEqual(store.markCount, 0, "stale invalid_grant must not mark a rotated token")
         XCTAssertNotNil(store.stored)
     }
 
-    // MARK: - Genuine invalid_grant (token really was revoked) still clears.
+    // MARK: - Genuine invalid_grant (token really was revoked) marks, never deletes.
 
-    func testGenuineInvalidGrant_stillClearsCredentials() {
+    func testGenuineInvalidGrant_marksForReauth_keepsCredentials() {
         let store = FakeStore()
         // The stored token IS the one that failed — a real revocation.
         store.stored = storage(access: "ACCESS", refresh: "SAME_REFRESH")
@@ -82,20 +82,20 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
                 error: invalidGrant(),
                 isFatal: isFatal,
                 loadCurrent: store.load,
-                deleteCredentials: store.delete
+                markNeedsReauth: store.markNeedsReauth
             )
         ) { error in
             guard case LLMError.invalidAPIKey = error else {
                 return XCTFail("expected invalidAPIKey, got \(error)")
             }
         }
-        XCTAssertEqual(store.deleteCount, 1, "a genuine invalid_grant must clear credentials")
-        XCTAssertNil(store.stored)
+        XCTAssertEqual(store.markCount, 1, "a genuine invalid_grant must mark for re-login, keeping credentials")
+        XCTAssertNotNil(store.stored)
     }
 
-    // MARK: - Missing store entry on invalid_grant clears (nothing to preserve).
+    // MARK: - Missing store entry on invalid_grant throws re-auth (nothing to preserve).
 
-    func testInvalidGrant_noStoredToken_clears() {
+    func testInvalidGrant_noStoredToken_throwsReauth() {
         let store = FakeStore()
         store.stored = nil // nothing persisted
 
@@ -106,12 +106,12 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
                 error: invalidGrant(),
                 isFatal: isFatal,
                 loadCurrent: store.load,
-                deleteCredentials: store.delete
+                markNeedsReauth: store.markNeedsReauth
             )
         )
-        // delete() is still called (idempotent), but the key point is it throws
-        // re-auth rather than silently returning a stale token.
-        XCTAssertEqual(store.deleteCount, 1)
+        // The mark is still requested (a no-op with nothing stored), but the key
+        // point is it throws re-auth rather than silently returning a stale token.
+        XCTAssertEqual(store.markCount, 1)
     }
 
     // MARK: - Transient (network) failure keeps a still-valid token, no delete.
@@ -127,11 +127,11 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
             error: netErr,
             isFatal: isFatal,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         )
 
         XCTAssertEqual(result.accessToken, "ACCESS")
-        XCTAssertEqual(store.deleteCount, 0, "a transient failure must never delete credentials")
+        XCTAssertEqual(store.markCount, 0, "a transient failure must never mark for re-login")
     }
 
     // MARK: - Transient failure but the token is ALSO expired → re-auth needed.
@@ -148,14 +148,14 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
                 error: netErr,
                 isFatal: isFatal,
                 loadCurrent: store.load,
-                deleteCredentials: store.delete
+                markNeedsReauth: store.markNeedsReauth
             )
         ) { error in
             guard case LLMError.invalidAPIKey = error else {
                 return XCTFail("expected invalidAPIKey (re-auth), got \(error)")
             }
         }
-        XCTAssertEqual(store.deleteCount, 0, "transient+expired throws re-auth but does not itself delete")
+        XCTAssertEqual(store.markCount, 0, "transient+expired throws re-auth but does not itself mark")
     }
 
     // MARK: - Transient failure where a concurrent winner already refreshed.
@@ -173,12 +173,12 @@ final class ClaudeOAuthRefreshRaceTests: XCTestCase {
             error: netErr,
             isFatal: isFatal,
             loadCurrent: store.load,
-            deleteCredentials: store.delete
+            markNeedsReauth: store.markNeedsReauth
         )
 
         // Even though our own existingStorage was expired, the persisted winner
         // token is used instead of throwing.
         XCTAssertEqual(result.accessToken, "WINNER_ACCESS")
-        XCTAssertEqual(store.deleteCount, 0)
+        XCTAssertEqual(store.markCount, 0)
     }
 }

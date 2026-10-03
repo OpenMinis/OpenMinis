@@ -70,6 +70,17 @@ object ConfigBridge {
 
     // -- list-topics / topic-help --
 
+    /**
+     * [T-config-path-dotted-id] OpenMinis#390. For a collection topic, how to
+     * write a child path — surfaced by `topic-help` next to the field list,
+     * whose example paths now carry raw ids. Null for flat topics. Same text
+     * as iOS `ConfigOffloadBridge.pathNoteForTopic` (cef38f13b).
+     */
+    fun pathNoteForTopic(topic: String): String? {
+        if (ConfigRegistry.get().collection(topic) == null) return null
+        return "Child paths are $topic.<entry_id>.<field>. Use entry_id exactly as `minis-config get $topic` prints it — dots and slashes need no escaping."
+    }
+
     fun allTopics(): JSONArray =
         JSONArray().also { arr -> for (t in ConfigRegistry.get().topics()) arr.put(t) }
 
@@ -194,7 +205,8 @@ object ConfigBridge {
         val field = ConfigRegistry.get().resolveField(path) ?: return JSONObject().apply {
             put("ok", false)
             put("error", "unknown_path")
-            put("reason", "No registered field at '$path'.")
+            // [T-config-path-dotted-id] Says which part was wrong.
+            put("reason", ConfigRegistry.get().explainUnknownPath(path))
         }
         if (field.access == ConfigAccess.HIDDEN) return JSONObject().apply {
             put("ok", false)
@@ -389,7 +401,8 @@ object ConfigBridge {
                 ?: return JSONObject().apply {
                     put("ok", false)
                     put("error", "unknown_path")
-                    put("reason", "No registered field at '$rawPath'.")
+                    // [T-config-path-dotted-id] Says which part was wrong.
+                    put("reason", ConfigRegistry.get().explainUnknownPath(resolvePath))
                 }
 
             // [T-android-config-feature-unavailable] Feature-unavailable gate

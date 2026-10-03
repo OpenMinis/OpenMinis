@@ -5,10 +5,9 @@ import com.openminis.app.data.model.ThinkingLevel
 /**
  * How a given endpoint expects the thinking/reasoning control to appear on the wire.
  *
- * Every entry is anchored to a shipped field report or vendor doc — see
- * `/tmp/thinking_rules_evidence.md` §A for the provenance chain (17 rules mined from git
- * history, each with a file:line and commit hash). The short form is kept here so the
- * reasoning survives next to the code.
+ * Every entry is anchored to a shipped field report or vendor doc (17 rules mined
+ * from past regressions, each traced to the commit that fixed it). The short form is
+ * kept here so the reasoning survives next to the code.
  *
  * Mirrors iOS `ThinkingWireFormat.swift` case for case; the two must stay in step, since
  * the whole point of the rule registry is that a vendor contract is described ONCE.

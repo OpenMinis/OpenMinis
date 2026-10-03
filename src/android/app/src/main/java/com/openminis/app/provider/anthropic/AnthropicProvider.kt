@@ -197,7 +197,23 @@ class AnthropicProvider(
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
-                android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                // [T-android-vm-store-leak] Gated on DEBUG. This dumps the ENTIRE
+                // raw SSE payload for every event — ~8.5k lines and 1.4 MB in a
+                // 3-hour device log, 20% of the whole file. The `$payload`
+                // interpolation builds that string BEFORE logcat decides whether
+                // anything is listening, so a release build paid the allocation
+                // and the I/O in full. Note the T321 summary right below this
+                // deliberately logs only counts and lengths "never the actual
+                // delta text — keeps log volume bounded"; this line was quietly
+                // undoing that.
+                //
+                // NOT the cause of the stutter this was filed under (the log
+                // shows the heaviest SSE hour had ZERO of the blocking GCs), but
+                // it is real per-token overhead on the hot streaming path and
+                // does not belong in a shipped build.
+                if (com.openminis.app.BuildConfig.DEBUG) {
+                    android.util.Log.d("ToolChain[Provider]", "RAW SSE: $payload")
+                }
                 val eventType = event.safeOptString("type", "")
 
                 when (eventType) {
@@ -232,7 +248,10 @@ class AnthropicProvider(
                                 val partial = delta.safeOptString("partial_json", "")
                                 if (partial.isNotEmpty() && currentToolId != null) {
                                     toolInputBuffer.append(partial)
-                                    android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars")
+                                    // [T-android-log-hotpath] Fires per tool-argument chunk.
+                                    if (com.openminis.app.logging.AppLogger.traceEnabled) {
+                                        android.util.Log.d("ToolChain[Provider]", "→ ToolInputDelta id=$currentToolId accumulated=${toolInputBuffer.length}chars")
+                                    }
                                     send(LLMStreamChunk.ToolInputDelta(currentToolId!!, toolInputBuffer.toString()))
                                 }
                             }
@@ -259,6 +278,40 @@ class AnthropicProvider(
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
                         send(LLMStreamChunk.Finished(stopReason))
+                    }
+                    // [T-android-fallback-providererror] Anthropic can emit an
+                    // `error` frame MID-STREAM (overloaded_error, rate-limit,
+                    // an invalidated key) after tokens have already flowed.
+                    // This `when` had no branch for it, so the frame was
+                    // ignored, the loop ran to EOF and the flow completed
+                    // NORMALLY — the turn looked successful, nothing threw, and
+                    // the group-fallback decision was never reached. Throwing
+                    // here routes it through the same `catch` below as any
+                    // other stream failure (`cancel("Stream error", mapError(e))`),
+                    // which is what carries the error to the fallback logic.
+                    "error" -> {
+                        val err = event.optJSONObject("error")
+                        val errType = err?.safeOptString("type", "") ?: "error"
+                        val errMessage = err?.safeOptString("message", "") ?: payload.take(500)
+                        android.util.Log.w(
+                            "AnthropicProvider",
+                            "SSE error frame mid-stream: type=$errType message=${errMessage.take(200)}",
+                        )
+                        // Map the documented error `type` onto the same LLMError
+                        // shapes mapHttpError produces for the equivalent HTTP
+                        // status, so downstream classification (isFallbackable /
+                        // isHttpServerError) behaves identically whether the
+                        // failure arrived as a status code or as a frame.
+                        throw when (errType) {
+                            "overloaded_error" ->
+                                LLMError.TransientError("[$errType] $errMessage", httpStatus = 529)
+                            "api_error" ->
+                                LLMError.TransientError("[$errType] $errMessage", httpStatus = 500)
+                            "rate_limit_error" -> LLMError.RateLimited()
+                            "authentication_error", "permission_error" ->
+                                LLMError.InvalidApiKey("[$errType] $errMessage")
+                            else -> LLMError.ProviderError("[$errType] $errMessage")
+                        }
                     }
                 }
             }
@@ -394,14 +447,21 @@ class AnthropicProvider(
                     }
                 }
             }
-        } else if (modelUsesAdaptiveThinking(model.id)) {
-            // Adaptive-generation models (4.6+/5) think by DEFAULT when the
-            // request carries no thinking field at all — "off" must be sent
-            // explicitly, or small-maxTokens calls burn the whole budget on
-            // thinking_tokens and return zero text (iOS ea86dd8a observed:
-            // max_tokens=256 → stop_reason=max_tokens, thinking_tokens=256/256,
-            // empty body). Legacy (<=4.5) models default to no thinking, so
-            // absence is fine there.
+        } else if (modelAcceptsExplicitThinkingDisabled(model.id)) {
+            // Claude 4.6-4.x think by DEFAULT when the request carries no
+            // thinking field at all — "off" must be sent explicitly, or
+            // small-maxTokens calls burn the whole budget on thinking_tokens and
+            // return zero text (iOS ea86dd8a observed: max_tokens=256 →
+            // stop_reason=max_tokens, thinking_tokens=256/256, empty body).
+            // Legacy (<=4.5) models default to no thinking, so absence is fine
+            // there.
+            //
+            // [T-android-claude5-thinking-disabled-400] Note this asks
+            // modelAcceptsExplicitThinkingDisabled, NOT modelUsesAdaptiveThinking:
+            // the latter is true for 4.6+ AND 5+, but Claude 5 rejects the literal
+            // with `"thinking.type.disabled" is not supported for this model` and
+            // treats an absent field as adaptive — which is exactly what OFF
+            // wants. Ported from iOS 69be65763.
             body.put("thinking", JSONObject().put("type", "disabled"))
         }
 
@@ -595,16 +655,7 @@ class AnthropicProvider(
                                 // never went through the composer's budget pass.
                                 // Re-encode in-place if a single part already blows
                                 // the per-image cap so we don't 413 on replay.
-                                val safeBytes = ImageBudget.compressUnderBudget(part.imageData)
-                                val safeMime = if (safeBytes === part.imageData) part.imageMimeType else "image/jpeg"
-                                resultContent.put(JSONObject().apply {
-                                    put("type", "image")
-                                    put("source", JSONObject().apply {
-                                        put("type", "base64")
-                                        put("media_type", safeMime)
-                                        put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                                    })
-                                })
+                                resultContent.put(imageBlock(part.imageData, part.imageMimeType))
                             }
                             contentArray.put(JSONObject().apply {
                                 put("type", "tool_result")
@@ -618,16 +669,7 @@ class AnthropicProvider(
                             // image bytes that bypassed the composer budget
                             // (restored sessions, retry-after-edit, agent-emitted
                             // ImageData). Composer already capped fresh sends.
-                            val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                            val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                            contentArray.put(JSONObject().apply {
-                                put("type", "image")
-                                put("source", JSONObject().apply {
-                                    put("type", "base64")
-                                    put("media_type", safeMime)
-                                    put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                                })
-                            })
+                            contentArray.put(imageBlock(part.data, part.mimeType))
                         }
                     }
                 }
@@ -643,16 +685,7 @@ class AnthropicProvider(
                         // pre-T132). Composer already runs ImageBudget but this
                         // arm is also reached on session restore where
                         // contentParts may not be populated.
-                        val safeBytes = ImageBudget.compressUnderBudget(part.data)
-                        val safeMime = if (safeBytes === part.data) part.mimeType else "image/jpeg"
-                        contentArray.put(JSONObject().apply {
-                            put("type", "image")
-                            put("source", JSONObject().apply {
-                                put("type", "base64")
-                                put("media_type", safeMime)
-                                put("data", Base64.encodeToString(safeBytes, Base64.NO_WRAP))
-                            })
-                        })
+                        contentArray.put(imageBlock(part.data, part.mimeType))
                     }
                     contentArray.put(JSONObject().apply {
                         put("type", "text")
@@ -693,6 +726,29 @@ class AnthropicProvider(
      * For assistant messages, reorder: text/image first, then tool_use (Anthropic
      * rejects text appearing after tool_use in the same message).
      */
+    /**
+     * [T-android-image-upload-format] One inline image as an Anthropic content
+     * block. Format, byte budget and `media_type` all come from
+     * [ImageBudget.prepareForUpload], so the label always matches the bytes;
+     * an image that cannot be made sendable becomes a text block instead of a
+     * request the API rejects on every retry.
+     */
+    private fun imageBlock(data: ByteArray, declaredMime: String?): JSONObject {
+        val upload = ImageBudget.prepareForUpload(data, declaredMime)
+            ?: return JSONObject().apply {
+                put("type", "text")
+                put("text", ImageBudget.UNSENDABLE_IMAGE_PLACEHOLDER)
+            }
+        return JSONObject().apply {
+            put("type", "image")
+            put("source", JSONObject().apply {
+                put("type", "base64")
+                put("media_type", upload.mimeType)
+                put("data", upload.base64())
+            })
+        }
+    }
+
     private fun mergeConsecutiveSameRole(messages: JSONArray): JSONArray {
         if (messages.length() <= 1) return messages
         val result = JSONArray()
@@ -786,12 +842,36 @@ class AnthropicProvider(
          * whole 5-series. The optional group is greedy, so a real pair like
          * claude-3-5-sonnet still wins as (3,5) — never (3,0).
          * Returns null for non-Claude ids or ids without any version digits.
+         *
+         * TWO POSITIONAL BUGS FIXED (mirrored on iOS AnthropicProvider.swift):
+         *
+         * 1. The minor group is capped at 1-2 digits. It was uncapped and
+         *    greedy, so a SINGLE-segment version followed by a snapshot stamp
+         *    swallowed the stamp: `claude-sonnet-4-20250514` (Claude Sonnet 4.0)
+         *    parsed as (4, 20250514) and was therefore treated as >= 4.6 —
+         *    temperature dropped, adaptive effort sent, and
+         *    `thinking.type=disabled` sent, none of which a 4.0 model accepts.
+         *    Two shipping catalog ids hit this (claude-sonnet-4-20250514,
+         *    claude-opus-4-20250514, plus their `anthropic/` forms). No real
+         *    Claude version has ever had a 3+ digit minor, and a version PAIR is
+         *    unaffected either way (`claude-opus-4-8-20260115` -> (4,8)) because
+         *    the pair consumes the separator first.
+         *
+         * 2. The search STARTS AFTER the word "claude". It used to take the
+         *    first version-shaped run anywhere in the id, so a namespace
+         *    carrying digits before the family name won: `v2-gateway/claude-opus-5`
+         *    parsed as (2, 0), and `inst-53/claude-haiku-4-5` as (53, 0). Both
+         *    would then take `temperature` plus legacy budget thinking — the
+         *    exact 400 and silent no-op this commit family exists to prevent.
+         *    Only digits AFTER the family name can be the version.
          */
         private fun parseClaudeVersion(modelId: String): Pair<Int, Int>? {
             val lower = modelId.lowercase()
-            if (!lower.contains("claude")) return null
-            val regex = Regex("""[-/]?(\d+)(?:[-.](\d+))?(?:$|[^0-9])""")
-            val match = regex.find(lower) ?: return null
+            val claudeAt = lower.indexOf("claude")
+            if (claudeAt < 0) return null
+            val afterClaude = lower.substring(claudeAt + "claude".length)
+            val regex = Regex("""[-/]?(\d+)(?:[-.](\d{1,2}))?(?:$|[^0-9])""")
+            val match = regex.find(afterClaude) ?: return null
             val major = match.groupValues[1].toIntOrNull() ?: return null
             val minor = match.groupValues[2].toIntOrNull() ?: 0
             return major to minor
@@ -815,6 +895,42 @@ class AnthropicProvider(
         fun modelUsesAdaptiveThinking(modelId: String): Boolean {
             val (major, minor) = parseClaudeVersion(modelId) ?: return false
             return major > 4 || (major == 4 && minor >= 6)
+        }
+
+        /**
+         * [T-android-claude5-thinking-disabled-400] Whether this model accepts an
+         * explicit `thinking: {"type": "disabled"}` on the wire. Ported from iOS
+         * `AnthropicProvider.modelAcceptsExplicitThinkingDisabled` (69be65763).
+         *
+         * Claude 4.6-4.x adaptive models DO: they think by default when the field
+         * is absent, so "thinking off" has to be stated, or a small-maxTokens call
+         * burns its whole budget on thinking and returns empty text (the reason the
+         * disabled literal exists at all).
+         *
+         * Claude 5+ does NOT. The API rejects the value outright:
+         *
+         *     [invalid_request_error] "thinking.type.disabled" is not supported
+         *     for this model. Thinking defaults to adaptive mode when not
+         *     specified; use "thinking.type.enabled" with "budget_tokens" for
+         *     extended thinking.
+         *
+         * So on 5+ the correct encoding of "off" is to send NO thinking field —
+         * the server's adaptive default handles it. Reported on iOS against fable 5
+         * (Claude Opus 5, official OAuth) where every non-thinking message 400'd;
+         * Android had the same conflation and the same exposure for claude-sonnet-5.
+         *
+         * This is the split iOS made: `modelUsesAdaptiveThinking` answers "does
+         * this model think by default / take an effort tier" (4.6+ AND 5+), while
+         * this predicate answers "may we send thinking.type=disabled" (4.6-4.x
+         * only). They are NOT the same question.
+         *
+         * Deliberately keyed on the parsed version rather than a model allowlist:
+         * this is a generation-wide API contract change, and an allowlist would
+         * 400 again on the next Claude 5 variant nobody remembered to add.
+         */
+        fun modelAcceptsExplicitThinkingDisabled(modelId: String): Boolean {
+            val (major, minor) = parseClaudeVersion(modelId) ?: return false
+            return major == 4 && minor >= 6
         }
 
         /**
@@ -904,13 +1020,11 @@ class AnthropicProvider(
         // OkHttp forbids multiple values for the same header slot via `.header(...)`,
         // so build a combined anthropic-beta string and set it once.
         //
-        // For OAuth (Claude Code) credentials we mimic the real CLI as closely as
-        // possible — Anthropic's backend uses the *combination* of anthropic-beta,
-        // User-Agent, and X-Stainless-* headers to decide whether the request is
-        // coming from the official CLI or a third-party client. Non-CLI requests
-        // get downgraded (extra-usage billing, silently-disabled thinking on 4.7).
-        // Aligned with sub2api FullClaudeCodeMimicryBetas / DefaultHeaders
-        // (Wei-Shaw/sub2api backend/internal/pkg/claude/constants.go).
+        // OAuth (Claude Code) credentials are served with the Claude CLI's
+        // request profile — the anthropic-beta set, User-Agent and X-Stainless-*
+        // headers. Without it some features (e.g. thinking on 4.7) are not
+        // enabled for these credentials. Values tracked from Wei-Shaw/sub2api
+        // backend/internal/pkg/claude/constants.go.
         //
         // For API-key / custom endpoints we only carry the betas actually needed
         // by the request body; we must NOT include oauth-2025-04-20 or
@@ -919,16 +1033,16 @@ class AnthropicProvider(
         val betaFlags = mutableListOf<String>()
         if (isOAuth) {
             // [T-anthropic-redact-thinking] Deliberately OMIT
-            // "redact-thinking-2026-02-12" from the Claude-Code mimicry betas.
+            // "redact-thinking-2026-02-12" from the Claude Code OAuth betas.
             // When present, Anthropic redacts the plaintext of `thinking` content
             // blocks (returns an empty `thinking` string with only a `signature`),
             // so a reasoning model runs (usage.thinking_tokens > 0) but the App
             // can't show any thinking text. The official Claude Code CLI only adds
-            // this beta when `showThinkingSummaries` is unset/false (confirmed via
-            // CLI de-obfuscation, anthropics/claude-code#31326, and the
+            // this beta when `showThinkingSummaries` is unset/false (per
+            // anthropics/claude-code#31326 and the
             // code.claude.com model-config docs); omitting it is equivalent to
             // `showThinkingSummaries: true` — pure UI visibility, no effect on
-            // reasoning quality or token budget. All other mimicry betas stay.
+            // reasoning quality or token budget. All other OAuth betas stay.
             betaFlags.addAll(listOf(
                 "claude-code-20250219",
                 "oauth-2025-04-20",
@@ -956,26 +1070,38 @@ class AnthropicProvider(
             builder.header("anthropic-beta", betaFlags.joinToString(","))
         }
 
-        // Stainless / CLI fingerprint headers — only on OAuth.
+        // Stainless / CLI fingerprint headers — only on OAuth; bump in lockstep
+        // with sub2api when the real CLI version moves.
         //
-        // [T-anthropic-cli-version] The claude-cli version is resolved at
-        // runtime by [ClaudeCliVersion] instead of being hardcoded: Anthropic
-        // gates new models on a minimum CLI version (Fable 5.1 needed
-        // >= 2.1.251, Opus 5.5 needs >= 2.1.280) and rejects older clients
-        // with `claude_code_version_too_old`. A constant means every model
-        // launch breaks OAuth users until the next app release (#301).
+        // [T-anthropic-fable51-android] 2.1.195 -> 2.1.251. Anthropic gates
+        // models on this version: below 2.1.251 a claude-fable-5-1 request is
+        // refused with "Claude Code <ver> does not support this model; version
+        // 2.1.251 or newer is required." 2.1.251 is the value CLIProxyAPI
+        // adopted for exactly this reason (router-for-me/CLIProxyAPI#5405,
+        // bumping their defaultClaudeFingerprintUserAgent from 2.1.220), not a
+        // number picked to clear the error message.
+        //
+        // [T-anthropic-opus55-catalog] 2.1.251 -> 2.1.280, for the same class
+        // of gate one generation later: Claude Opus 5.5 is refused below
+        // 2.1.280, and the refusal is a plain 400 that reads like a bad model
+        // id rather than a version problem. The floor only ever rises, so
+        // every model that worked at 2.1.251 (Fable 5.1, Sonnet/Opus 4.x, …)
+        // is unaffected — the gate is "at least", not "exactly".
+        //
+        // The X-Stainless-* values below are deliberately NOT touched: they
+        // describe the SDK/runtime, not the CLI, and the backend pairs UA with
+        // them as one registered client identity. Changing them speculatively
+        // is how a working fingerprint gets broken.
+        // [T-anthropic-cli-version] The set itself lives in ONE place,
+        // ClaudeCliMimicryHeaders, shared with the token path (#360). Its
+        // `current()` swaps in the User-Agent resolved at runtime by
+        // ClaudeCliVersion; the literal there remains the compiled-in floor
+        // (2.1.280), so an offline fresh install sends exactly what this block
+        // used to spell out inline.
         if (isOAuth) {
-            builder.header("User-Agent", ClaudeCliVersion.userAgent())
-            builder.header("X-Stainless-Lang", "js")
-            builder.header("X-Stainless-Package-Version", "0.106.0")
-            builder.header("X-Stainless-OS", "Linux")
-            builder.header("X-Stainless-Arch", "arm64")
-            builder.header("X-Stainless-Runtime", "node")
-            builder.header("X-Stainless-Runtime-Version", "v24.18.0")
-            builder.header("X-Stainless-Retry-Count", "0")
-            builder.header("X-Stainless-Timeout", "600")
-            builder.header("X-App", "cli")
-            builder.header("Anthropic-Dangerous-Direct-Browser-Access", "true")
+            for ((name, value) in com.openminis.app.auth.ClaudeCliMimicryHeaders.current()) {
+                builder.header(name, value)
+            }
         }
 
         if (isOAuth) {
@@ -1051,9 +1177,11 @@ class AnthropicProvider(
 
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) {
-            return LLMError.TransientError(message)
+            // [T-android-503-fallback] See OpenAIProvider.mapHttpError — the
+            // status must survive onto the error so fallback can act on it.
+            return LLMError.TransientError(message, httpStatus = statusCode)
         }
-        return LLMError.ProviderError(message)
+        return LLMError.ProviderError(message, httpStatus = statusCode)
     }
 
     private fun mapError(error: Throwable): LLMError {

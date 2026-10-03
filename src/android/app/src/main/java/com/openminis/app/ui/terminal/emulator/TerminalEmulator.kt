@@ -143,8 +143,8 @@ class TerminalEmulator(cols: Int = 80, rows: Int = 24) {
      * Extract text from the viewport for the given selection rect, in the
      * order start → end. Coordinates are clamped to [0,cols) × [0,rows). If
      * start is after end (in reading order), they are swapped automatically.
-     * Trailing spaces on each line are trimmed (matches Termux behaviour and
-     * what users expect when they grab a URL by long-pressing).
+     * Trailing spaces on each line are trimmed (what users expect
+     * when they grab a URL by long-pressing).
      */
     fun getSelectedText(col1: Int, row1: Int, col2: Int, row2: Int): String {
         val lines = visibleLines()
@@ -172,7 +172,7 @@ class TerminalEmulator(cols: Int = 80, rows: Int = 24) {
                 val cp = row[c].char
                 if (cp != 0) lineSb.appendCodePoint(cp)
             }
-            // Trim trailing spaces on each line (Termux behaviour).
+            // Trim trailing spaces on each line.
             var end = lineSb.length
             while (end > 0 && lineSb[end - 1] == ' ') end--
             sb.append(lineSb, 0, end)

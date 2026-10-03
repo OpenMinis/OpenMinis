@@ -68,6 +68,9 @@ import com.openminis.app.MinisApp
 import com.openminis.app.R
 import com.openminis.app.speech.VoiceOutputState
 import kotlinx.coroutines.delay
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import androidx.compose.ui.graphics.graphicsLayer
 
 /**
  * [T-android-tts-capsule] Floating speech-player control for "Read replies"
@@ -130,6 +133,8 @@ fun SpeechPlayerCapsule(
      * disagree about where the FABs are.
      */
     additionalObstructionDp: androidx.compose.ui.unit.Dp = 0.dp,
+    /** [T-android-picker-provider-edit] Open a provider's settings from the voice picker; null hides the button. */
+    onEditProvider: ((instanceId: String) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { VoiceOutputState.init(context) }
@@ -368,6 +373,9 @@ fun SpeechPlayerCapsule(
         }
     }
 
+    val reopenPickerOnResume = com.openminis.app.ui.components.rememberReopenOnResume {
+        showModelPicker = true
+    }
     if (showModelPicker) {
         // [T-android-tts-capsule-unified-picker] Same unified voice picker the
         // rest of the app uses (iOS: the capsule opens UnifiedModelPicker with
@@ -379,6 +387,13 @@ fun SpeechPlayerCapsule(
             VoiceOutputPickerSheet(
                 providerRepository = repo,
                 onDismiss = { showModelPicker = false; bumpIdle() },
+                onEditProvider = onEditProvider?.let { open ->
+                    { id: String ->
+                        showModelPicker = false
+                        reopenPickerOnResume()
+                        open(id)
+                    }
+                },
             )
         }
     }
@@ -555,18 +570,14 @@ private fun SpeakerGlyph(muted: Boolean, synthesizing: Boolean, ring: androidx.c
             modifier = Modifier.size(18.dp),
         )
         if (synthesizing && !muted) {
-            val transition = rememberInfiniteTransition(label = "synthArc")
-            val angle by transition.animateFloat(
-                initialValue = 0f,
-                targetValue = 360f,
-                animationSpec = infiniteRepeatable(tween(900, easing = LinearEasing), RepeatMode.Restart),
-                label = "synthAngle",
-            )
+            // [T-android-decorative-anim-perf] Static arc, rotated as a layer
+            // from the shared tick: recorded once, no per-frame Canvas re-record.
+            val tick = rememberDecorativeTick()
             val arcColor = MaterialTheme.colorScheme.primary
-            Canvas(Modifier.size(ring)) {
+            Canvas(Modifier.size(ring).graphicsLayer { rotationZ = decorativePhase(tick.value, 900) * 360f }) {
                 drawArc(
                     color = arcColor,
-                    startAngle = angle,
+                    startAngle = 0f,
                     sweepAngle = 75f,
                     useCenter = false,
                     style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round),

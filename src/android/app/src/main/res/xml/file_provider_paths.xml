@@ -32,4 +32,20 @@
          text body instead of a real file attachment — broke email / Drive
          / any chat target that wanted the .log file itself. -->
     <files-path name="logs" path="logs/" />
+    <!-- [T-android-backup-local-export] Finished .minisbak packages
+         (BackupExporter.backupsDirectory = filesDir/Backups/). Exposed so the
+         backup screen's "Share…" can hand a package to another app; each grant
+         is per-URI and read-only via FLAG_GRANT_READ_URI_PERMISSION, and the
+         provider itself is not exported. -->
+    <files-path name="backups" path="Backups/" />
+    <!-- [T-android-mount-fileprovider-root] Mounted folders are picked with
+         OpenDocumentTree (on-device storage only) and used by their real path
+         under /storage — /storage/emulated/0/… for internal storage,
+         /storage/XXXX-XXXX/… for an SD card. No root above covered them, so
+         getUriForFile threw "Failed to find configured root" and every Share /
+         Open-with on a mounted file failed (file preview, chat file links,
+         inline media). root-path is scoped to /storage, not "/": the grant is
+         still per-URI and read-only, and the provider is not exported. An
+         external-path would cover internal storage only, not SD cards. -->
+    <root-path name="device-storage" path="storage/" />
 </paths>

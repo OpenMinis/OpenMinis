@@ -49,6 +49,13 @@ final class SyncLogStore: ObservableObject {
         let deviceName: String?
     }
 
+    /// [T-ios27-scene-create-watchdog] Runs inside the `dispatch_once` for
+    /// `CloudSyncEngine.shared`, so anything slow here blocks every later
+    /// toucher of the singleton — including the main thread if it reaches this
+    /// during scene creation, which the system kills at 10 s. The body does
+    /// disk I/O (state read + JSON decode, legacy cache delete), so its logging
+    /// is buffered: on iOS 27 an NSLog from inside a once token can itself park
+    /// on a notification round trip. See AppLogger.withDeferredLogging.
     private init() {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
         let logsDir = library.appendingPathComponent("Logs")
@@ -318,6 +325,12 @@ final class CloudSyncEngine: ObservableObject {
         didSet {
             UserDefaults.standard.set(isEnabled, forKey: "cloudSync.enabled")
             if isEnabled {
+                // [T-icloud-zone-delete-resurrect] Turning sync back ON is an
+                // explicit request for v1 to work again, so drop the purge
+                // tombstones — otherwise a zone deleted long ago would
+                // permanently suppress the zone this engine needs, and sync
+                // would come back half-dead with no way to fix it from the UI.
+                Self.clearZonePurgeTombstones()
                 Task { await start() }
             } else {
                 syncEngine = nil
@@ -443,8 +456,19 @@ final class CloudSyncEngine: ObservableObject {
         // Migration: remove legacy disk cache (replaced by in-memory-only cache).
         // The old cache could grow to tens of thousands of NSKeyedArchiver'd CKRecords,
         // causing multi-second main-thread blocks on load and save.
+        //
+        // [T-ios27-scene-create-watchdog] The delete and its log line are
+        // deferred off this thread. This initializer runs inside the
+        // `dispatch_once` for `CloudSyncEngine.shared`, and on iOS 27 an NSLog
+        // from inside a once token can park on a notification round trip
+        // (`-[NSOperation waitUntilFinished]`), which then blocks every later
+        // toucher of the singleton — the main thread included, at a 10 s hard
+        // kill during scene creation. Removing a legacy file is pure cleanup
+        // with no ordering requirement, so it does not belong on this path at
+        // all.
         let legacyCacheURL = library.appendingPathComponent("MinisChat/sync_record_cache.bin")
-        if FileManager.default.fileExists(atPath: legacyCacheURL.path) {
+        DispatchQueue.global(qos: .utility).async { [logger] in
+            guard FileManager.default.fileExists(atPath: legacyCacheURL.path) else { return }
             try? FileManager.default.removeItem(at: legacyCacheURL)
             logger.info("[CloudSync] Removed legacy sync_record_cache.bin")
         }
@@ -452,12 +476,90 @@ final class CloudSyncEngine: ObservableObject {
 
     // MARK: - Start / Stop
 
+    /// [T-icloud-zone-delete-resurrect] Tear the CKSyncEngine down so the
+    /// `saveZone` changes it keeps pending for `device-<myId>` and the legacy
+    /// `devices` zone cannot land after the user deletes those zones from the
+    /// Zones inventory. Deliberately does NOT touch `isEnabled`: this is a
+    /// momentary hold, not the user turning sync off, and the preference must
+    /// survive so `resumeAfterZonePurge()` can put things back exactly as they
+    /// were. Dropping the engine also drops its queued changes, which is the
+    /// point — `state.remove(pendingDatabaseChanges:)` has no public spelling
+    /// for "forget this saveZone".
+    func suspendForZonePurge() {
+        guard syncEngine != nil else { return }
+        logger.info("[CloudSync] suspending engine for zone purge")
+        syncEngine = nil
+        stopForegroundSyncTimer()
+        pendingSendTask?.cancel()
+        pendingSendTask = nil
+    }
+
+    /// Restart after a zone purge, but only if sync is still switched on.
+    /// `start()` is idempotent, and `queueZonesAndDeviceRecord` now skips any
+    /// zone on the purge list, so restarting cannot undo the delete.
+    func resumeAfterZonePurge() async {
+        guard isEnabled else { return }
+        logger.info("[CloudSync] resuming engine after zone purge")
+        await start()
+    }
+
+    /// [T-icloud-zone-delete-resurrect] Zone names the user has explicitly
+    /// deleted from the Zones inventory. Persisted, because the resurrection
+    /// otherwise comes back on the NEXT LAUNCH: `start()` unconditionally
+    /// re-queues `saveZone` for this device's v1 zone and the legacy `devices`
+    /// zone, so without a durable record the zone the user deleted today is
+    /// simply re-created tomorrow.
+    ///
+    /// This is a v1-only tombstone. v1 is the legacy engine being migrated
+    /// away from, and re-creating its zones has no value once the user has
+    /// deliberately reclaimed that space; if v1 ever genuinely needs the zone
+    /// again (sync re-enabled from scratch), `clearZonePurgeTombstones()`
+    /// drops the list.
+    private static let purgedZonesKey = "cloudSync.v1.purgedZones"
+
+    static var purgedZoneNames: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: purgedZonesKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue).sorted(), forKey: purgedZonesKey) }
+    }
+
+    static func markZonePurged(_ zoneName: String) {
+        var set = purgedZoneNames
+        guard !set.contains(zoneName) else { return }
+        set.insert(zoneName)
+        purgedZoneNames = set
+        logger.info("[CloudSync] zone marked purged (will not be re-created): \(zoneName)")
+    }
+
+    /// Forget every purge tombstone — used when the user re-enables sync or
+    /// runs the "Delete iCloud Data" recovery flow, both of which legitimately
+    /// want a clean slate rather than the old suppressions.
+    static func clearZonePurgeTombstones() {
+        guard !purgedZoneNames.isEmpty else { return }
+        UserDefaults.standard.removeObject(forKey: purgedZonesKey)
+        logger.info("[CloudSync] cleared zone purge tombstones")
+    }
+
     func start() async {
         guard isEnabled else {
             syncStatus = .disabled
             return
         }
         guard syncEngine == nil else { return }
+
+        // [T-ios-reboot-keychain-identity-rotation] Refuse to start on a
+        // provisional identity. `start()` is reached from the scenePhase→.active
+        // handler, which iOS can run on a background relaunch BEFORE first unlock
+        // after a reboot; the Keychain is unreadable in that window, so
+        // `DeviceIdentity.deviceId` answers with a throwaway id. Starting here
+        // would name the zone `device-provisional-…`, register a duplicate
+        // SyncDevice, and orphan this device's real zone — and every
+        // `$0.id != DeviceIdentity.deviceId` filter below would then treat our own
+        // records as a peer's. Bail; the same handler runs again after unlock (and
+        // `syncEngine == nil` still holds, so it starts properly then).
+        guard !DeviceIdentity.isProvisional else {
+            logger.warning("[CloudSync] start deferred — device identity is provisional (keychain locked after reboot); will start after first unlock")
+            return
+        }
 
         logger.info("[CloudSync] Starting sync engine for device \(DeviceIdentity.zoneName)")
 
@@ -834,6 +936,10 @@ final class CloudSyncEngine: ObservableObject {
     func deleteAllCloudData() async throws {
         logger.warning("[CloudSync] Delete iCloud Data: STARTING destructive wipe")
         syncStatus = .syncing
+        // [T-icloud-zone-delete-resurrect] This flow ends by re-uploading into
+        // a FRESH zone, so any purge tombstone must go — leaving one would
+        // suppress the very zone the restart is about to need.
+        Self.clearZonePurgeTombstones()
 
         // 1. Tear down the engine and any pending work so nothing races the wipe.
         syncEngine = nil
@@ -969,13 +1075,25 @@ final class CloudSyncEngine: ObservableObject {
     private func queueZonesAndDeviceRecord() {
         guard let engine = syncEngine else { return }
 
-        let deviceZoneID = CKRecordZone.ID(zoneName: DeviceIdentity.zoneName)
-        let devicesZoneID = CKRecordZone.ID(zoneName: devicesZoneName)
-        engine.state.add(pendingDatabaseChanges: [
-            .saveZone(CKRecordZone(zoneID: deviceZoneID)),
-            .saveZone(CKRecordZone(zoneID: devicesZoneID))
-        ])
+        // [T-icloud-zone-delete-resurrect] Skip any zone the user deleted from
+        // the Zones inventory. This queue is what resurrected those zones: it
+        // runs on every start() and on accountChange, so a zone deleted from
+        // the UI came straight back — which is exactly the "delete does
+        // nothing, it's still there after refresh" report.
+        let purged = Self.purgedZoneNames
+        var zoneChanges: [CKSyncEngine.PendingDatabaseChange] = []
+        for name in [DeviceIdentity.zoneName, devicesZoneName] where !purged.contains(name) {
+            zoneChanges.append(.saveZone(CKRecordZone(zoneID: CKRecordZone.ID(zoneName: name))))
+        }
+        if !zoneChanges.isEmpty {
+            engine.state.add(pendingDatabaseChanges: zoneChanges)
+        }
+        if !purged.isEmpty {
+            logger.info("[CloudSync] skipped re-creating purged zones: \(purged.sorted().joined(separator: ", "))")
+        }
 
+        // Self-guards on the purge list (a record save would re-create its
+        // zone implicitly).
         queueDeviceRecord()
         logger.info("[CloudSync] Queued zones + device record")
     }
@@ -983,6 +1101,14 @@ final class CloudSyncEngine: ObservableObject {
     /// Queue the SyncDevice record as a pending change for the next send cycle.
     private func queueDeviceRecord() {
         guard let engine = syncEngine else { return }
+
+        // [T-icloud-zone-delete-resurrect] Saving a record into a zone
+        // re-creates that zone implicitly, so the device heartbeat is a back
+        // door that would resurrect `devices` even with the saveZone skipped.
+        // Guarded here rather than at the call sites: this is reached from the
+        // foreground timer and the send-failure retry too, and any unguarded
+        // path is enough to undo the user's delete.
+        guard !Self.purgedZoneNames.contains(devicesZoneName) else { return }
 
         let devicesZoneID = CKRecordZone.ID(zoneName: devicesZoneName)
 
@@ -2333,6 +2459,7 @@ final class CloudSyncEngine: ObservableObject {
         local.deletedInstances    = mergedInstanceTombstones
         local.deletedModelEntries = mergedEntryTombstones
         local.deletedModelGroups  = mergedGroupTombstones
+
 
         // Commit: push merged config into store (in-memory + disk) WITHOUT
         // triggering a markDirty upload. We control the re-upload decision

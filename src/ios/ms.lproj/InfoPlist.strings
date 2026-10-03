@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Bahasa Melayu */
+
+"NSLocationWhenInUseUsageDescription" = "Minis menggunakan lokasi anda untuk merekod tempat sesi ejen dimulakan dalam sejarah sesi anda.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis menggunakan lokasi di latar belakang supaya tugas ejen dapat terus berjalan semasa apl tidak dibuka. Data lokasi hanya digunakan untuk merekod sejarah sesi.";
+"NSCalendarsUsageDescription" = "Minis mengakses Kalendar supaya ejen AI dapat melihat jadual anda, menyemak masa lapang, dan mencipta acara bagi pihak anda.";
+"NSCalendarsFullAccessUsageDescription" = "Minis mengakses Kalendar supaya ejen AI dapat melihat jadual anda, menyemak masa lapang, dan mencipta acara bagi pihak anda.";
+"NSRemindersUsageDescription" = "Minis mengakses Peringatan supaya ejen AI dapat mencari dan mencipta peringatan bagi pihak anda.";
+"NSRemindersFullAccessUsageDescription" = "Minis mengakses Peringatan supaya ejen AI dapat mencari dan mencipta peringatan bagi pihak anda.";
+"NSCameraUsageDescription" = "Minis memerlukan akses kamera untuk mengambil foto yang digunakan dalam perbualan AI.";
+"NSPhotoLibraryUsageDescription" = "Minis memerlukan akses ke Galeri Foto untuk melampirkan imej pada perbualan AI.";
+"NSPhotoLibraryAddUsageDescription" = "Minis memerlukan kebenaran untuk menyimpan video dan imej ke Galeri Foto anda.";
+"NSHealthShareUsageDescription" = "Minis mengakses HealthKit supaya ejen AI dapat membaca data kesihatan seperti langkah, kadar denyutan jantung, tidur, dan senaman bagi pihak anda.";
+"NSHealthUpdateUsageDescription" = "Minis menulis ke HealthKit supaya ejen AI dapat merekod data kesihatan seperti langkah, berat badan, dan pengambilan air bagi pihak anda.";
+"NSContactsUsageDescription" = "Minis mengakses Kenalan supaya ejen AI dapat mencari, memaparkan, dan mengurus kenalan anda bagi pihak anda.";
+"NSAppleMusicUsageDescription" = "Minis mengakses pustaka media supaya ejen AI dapat menyemak koleksi muzik anda dan mengawal main balik.";
+"NSMicrophoneUsageDescription" = "Minis memerlukan akses mikrofon untuk input suara dalam perbualan.";
+"NSSpeechRecognitionUsageDescription" = "Minis menggunakan pengecaman pertuturan untuk menukar suara anda kepada mesej teks.";
+"NSHomeKitUsageDescription" = "Minis mengakses HomeKit supaya ejen AI dapat menyemak dan mengawal peranti rumah pintar anda bagi pihak anda.";
+"NSAlarmKitUsageDescription" = "Minis menggunakan AlarmKit supaya ejen AI dapat menetapkan penggera dan pemasa bagi pihak anda.";
+"NSLocalNetworkUsageDescription" = "Mesin maya memerlukan akses rangkaian untuk sambungan rangkaian SLIRP.";

@@ -43,8 +43,8 @@ class SessionsOffloadHandler(
         // and options follow. Drop argv[0] before parsing so positional[0]
         // is the subcommand name. `full` is declared boolean so
         // `--full <token>` never greedily consumes the next token as a value
-        // (e.g. `--full` placed before the subcommand).
-        val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("full"))
+        // (e.g. `--full` placed before the subcommand). Same for `--tools`.
+        val args = OffloadArgs(request.argv.drop(1), booleanFlags = setOf("full", "tools"))
         if (args.hasFlag("h", "help")) {
             return NativeOffloadResult(0, OffloadOutput.formatBody(HELP_TEXT, args) + "\n")
         }
@@ -177,6 +177,9 @@ class SessionsOffloadHandler(
         // working and matching everything.
         val startMs = parseDate(args.get("start"))
         val endMs = parseEndDate(args.get("end"))
+        // [T-android-sessions-cli-tool-calls] Opt-in, so the default output is
+        // unchanged (iOS 7af22b59f).
+        val tools = args.hasFlag("tools")
 
         val (page, total) = runBlocking {
             // Single coroutine block so the two reads see a consistent
@@ -189,7 +192,7 @@ class SessionsOffloadHandler(
             // count next to a filtered page would make `total` describe the
             // whole session while the slice covers only the matches, so
             // `hasMore` would lie. iOS 8f3189a73 calls this out explicitly.
-            repo.loadMessagePage(sessionId, offset, limit, maxChars, startMs, endMs) to
+            repo.loadMessagePage(sessionId, offset, limit, maxChars, startMs, endMs, includeTools = tools) to
                 repo.messageCountInRange(sessionId, startMs, endMs)
         }
 
@@ -203,6 +206,10 @@ class SessionsOffloadHandler(
             // Only present when the stored text exceeded the cap, so normal
             // messages serialize byte-identically to before (iOS parity).
             if (m.truncated) obj.put("truncated", true)
+            if (tools) {
+                obj.put("tool_calls", toolCallsJson(m.toolUses, maxChars))
+                obj.put("tool_results", toolResultsJson(m.toolResults, maxChars))
+            }
             msgs.put(obj)
         }
         val data = JSONObject()
@@ -214,6 +221,8 @@ class SessionsOffloadHandler(
             .put("total", total)
             .put("count", msgs.length())
             .put("messages", msgs)
+        // Only when on, so the default envelope keeps exactly its old keys.
+        if (tools) data.put("tools", true)
         return emit("messages", data, args)
     }
 
@@ -300,6 +309,39 @@ class SessionsOffloadHandler(
             timeZone = TimeZone.getDefault()
         }
 
+        /**
+         * [T-android-sessions-cli-tool-calls] `tool_calls` for one message:
+         * `{tool_use_id, name, input}`, input being the stored input JSON as a
+         * string (so the field has one type even when cut mid-JSON), capped at
+         * the same [maxChars] as `text` with `input_truncated` when cut.
+         */
+        internal fun toolCallsJson(uses: List<com.openminis.app.data.repository.OffloadToolUse>, maxChars: Int): JSONArray {
+            val out = JSONArray()
+            for (tu in uses) {
+                val call = JSONObject()
+                    .put("tool_use_id", tu.toolUseId)
+                    .put("name", tu.name)
+                    .put("input", tu.input.take(maxChars))
+                if (tu.input.length > maxChars) call.put("input_truncated", true)
+                out.put(call)
+            }
+            return out
+        }
+
+        /** [T-android-sessions-cli-tool-calls] `tool_results`: `{tool_use_id, success, output}`, same cap. */
+        internal fun toolResultsJson(results: List<com.openminis.app.data.repository.OffloadToolResult>, maxChars: Int): JSONArray {
+            val out = JSONArray()
+            for (tr in results) {
+                val res = JSONObject()
+                    .put("tool_use_id", tr.toolUseId)
+                    .put("success", tr.success)
+                    .put("output", tr.output.take(maxChars))
+                if (tr.output.length > maxChars) res.put("output_truncated", true)
+                out.put(res)
+            }
+            return out
+        }
+
         private const val HELP_TEXT = """minis-sessions-cli - Query historical chat sessions and messages
 
 USAGE:
@@ -315,6 +357,11 @@ OPTIONS:
   --ids <id1,id2,...>   Filter by comma-separated session IDs (list/search)
   --id <session_id>     Session ID to read messages from (messages)
   --full                (messages only) Return full message text up to 50000 chars
+  --tools               (messages only) Also return each message's tool calls:
+                        tool_calls [{tool_use_id, name, input}] with the full
+                        input JSON (e.g. the exact shell command), and
+                        tool_results [{tool_use_id, success, output}].
+                        Same per-field cap as text (600, or 50000 with --full).
   --offset <n>          Skip first n messages, 0-based (default: 0)
   --start <YYYY-MM-DD>  Filter results after this date (inclusive)
   --end <YYYY-MM-DD>    Filter results before this date (inclusive, end of day)
@@ -335,7 +382,9 @@ OUTPUT (messages):
   Each message includes: message_id, role, created_at, text (up to 600 chars
   by default; up to 50000 with --full). Messages longer than the cap carry
   "truncated": true. Response also includes: session_id, offset, limit, full,
-  max_chars, total (total message count).
+  max_chars, total (total message count). With --tools each message also
+  has tool_calls / tool_results (input_truncated / output_truncated when cut)
+  and the response carries "tools": true.
 
 WORKFLOW:
   1. Use 'list' or 'list --keywords <topic>' to find relevant sessions
@@ -352,6 +401,7 @@ EXAMPLES:
   minis-sessions-cli search --keywords deploy --ids abc123,def456
   minis-sessions-cli messages --id <session_id>
   minis-sessions-cli messages --id <session_id> --full
+  minis-sessions-cli messages --id <session_id> --tools --full
   minis-sessions-cli messages --id <session_id> --offset 20 --limit 10
 """
     }

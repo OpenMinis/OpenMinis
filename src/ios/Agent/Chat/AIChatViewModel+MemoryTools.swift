@@ -321,8 +321,8 @@ extension AIChatViewModel {
         // Cap output to avoid flooding context. Two independent limits, whichever
         // is hit FIRST wins:
         //   1. Entry count — max 60 entries (legacy T-memory-get-limit).
-        //   2. Byte size — max 30 KB of UTF-8 entry text. Reported by Xu Jiu
-        //      (TG 37452): a single memory_get returned ~70 KB, making the
+        //   2. Byte size — max 30 KB of UTF-8 entry text. From a field
+        //      report: a single memory_get returned ~70 KB, making the
         //      tool-result view stutter for seconds. We accumulate per entry
         //      and stop AFTER the entry that pushes the running total past the
         //      ceiling (so the triggering entry is shown whole, never sliced).

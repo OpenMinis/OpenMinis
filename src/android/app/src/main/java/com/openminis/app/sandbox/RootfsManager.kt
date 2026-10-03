@@ -227,18 +227,27 @@ class RootfsManager private constructor(private val context: Context) {
         Log.i(TAG, "User data restored from $backupDir")
     }
 
-    private fun calculateDirSize(dir: File): Long {
-        var total = 0L
-        val files = dir.listFiles() ?: return 0L
-        for (file in files) {
-            total += if (file.isDirectory) {
-                calculateDirSize(file)
-            } else {
-                file.length()
-            }
-        }
-        return total
-    }
+    /**
+     * [T-android-storage-symlink-inflation] Third copy of the sizing walk —
+     * routed through the shared one instead of keeping a following variant
+     * alive here.
+     *
+     * This was hand-rolled recursion over `listFiles()`, and both `isDirectory`
+     * and `length()` RESOLVE symlinks: a link to a directory was descended into
+     * and its whole subtree counted again (once per link pointing at it), and a
+     * link to a file was counted as a second copy of the target. That is the
+     * same defect 754e65eac fixed in `SessionStorage.directorySize` and
+     * `DebugRPCHandler.dirSize`, and missing it here is why the "Rootfs 管理"
+     * screen still read 40.25 GB after the Storage screen had been corrected —
+     * two screens sizing the same directory and disagreeing by an order of
+     * magnitude.
+     *
+     * It was also the only one of the three with no cycle protection: a
+     * `a/loop -> a` symlink recursed until StackOverflowError rather than
+     * merely over-counting.
+     */
+    private fun calculateDirSize(dir: File): Long =
+        com.openminis.app.data.session.SessionStorage.directorySize(dir)
 
     /**
      * Ensure session-specific directories exist on the host filesystem.
@@ -259,6 +268,19 @@ class RootfsManager private constructor(private val context: Context) {
      */
     fun refreshDns() {
         if (!rootfsDir.exists()) return
+
+        // [T-container-network-dns] (OpenMinis#396) Custom mode: the user's
+        // servers, verbatim, on every call — install, boot and each network
+        // change all land here, so a network switch can no longer wash them
+        // out. Custom with no usable server resolves to System (see
+        // ContainerDns.plan), so this can never write a resolv.conf with no
+        // nameserver. Auto (the default) is the code below, unchanged.
+        val plan = ContainerDns.plan(context)
+        if (plan is ContainerDns.Plan.Custom) {
+            Log.i(TAG, "[DNS] custom mode: ${plan.servers.joinToString(", ")}")
+            writeResolvConf(ContainerDns.customResolvConf(plan.servers))
+            return
+        }
 
         val resolvConf = StringBuilder()
 
@@ -296,11 +318,15 @@ class RootfsManager private constructor(private val context: Context) {
             resolvConf.append("nameserver 8.8.4.4\n")
         }
 
+        writeResolvConf(resolvConf.toString())
+    }
+
+    private fun writeResolvConf(content: String) {
         try {
             val file = File(rootfsDir, "etc/resolv.conf")
             file.parentFile?.mkdirs()
-            file.writeText(resolvConf.toString())
-            Log.i(TAG, "[DNS] resolv.conf updated:\n$resolvConf")
+            file.writeText(content)
+            Log.i(TAG, "[DNS] resolv.conf updated:\n$content")
         } catch (e: Exception) {
             Log.e(TAG, "[DNS] Failed to write resolv.conf: ${e.message}")
         }

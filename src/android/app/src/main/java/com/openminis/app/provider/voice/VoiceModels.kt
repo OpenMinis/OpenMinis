@@ -45,6 +45,9 @@ data class VoiceOutputRequest(
     /** 0.25 ~ 4.0, null = 1.0 (provider default). */
     val speed: Float? = null,
     val responseFormat: VoiceOutputFormat = VoiceOutputFormat.MP3,
+    /** The resolved model — lets the provider route by catalog voice role
+     *  ([LLMModel.voiceRole]). null = the provider only knows [model]. */
+    val resolvedModel: LLMModel? = null,
 )
 
 enum class VoiceOutputFormat(val wireValue: String) {

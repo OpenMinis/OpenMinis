@@ -107,6 +107,21 @@
     <string name="bg_overlay_nudge_body">Grant "Display over other apps" to let Minis show the current tool while you switch to another app. Tap to open the permission screen.</string>
     <!-- T-android-overlay-reply-status-34599 — manual-dismiss button on the floating overlay -->
     <string name="overlay_dismiss">Dismiss</string>
+    <!-- Floating capsule task indicator: %1$d is the 1-based task number, %2$d the total.
+         Non-Latin-script locales render this as "%1$d/%2$d" — the English "of" reads as a
+         foreign word there and CJK has no short equivalent that fits the chip. -->
+    <string name="overlay_task_index">%1$d of %2$d</string>
+    <string name="restore_stop_title">Stop restoring</string>
+    <string name="restore_stop_message">Stop the restore now? What has already been restored is kept; the rest is skipped.</string>
+    <string name="restore_stop_confirm">Stop restoring</string>
+    <string name="restore_stop_cancel">Keep going</string>
+    <string name="restore_stop_action">Stop restoring</string>
+    <string name="backup_restoring_percent">Restoring %1$s %2$d%% (%3$d/%4$d)</string>
+    <string name="restore_eta_almost_done">Almost done…</string>
+    <string name="restore_eta_seconds">about %1$d seconds left</string>
+    <string name="restore_eta_minutes">about %1$d min %2$d s left</string>
+    <string name="overlay_streaming">Generating…</string>
+    <string name="overlay_thinking">Thinking…</string>
     <!-- T-android-overlay-finalize item 3 — completion fallback labels -->
     <string name="overlay_completion_completed">Completed</string>
     <string name="overlay_completion_failed">Failed</string>
@@ -130,6 +145,7 @@
     <string name="a11y_repair_footer_manual">Android removes the accessibility grant whenever an app is force-stopped, and does not restore it automatically. Install and authorize Shizuku to repair this in one tap in future.</string>
     <string name="bg_service_notification_title">Minis Agent Active</string>
     <string name="bg_service_notification_text">%1$s | %2$s | %3$s</string>
+    <string name="bg_service_notification_text_running">%1$s | %2$s</string>
     <!-- Shown on the ongoing notification / Live Update chip once the agent
          task has finished but the service is still alive because the user is
          still in the chat. %1$s = session count label, %2$s = total run time. -->
@@ -332,6 +348,7 @@
     <string name="about_links">Links</string>
     <string name="about_github_repository">GitHub Repository</string>
     <string name="about_version_format">Version %1$s (%2$s)</string>
+    <string name="about_built_format">Built %1$s</string>
 
     <!-- T172 — chat sheets i18n (MoveToSessionSheet / OffloadPermissionDialog /
          SessionSkillsSheet / SpeechLanguagePickerSheet / StandardChatSheet /
@@ -386,6 +403,9 @@
     <string name="token_usage_section_cache">Cache (Session Total)</string>
     <string name="token_usage_cache_read">Cache Read</string>
     <string name="token_usage_cache_write">Cache Write</string>
+    <string name="token_usage_cache_hit_rate">Cache Hit Rate</string>
+    <string name="token_usage_section_speed">Speed</string>
+    <string name="token_usage_output_speed">Output Speed</string>
     <string name="token_usage_section_agent_loop">Agent Loop</string>
     <string name="token_usage_total_loops">Total Loops</string>
     <string name="common_on">On</string>
@@ -412,6 +432,10 @@
     <string name="onboarding_filter_models">Filter models</string>
     <string name="onboarding_done_count">Done (%1$d/3)</string>
     <string name="onboarding_loading_models">Loading models…</string>
+    <string name="onboarding_models_fetch_failed">Could not fetch the model list automatically.</string>
+    <string name="onboarding_models_fetch_timeout">Timed out after %1$d seconds.</string>
+    <string name="onboarding_models_retry">Retry</string>
+    <string name="onboarding_models_add_manually">Add Model Manually</string>
     <string name="webpreview_close">Close</string>
     <string name="webpreview_stop">Stop loading</string>
     <string name="webpreview_reload">Reload</string>
@@ -536,6 +560,7 @@
     <string name="export_summary_format">Format</string>
     <string name="export_summary_format_value_json">JSON</string>
     <string name="export_summary_format_value_txt">Plain Text</string>
+    <string name="export_summary_sessions">Sessions</string>
     <string name="export_summary_messages">Messages</string>
     <string name="export_summary_messages_value">%1$d messages</string>
     <string name="export_summary_timerange">Time range</string>
@@ -740,6 +765,10 @@
     <string name="log_share_all">Share All</string>
     <string name="log_section_logging">Logging</string>
     <string name="log_section_logging_footer">When enabled, all console output is captured to daily log files in the app\'s private storage.</string>
+    <string name="log_section_detail_level">Detail Level</string>
+    <string name="log_detail_level_info">Info</string>
+    <string name="log_detail_level_verbose">Verbose</string>
+    <string name="log_detail_level_footer">Info keeps logs small. Verbose also records debug-level detail and system logs and can be many times larger. Use it only while reproducing a problem.</string>
     <string name="log_enable_switch">Enable Logging</string>
     <string name="log_section_files">Log Files</string>
     <string name="log_section_files_footer">Tap a file to view its contents. Logs rotate daily.</string>
@@ -957,8 +986,31 @@
     <string name="storage_clearing_status">Clearing…</string>
     <string name="storage_clear_session_button">Clear Session Files</string>
     <string name="storage_clear_confirm_title">Clear Session Files?</string>
+    <string name="storage_overview_logs_caches">Logs &amp; Caches</string>
+    <string name="storage_clear_logs_caches_button">Clear Logs &amp; Caches</string>
+    <string name="storage_clear_logs_caches_footer">Deletes all logs, including crash reports, and cached data such as model lists and old share files. Logs older than 15 days are also deleted automatically. Chats, files and settings are not affected.</string>
+    <string name="storage_clear_logs_caches_confirm_title">Clear Logs &amp; Caches?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Crash reports are deleted too, so send any you need first. Chats, files and settings are not affected.</string>
+    <string name="storage_clear_logs_caches_confirm">Clear</string>
+    <string name="storage_clear_partial_failure">Could not delete %1$d item(s), e.g. %2$s. They may be read-only; see the sandbox cleanup steps.</string>
     <string name="storage_clear_confirm_text">This will delete %1$s of files. This action cannot be undone.</string>
     <string name="storage_clear_confirm_button">Clear %1$s</string>
+    <!-- [T-android-storage-usage-cache] Storage multi-select batch actions -->
+    <string name="storage_batch_clear_button">Clear Files</string>
+    <plurals name="storage_batch_clear_title">
+        <item quantity="one">Clear files of %d session?</item>
+        <item quantity="other">Clear files of %d sessions?</item>
+    </plurals>
+    <string name="storage_batch_clear_message">This deletes %1$s of files. The conversations themselves are kept. This cannot be undone.</string>
+    <string name="storage_batch_delete_message">The conversations and their files (%1$s) will be deleted. This cannot be undone.</string>
+    <plurals name="storage_batch_clear_result">
+        <item quantity="one">Cleared files of %1$d session, freed %2$s</item>
+        <item quantity="other">Cleared files of %1$d sessions, freed %2$s</item>
+    </plurals>
+    <plurals name="storage_batch_delete_result">
+        <item quantity="one">Deleted %1$d conversation, freed %2$s</item>
+        <item quantity="other">Deleted %1$d conversations, freed %2$s</item>
+    </plurals>
     <string name="usage_title">Usage</string>
     <string name="usage_section_total">Total Usage</string>
     <string name="usage_label_total_input">Total Input (incl. Cache)</string>
@@ -1057,6 +1109,8 @@
     <string name="provider_detail_status">Status</string>
     <string name="provider_detail_enabled">Enabled</string>
     <string name="provider_detail_refresh_models">Refresh Models</string>
+    <string name="provider_refresh_auth_failed_title">Sign-in expired</string>
+    <string name="provider_refresh_auth_failed_body">The model list could not be refreshed because this provider rejected the saved sign-in. Sign in again, then refresh.</string>
     <string name="provider_detail_add_custom_model">Add Custom Model</string>
     <string name="provider_detail_delete_provider">Delete Provider</string>
     <string name="provider_detail_delete_model">Delete Model</string>
@@ -1064,6 +1118,13 @@
     <string name="provider_detail_show_model">Show Model</string>
     <string name="provider_detail_sign_out">Sign Out</string>
     <string name="provider_detail_sign_in">Sign In</string>
+    <string name="provider_oauth_sign_in_expired">Sign-in expired</string>
+    <string name="provider_oauth_sign_in_expired_detail">Sign-in expired. Sign in again to keep using this provider.</string>
+    <string name="provider_oauth_sign_in_again">Sign In Again</string>
+    <string name="oauth_status_signing_in">Signing in…</string>
+    <string name="oauth_waiting_for_authorization">Waiting for authorization… Finish in the browser, then return to Minis.</string>
+    <string name="oauth_completing_sign_in">Completing sign-in…</string>
+    <string name="oauth_sign_in_failed">Sign-in failed: %1$s</string>
     <string name="provider_detail_save_key">Save Key</string>
     <string name="provider_detail_paste_bearer_token">Paste bearer token</string>
     <string name="provider_detail_save_token">Save Token</string>
@@ -1154,7 +1215,13 @@
     <string name="common_default">Default</string>
     <string name="model_group_detail_always">Always</string>
     <string name="model_group_detail_unavailable">Unavailable</string>
+    <!-- [T-android-picker-prune-dangling-member] Row for a group member whose entry no longer resolves. -->
+    <string name="model_group_detail_stale_member">Model no longer available</string>
     <string name="model_group_detail_drag_to_reorder">Drag to reorder</string>
+    <!-- [T-android-model-absence-grace] Shown when the provider has stopped
+         listing a model; the entry is retained with its overrides through the
+         grace window rather than being deleted. -->
+    <string name="model_not_listed_by_provider">Not listed by provider</string>
     <string name="model_group_detail_more_options">More options</string>
     <string name="model_group_detail_remove_from_group">Remove from group</string>
     <string name="model_group_detail_add_models">Add Models</string>
@@ -1331,6 +1398,12 @@
         <item quantity="one">This message and everything after it will be deleted. %d message in total. This cannot be undone.</item>
         <item quantity="other">This message and everything after it will be deleted. %d messages in total. This cannot be undone.</item>
     </plurals>
+    <!-- [T-android-compact-above] User-bubble long-press "Compact Above" —
+         mirrors iOS ChatMessageViews.swift. Destructive-tinted because the
+         summarized history cannot be restored. -->
+    <string name="chat_longpress_compact_above">Compact Above</string>
+    <string name="chat_compact_above_dialog_body">Messages above this point will be compacted into a summary. You can undo it later from the info button on the divider.</string>
+    <string name="chat_compact_above_confirm">Compact</string>
     <string name="chat_edit_exit_button">Exit Edit Mode</string>
     <string name="chat_show_sidebar">Show session list</string>
     <string name="chat_hide_sidebar">Hide session list</string>
@@ -1377,8 +1450,12 @@
     <string name="backup_file_footer_unlimited">Chats includes every file in each conversation, not just the messages.</string>
     <!-- Encryption -->
     <string name="backup_section_encryption">Encryption</string>
+    <string name="backup_device_name">Device Name</string>
+    <string name="backup_device_name_footer">Identifies this device in backup filenames. Leave empty to use “%1$s”.</string>
     <string name="backup_encrypt_backup">Encrypt Backup</string>
     <string name="backup_passphrase">Passphrase</string>
+    <string name="backup_show_passphrase">Show passphrase</string>
+    <string name="backup_hide_passphrase">Hide passphrase</string>
     <string name="backup_confirm_passphrase">Confirm passphrase</string>
     <string name="backup_passphrase_mismatch">Passphrases don\'t match.</string>
     <string name="backup_encrypt_footer_on">This passphrase encrypts the entire backup, including chats, files, and credentials. There is no way to recover a forgotten passphrase — the backup cannot be opened without it.</string>
@@ -1421,6 +1498,16 @@
     <string name="backup_history_remove_title">Delete this backup record?</string>
     <string name="backup_history_remove_record_only">Delete Record Only</string>
     <string name="backup_history_remove_with_files">Delete Record and Files</string>
+    <!-- [T-android-backup-delete-files-feedback] Second confirmation for the destructive branch. -->
+    <string name="backup_delete_files_confirm_title">Delete the backup files too?</string>
+    <string name="backup_delete_files_confirm_body">The backup package “%1$s” will be permanently deleted from %2$d destination(s). This cannot be undone.</string>
+    <string name="backup_delete_files_confirm_action">Delete Files</string>
+    <string name="backup_delete_files_progress">Deleting backup files…</string>
+    <string name="backup_delete_files_success">Backup record and files deleted</string>
+    <string name="backup_delete_files_success_none">Backup record deleted</string>
+    <string name="backup_delete_files_failed_title">Could not delete the files</string>
+    <string name="backup_delete_files_failed_body">The record was kept so you can try again.\n\n%1$s</string>
+    <string name="backup_delete_files_dest_missing">destination no longer configured</string>
     <string name="backup_history_remove_choice_note">“Delete Record Only” removes this entry and leaves the backup files on your destinations. “Delete Record and Files” also deletes the package from each destination — that cannot be undone.</string>
     <string name="backup_status_succeeded">Completed</string>
     <string name="backup_status_issues">Completed with issues</string>
@@ -1432,6 +1519,25 @@
     <string name="backup_result_delivered">Saved on this device, and copied to %1$d of %2$d destination(s).</string>
     <string name="backup_local_removed">Local copy removed — %1$s freed on this device</string>
     <string name="backup_local_kept">Local copy kept — not every destination was verified</string>
+    <string name="backup_result_local_pending">Not saved outside this app yet. Save it to your device or share it — a backup that stays in the app is lost if Minis is removed.</string>
+    <string name="backup_no_destination_hint">No destination set. The backup will stay in the app until you save or share it.</string>
+    <string name="backup_save_to_device">Save to Device…</string>
+    <string name="backup_share_package">Share…</string>
+    <string name="backup_saving_to_device">Saving to device… %1$d%%</string>
+    <string name="backup_saved_to_device">Saved to device as %1$s.</string>
+    <string name="backup_saved_to_device_log">Saved to device as %1$s</string>
+    <string name="backup_save_failed">Couldn\'t save to device: %1$s</string>
+    <string name="backup_share_failed">Couldn\'t open the share sheet.</string>
+    <string name="backup_notif_channel">Backups</string>
+    <string name="backup_notif_running_title">Backing up…</string>
+    <string name="backup_notif_running_text">Preparing…</string>
+    <string name="backup_notif_done_title">Backup complete</string>
+    <string name="backup_notif_done_text">Your backup was delivered.</string>
+    <string name="backup_notif_local_pending">Kept in Minis only. Open the app to save it to your device or share it.</string>
+    <string name="backup_notif_issues_title">Backup finished with issues</string>
+    <string name="backup_notif_failed_title">Backup failed</string>
+    <string name="backup_notif_stopped_title">Backup stopped</string>
+    <string name="backup_notif_stopped_text">The backup was stopped before it finished.</string>
     <string name="backup_result_delivered_cleaned">Delivered to all %1$d destination(s) and verified. The copy on this device was removed to save space.</string>
     <string name="backup_ready_footer">Size %1$s.</string>
     <string name="backup_ready_footer_excluded">Size %1$s · %2$d file(s) excluded by the size limit.</string>
@@ -1482,9 +1588,11 @@
     <string name="backup_report_up_to_date">Already up to date</string>
     <string name="backup_report_missing_files">Missing files</string>
     <string name="backup_report_issues">Issues</string>
+    <string name="backup_report_notices_footer">These were left out when the backup was created, by its size limit or because they weren\'t downloaded on that device. Nothing went wrong during the restore.</string>
+    <string name="backup_report_notices">Not included in this backup</string>
     <string name="backup_report_failed">%1$s: %2$s</string>
-    <string name="backup_report_size_skipped">%1$s: %2$d file(s) weren\'t in the backup (size limit)</string>
-    <string name="backup_report_not_downloaded">%1$s: %2$d file(s) weren\'t in the backup (not downloaded on the source device)</string>
+    <string name="backup_report_size_skipped">%1$s: %2$d file(s) skipped when the backup was made (over the size limit)</string>
+    <string name="backup_report_not_downloaded">%1$s: %2$d file(s) not included \u2014 they weren\'t downloaded on the source device</string>
     <string name="backup_report_missing_from_package">%1$s: %2$d file(s) were listed in the backup but missing from it — the backup is incomplete</string>
     <string name="backup_report_unreadable">%1$s: %2$d item(s) could not be read</string>
     <string name="backup_creds_restored">API keys were restored for %1$d provider(s) along with their settings. Existing keys on this device were kept. OAuth logins may still need to be renewed if their tokens have expired.</string>
@@ -1499,6 +1607,12 @@
     <string name="backup_dest_none">No destinations yet.</string>
     <string name="backup_dest_add_server">Add Server…</string>
     <string name="backup_dest_remove">Remove %1$s</string>
+    <!-- [T-android-backup-local-folder] A backup destination that is a folder
+         on this device, picked through the system file picker, rather than an
+         rclone server. -->
+    <string name="backup_dest_add_local_folder">Add Local Folder…</string>
+    <string name="backup_dest_kind_local_folder">Local Folder</string>
+    <string name="backup_dest_local_folder_no_permission">Couldn\'t keep access to that folder. Pick it again, or choose a different one.</string>
     <string name="backup_dest_server_type">Server type</string>
     <string name="backup_dest_display_name">Display name</string>
     <string name="backup_dest_field_optional">%1$s (optional)</string>
@@ -1531,6 +1645,7 @@
     <string name="backup_dest_no_packages">No backups found here yet.</string>
     <string name="backup_dest_delete_title">Delete this backup?</string>
     <string name="backup_dest_delete_note">“%1$s” will be deleted from this server. This cannot be undone.</string>
+    <string name="restore_browse_delete_note">“%1$s” (%2$s) will be permanently deleted from this server. There is no trash to recover it from, and any data only in this backup will be lost. This cannot be undone.</string>
     <string name="backup_dest_delete_confirm">Delete</string>
     <string name="backup_dest_name_invalid">Use letters, numbers, - or _ for the name.</string>
     <string name="backup_dest_choose_folder">Choose a destination folder</string>
@@ -1565,6 +1680,7 @@
     <string name="mount_badge_locked">Locked</string>
     <string name="mount_badge_readonly">Read-only</string>
     <string name="mount_only_on_device_supported">Only on-device folders are supported (cloud providers like Google Drive are not supported).</string>
+    <string name="mount_picker_unavailable">This device has no system file picker, so an external folder cannot be mounted.</string>
     <string name="mount_all_files_access_required">All files access not granted</string>
     <string name="mount_all_files_access_required_desc">Without this, the shell will only see files this app created — files written by other apps (e.g. Obsidian) will be hidden. Tap to grant in Settings.</string>
     <string name="mount_detail_title">Edit Mount</string>
@@ -1597,12 +1713,16 @@
     <string name="model_picker_search_clear">Clear</string>
     <string name="model_picker_groups_section">Model Groups</string>
     <string name="model_picker_groups_edit">Edit</string>
+    <!-- [T-android-picker-provider-edit] Accessibility label of the edit button on a provider section header in the model picker; %1$s is the provider name. -->
+    <string name="model_picker_edit_provider">Edit %1$s</string>
     <string name="model_picker_groups_footer">Bind this session to a group for automatic fallback or load balancing.</string>
     <string name="model_picker_default_badge">Default</string>
+    <string name="model_picker_no_model_selected">No model selected</string>
     <string name="model_picker_active_badge">Active</string>
     <string name="model_picker_no_linked_models">No models linked to this group.</string>
     <string name="model_picker_models_count_unlinked">%d models (unlinked)</string>
     <string name="model_picker_no_results">No results</string>
+    <string name="model_picker_search_capped">Showing the %1$d best matches of %2$d. Type more to narrow the search.</string>
     <string name="model_picker_no_models">No models available</string>
     <string name="model_picker_configure_hint">Configure providers in Settings to see models here.</string>
     <string name="model_picker_try_different_search">Try a different search term.</string>
@@ -1727,6 +1847,7 @@
     <string name="sessionlist_welcome_step3_title">Start a Conversation</string>
     <string name="sessionlist_welcome_step3_subtitle">Tap to begin</string>
     <string name="sessionlist_welcome_step3_locked">Complete step 2 first</string>
+    <string name="sessionlist_welcome_restore_backup">Have a backup? Restore from it</string>
     <string name="sessionlist_welcome_step_done">Done</string>
 
     <!-- T-pwa-1: WebApp shortcut foundation (renamed from PWA) -->
@@ -1761,6 +1882,7 @@
 
     <!-- T-imgsize: composer-side image-budget Snackbar messages -->
     <string name="image_budget_compressed">Compressed %1$d image(s) before send</string>
+    <string name="image_input_rejected_hint">The request included %1$d image(s) and this model may not accept image input — try a vision-capable model, or turn off “Image Input” for it in the model’s details.</string>
     <string name="image_budget_dropped">Skipped %1$d oversized URL(s) (&gt;5MB)</string>
     <string name="image_budget_total_exceeded">Total image size exceeds 25MB; later images dropped</string>
     <!-- T-request-imgsize: request-level image-budget Snackbar message -->
@@ -1845,13 +1967,18 @@
     <string name="scheduled_task_target_new">New chat</string>
     <string name="scheduled_task_target_followup">Follow up</string>
     <string name="scheduled_task_target_rerun">Re-run</string>
+    <string name="scheduled_task_target_agent">Agent task</string>
     <string name="scheduled_task_field_session">Target chat</string>
     <string name="scheduled_task_pick_session">Choose a chat…</string>
     <string name="scheduled_task_field_message">From message</string>
     <string name="scheduled_task_pick_message">Choose a message…</string>
     <string name="scheduled_task_field_model">Model</string>
+    <string name="scheduled_task_field_thinking">Thinking</string>
     <string name="scheduled_task_model_default">App default</string>
     <string name="scheduled_task_field_active_window">Active window (optional)</string>
+    <!-- [T-android-scheduled-triggers] -->
+    <string name="scheduled_task_field_trigger">Trigger</string>
+    <string name="scheduled_task_trigger_readonly_note">Set by the assistant with minis-scheduled; the time can\'t be changed here. Ask the assistant to change it, or delete the task and create a new one.</string>
     <string name="scheduled_task_field_start_date">Start</string>
     <string name="scheduled_task_field_end_date">End</string>
     <string name="scheduled_task_date_any">Any</string>
@@ -1884,6 +2011,7 @@
     <string name="file_save_failed_toast">Save failed</string>
     <string name="file_share_chooser_title">Share file</string>
     <string name="file_share_failed_toast">Share failed: %1$s</string>
+    <string name="file_open_failed_toast">Couldn\'t open the file: %1$s</string>
     <string name="file_print_failed_toast">Print failed: %1$s</string>
     <string name="debug_trigger_crash_menu">Trigger crash (Debug)</string>
     <!-- [T-android-larky-longsession-followup] Tappable header at the top of the chat list, shown only when more older messages exist behind the windowed slice. -->
@@ -1906,6 +2034,21 @@
     <string name="voice_correction_button_a11y">Correct transcript with AI</string>
     <string name="voice_correction_none_needed">No corrections needed</string>
     <string name="voice_correction_failed">Correction failed, original kept</string>
+    <!-- [T-voice-asr-failure-retry-prompt] / [T-voice-send-waits-for-asr] -->
+    <string name="voice_asr_failed_title">Transcription failed</string>
+    <string name="voice_asr_failed_message">%1$d seconds of speech could not be transcribed (%2$s). Try again?</string>
+    <!-- [T-android-voice-asr-stall-skip] Pill beside the mic after 5 s without an ASR result; a11y label; toast after skipping (%1$s = the model now used); names used in that toast. -->
+    <string name="voice_asr_switch_model">Switch Model</string>
+    <string name="voice_asr_switch_model_a11y">Retry with the next voice model</string>
+    <string name="voice_asr_retrying_with">Retrying with %1$s</string>
+    <string name="voice_asr_system_recognition">System speech recognition</string>
+    <string name="voice_mic_in_use">The microphone is in use by another app (for example a call or a recording). Please try again after it finishes.</string>
+    <string name="voice_mic_unavailable">The microphone could not be used. Please try again.</string>
+    <string name="voice_asr_next_model">the next voice model</string>
+    <string name="voice_asr_retry">Retry</string>
+    <string name="voice_asr_discard">Discard</string>
+    <string name="voice_send_still_transcribing">Still transcribing. Tap Send again when the text appears.</string>
+    <string name="voice_asr_timed_out">Speech recognition timed out</string>
     <string name="voice_correction_section">Voice Correction Learning</string>
     <string name="voice_correction_toggle">Collect voice correction data</string>
     <string name="voice_correction_footer">When enabled, your manual fixes to voice transcripts (original → corrected pairs), accepted AI corrections, and frequently typed terms are stored in a local on-device database to make future voice corrections smarter. Nothing is uploaded. Default is off; existing data stays until you clear it.</string>
@@ -1935,7 +2078,230 @@
     <string name="selection_copy_as_rich_text">Copy as Rich Text</string>
     <string name="selection_copy_as_plain_text">Copy as Plain Text</string>
     <string name="chat_input_placeholder_hint_5">Minis can make the Return key send or insert a newline</string>
+    <!-- [T-android-context-usage-hint] Composer line after a reply: "Context 70% used · 124k / 200k".
+         %1$s is the percentage, %2$s the used/window pair; both are highlighted by the renderer.
+         Translations may reorder the two placeholders. -->
+    <string name="chat_context_usage_hint">Context %1$s used · %2$s</string>
     <!-- [T-android-compact-progress] Live status while a compaction runs. -->
     <string name="compact_progress">Compacting… %1$d s elapsed</string>
     <string name="compact_progress_split">Compacting… %1$d s · summarizing in segments (%2$d/%3$d)</string>
+    <!-- [T-p1-delegate-task] helper capsule / sheet -->
+    <string name="helper_label">Agent</string>
+    <string name="helper_stop">Stop agent</string>
+    <string name="helper_close">Close</string>
+    <string name="helper_status_running">running</string>
+    <string name="helper_status_completed">Done</string>
+    <string name="helper_status_failed">Failed</string>
+    <string name="helper_status_cancelled">Cancelled</string>
+    <string name="helper_status_timeout">Timed out</string>
+    <string name="helper_status_rejected">Rejected</string>
+    <string name="agent_callback_result">Agent result</string>
+    <string name="agent_callback_progress">Agent progress</string>
+    <string name="agent_callback_turn">Turn %1$d</string>
+    <string name="agent_open_detail">Open agent details</string>
+    <string name="settings_agent_tools">Agent Tools</string>
+    <string name="settings_agent_tools_subtitle">Which optional tools the agent may use</string>
+    <string name="agent_tools_browser">Browser Use</string>
+    <string name="agent_tools_browser_footer">Browse the web in the in-app browser: open pages, read them, click and type. Stable and on by default. When off, the tool is removed from every conversation — the model does not see it at all.</string>
+    <string name="agent_tools_agents">Agents</string>
+    <string name="agent_tools_agents_footer">Hand self-contained sub-tasks to sub agents that work in their own hidden sessions and report back. The same tool also lets the assistant check on or stop what it started. Configure the roster under Settings › Agents › Sub Agents.</string>
+    <string name="settings_agents">Sub Agents</string>
+    <string name="settings_agents_subtitle">Named agents the assistant can delegate to</string>
+    <string name="agent_settings_allow">Allow agents</string>
+    <string name="agent_settings_allow_footer">Delegate self-contained sub-tasks to a sub agent that works in its own hidden session and reports back. The same tool also lets the assistant check on or stop what it started. Several agents can run at once, so a large fan-out uses correspondingly more of your quota. On by default; when off, it is not offered to the model at all.</string>
+    <string name="agent_settings_sub_model">Model for simple tasks</string>
+    <string name="agent_settings_sub_footer">Agents run on the same model tier as the conversation by default. The assistant may pick the Sub model group for simple, easily verified tasks — configure one under Providers › Model Groups.</string>
+    <string name="agent_settings_not_configured">Not configured</string>
+    <string name="helper_status_interrupted">Interrupted</string>
+    <string name="helper_status_unknown">Status unknown</string>
+    <string name="helper_status_no_deliverable">No result</string>
+    <string name="agent_status_starting">starting</string>
+    <string name="agent_status_queued">Queued</string>
+    <string name="agent_status_never_started">Never started</string>
+    <string name="agent_working">working…</string>
+    <string name="agent_detail_current_tool">Current tool</string>
+    <string name="agent_detail_latest_screenshot">Latest screenshot</string>
+    <string name="agent_detail_result">Result</string>
+    <string name="agent_detail_sent_to_agent">Sent to the sub agent</string>
+    <string name="agent_error_context_limit">Context limit</string>
+    <string name="agent_error_rate_limited">Rate limited</string>
+    <string name="agent_error_quota_exhausted">Quota exhausted</string>
+    <string name="agent_error_provider_overloaded">Provider overloaded</string>
+    <string name="agent_error_timed_out">Timed out</string>
+    <string name="agent_error_auth_failed">Auth failed</string>
+    <string name="agent_error_network">Network error</string>
+    <string name="agent_error_cancelled">Cancelled</string>
+    <string name="agent_detail_error">Error</string>
+    <string name="agent_detail_last_message">Last message</string>
+    <string name="agent_detail_no_deliverable">No deliverable was returned</string>
+    <string name="agent_detail_model_strategy">Model strategy</string>
+    <string name="agent_detail_model_actual">Actual model</string>
+    <string name="agent_detail_model_group">Model group</string>
+    <string name="agent_detail_model_tier">Model tier</string>
+    <string name="agent_strategy_inherited">Same as this conversation</string>
+    <string name="agent_strategy_default_group">Auto · default group · %1$s</string>
+    <string name="agent_strategy_sub_group">Auto · light group · %1$s</string>
+    <string name="agent_pinned_group_unavailable">Pinned group unavailable — ran on the conversation\'s model</string>
+    <string name="agent_strategy_pinned">Pinned group · %1$s</string>
+    <string name="agent_detail_model">Model</string>
+    <string name="agent_detail_tools">Tools</string>
+    <string name="agent_detail_turns">Turns</string>
+    <string name="agent_detail_tokens">Tokens</string>
+    <string name="agent_detail_summary">Summary</string>
+    <string name="agent_detail_escalation">Escalation</string>
+    <string name="agent_detail_escalation_value">The agent asked for a stronger model</string>
+    <string name="agent_detail_delivery">Delivery</string>
+    <string name="agent_detail_delivery_value">Result posted as a new message</string>
+    <string name="sub_agents_title">Sub Agents</string>
+    <string name="sub_agents_add">Add Sub Agent</string>
+    <string name="sub_agents_list_header">Sub Agents</string>
+    <string name="sub_agents_list_footer">The assistant picks a sub agent by its description, so write the description as \u201cwhen to use this\u201d. Order is the order it sees them in.</string>
+    <string name="sub_agent_name">Name</string>
+    <string name="sub_agent_description">When to use it</string>
+    <string name="sub_agent_description_footer">The main model reads this to decide what to delegate here. Keep it short and concrete — it costs tokens on every request.</string>
+    <string name="sub_agent_instructions">Instructions</string>
+    <string name="sub_agent_instructions_footer_builtin">These instructions apply to every delegation that does not name a sub agent. Custom sub agents use their own.</string>
+    <string name="sub_agent_instructions_footer">Added to this sub agent\'s own prompt. The main conversation never sees it.</string>
+    <string name="sub_agent_model">Model</string>
+    <string name="sub_agent_model_auto">Auto</string>
+    <string name="sub_agent_model_footer">Auto lets the delegating model choose, defaulting to this conversation\'s model. Pin a group to always use it.</string>
+    <!-- [T-subagent-thinking-override] -->
+    <string name="sub_agent_reasoning">Reasoning</string>
+    <string name="sub_agent_reasoning_override">Override Reasoning</string>
+    <string name="sub_agent_reasoning_footer_off">Off: runs use the reasoning level of the Model Group above, or of the conversation that delegated when the model is Auto.</string>
+    <string name="sub_agent_reasoning_footer_on">Every run of this sub agent uses this level, overriding the Model Group\'s own default. Models that cannot reason this hard are clamped to their own ceiling.</string>
+    <string name="sub_agent_delete">Delete Sub Agent</string>
+    <string name="sub_agent_builtin_note">The built-in sub agent\'s name and description are fixed. You can still change its model and instructions.</string>
+    <string name="sub_agents_limit_reached">You can have at most %1$d sub agents.</string>
+    <string name="sub_agent_name_required">A name is required.</string>
+    <string name="sub_agent_name_taken">Another sub agent already uses that name.</string>
+    <string name="sub_agent_builtin_name">General Sub Agent</string>
+    <string name="sub_agent_builtin_description">Open-ended work that needs its own tool loop: exploring a codebase or the web over many rounds, digesting bulk output into a conclusion, or running independent branches in parallel.</string>
+    <string name="agent_model_group_unavailable">Pinned model group unavailable — ran on this conversation\'s model</string>
+    <string name="scheduled_card_label">Scheduled task</string>
+    <string name="scheduled_card_next_fire">Next: %1$s</string>
+    <string name="scheduled_card_last_run">This was the last run</string>
+    <string name="scheduled_card_cancel">Cancel this schedule</string>
+    <string name="scheduled_card_cancel_confirm_title">Cancel this scheduled task?</string>
+    <string name="scheduled_card_cancel_confirm_body">“%1$s” will stop running. Past results stay in this conversation.</string>
+    <string name="scheduled_card_cancel_confirm_ok">Cancel task</string>
+    <string name="scheduled_card_cancel_confirm_keep">Keep it</string>
+    <string name="scheduled_card_cancelled">Schedule cancelled</string>
+    <string name="tool_pager_position">Tool call %1$d of %2$d in this conversation</string>
+    <string name="agent_control_checked_n">Checked %1$d sub agent(s)</string>
+    <string name="agent_control_checked">Checked sub agent status</string>
+    <string name="agent_control_resumed_n">Resumed %1$d sub agent(s)</string>
+    <string name="agent_control_resumed">Resumed a sub agent</string>
+    <string name="agent_control_steered">Sent a course correction</string>
+    <string name="agent_control_stopped">Stopped a sub agent</string>
+    <string name="agent_control_generic">Sub agent control</string>
+    <string name="agent_detail_interaction">Interaction</string>
+    <string name="agent_detail_interaction_progress">Progress report</string>
+    <string name="agent_detail_interaction_final">Final result</string>
+    <string name="agent_detail_job">Job</string>
+    <string name="sub_agents_move_up">Move up</string>
+    <string name="sub_agents_move_down">Move down</string>
+    <string name="sub_agent_builtin_badge">Built-in</string>
+    <string name="helper_start">Start</string>
+    <string name="helper_start_failed">Could not start — too many sub agents are running</string>
+    <!-- [T-android-subagent-card-resume] Resume button on an interrupted sub agent card -->
+    <string name="helper_resume">Resume sub agent</string>
+    <string name="helper_resume_queued">All sub agents are busy. It will resume when one finishes.</string>
+    <string name="helper_resume_failed">Could not resume this sub agent</string>
+    <string name="add_provider_subtitle_copilot">Sign in with GitHub — unofficial, use at your own risk</string>
+    <string name="copilot_login_title">Sign in with GitHub</string>
+    <string name="copilot_login_instructions">Open the verification page and enter this code to link your GitHub account:</string>
+    <string name="copilot_disclaimer_title">Notice regarding unofficial access</string>
+    <string name="copilot_disclaimer_p1">This sign-in method is not officially authorized. Minis is not affiliated with, endorsed by, or supported by GitHub, and this integration has not been reviewed or approved by GitHub.</string>
+    <string name="copilot_disclaimer_p2">Authorization is performed using a client identity issued to a third-party developer tool rather than to Minis, and it relies on service interfaces that are not published for this purpose.</string>
+    <string name="copilot_disclaimer_p3">Access may be withdrawn without notice. The provider may change or discontinue these interfaces at any time, which can cause requests to fail or this feature to stop working entirely.</string>
+    <string name="copilot_disclaimer_p4">Use may violate the provider\'s terms of service and may result in rate limiting, suspension, or permanent termination of your Copilot entitlement or your GitHub account. Any such consequence applies to your account and cannot be reversed by Minis.</string>
+    <string name="copilot_disclaimer_p5">Use of an organization, enterprise, or production account is strongly discouraged. Please sign in with a personal account whose loss you are prepared to accept.</string>
+    <string name="copilot_disclaimer_p6">Your access token is held in this device\'s encrypted storage and is transmitted only to the provider. Minis does not collect it and does not route it through any server operated by us. A backup you export yourself may contain it.</string>
+    <string name="copilot_disclaimer_p7">This feature is provided on an “as is” basis, without warranty of any kind. By continuing you confirm that you have read this notice and accept these risks entirely at your own discretion.</string>
+    <string name="copilot_disclaimer_accept">I have read and accept these terms</string>
+    <string name="copilot_disclaimer_cancel">Cancel</string>
+    <string name="context_overflow_selfheal_notice">A message was too large for this model. It has been moved to a file and the conversation can continue.</string>
+    <string name="thinking_rules_error_path_required">Field path is required.</string>
+    <string name="thinking_rules_error_path_reserved">"%1$s" is a reserved request field and cannot be written.</string>
+    <string name="thinking_rules_error_value_required">Value is required.</string>
+    <string name="thinking_rules_error_off_value_required">Off value is required when "send off value" is on.</string>
+    <!-- [T-send-longpress-return-mode] Send-button long-press chooser -->
+    <string name="send_return_mode_sends">Return sends</string>
+    <string name="send_return_mode_newline">Return adds a new line</string>
+    <string name="send_return_mode_a11y_action">Return key options</string>
+    <!-- [T-scheduled-task-detail] Scheduled task detail page -->
+    <string name="scheduled_detail_title">Scheduled task</string>
+    <string name="scheduled_detail_close">Close</string>
+    <string name="scheduled_status_running">Running</string>
+    <string name="scheduled_status_waiting">Waiting for next run</string>
+    <string name="scheduled_status_completed">Completed</string>
+    <string name="scheduled_status_failed">Failed</string>
+    <string name="scheduled_status_disabled">Disabled</string>
+    <string name="scheduled_status_deleted">Deleted</string>
+    <string name="scheduled_detail_deleted_note">This task has been deleted. What it already ran stays in the chats it ran in.</string>
+    <string name="scheduled_detail_run_n">Run %1$d</string>
+    <string name="scheduled_detail_of_total">" / %1$d total"</string>
+    <string name="scheduled_detail_next_run">Next run</string>
+    <string name="scheduled_detail_remaining">Remaining</string>
+    <string name="scheduled_detail_remaining_n">%1$d</string>
+    <string name="scheduled_detail_unlimited">Unlimited</string>
+    <string name="scheduled_detail_in">in %1$s</string>
+    <string name="scheduled_detail_now">now</string>
+    <string name="scheduled_unit_sec">%1$ds</string>
+    <string name="scheduled_unit_min">%1$d min</string>
+    <string name="scheduled_unit_hour">%1$d h</string>
+    <string name="scheduled_unit_day">%1$d d</string>
+    <string name="scheduled_detail_params">Parameters</string>
+    <string name="scheduled_detail_name">Name</string>
+    <string name="scheduled_detail_trigger">Trigger</string>
+    <string name="scheduled_detail_delivery">Delivery</string>
+    <string name="scheduled_detail_preset">Preset command</string>
+    <string name="scheduled_detail_created">Created</string>
+    <string name="scheduled_detail_task_id">Task ID</string>
+    <string name="scheduled_detail_fired_count">Runs so far</string>
+    <string name="scheduled_detail_copied">Copied</string>
+    <string name="scheduled_delivery_new">Runs in a new chat each time</string>
+    <string name="scheduled_delivery_this_chat">Added to this chat as a new message</string>
+    <string name="scheduled_delivery_other_chat">Added to the chat “%1$s”</string>
+    <string name="scheduled_delivery_rerun_this">Regenerates a chosen message in this chat</string>
+    <string name="scheduled_delivery_rerun_other">Regenerates a chosen message in the chat “%1$s”</string>
+    <string name="scheduled_delivery_child_this">Runs as a sub task; the result comes back to this chat</string>
+    <string name="scheduled_delivery_child_other">Runs as a sub task of the chat “%1$s”</string>
+    <string name="scheduled_trigger_once">Once at %1$s</string>
+    <string name="scheduled_trigger_daily">Every day %1$s</string>
+    <string name="scheduled_trigger_weekdays">Weekdays %1$s</string>
+    <string name="scheduled_trigger_weekly">Every %1$s %2$s</string>
+    <string name="scheduled_trigger_day_separator">", "</string>
+    <string name="scheduled_trigger_from">from %1$s</string>
+    <string name="scheduled_trigger_until">until %1$s</string>
+    <string name="scheduled_trigger_window">%1$s – %2$s</string>
+    <!-- [T-android-scheduled-triggers] -->
+    <string name="scheduled_trigger_interval">Every %1$s</string>
+    <string name="scheduled_trigger_interval_count">Every %1$s · %2$d times</string>
+    <string name="scheduled_trigger_on_completion">When “%1$s” finishes</string>
+    <string name="scheduled_detail_prompt">Prompt</string>
+    <string name="scheduled_detail_expand">Show more</string>
+    <string name="scheduled_detail_collapse">Show less</string>
+    <string name="scheduled_detail_copy_prompt">Copy prompt</string>
+    <string name="scheduled_detail_history">Runs</string>
+    <string name="scheduled_detail_history_empty">No runs yet</string>
+    <string name="scheduled_detail_current">Current</string>
+    <string name="scheduled_detail_open_chat">Open chat</string>
+    <!-- [T-container-network-dns] Rootfs > Container Network -->
+    <string name="rootfs_network_section">Container Network</string>
+    <string name="rootfs_dns_mode">DNS Mode</string>
+    <string name="rootfs_dns_auto">Auto</string>
+    <string name="rootfs_dns_auto_desc">Follows the system DNS and updates on every network change. Keep this when a proxy runs in Fake-IP or TUN mode.</string>
+    <string name="rootfs_dns_custom">Custom</string>
+    <string name="rootfs_dns_custom_desc">The sandbox uses only the servers below. Network changes no longer overwrite them.</string>
+    <string name="rootfs_dns_servers">Custom DNS Servers</string>
+    <string name="rootfs_dns_servers_hint">One IPv4 or IPv6 address per line, or separated by commas</string>
+    <string name="rootfs_dns_invalid">Not a valid IPv4 or IPv6 address: %1$s</string>
+    <string name="rootfs_dns_empty">Enter at least one server. Until then the sandbox keeps following the system DNS.</string>
+    <string name="rootfs_dns_too_many">The sandbox resolver only uses the first %1$d servers.</string>
+    <string name="rootfs_dns_save">Save</string>
+    <string name="rootfs_dns_saved">Saved and applied</string>
+    <string name="rootfs_dns_effective_system">In effect: system DNS</string>
+    <string name="rootfs_dns_effective_custom">In effect: %1$s</string>
 </resources>

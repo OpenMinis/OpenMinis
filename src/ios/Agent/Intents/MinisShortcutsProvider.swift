@@ -10,7 +10,37 @@ import AppIntents
 /// rejects AppShortcuts.xcstrings below iOS 17. Add new phrases here AND
 /// to every AppShortcuts.strings; keys must match exactly with
 /// `\(.applicationName)` spelled `${applicationName}` in the tables.
-@available(iOS 17.0, *)
+///
+/// [T-ios16-appshortcut-null-init] MUST stay callable on iOS 16 — no
+/// type-level `@available(iOS 17.0, *)`, and every `AppShortcut` below must
+/// resolve to the iOS 16.0 initializer.
+///
+/// This type used to be gated to iOS 17 because the code called
+/// `AppShortcut(intent:phrases:shortTitle:systemImageName:)` with NON-optional
+/// arguments, and that overload is iOS 17.0+. The gate did not keep iOS 16 out:
+/// a type-level `@available` is a compile-time rule, but the protocol
+/// conformance record is still in the binary, and the AppIntents runtime finds
+/// it and calls `appShortcuts` whenever the system resolves an App Shortcut
+/// (`AppContext.fetchAction(for:)`, background, no user action needed). On
+/// iOS 16 the weak-linked iOS 17 initializer is NULL, so the call jumped to
+/// address 0 — TestFlight crash bucket "???: 0x0", 9 reports on stock iOS
+/// 16.0–16.7 devices across 1.12–1.14.
+///
+/// The fix is removing that gate. The source is unchanged, but with the type no
+/// longer iOS 17-only the compiler may not choose the iOS 17 overload (that
+/// would be an availability error), so it resolves every call to the older
+/// `init(intent:phrases:shortTitle:systemImageName:)` taking `LocalizedStringResource?`
+/// / `String?`. That one is available from iOS 16.0 and carries the same two
+/// values, so iOS 17+ keeps the short titles and icons, and iOS 16 no longer
+/// calls a missing symbol. Verified on the object file: the only imported
+/// `AppShortcut.init` is the optional-parameter one.
+///
+/// Do not "fix" this by making the arguments explicit optionals: Apple's
+/// build-time App Intents metadata extractor rejects
+/// `LocalizedStringResource?("…")` (it needs a literal or a direct initializer
+/// call) and `systemImageName` is `_const`. Branching with `if #available`
+/// inside the builder is not an option either: that needs AppShortcutsBuilder
+/// methods that are themselves iOS 17.4+.
 struct MinisShortcutsProvider: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         // Siri-facing "ask Minis" entry — opens the app and lands in the

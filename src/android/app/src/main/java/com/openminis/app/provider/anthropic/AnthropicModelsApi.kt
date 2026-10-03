@@ -143,7 +143,7 @@ object AnthropicModelsApi {
             for (i in 0 until data.length()) {
                 val obj = data.getJSONObject(i)
                 val id = obj.getString("id")
-                val displayName = obj.optString("display_name", id)
+                val displayName = obj.optString("display_name", "").ifBlank { LLMModel.modelDisplayName(id) }
                 // [T-android-claude-opus48-thinking-toggle] (Sow Sow 38845/38850)
                 // /v1/models returns no capability metadata, so without this the
                 // model lands with supportsReasoning=null and ChatViewModel hides

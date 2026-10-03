@@ -81,6 +81,22 @@ interface SpeechRecognitionEngine {
      */
     fun clearDegraded() {}
 
+    /**
+     * [T-voice-asr-failure-retry-prompt] Re-transcribe audio kept from an
+     * earlier failed take ([Listener.onRetainedAudio]). No capture: the result
+     * arrives through [listener] exactly like a live take's terminal callback,
+     * and a second failure hands the audio back again.
+     *
+     * [wav] is mono PCM16 with a 44-byte header, at whatever rate the SAME
+     * engine handed it back with (retries always go to the engine that
+     * produced the audio). The default reports an
+     * error so an engine that cannot replay audio still ends in a terminal
+     * callback.
+     */
+    fun transcribeRetained(wav: ByteArray, locale: Locale, listener: Listener) {
+        listener.onError(RecognitionError.UNKNOWN, "This recognizer cannot re-transcribe saved audio.")
+    }
+
     interface Listener {
         /** Incremental interim result. Only fires if [supportsPartialResults]. */
         fun onPartial(text: String)
@@ -96,6 +112,16 @@ interface SpeechRecognitionEngine {
 
         /** Fires when the engine starts actually listening (after warmup). */
         fun onReadyForSpeech() {}
+
+        /**
+         * [T-voice-asr-failure-retry-prompt] Called immediately BEFORE a
+         * terminal [onError] when the engine still holds the audio of the
+         * utterance that failed to transcribe (mono PCM16 WAV; the header
+         * carries the sample rate). The
+         * caller keeps it and offers a retry instead of the speech being
+         * dropped — long dictation is hard to repeat.
+         */
+        fun onRetainedAudio(wav: ByteArray) {}
     }
 }
 
@@ -132,6 +158,20 @@ enum class RecognitionError {
 
     /** Audio capture failed (mic hardware / HAL). */
     AUDIO_ERROR,
+
+    /**
+     * [T-voice-mic-preempted] Another app holds the microphone (a call, a
+     * voice recorder). Transient, and not this engine's fault: it must not
+     * mark the engine degraded. See [MicInUse].
+     */
+    MIC_IN_USE,
+
+    /**
+     * [T-voice-asr-failure-retry-prompt] The recognizer produced no text
+     * before its (audio-length-scaled) watchdog fired. A failure — the audio
+     * is kept and the user asked to retry — not a "no speech" result.
+     */
+    TIMED_OUT,
 
     /** Any other failure. */
     UNKNOWN,

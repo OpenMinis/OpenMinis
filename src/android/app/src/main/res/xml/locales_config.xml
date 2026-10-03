@@ -51,4 +51,10 @@
          file (verified on Android 13 and 17), so the wording avoids
          Brazil-only slang where a neutral choice reads naturally in both. -->
     <locale android:name="pt-BR"/>
+    <!-- Croatian. Three CLDR plural categories (one/few/other) — note it has
+         NO "many", unlike Polish and Russian: the counts pl routes to `many`
+         (5..9, 11..14) fall to `other` here, so `other` carries the genitive
+         plural rather than a fallback. Diacritics are č ć đ š ž only; the
+         validator rejects Polish/Czech/Romanian look-alikes. -->
+    <locale android:name="hr"/>
 </locale-config>

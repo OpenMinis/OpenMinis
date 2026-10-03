@@ -22,7 +22,12 @@ fun highlightedAnnotatedString(text: String, query: String): AnnotatedString {
     val highlightBg = MaterialTheme.colorScheme.tertiaryContainer
     val highlightFg = MaterialTheme.colorScheme.onTertiaryContainer
     val lower = text.lowercase()
-    val q = query.lowercase()
+    // [T-android-search-visible-only] Highlight the TRIMMED query, as iOS does
+    // (6b0ee14c1). The search itself trims (ChatRepository.searchSessionsWithHits),
+    // so " GPT" finds every "GPT" — but highlighting the raw text marked only
+    // hits that happened to follow a space. Seen on a Pixel 6: of six results
+    // for " GPT", only "🔧 GPT Image 2" was highlighted.
+    val q = query.trim().lowercase()
     return buildAnnotatedString {
         var idx = 0
         while (idx < text.length) {

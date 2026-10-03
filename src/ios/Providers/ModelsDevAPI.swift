@@ -203,7 +203,219 @@ enum ModelsDevAPI {
         // index stores the winner picked by exactly the vote below, evaluated in
         // exactly the old scan order (see `buildStage2Index`).
         guard let index = stage2Index(for: registry) else { return nil }
-        return index[wanted]
+        if let hit = index[wanted] { return hit }
+
+        // [T-modelsdev-suffix-alias] Stage 3: longest-prefix fallback for a
+        // vendor-suffixed alias.
+        //
+        // Stages 1 and 2 both require an EXACT match after normalization, so a
+        // relay that publishes `glm-5.3-flash-cpa` (or `-0710`, `-preview`,
+        // any house suffix) matched nothing at all and the model arrived with
+        // no context window, no thinking support and no modalities — the
+        // reported "14 个模型逐项读取均返回 unknown_path". A prefix
+        // match resolves these; we had no such fallback.
+        //
+        // Only ever reached when both exact stages missed, so no id that
+        // resolves today can change meaning.
+        if let hit = prefixMatch(wanted, in: index) { return hit }
+
+        // [T-modelsdev-aggregate-fallback] Stage 4, for UNRECOGNIZED providers
+        // only.
+        //
+        // Stages 1–3 all need some catalog id to match the requested one. A
+        // relay that renames a model beyond any shared prefix still matches
+        // nothing, and the model arrives with no context window, no output cap,
+        // no reasoning flag and no modalities — the reported `unknown_path` on
+        // every field.
+        //
+        // Gated on `isUnrecognizedProvider` deliberately: an aggregate is a
+        // MAXIMUM over a family, so applying it to a direct OpenAI or Anthropic
+        // connection could overwrite a precisely-known context window with a
+        // larger sibling's. Those providers have a real catalog identity and
+        // must keep getting the exact answer or none.
+        //
+        // Non-authoritative by construction — it describes a family, not this
+        // endpoint — so it can never suppress an explicit "thinking off"
+        // (see `effortDeclarationIsAuthoritative` in `applyDevData`).
+        guard isUnrecognizedProvider(model.provider),
+              let aggIndex = aggregateIndex(for: registry) else { return nil }
+        var segments = wanted.split(separator: "-").map(String.init)
+        while segments.count >= minPrefixSegments {
+            if let agg = aggIndex[segments.joined(separator: "-")] {
+                logger.info("[ModelsDev] aggregate fallback: \(model.id) → prefix \(segments.joined(separator: "-"))")
+                return DevModelMatch(model: agg, authoritative: false)
+            }
+            segments.removeLast()
+        }
+        return nil
+    }
+
+    /// [T-modelsdev-suffix-alias] The longest catalog id that `wanted` extends
+    /// at a SEGMENT boundary.
+    ///
+    /// Boundary-anchored on purpose. A bare `hasPrefix` would let `gpt-5` claim
+    /// `gpt-51`, and `glm-5` claim `glm-53-flash` — silently attaching one
+    /// model's context window and thinking ladder to a different model. Only a
+    /// candidate the id continues with `-` counts, which is exactly the shape a
+    /// house suffix takes once `normalizedModelKey` has folded `.` and `_` to
+    /// `-`.
+    ///
+    /// Longest wins so `glm-5.3-flash-cpa` prefers `glm-5-3-flash` over
+    /// `glm-5-3`, and a 3-segment floor keeps a generic stem like `gpt-5` from
+    /// being matched by everything that starts with it.
+    private static func prefixMatch(_ wanted: String,
+                                    in index: [String: DevModelMatch]) -> DevModelMatch? {
+        // Walk the id's own segments from longest to shortest and look each up,
+        // rather than scanning the catalog: bounded by the id's segment count
+        // (a handful), not by the 6,243-entry catalog, so this adds nothing
+        // measurable to the launch path stage 2 was optimised for.
+        var segments = wanted.split(separator: "-").map(String.init)
+        guard segments.count > minPrefixSegments else { return nil }
+        while segments.count > minPrefixSegments {
+            segments.removeLast()
+            let candidate = segments.joined(separator: "-")
+            if let hit = index[candidate] {
+                // A stage-2 winner is already a cross-provider guess; reached
+                // through a truncated id it is one step weaker still, so it is
+                // never reported as authoritative.
+                return DevModelMatch(model: hit.model, authoritative: false)
+            }
+        }
+        return nil
+    }
+
+    /// Fewest segments a prefix may be reduced to before matching is abandoned.
+    /// Two segments (`gpt-5`, `glm-5`) name a family rather than a model, and
+    /// matching those would hand a family's metadata to every variant of it.
+    private static let minPrefixSegments = 2
+
+    // MARK: - [T-modelsdev-aggregate-fallback] Stage 4: aggregate fallback
+
+    /// True when this provider has no models.dev channel identity.
+    ///
+    /// Reuses the EXISTING `providerKeyMap` rather than introducing a second
+    /// notion of "known provider": a provider with no mapped catalog key is
+    /// precisely one we cannot resolve a first-party answer for — a custom or
+    /// relayed endpoint. Anthropic / Google / OpenAI / OpenRouter all map to
+    /// real keys and are therefore never aggregated.
+    ///
+    /// Antigravity is deliberately mapped to an EMPTY list in that table (it is
+    /// a custom proxy with no public entry), so it counts as unrecognised here
+    /// too — which is the intended reading: we have no authoritative catalog
+    /// for it either.
+    private static func isUnrecognizedProvider(_ providerName: String) -> Bool {
+        (providerKeyMap[providerName] ?? []).isEmpty
+    }
+
+    /// Per-prefix aggregate of every catalog record whose normalized id starts
+    /// with that prefix at a segment boundary.
+    ///
+    /// Numeric fields take the MAXIMUM seen, capability flags the logical OR
+    /// (for `ModelModality`, an OptionSet, that is a set union). The point is a
+    /// deliberately optimistic answer: for a relay that publishes
+    /// `glm-5.3-flash-cpa`, some record in the `glm-5-3-flash` family is the
+    /// closest thing to the truth we have, and under-reporting a context window
+    /// silently truncates conversations while over-reporting merely surfaces
+    /// the provider's own error.
+    private static var cachedAggregateIndex: [String: ModelsDevModel]?
+    private static var aggregateIndexBuiltFrom: Date?
+
+    /// Build (and memoize) the aggregate index. Same invalidation rule as
+    /// `stage2Index` / `releaseIndex`: keyed on `cacheTimestamp`, so a
+    /// background models.dev refresh rebuilds it without a relaunch.
+    private static func aggregateIndex(for registry: [String: ModelsDevProvider]) -> [String: ModelsDevModel]? {
+        if let cached = cachedAggregateIndex, aggregateIndexBuiltFrom == cacheTimestamp {
+            return cached
+        }
+        let index = buildAggregateIndex(registry)
+        cachedAggregateIndex = index
+        aggregateIndexBuiltFrom = cacheTimestamp
+        logger.info("[ModelsDev] aggregate index built: \(index.count) prefixes")
+        return index
+    }
+
+    /// Group every catalog record under each of its own id prefixes, then fold
+    /// each group into one synthetic record.
+    ///
+    /// Precomputed once per snapshot rather than scanned per request: the
+    /// catalog is ~6,243 entries and this runs on the launch path that stage 2
+    /// was already optimised for. Each record contributes to at most a handful
+    /// of prefixes (its own segment count), so the build stays linear in the
+    /// catalog size.
+    private static func buildAggregateIndex(_ registry: [String: ModelsDevProvider]) -> [String: ModelsDevModel] {
+        var grouped: [String: [ModelsDevModel]] = [:]
+        for key in registry.keys.sorted() {
+            guard let prov = registry[key] else { continue }
+            for id in prov.models.keys.sorted() {
+                guard let devModel = prov.models[id] else { continue }
+                // Register the record under every prefix of its own id that is
+                // long enough to name a model rather than a family — the same
+                // floor `prefixMatch` enforces, so stage 4 can never match
+                // something stage 3 would have refused.
+                var segments = normalizedModelKey(id).split(separator: "-").map(String.init)
+                while segments.count >= minPrefixSegments {
+                    grouped[segments.joined(separator: "-"), default: []].append(devModel)
+                    segments.removeLast()
+                }
+            }
+        }
+
+        var index: [String: ModelsDevModel] = [:]
+        index.reserveCapacity(grouped.count)
+        for (prefix, records) in grouped {
+            index[prefix] = aggregate(records, id: prefix)
+        }
+        return index
+    }
+
+    /// Fold several catalog records into one: max for numbers, OR for flags.
+    private static func aggregate(_ records: [ModelsDevModel], id: String) -> ModelsDevModel {
+        var maxContext: Int?
+        var maxOutput: Int?
+        var anyReasoning = false
+        var sawReasoning = false
+        var unionInput: Set<String> = []
+        var unionOutput: Set<String> = []
+        var interleaved: ModelsDevInterleaved?
+        var effortUnion: [String] = []
+        var sawEffort = false
+
+        for r in records {
+            if let c = r.limit?.context { maxContext = max(maxContext ?? c, c) }
+            if let o = r.limit?.output { maxOutput = max(maxOutput ?? o, o) }
+            if let reasoning = r.reasoning {
+                sawReasoning = true
+                anyReasoning = anyReasoning || reasoning
+            }
+            unionInput.formUnion(r.modalities?.input ?? [])
+            unionOutput.formUnion(r.modalities?.output ?? [])
+            // First non-nil wins: this names a wire field, not a capacity, so
+            // "any value seen" is the only sensible fold — taking a maximum or
+            // a union of field NAMES would be meaningless.
+            if interleaved == nil { interleaved = r.interleaved }
+            if let efforts = r.effortValues {
+                sawEffort = true
+                for e in efforts where !effortUnion.contains(e) { effortUnion.append(e) }
+            }
+        }
+
+        return ModelsDevModel(
+            id: id,
+            modalities: (unionInput.isEmpty && unionOutput.isEmpty)
+                ? nil
+                : ModelsDevModalities(input: unionInput.sorted(), output: unionOutput.sorted()),
+            limit: (maxContext == nil && maxOutput == nil)
+                ? nil
+                : ModelsDevLimit(context: maxContext, output: maxOutput),
+            reasoning: sawReasoning ? anyReasoning : nil,
+            interleaved: interleaved,
+            // Rebuilt as effort options so `effortValues` derives the union
+            // back out; nil when no record declared any, so the aggregate never
+            // fabricates an effort ladder.
+            reasoningOptions: sawEffort
+                ? [ModelsDevReasoningOption(type: "effort", values: effortUnion)]
+                : nil
+        )
     }
 
     /// The stage-2 winner for every normalized id in the catalog.
@@ -602,6 +814,32 @@ private struct ModelsDevModel: Decodable {
     /// what actually separates their capability tiers.
     let cost: ModelsDevCost?
 
+    /// [T-modelsdev-aggregate-fallback] Synthesise an entry that no single
+    /// catalog record backs — used only by the aggregate fallback, which folds
+    /// several records into one. Decoding is unaffected: this is an additional
+    /// initialiser, so `Decodable`'s synthesised one still applies.
+    init(id: String,
+         name: String? = nil,
+         family: String? = nil,
+         modalities: ModelsDevModalities? = nil,
+         limit: ModelsDevLimit? = nil,
+         reasoning: Bool? = nil,
+         interleaved: ModelsDevInterleaved? = nil,
+         reasoningOptions: [ModelsDevReasoningOption]? = nil,
+         releaseDate: String? = nil,
+         cost: ModelsDevCost? = nil) {
+        self.id = id
+        self.name = name
+        self.family = family
+        self.modalities = modalities
+        self.limit = limit
+        self.reasoning = reasoning
+        self.interleaved = interleaved
+        self.reasoningOptions = reasoningOptions
+        self.releaseDate = releaseDate
+        self.cost = cost
+    }
+
     /// [T-reasoning-effort-data-driven] Effort tiers declared by the catalog,
     /// or nil when this model exposes no `effort`-type reasoning option (it may
     /// still declare `toggle` / `budget_tokens`, which are different mechanisms
@@ -669,11 +907,24 @@ private struct ModelsDevModel: Decodable {
 private struct ModelsDevModalities: Decodable {
     let input: [String]?
     let output: [String]?
+
+    /// [T-modelsdev-aggregate-fallback] For synthesising a union of several
+    /// records' modalities.
+    init(input: [String]?, output: [String]?) {
+        self.input = input
+        self.output = output
+    }
 }
 
 private struct ModelsDevLimit: Decodable {
     let context: Int?
     let output: Int?
+
+    /// [T-modelsdev-aggregate-fallback] For synthesising per-field maxima.
+    init(context: Int?, output: Int?) {
+        self.context = context
+        self.output = output
+    }
 }
 
 /// [T-model-release-ranking] models.dev `cost` block (USD per million tokens).
@@ -692,6 +943,13 @@ private struct ModelsDevCost: Decodable {
 private struct ModelsDevReasoningOption: Decodable {
     let type: String?
     let values: [String]?
+
+    /// [T-modelsdev-aggregate-fallback] For synthesising the union of effort
+    /// tiers across aggregated records.
+    init(type: String?, values: [String]?) {
+        self.type = type
+        self.values = values
+    }
 
     // `values` is NOT a clean [String] in the wild: models.dev ships null
     // elements (sarvam-105b / sarvam-30b are `[null,"low","medium","high"]`).

@@ -127,6 +127,48 @@ class RcloneRemoteStore(private val context: Context) {
     /** Remotes that new backups should actually be delivered to. */
     val enabledRemotes: List<Remote> get() = remotes.filter { it.enabled }
 
+    // MARK: - Local folder destinations
+
+    /**
+     * [T-android-backup-local-folder] Register a SAF-picked folder on this
+     * device as a backup destination.
+     *
+     * Local folders deliberately reuse the SAME [Remote] record and the same
+     * saved list as rclone servers, rather than getting a parallel store. The
+     * destination list, its enable/disable switch, the "is anything configured"
+     * gate on the Start button and the history's per-destination outcomes all
+     * key off that one list — a second list would have had to be threaded
+     * through every one of them, and any spot that was missed would silently
+     * treat a local folder as "no destination configured".
+     *
+     * The tree URI lives in [Remote.path] because that is the field every
+     * caller already treats as "where in the destination the package goes".
+     * [BACKEND_LOCAL] is not an rclone backend and is filtered out of
+     * [syncToRclone]; delivery for it is a plain DocumentFile write.
+     */
+    fun addLocalFolder(name: String, treeUri: String, displayPath: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) throw StoreException("Choose a name for this folder.")
+        if (remote(trimmed) != null) {
+            throw StoreException("A destination named \"$trimmed\" already exists.")
+        }
+        if (remotes.any { it.backend == BACKEND_LOCAL && it.params[PARAM_TREE_URI] == treeUri }) {
+            throw StoreException("That folder is already a backup destination.")
+        }
+        remotes = remotes + Remote(
+            name = trimmed,
+            backend = BACKEND_LOCAL,
+            params = mapOf(PARAM_TREE_URI to treeUri),
+            // Shown in the row subtitle. The raw tree URI is unreadable
+            // ("content://com.android.externalstorage.documents/tree/primary%3ADocuments"),
+            // so the human form is stored alongside it rather than re-derived
+            // for display on every recomposition.
+            path = displayPath,
+            createdAt = System.currentTimeMillis(),
+        )
+        AppLogger.info(TAG, "[Rclone] local folder destination added: $trimmed -> $displayPath")
+    }
+
     // MARK: - Registration
 
     /** Add a remote. [secret] goes to the encrypted store; everything else to prefs. */
@@ -203,7 +245,10 @@ class RcloneRemoteStore(private val context: Context) {
         // not quietly lower the bar for every other destination the user has.
         RcloneBridge.setInsecureTLS(remotes.any { it.allowInsecureTLS })
 
-        for (r in remotes) {
+        // A local-folder destination has no rclone backend to create — feeding
+        // `type = "local-folder"` to config/create would make rclone reject it
+        // and log a failure for a destination that is working fine.
+        for (r in remotes.filterNot { it.backend == BACKEND_LOCAL }) {
             val params = buildConfigParams(
                 backend = r.backend,
                 params = r.params,
@@ -237,6 +282,20 @@ class RcloneRemoteStore(private val context: Context) {
 
     companion object {
         private const val TAG = "Rclone"
+
+        /**
+         * [T-android-backup-local-folder] Reserved [Remote.backend] marking a
+         * destination that is a folder on this device, reached through SAF
+         * rather than rclone. Hyphenated so it can never collide with a real
+         * rclone backend name (those are bare lowercase words like "smb").
+         */
+        const val BACKEND_LOCAL = "local-folder"
+
+        /** Key under [Remote.params] holding the persisted SAF tree URI. */
+        const val PARAM_TREE_URI = "treeUri"
+
+        /** Whether [backend] names a local folder rather than an rclone remote. */
+        fun isLocalFolder(backend: String): Boolean = backend == BACKEND_LOCAL
         private const val PREFS_NAME = "backup_rclone_remotes"
         private const val SECRETS_PREFS_NAME = "backup_rclone_secrets"
         private const val KEY_REMOTES = "remotes"

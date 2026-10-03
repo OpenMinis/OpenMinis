@@ -354,6 +354,7 @@ create_umbrella_header() {
 
 #include "misc.h"
 #include "debug.h"
+#include "util/verbosetrace.h"
 
 // Kernel
 #include "kernel/init.h"

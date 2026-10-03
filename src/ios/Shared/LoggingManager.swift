@@ -78,8 +78,33 @@ final class LoggingManager: ObservableObject {
         return f
     }()
 
+    /// [T-ios-log-verbose-tier] The recorded detail level.
+    ///
+    /// Lives here rather than only on `AppLogger` because two things have to
+    /// move together: the Swift-side threshold, and the iSH kernel's C traces,
+    /// which write to stderr and are captured into the same file by the dup2
+    /// in `startCapture()`. A level switch that moved only one of them would
+    /// leave the biggest single contributor (183 MB/day of per-entry readdir
+    /// traces) untouched.
+    @Published var level: AppLogger.Level {
+        didSet {
+            AppLogger.level = level
+            Self.applyKernelVerbose(level)
+        }
+    }
+
+    /// Mirror the level into the iSH kernel's trace gate.
+    private static func applyKernelVerbose(_ level: AppLogger.Level) {
+        ish_set_verbose_trace(level <= .verbose)
+    }
+
     private init() {
         isEnabled = UserDefaults.standard.bool(forKey: "loggingEnabled")
+        level = AppLogger.level
+        // The kernel flag defaults to false, so it only needs pushing when the
+        // stored level is verbose — but set it unconditionally so the two can
+        // never drift after a restart.
+        Self.applyKernelVerbose(AppLogger.level)
     }
 
     /// Called at app launch to restore capture if previously enabled.

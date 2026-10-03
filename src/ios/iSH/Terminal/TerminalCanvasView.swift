@@ -146,9 +146,61 @@ final class TerminalTextView: UITextView {
 // MARK: - Glyph Advance Cache Key
 
 /// Key for caching measured glyph advances, keyed by character + font identity.
+///
+/// [T-terminal-glyph-cache-hash] Neither field is a String, deliberately.
+///
+/// This key used to carry `font.fontName`, and hashing it trapped inside the
+/// Swift runtime — `_StringGutsSlice._normalizedHash` →
+/// `_StringGuts.withFastUTF8` → `_fatalErrorMessage`, five identical reports
+/// on 1.14(12), all on iOS 27.0 beta (24A5430a). `withFastUTF8` fails that way
+/// when the string is not natively stored, which is what a lazily-bridged
+/// NSString from UIKit looks like. The character alone is a `Character`, whose
+/// hash goes through the same normalization path.
+///
+/// `ObjectIdentifier` sidesteps the font half: the four fonts are stored
+/// properties held for the view's lifetime (regular / bold / italic /
+/// boldItalic), so their identity is stable and unique for exactly as long as
+/// the cache lives.
+///
+/// [T-terminal-glyph-key-no-character] The character half took one more round.
+/// That first fix replaced `Character` with `character.unicodeScalars.map(\.value)`,
+/// which still reads String storage — and 1.14(16) crashed in exactly that
+/// read, on iOS 26.6:
+///
+///   String.UnicodeScalarView.distance(from:to:)
+///   → Collection.count.getter
+///   → Collection.map
+///   → GlyphAdvanceKey.init(character:font:)
+///
+/// with x0 = 0 and `esr 0x56000080`. Despite the SIGSEGV label that ESR
+/// decodes to EC 0x15 — an SVC, i.e. the Swift runtime trapping on purpose,
+/// the same *class* of failure as the EXC_BREAKPOINT before it, not a wild
+/// pointer. `map` asks the scalar view for its `count` to size the result
+/// buffer, and counting walks the string's storage; the earlier report
+/// trapped hashing that storage, this one trapped measuring it.
+///
+/// So the key no longer touches a `Character` at all. The grid already knows
+/// each cell's scalars — the ANSI parser decoded them from UTF-8 bytes on the
+/// way in — so `TerminalCell` carries them as plain integers and the key just
+/// copies the value across. Nothing here reads String storage, allocates, or
+/// normalizes.
+///
+/// Two characters that normalize alike occupy separate entries; each measures
+/// to the same advance, so the only cost is a duplicate row.
 private struct GlyphAdvanceKey: Hashable {
-    let character: Character
-    let fontName: String  // Use font name+size as identity
+    /// The cell's scalars, inline for the single-scalar case that is almost
+    /// every cell (ASCII, CJK, and any unaccented glyph). `rest` stays empty
+    /// unless the cell holds a combining sequence, so the common path does no
+    /// heap allocation at all.
+    let first: UInt32
+    let rest: [UInt32]
+    let font: ObjectIdentifier
+
+    init(glyph: TerminalCell.Glyph, font: UIFont) {
+        self.first = glyph.first
+        self.rest = glyph.rest
+        self.font = ObjectIdentifier(font)
+    }
 }
 
 // MARK: - Container View (owns UIScrollView + UITextView + cursor overlay)
@@ -878,7 +930,7 @@ final class TerminalScrollContainerView: UIView {
                 // Snap glyph advance to the grid so cursor and text stay aligned.
                 // kern = (expectedCellWidth - actualGlyphAdvance)
                 let expectedAdvance = CGFloat(cell.width) * metrics.cellWidth
-                let actualAdvance = glyphAdvance(for: cell.character, font: font)
+                let actualAdvance = glyphAdvance(for: cell.character, glyph: cell.glyph, font: font)
                 let kern = expectedAdvance - actualAdvance
                 if abs(kern) > 0.01 {
                     attrs[.kern] = kern
@@ -908,8 +960,9 @@ final class TerminalScrollContainerView: UIView {
     /// Measure the actual rendering advance of a character in the given font.
     /// Uses CoreText to get the true glyph advance (including font substitution
     /// for emoji, which uses Apple Color Emoji instead of Menlo).
-    private func glyphAdvance(for char: Character, font: UIFont) -> CGFloat {
-        let key = GlyphAdvanceKey(character: char, fontName: font.fontName)
+    private func glyphAdvance(for char: Character, glyph: TerminalCell.Glyph,
+                              font: UIFont) -> CGFloat {
+        let key = GlyphAdvanceKey(glyph: glyph, font: font)
         if let cached = glyphAdvanceCache[key] {
             return cached
         }
@@ -920,9 +973,23 @@ final class TerminalScrollContainerView: UIView {
         let width = CTLineGetTypographicBounds(line, nil, nil, nil)
         let advance = CGFloat(width)
 
+        // [T-terminal-glyph-cache-hash] Bound the cache. It was unbounded, which
+        // was survivable while keys normalized (a terminal shows a limited
+        // alphabet), but the scalar-array key treats two normalization-equal
+        // characters as distinct, so a stream of exotic input can add more rows
+        // than before. Dropping everything past the cap keeps the memoization
+        // for the common alphabet and refills within one redraw; the measure
+        // below is a CoreText call, not something worth risking growth for.
+        if glyphAdvanceCache.count >= Self.glyphAdvanceCacheMax {
+            glyphAdvanceCache.removeAll(keepingCapacity: true)
+        }
         glyphAdvanceCache[key] = advance
         return advance
     }
+
+    /// Enough for every character a terminal realistically repeats, across the
+    /// four fonts, with room to spare.
+    private static let glyphAdvanceCacheMax = 4096
 }
 
 // MARK: - UITextViewDelegate (URL tap interception)

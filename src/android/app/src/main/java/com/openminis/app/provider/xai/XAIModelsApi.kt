@@ -10,8 +10,8 @@ import com.openminis.app.provider.ModelsDevApi
  *
  * [T-provider-dynamic-catalog-reconcile] This is no longer the definitive
  * list. It used to be — `ProviderRepository.refreshModels` returned it
- * unconditionally for xAI, on the reasoning (from
- * /tmp/grok-oauth-design.md §6) that pinning a known-good set keeps Add
+ * unconditionally for xAI, on the reasoning
+ * that pinning a known-good set keeps Add
  * Provider off the network path. Seeding does that; pinning REFRESH too
  * meant a model released after the build could never appear, however many
  * times the user pressed Refresh (GH#265: grok-4.6 invisible).

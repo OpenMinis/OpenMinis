@@ -8,7 +8,7 @@ import org.junit.Test
  * [T-android-minis-url-double-encoding] Decode candidates for a `minis://`
  * path.
  *
- * The field report: `minis://workspace/厚升凭证拆分/厚博-2026-03-935.pdf` was
+ * The field report: `minis://workspace/示例凭证目录/示例-2026-03-001.pdf` was
  * unclickable in chat — tapping did nothing at all — while the same file under
  * an ASCII directory opened fine. A tap that resolves to no file falls through
  * to `ChatLinkAction.Web`, and a web preview of a `minis://` URL renders
@@ -21,29 +21,29 @@ class MinisPathCandidatesTest {
 
     private fun candidates(path: String) = ChatLinkResolver.minisPathCandidates(path)
 
-    private val cjkDir = "%E5%8E%9A%E5%8D%87%E5%87%AD%E8%AF%81%E6%8B%86%E5%88%86"
-    private val cjkFile = "%E5%8E%9A%E5%8D%9A-2026-03-935.pdf"
+    private val cjkDir = "%E7%A4%BA%E4%BE%8B%E5%87%AD%E8%AF%81%E7%9B%AE%E5%BD%95"
+    private val cjkFile = "%E7%A4%BA%E4%BE%8B-2026-03-001.pdf"
 
     // ─── The correct, single-encoded case ────────────────────────────────
 
     @Test
     fun `single-encoded CJK path decodes in one pass`() {
         val out = candidates("workspace/$cjkDir/$cjkFile")
-        assertEquals("workspace/厚升凭证拆分/厚博-2026-03-935.pdf", out.first())
+        assertEquals("workspace/示例凭证目录/示例-2026-03-001.pdf", out.first())
     }
 
     @Test
     fun `a fully-decoded path is returned unchanged`() {
         // The agent sometimes emits raw UTF-8 with no encoding at all.
-        val raw = "workspace/厚升凭证拆分/厚博-2026-03-935.pdf"
+        val raw = "workspace/示例凭证目录/示例-2026-03-001.pdf"
         assertEquals(raw, candidates(raw).first())
     }
 
     @Test
     fun `an ASCII path yields exactly one candidate`() {
         // Nothing to decode twice — no speculative second candidate.
-        val out = candidates("workspace/houbo-vouchers/report.pdf")
-        assertEquals(listOf("workspace/houbo-vouchers/report.pdf"), out)
+        val out = candidates("workspace/sample-vouchers/report.pdf")
+        assertEquals(listOf("workspace/sample-vouchers/report.pdf"), out)
     }
 
     // ─── The regression: double-encoded input ────────────────────────────
@@ -57,7 +57,7 @@ class MinisPathCandidatesTest {
         val out = candidates(doubled)
         assertTrue("must offer a second candidate", out.size >= 2)
         assertEquals(
-            "workspace/厚升凭证拆分/厚博-2026-03-935.pdf",
+            "workspace/示例凭证目录/示例-2026-03-001.pdf",
             out[1],
         )
     }
@@ -67,11 +67,11 @@ class MinisPathCandidatesTest {
         // The user's "working" case was only working by luck — an English
         // directory has nothing to encode, so fewer segments could be
         // corrupted. A CJK FILENAME under it is still vulnerable.
-        val doubled = "workspace/houbo-vouchers/" +
-            "%E5%8E%9A%E5%8D%9A-2026-03-931.pdf".replace("%", "%25")
+        val doubled = "workspace/sample-vouchers/" +
+            "%E7%A4%BA%E4%BE%8B-2026-03-002.pdf".replace("%", "%25")
         val out = candidates(doubled)
         assertTrue(out.size >= 2)
-        assertEquals("workspace/houbo-vouchers/厚博-2026-03-931.pdf", out[1])
+        assertEquals("workspace/sample-vouchers/示例-2026-03-002.pdf", out[1])
     }
 
     @Test

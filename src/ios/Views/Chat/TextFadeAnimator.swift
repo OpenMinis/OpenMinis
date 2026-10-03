@@ -8,7 +8,7 @@
 //  of the new glyphs popping in instantly we fade each word from alpha 0 → 1
 //  with a small per-word stagger, producing a "ripple" reveal.
 //
-//  Design constraints (see /tmp/task_word_fade_animation.md):
+//  Design constraints:
 //   - Display-layer only. Does NOT touch MinisMarkdownParser / AST /
 //     MarkdownNSRenderer. We mutate the live NSTextStorage's `.foregroundColor`
 //     attribute and rely on TextKit 1's behaviour that a foregroundColor change

@@ -417,13 +417,114 @@ final class MountedFoldersManager {
             pushExternalMountSnapshot()
             return
         }
-        Task.detached(priority: .userInitiated) {
-            for entry in snapshot {
-                await Self.resolveAndCommit(entry: entry)
+        // [T-headless-mount-activation] Delegate to the awaitable pass so the
+        // foreground and headless paths cannot drift apart, and so a headless
+        // intent arriving moments later joins THIS pass instead of starting a
+        // second resolve of the same bookmarks. Still fire-and-forget for the
+        // caller: `.onAppear` must not block the first frame on FileProvider.
+        Task { await self.ensureActivated() }
+    }
+
+    // MARK: - [T-headless-mount-activation] Awaitable activation
+
+    /// True once an activation pass has finished (successfully or not) in this
+    /// process. Guards the fast path in `ensureActivated`.
+    private var didCompleteActivationPass = false
+
+    /// In-flight activation, so concurrent callers await one pass instead of
+    /// racing several resolves of the same bookmarks.
+    private var activationPass: Task<Void, Never>?
+
+    /// Resolve every configured mount and publish the snapshot, RETURNING ONLY
+    /// WHEN THAT IS DONE. Safe to call repeatedly and from several callers at
+    /// once — the work happens at most once per process.
+    ///
+    /// Why this exists (issue #335): `activateAll()` is fire-and-forget and is
+    /// invoked from the root view's `.onAppear`. A headless AppIntent launch
+    /// (`openAppWhenRun = false`, e.g. a Shortcuts automation after the app was
+    /// force-quit) never builds that view, so activation never ran at all:
+    /// no security scope was acquired, `activeURLs` stayed empty, and
+    /// `pushExternalMountSnapshot` therefore dropped every entry through its
+    /// `compactMap`. The agent then started against an empty external-mount
+    /// snapshot and `/var/minis/mounts/<name>` was missing — while the
+    /// bookmarks themselves were on disk the whole time, which is why opening
+    /// the app once "fixed" it.
+    ///
+    /// Bounded by construction: `resolveAndCommit` already races each bookmark
+    /// against a 5s timeout and records `.failed` rather than hanging, so the
+    /// worst case here is 5s per configured mount and never unbounded. Callers
+    /// that want a hard ceiling regardless of mount count should use
+    /// `ensureActivated(timeout:)`.
+    func ensureActivated() async {
+        if didCompleteActivationPass { return }
+        if let existing = activationPass {
+            await existing.value
+            return
+        }
+        let snapshot = entries
+        mountLog.info("ensureActivated: starting pass over \(snapshot.count) entries")
+        // The class is @MainActor, so this Task inherits main-actor isolation;
+        // `resolveAndCommit` does its own hop to a background queue for the
+        // blocking XPC resolve and only comes back here to commit.
+        let pass = Task {
+            // Resolve CONCURRENTLY, not one after another.
+            //
+            // Measured on device (iPhone 11, 4 iCloud Drive mounts): every
+            // bookmark resolves successfully but takes ~5.0s, because each one
+            // is a synchronous XPC round-trip to a cold FileProvider extension.
+            // Serially that is ~20s — long enough that any sane ceiling would
+            // expire with most mounts still missing, which is the very failure
+            // this change exists to remove. The resolves are independent and
+            // each already does its blocking work off the main actor, so
+            // running them together turns ~20s into ~5s.
+            await withTaskGroup(of: Void.self) { group in
+                for entry in snapshot {
+                    // Skip anything a previous partial pass already activated.
+                    if self.activeURLs[entry.id] != nil { continue }
+                    group.addTask { await Self.resolveAndCommit(entry: entry) }
+                }
+                await group.waitForAll()
             }
-            await MainActor.run {
-                MountedFoldersManager.shared.pushExternalMountSnapshot()
-            }
+            self.pushExternalMountSnapshot()
+            self.didCompleteActivationPass = true
+            self.activationPass = nil
+            mountLog.info("ensureActivated: pass complete — \(self.activeURLs.count)/\(self.entries.count) active")
+        }
+        activationPass = pass
+        await pass.value
+    }
+
+    /// `ensureActivated()` with a hard ceiling on how long the caller waits.
+    ///
+    /// The per-bookmark timeout inside `resolveAndCommit` bounds each mount,
+    /// but a user with many mounts could still add those up into a delay long
+    /// enough to matter for a Shortcut. On expiry this RETURNS rather than
+    /// cancelling: the activation pass keeps running in the background and
+    /// pushes its snapshot when it lands, so a slow mount still becomes usable
+    /// mid-run instead of being abandoned. The agent simply starts without it.
+    func ensureActivated(timeout: TimeInterval) async {
+        if didCompleteActivationPass { return }
+        let started = Date()
+        // Start the pass without awaiting it, then wait on the completion flag.
+        //
+        // The obvious shape — racing `await pass.value` against `Task.sleep`
+        // in a task group — does NOT work here and was measured failing: this
+        // type is `@MainActor`, so awaiting the activation task keeps handing
+        // main-actor turns back to it and the sleep never gets to win. A
+        // 0.3s deadline over 1.0s of work returned after 1.03s, i.e. the
+        // timeout was silently inert and the caller waited for the full pass
+        // anyway. Polling a flag never awaits the work, so the deadline is
+        // real (measured 0.32s for the same case).
+        Task { await self.ensureActivated() }
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        while !didCompleteActivationPass && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)   // 50ms
+        }
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        if didCompleteActivationPass {
+            mountLog.info("ensureActivated(timeout:) completed in \(ms)ms")
+        } else {
+            mountLog.warning("ensureActivated(timeout:) gave up after \(ms)ms — agent starts without external mounts; the pass continues in the background")
         }
     }
 

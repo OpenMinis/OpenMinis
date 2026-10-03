@@ -57,6 +57,20 @@ fun KimiDeviceLoginDialog(
     userCode: String,
     verificationUrl: String,
     onCancel: () -> Unit,
+    /**
+     * [T-copilot-provider] Title / instructions are parameterised so the same
+     * dialog serves every RFC 8628 provider — the mechanics (show a code,
+     * open a URL, poll behind the dialog) are identical, and forking it would
+     * mean two copies of the copy-to-clipboard and Custom Tab handling.
+     */
+    title: String = stringResource(R.string.kimi_login_title),
+    instructions: String = stringResource(R.string.kimi_login_instructions),
+    /**
+     * Optional warning shown above the code, in the error colour. Used by the
+     * unofficial Copilot integration so the risk is on screen at the moment
+     * of sign-in — not only on the settings row that led here.
+     */
+    riskNotice: String? = null,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -64,13 +78,21 @@ fun KimiDeviceLoginDialog(
 
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(stringResource(R.string.kimi_login_title)) },
+        title = { Text(title) },
         text = {
             Column {
                 Text(
-                    stringResource(R.string.kimi_login_instructions),
+                    instructions,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                riskNotice?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 Spacer(Modifier.height(16.dp))
                 // The user code — monospace, tap to copy.
                 Surface(

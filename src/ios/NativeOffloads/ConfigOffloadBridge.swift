@@ -94,6 +94,23 @@ private let logger = AppLogger(category: "ConfigOffload")
         return out
     }
 
+    /// [T-config-path-dotted-id] OpenMinis#390. For a collection topic, how to
+    /// write a child path — surfaced by `topic-help` next to the field list,
+    /// whose example paths now carry raw ids. nil for flat topics.
+    @objc public static func pathNoteForTopic(_ topic: String) -> String? {
+        let sem = DispatchSemaphore(value: 0)
+        var note: String?
+        Task.detached { @MainActor in
+            ConfigRegistry.shared.registerBuiltinsIfNeeded()
+            if ConfigRegistry.shared.collection(basePath: topic) != nil {
+                note = "Child paths are \(topic).<entry_id>.<field>. Use entry_id exactly as `minis-config get \(topic)` prints it — dots and slashes need no escaping."
+            }
+            sem.signal()
+        }
+        sem.wait()
+        return note
+    }
+
     // MARK: - Read
 
     /// Read a single field's current value. Returns
@@ -269,7 +286,8 @@ private let logger = AppLogger(category: "ConfigOffload")
             return [
                 "ok": false,
                 "error": "unknown_path",
-                "reason": "No registered field at '\(path)'.",
+                // [T-config-path-dotted-id] Says which part was wrong.
+                "reason": ConfigRegistry.shared.explainUnknownPath(path),
             ]
         }
         if field.access == .hidden {
@@ -446,7 +464,11 @@ private let logger = AppLogger(category: "ConfigOffload")
                             "reason": "'\(rawPath)' expects a JSON string child id (e.g. \"<uuid>\").",
                         ]
                     }
-                    guard collection.childIds().contains(childId) else {
+                    // [T-config-path-dotted-id] A child may also be named in a
+                    // form `childIds()` does not list verbatim (the pre-#390
+                    // `~d`-escaped model id); `fields(for:)` accepts both.
+                    guard collection.childIds().contains(childId)
+                            || !collection.fields(for: childId).isEmpty else {
                         return [
                             "ok": false, "error": "not_found",
                             "reason": "No '\(resolvePath)' child with id '\(childId)'.",
@@ -506,7 +528,8 @@ private let logger = AppLogger(category: "ConfigOffload")
             guard let field = ConfigRegistry.shared.resolveField(path: resolvePath) else {
                 return [
                     "ok": false, "error": "unknown_path",
-                    "reason": "No registered field at '\(rawPath)'.",
+                    // [T-config-path-dotted-id] Says which part was wrong.
+                    "reason": ConfigRegistry.shared.explainUnknownPath(resolvePath),
                 ]
             }
             // Feature-unavailable gate BEFORE access/validation and before the
@@ -832,12 +855,24 @@ private let logger = AppLogger(category: "ConfigOffload")
             if applied.isEmpty {
                 if !writeErrors.isEmpty {
                     logger.warning("write_failed resolved=\(resolved.count) approvedRows=\(approvedRows.count) approvedRowsOn=\(approvedRows.filter { $0.isApproved }.count) errors=\(writeErrors.count) caption=\(caption ?? "")")
+                    let reason = writeErrors.map { "\($0["path"] ?? "?"): \($0["reason"] ?? "unknown error")" }.joined(separator: "; ")
+                    // [T-subagent-config-honesty] A DELIBERATE refusal lands in
+                    // this same branch — renaming or deleting the built-in sub
+                    // agent, for instance. "applying it failed" describes a
+                    // malfunction, so a working rule was reported as an internal
+                    // error. When every entry is a permission_denied, say it was
+                    // refused and carry the reason, which already explains what
+                    // to do instead. Mixed or other errors keep the original
+                    // wording: those really may be failures.
+                    let allDenied = writeErrors.allSatisfy { $0["error"] == "permission_denied" }
                     return [
                         "ok": false,
                         "error": "write_failed",
-                        "reason": writeErrors.map { "\($0["path"] ?? "?"): \($0["reason"] ?? "unknown error")" }.joined(separator: "; "),
+                        "reason": reason,
                         "write_errors": writeErrors,
-                        "user_message": "I confirmed the change, but applying it failed. No settings were updated.",
+                        "user_message": allDenied
+                            ? "That change isn't allowed: \(reason). No settings were updated."
+                            : "I confirmed the change, but applying it failed. No settings were updated.",
                     ]
                 }
                 if approvedRows.count != resolved.count {

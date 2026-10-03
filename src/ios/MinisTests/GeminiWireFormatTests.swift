@@ -41,6 +41,8 @@ final class GeminiWireFormatTests: XCTestCase {
     }
 
     func testTextPart_realText_passesThrough() {
+        // Arbitrary payload passthrough (this shape is no longer produced —
+        // see [T-gemini-unsigned-narration] — but textPart must stay verbatim).
         XCTAssertEqual(GeminiWireFormat.textPart("[Called foo with: {}]")["text"] as? String,
                        "[Called foo with: {}]")
     }

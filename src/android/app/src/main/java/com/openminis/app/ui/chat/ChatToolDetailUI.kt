@@ -95,6 +95,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
@@ -271,6 +272,7 @@ import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
+import com.openminis.app.ui.DisplayBitmapLimits
 import com.openminis.app.ui.components.MinisTextButton
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -281,6 +283,9 @@ internal fun ToolDetailSheet(
     onDismiss: () -> Unit,
     onOpenTerminalWithCommand: (String) -> Unit = {},
     onOpenBrowserForUrl: (String) -> Unit = {},
+    /** [T-agent-detail-buttons] delegate_task block: the bar's chat-bubble
+     *  button opens the child's full-screen transcript. */
+    onOpenAgentTranscript: ((childSessionId: String) -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var currentIdx by remember { mutableStateOf(initialIndex.coerceIn(0, toolBlocks.lastIndex.coerceAtLeast(0))) }
@@ -390,6 +395,8 @@ internal fun ToolDetailSheet(
                     }
                 }
                 val hasBrowserUrl = isBrowserTool && browserActionUrl.isNotEmpty()
+                val isAgentTool = com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(block.toolName)
+                val agentChildId = if (isAgentTool) com.openminis.app.agent.jobs.HelperRunner.childSessionIdFrom(block.content) else null
                 Box(
                     modifier = Modifier
                         .size(32.dp)
@@ -397,7 +404,11 @@ internal fun ToolDetailSheet(
                         .border(0.5.dp, ChatColors.inputIconBorder, CircleShape)
                         .clip(CircleShape)
                         .clickable {
-                            if (isShellTool) {
+                            if (isAgentTool) {
+                                // [T-agent-detail-buttons] The single entry to the
+                                // live / historical agent conversation.
+                                if (agentChildId != null) onOpenAgentTranscript?.invoke(agentChildId)
+                            } else if (isShellTool) {
                                 val command = extractShellCommand(toolArgsForAction, block)
                                 if (command.isNotBlank() && command != "Shell command") {
                                     AppLogger.info(
@@ -431,11 +442,13 @@ internal fun ToolDetailSheet(
                     Icon(
                         when {
                             copyDone -> Icons.Default.Check
+                            isAgentTool -> Icons.AutoMirrored.Outlined.Chat
                             isShellTool -> Icons.Default.Terminal
                             isBrowserTool -> Icons.Outlined.Public
                             else -> Icons.Default.ContentCopy
                         },
                         contentDescription = when {
+                            isAgentTool -> "Open agent conversation"
                             isShellTool -> "Open in terminal"
                             isBrowserTool -> "Open in session browser"
                             else -> "Copy"
@@ -467,6 +480,9 @@ internal fun ToolDetailSheet(
                     .fillMaxWidth(),
             ) {
                 when (block.toolName) {
+                    // ── Agent: stacked cards (header · current tool · screenshot · result) ──
+                    com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME -> HelperDetailContent(block)
+
                     // ── Shell: black rounded terminal card (mirrors iOS ToolLiveSheet) ──
                     "shell_execute" -> {
                         val command = extractShellCommand(toolArgsObj, block)
@@ -857,16 +873,14 @@ internal fun ToolDetailSheet(
                         ) {
                             value = withContext(Dispatchers.IO) {
                                 block.imageFilePath?.let { path ->
-                                    try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
+                                    DisplayBitmapLimits.decodeFileBounded(path)
                                 } ?: run {
                                     val blockIdx = toolBlocks.indexOfFirst { it.id == block.id }
                                     if (blockIdx <= 0) null
                                     else (blockIdx - 1 downTo 0).firstNotNullOfOrNull { i ->
                                         val prev = toolBlocks[i]
                                         if (prev.toolName == "browser_use" && prev.imageFilePath != null) {
-                                            try {
-                                                android.graphics.BitmapFactory.decodeFile(prev.imageFilePath)
-                                            } catch (_: Exception) { null }
+                                            DisplayBitmapLimits.decodeFileBounded(prev.imageFilePath)
                                         } else null
                                     }
                                 }
@@ -1051,7 +1065,7 @@ internal fun ToolDetailSheet(
                             value = if (imgPath == null) null else withContext(Dispatchers.IO) {
                                 val f = File(imgPath)
                                 if (!f.exists()) null
-                                else try { BitmapFactory.decodeFile(f.absolutePath) } catch (_: Throwable) { null }
+                                else DisplayBitmapLimits.decodeFileBounded(f.absolutePath)
                             }
                         }
                         Column(
@@ -1211,14 +1225,21 @@ internal fun ToolDetailSheet(
                     // line right beneath it. This is where the user goes
                     // to inspect a single step, so the timestamp lives
                     // here instead of on every pill in the message list.
-                    if ((block.durationMs > 0 && !isLive) || block.startTimeMs > 0L) {
+                    // [T-agent-port-round3] A background delegate_task's tool
+                    // call returns in ~2 s; the run it stands for is measured
+                    // by the payload's elapsed_s. Show that for agent blocks.
+                    val shownDurationMs = if (com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(block.toolName)) {
+                        runCatching { org.json.JSONObject(block.content).optLong("elapsed_s", -1L) }.getOrDefault(-1L)
+                            .takeIf { it >= 0 }?.let { it * 1000L } ?: block.durationMs
+                    } else block.durationMs
+                    if ((shownDurationMs > 0 && !isLive) || block.startTimeMs > 0L) {
                         Column(
                             horizontalAlignment = Alignment.End,
                             verticalArrangement = Arrangement.spacedBy(1.dp),
                         ) {
-                            if (block.durationMs > 0 && !isLive) {
+                            if (shownDurationMs > 0 && !isLive) {
                                 Text(
-                                    text = formatToolDuration(block.durationMs),
+                                    text = formatToolDuration(shownDurationMs),
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = ChatColors.tertiaryText,

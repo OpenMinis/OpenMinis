@@ -89,7 +89,7 @@ actor SessionFileChangeTracker {
         } else if ignored > 0 {
             // Bumped to info + sample so we can diagnose why otherwise
             // valid-looking shell writes never reach the SessionFile pipeline.
-            logger.info("[SessionFileTracker] batch recv: events=\(events.count) all ignored (paths outside session subdirs) sample=\(firstIgnoredPath ?? "?")")
+            logger.verbose("[SessionFileTracker] batch recv: events=\(events.count) all ignored (paths outside session subdirs) sample=\(firstIgnoredPath ?? "?")")
         }
     }
 

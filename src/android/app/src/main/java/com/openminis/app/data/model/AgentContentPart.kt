@@ -19,6 +19,20 @@ sealed class AgentContentPart {
         // functionCall part (required by gemini-3.x or the request 400s). Null
         // for non-Gemini providers and for pre-fix / migrated history.
         val thoughtSignature: String? = null,
+        /**
+         * [T-offload-stub-system-reminder] (GH#374) True when the context
+         * offloader replaced this call's `content` argument with a
+         * pruned-argument notice because the real payload was moved to
+         * `/var/minis/offloads/…`.
+         *
+         * Provenance, not presentation: the notice text is also detectable with
+         * [com.openminis.app.data.ContextOffload.isOffloadPlaceholder], but that
+         * is a string test on a payload the model can imitate, whereas this flag
+         * is set only by the offloader. Defaults to false so every existing
+         * construction site and all history persisted before this change decode
+         * unchanged. Mirrors iOS `isOffloadedArgument`.
+         */
+        val isOffloadedArgument: Boolean = false,
     ) : AgentContentPart()
 
     data class ToolResult(

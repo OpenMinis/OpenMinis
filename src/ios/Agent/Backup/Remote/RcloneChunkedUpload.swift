@@ -22,6 +22,11 @@ private let logger = AppLogger(category: "Rclone")
 /// the user typically watching the progress screen — and a failure is
 /// recorded per-destination in BackupHistory, so it is visible, not silent.
 ///
+/// Since [T-backup-upload-cancellable] the transfer also runs as an async
+/// rclone job, so "interrupted" now includes a Stop the user can actually
+/// press mid-flight; the `.partial` scratch object is cleaned up on that path
+/// too.
+///
 /// ## What "success" means
 ///
 /// A transfer only counts once the remote object's SIZE matches the local
@@ -35,17 +40,6 @@ private let logger = AppLogger(category: "Rclone")
 /// only after the size check passes — the same rule as the local
 /// `.partial` rename in BackupDelivery (review I7): a half-uploaded file
 /// must never be listable under the real package name.
-/// Minimal thread-safe box for the progress-poll stop flag.
-private final class Atomic<T> {
-    private let lock = NSLock()
-    private var _v: T
-    init(_ v: T) { _v = v }
-    var value: T {
-        get { lock.lock(); defer { lock.unlock() }; return _v }
-        set { lock.lock(); _v = newValue; lock.unlock() }
-    }
-}
-
 enum RcloneTransfer {
 
     struct Progress {
@@ -90,8 +84,12 @@ enum RcloneTransfer {
     // MARK: - Upload
 
     /// Upload `packageURL` into `remote` as a single object, verifying the
-    /// uploaded size before the final rename. Retries the transfer once —
-    /// a transient network drop shouldn't fail the whole backup run.
+    /// uploaded size before the final rename. Retries the transfer once, after
+    /// a short backoff — a transient network drop shouldn't fail the whole
+    /// backup run.
+    ///
+    /// `isCancelled` is honoured DURING the transfer, not only between
+    /// attempts: see `runUploadJob` [T-backup-upload-cancellable].
     static func upload(packageURL: URL,
                        remote: RcloneRemoteStore.Remote,
                        backupId: String = "",
@@ -134,30 +132,27 @@ enum RcloneTransfer {
         var lastError: Error?
         for attempt in 1...2 {
             if isCancelled() { throw TransferError.cancelled }
-            do {
-                // Same reason as download(): copyfile blocks until the whole
-                // package has been sent, so live bytes come from core/stats.
-                let baseline = (try? RcloneBridge.rpc("core/stats")["bytes"] as? Int64) ?? 0
-                let done = Atomic(false)
-                if progress != nil {
-                    Thread.detachNewThread {
-                        while !done.value {
-                            Thread.sleep(forTimeInterval: 0.5)
-                            guard !done.value else { break }
-                            let now = (try? RcloneBridge.rpc("core/stats")["bytes"] as? Int64) ?? 0
-                            let moved = max(0, (now ?? 0) - (baseline ?? 0))
-                            progress?(Progress(bytesSent: min(moved, size), totalBytes: size))
-                        }
-                    }
+            // [T-backup-upload-retry-backoff] Wait before a SECOND attempt.
+            //
+            // There was no delay at all, so a deterministic failure — the
+            // response-deadline case in RcloneBridge.ioTimeout, where the
+            // server is simply slow — re-sent the whole package immediately and
+            // failed again for the same reason. Measured on a real report:
+            // 105s of waiting and 62MB of traffic for two doomed attempts.
+            //
+            // A pause also gives a genuinely transient fault (a Wi-Fi handover,
+            // a momentary 5xx) time to clear, which is the case retrying is for.
+            if attempt > 1 {
+                let deadline = Date().addingTimeInterval(Self.retryBackoff)
+                while Date() < deadline {
+                    if isCancelled() { throw TransferError.cancelled }
+                    Thread.sleep(forTimeInterval: 0.25)
                 }
-                defer { done.value = true }
-
-                _ = try RcloneBridge.rpc("operations/copyfile", [
-                    "srcFs": packageURL.deletingLastPathComponent().path,
-                    "srcRemote": name,
-                    "dstFs": fs,
-                    "dstRemote": partial,
-                ])
+            }
+            do {
+                try runUploadJob(srcDir: packageURL.deletingLastPathComponent().path,
+                                 srcName: name, fs: fs, partial: partial,
+                                 size: size, isCancelled: isCancelled, progress: progress)
                 // The size check IS the success condition, not decoration.
                 let uploaded = try remoteSize(fs: fs, remote: partial)
                 guard uploaded == size else {
@@ -177,12 +172,123 @@ enum RcloneTransfer {
                 // permanent failure shouldn't strand junk on the server.
                 _ = try? RcloneBridge.rpc("operations/deletefile",
                                           ["fs": fs, "remote": partial])
+                // Cancellation is the user's decision, not a transient fault:
+                // surface it immediately instead of burning the second attempt.
+                if case TransferError.cancelled = error { throw error }
                 logger.warning("[Rclone] upload attempt \(attempt) to '\(remote.name)' failed: \(error.localizedDescription)")
             }
         }
         throw TransferError.remoteRejected((lastError as? TransferError)?.errorDescription
                                            ?? lastError?.localizedDescription
                                            ?? "upload failed")
+    }
+
+    /// How long to wait before re-sending a failed package.
+    /// [T-backup-upload-retry-backoff]
+    private static let retryBackoff: TimeInterval = 3
+
+    /// Run ONE upload as an async rclone job, reporting progress and honouring
+    /// cancellation. Throws on failure; returns once the bytes have landed in
+    /// `partial` (the caller verifies the size and does the rename).
+    ///
+    /// [T-backup-upload-cancellable] This used to be a single blocking
+    /// `operations/copyfile`, which made Stop a decoration: `RcloneBridge.rpc`
+    /// is a synchronous call into Go, so a blocking copy owns its thread until
+    /// the whole file has landed and Swift cannot interrupt it. The only
+    /// `isCancelled()` check sat BETWEEN the two attempts, so a user pressing
+    /// Stop waited out the full response deadline — up to 300s per attempt now
+    /// that `ioTimeout` is the rclone default — before anything happened.
+    ///
+    /// The abort therefore has to be asked of rclone: `_async: true` returns a
+    /// jobid immediately and `job/stop` stops precisely this transfer. This is
+    /// deliberately the same shape `download()` has used since
+    /// [T-restore-download-cancel]; the two paths were asymmetric for no
+    /// reason other than that nobody had needed upload cancellation yet.
+    ///
+    /// `_group` is set for the same reason download sets it: `core/stats`
+    /// without a group reads the PROCESS-WIDE byte counter, so a concurrent
+    /// transfer (another destination, a restore) corrupted the progress bar.
+    private static func runUploadJob(srcDir: String,
+                                     srcName: String,
+                                     fs: String,
+                                     partial: String,
+                                     size: Int64,
+                                     isCancelled: () -> Bool,
+                                     progress: ((Progress) -> Void)?) throws {
+        let group = "backup-\(UUID().uuidString)"
+        let started = try RcloneBridge.rpc("operations/copyfile", [
+            "srcFs": srcDir, "srcRemote": srcName,
+            "dstFs": fs, "dstRemote": partial,
+            "_async": true,
+            "_group": group,
+        ])
+        guard let jobid = (started["jobid"] as? NSNumber)?.intValue else {
+            // No jobid means the async request itself was rejected. Fall back
+            // rather than silently doing nothing — better an upload that cannot
+            // be cancelled than no upload at all. Mirrors download()'s fallback.
+            logger.error("[Rclone] upload copyfile did not return a jobid; falling back to blocking copy")
+            _ = try RcloneBridge.rpc("operations/copyfile", [
+                "srcFs": srcDir, "srcRemote": srcName,
+                "dstFs": fs, "dstRemote": partial,
+            ])
+            return
+        }
+
+        var cancelled = false
+        var lastBytes: Int64 = 0
+        var lastTick = Date()
+        var smoothedRate: Double?
+        while true {
+            // 0.25s rather than 0.5s so Stop feels immediate — the poll
+            // interval is the floor on how long the button appears to hang.
+            Thread.sleep(forTimeInterval: 0.25)
+
+            if !cancelled && isCancelled() {
+                cancelled = true
+                // Stop THIS job by id, asked once. The loop then waits for the
+                // job to actually report finished, so the scratch object is not
+                // deleted out from under a transfer that is still writing.
+                _ = try? RcloneBridge.rpc("job/stop", ["jobid": jobid])
+            }
+
+            let status = (try? RcloneBridge.rpc("job/status", ["jobid": jobid])) ?? [:]
+            let finished = (status["finished"] as? NSNumber)?.boolValue ?? false
+
+            if !finished {
+                // Per-group stats start at zero for this job, so no baseline
+                // subtraction is needed the way the process-wide counter did.
+                let stats = (try? RcloneBridge.rpc("core/stats", ["group": group])) ?? [:]
+                let moved = max(0, (stats["bytes"] as? NSNumber)?.int64Value ?? 0)
+
+                // Prefer rclone's own speed figure when it reports one; it
+                // already averages over the transfer. Otherwise derive it.
+                let tick = Date()
+                let elapsed = tick.timeIntervalSince(lastTick)
+                if let reported = (stats["speed"] as? NSNumber)?.doubleValue, reported > 0 {
+                    smoothedRate = reported
+                } else if elapsed > 0.05 {
+                    let instant = Double(moved - lastBytes) / elapsed
+                    if instant >= 0 {
+                        smoothedRate = smoothedRate.map { $0 * 0.7 + instant * 0.3 } ?? instant
+                    }
+                }
+                if elapsed > 0.05 { lastBytes = moved; lastTick = tick }
+
+                // Never report more than the file — stats can include other
+                // bookkeeping, and a bar that overshoots reads as a bug.
+                progress?(Progress(bytesSent: min(moved, size), totalBytes: size,
+                                   bytesPerSecond: smoothedRate))
+                continue
+            }
+
+            if cancelled { throw TransferError.cancelled }
+            let success = (status["success"] as? NSNumber)?.boolValue ?? false
+            if !success {
+                let msg = (status["error"] as? String) ?? "transfer failed"
+                throw RcloneBridge.RPCError(status: -1, payload: msg)
+            }
+            return
+        }
     }
 
     /// Delete `.partial` scratch objects left by interrupted uploads.

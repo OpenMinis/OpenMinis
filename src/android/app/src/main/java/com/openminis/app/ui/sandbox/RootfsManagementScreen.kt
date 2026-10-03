@@ -177,6 +177,13 @@ fun RootfsManagementScreen(
                 }
             }
 
+            // --- Container Network section ---
+            // [T-container-network-dns] (OpenMinis#396) Shown before install too:
+            // the install itself writes resolv.conf through the same setting.
+            SettingsSection(title = stringResource(R.string.rootfs_network_section)) {
+                ContainerNetworkSection()
+            }
+
             // --- Actions section ---
             SettingsSection(title = stringResource(R.string.rootfs_actions_section)) {
                 if (!state.isInstalled) {

@@ -15,6 +15,9 @@ struct InlineVoiceInputView: View {
     @Binding var inputText: String
     var onPasteImage: ((UIImage) -> Void)?
     var onPasteFile: ((URL) -> Void)?
+    /// [T-paste-placeholder] Long pasted text → vm stash, returns the
+    /// `[pasted#N]` literal to append to the transcript. See ChatInputBar.
+    var onPasteLongText: ((String) -> String?)?
     /// [voice-correction §6] Supplies the current conversation's recent turns as the
     /// third correction signal.
     ///
@@ -24,6 +27,16 @@ struct InlineVoiceInputView: View {
     /// "张山说食堂今天关门" comes back unchanged; with context, "石塘"→"食堂" is caught
     /// immediately. Context is what makes the feature work on day one.
     var conversationContext: (() -> ConversationContext)?
+    /// [T-ios-context-usage-hint] The composer's context-window usage request
+    /// (AIChatViewModel.contextUsageHint), handed down from AIChatView. The
+    /// voice panel shows it in its status line for a few seconds; see
+    /// `voiceUsageHint` for the display rules.
+    var contextUsageHint: ContextUsageHint? = nil
+    /// The hint currently on the status line, or nil for the normal label.
+    @State private var voiceUsageHint: ContextUsageHint? = nil
+    /// Last hint generation this panel acted on, so re-renders carrying the
+    /// same request are no-ops.
+    @State private var voiceUsageHintGeneration = 0
     /// Tear down voice mode (X button / done).
 
     @FocusState private var editFocused: Bool
@@ -247,23 +260,24 @@ struct InlineVoiceInputView: View {
                     }
                     if UIPasteboard.general.hasStrings {
                         Button {
-                            guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
-                            let asciiLetters = text.unicodeScalars.filter { ($0.value >= 0x41 && $0.value <= 0x5A) || ($0.value >= 0x61 && $0.value <= 0x7A) }.count
-                            let isEnglishDominant = asciiLetters > text.count / 2
-                            let isLong: Bool
-                            if isEnglishDominant {
-                                let wordCount = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.count
-                                isLong = wordCount > 1000
-                            } else {
-                                isLong = text.count > 1200
-                            }
-                            if isLong, let onPasteFile {
-                                let tmp = FileManager.default.temporaryDirectory
-                                    .appendingPathComponent("pasted_\(UUID().uuidString.prefix(8)).txt")
-                                if let data = text.data(using: .utf8) {
-                                    try? data.write(to: tmp)
-                                    onPasteFile(tmp)
-                                    VoiceLog.log("voice panel paste: long text → file (\(text.count) chars)")
+                            guard var text = UIPasteboard.general.string, !text.isEmpty else { return }
+                            // [T-paste-placeholder] Long paste: stash in the
+                            // vm buffer and append only the `[pasted#N]`
+                            // literal to the transcript (it rides into the
+                            // composer text and expands at send). Replaces
+                            // the old inline copy of the .txt conversion —
+                            // threshold now shared via PastePlaceholder.
+                            if PastePlaceholder.isLong(text), let onPasteLongText {
+                                let chars = text.count
+                                if let placeholder = onPasteLongText(text) {
+                                    VoiceLog.log("voice panel paste: long text (\(chars) chars) → \(placeholder)")
+                                    text = placeholder
+                                } else {
+                                    // [T-paste-huge-to-file] nil = the paste became
+                                    // a .txt attachment. Appending `text` here would
+                                    // dump the whole paste into the transcript, which
+                                    // is exactly what the attachment exists to avoid.
+                                    VoiceLog.log("voice panel paste: huge text (\(chars) chars) → file attachment, transcript unchanged")
                                     return
                                 }
                             }
@@ -609,7 +623,7 @@ struct InlineVoiceInputView: View {
 
             // ── Status line (with Exit chip while editing). ──
             HStack(spacing: 8) {
-                Text(stateLabel)
+                statusLineText
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -625,6 +639,29 @@ struct InlineVoiceInputView: View {
                             .background(Capsule().fill(Color.secondary.opacity(0.15)))
                     }
                     .buttonStyle(.plain)
+                }
+            }
+            // [T-ios-context-usage-hint] Debounce + fixed display window for
+            // the usage line, driven by the request's generation. A newer
+            // generation restarts the task (cancelling the old window); the
+            // task owns no stored closure capturing the view.
+            .task(id: contextUsageHint?.generation) {
+                guard let hint = contextUsageHint,
+                      hint.generation != voiceUsageHintGeneration else { return }
+                voiceUsageHintGeneration = hint.generation
+                try? await Task.sleep(nanoseconds: UInt64(Self.usageHintDebounce * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { voiceUsageHint = hint }
+                try? await Task.sleep(nanoseconds: UInt64(Self.usageHintDuration * 1_000_000_000))
+                guard !Task.isCancelled, voiceUsageHint?.generation == hint.generation else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { voiceUsageHint = nil }
+            }
+            // Starting a recording is the voice-panel analogue of "input
+            // began": the line yields immediately instead of finishing its
+            // window over the live recording tips.
+            .onChange(of: viewModel.state) { newState in
+                if newState == .recording, voiceUsageHint != nil {
+                    withAnimation(.easeInOut(duration: 0.2)) { voiceUsageHint = nil }
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: viewModel.state)
@@ -1110,6 +1147,63 @@ struct InlineVoiceInputView: View {
         .accessibilityLabel(showCancelIcon
             ? Text("Cancel transcription", comment: "Voice cancel transcription")
             : Text("Toggle recording", comment: "Inline voice mic"))
+    }
+
+    // MARK: - [T-ios-context-usage-hint] Usage line in the status row
+
+    /// The status text: the usage line while one is showing, else `stateLabel`.
+    ///
+    /// Unlike the text composer's placeholder (which now holds the line until
+    /// the user types), the voice panel shows it for a fixed window and then
+    /// returns to whatever `stateLabel` says at that moment — the user may be
+    /// recording or reading a transcript by then, and the label must follow
+    /// `viewModel.state`, not snap back to "Tap to speak". Starting a recording
+    /// cuts the window short (see the onChange below).
+    ///
+    /// Number segments are tinted via AttributedString runs so the rest of the
+    /// line keeps the `.secondary` style of the row. Colours are chosen for the
+    /// panel's DARK surface — the composer's alpha-toned UIColors were tuned
+    /// against a pale glass wall and would go muddy here — kept restrained so
+    /// the line reads as a status note, not an alert.
+    @ViewBuilder
+    private var statusLineText: some View {
+        if let hint = voiceUsageHint {
+            Text(Self.highlightedUsageLine(hint))
+                .transition(.opacity)
+                .id("usage-\(hint.generation)")
+        } else {
+            Text(stateLabel)
+                .transition(.opacity)
+        }
+    }
+
+    /// Fixed display window for the usage line on the voice panel.
+    static let usageHintDuration: TimeInterval = 3.5
+    /// Same debounce as the composer: a burst of quick turns shows one line.
+    static let usageHintDebounce: TimeInterval = 0.4
+
+    /// Applies the panel-side tint to the number segments.
+    static func highlightedUsageLine(_ hint: ContextUsageHint) -> AttributedString {
+        var attributed = AttributedString(hint.text)
+        guard let tone = usageTint(for: hint.tier) else { return attributed }
+        for segment in hint.highlights {
+            guard let range = attributed.range(of: segment) else { continue }
+            attributed[range].foregroundColor = tone
+            attributed[range].font = .subheadline.weight(.medium)
+        }
+        return attributed
+    }
+
+    /// Tints for the dark voice surface. System hues at reduced opacity over
+    /// the dark panel come out as a dimmed, desaturated version of themselves
+    /// — visible, still clearly "warning" vs "danger", not glaring. Red keeps
+    /// a touch more presence than orange so it reads as the more urgent tier.
+    static func usageTint(for tier: ContextUsage.Tier) -> Color? {
+        switch tier {
+        case .normal: return nil
+        case .warning: return Color(UIColor.systemOrange).opacity(0.70)
+        case .critical: return Color(UIColor.systemRed).opacity(0.78)
+        }
     }
 
     private var stateLabel: String {

@@ -113,6 +113,13 @@ class MCPOAuthController(private val context: Context) {
                 return@withContext Result.Failed("State mismatch in the OAuth callback.")
             }
 
+            // [T-android-mcp-oauth-foreground-exchange] The loopback callback
+            // lands while the user is still in the Custom Tab, i.e. with Minis
+            // in the background, where Android blocks the app's network
+            // (blocked=APP_BACKGROUND): the exchange failed in ~10 ms with
+            // "Unable to resolve host". Same gate the provider OAuth managers
+            // use (dcf6085db) — exchange only once the user is back.
+            com.openminis.app.auth.OAuthForegroundGate.awaitForeground(TAG)
             exchangeCode(server, oauth, redirect, resource, code, pkce.verifier)
         }
     }

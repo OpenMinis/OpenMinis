@@ -83,8 +83,9 @@ struct UserMessageEntityQuery: EntityQuery {
             )
         }
 
-        // Fallback (no session selected): recent sessions' messages
-        let sessions = await ChatStore.shared.listSessions()
+        // Fallback (no session selected): recent sessions' messages.
+        // [T-child-session-leak] Hidden agent child sessions stay hidden here.
+        let sessions = await ChatStore.shared.listSessions().filter { !$0.isChild }
         var entities: [UserMessageEntity] = []
         for session in sessions.prefix(10) {
             let msgs = await UserMessageEntity.loadFromDB(

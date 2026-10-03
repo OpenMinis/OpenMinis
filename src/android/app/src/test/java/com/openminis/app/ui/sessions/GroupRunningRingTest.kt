@@ -26,11 +26,11 @@ class GroupRunningRingTest {
             id = id, modelId = "m", createdAt = 0, updatedAt = 0, folderId = folderId,
         )
 
-    private fun blocksFor(active: Set<String>, collapsed: Set<String> = setOf("a")) =
+    private fun blocksFor(active: Set<String>, expanded: String? = "b") =
         partitionByFolder(
             sessions = listOf(session("s1", "a"), session("s2", "a"), session("s3", "b")),
             folders = listOf(folder("a"), folder("b")),
-            collapsedIds = collapsed,
+            expandedFolderId = expanded,
             activeSessionIds = active,
         ).first
 
@@ -62,7 +62,7 @@ class GroupRunningRingTest {
         // The flag is pure data; the collapsed-only rule is a RENDER decision,
         // so an expanded group still reports it. Keeping the two separate means
         // expanding a group can't drop the state.
-        val expanded = blocksFor(active = setOf("s1"), collapsed = emptySet())
+        val expanded = blocksFor(active = setOf("s1"), expanded = "a")
         assertTrue(expanded.first { it.folder.id == "a" }.anyActive)
     }
 
@@ -82,7 +82,7 @@ class GroupRunningRingTest {
         val blocks = partitionByFolder(
             sessions = listOf(session("s1", "a")),
             folders = listOf(folder("a")),
-            collapsedIds = setOf("a"),
+            expandedFolderId = null,
         ).first
         assertFalse(blocks.single().anyActive)
     }

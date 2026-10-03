@@ -219,7 +219,13 @@ struct SoulSettingsView: View {
                 }
                 Button(AppLocalized("Cancel"), role: .cancel) {}
             } message: {
-                Text(AppLocalized("Images must have a transparent background (PNG). Photos without transparency can't be used."))
+                // [T-soul-icon-opaque-rounded] Any image works. This used to
+                // demand a transparent PNG, which stopped being true when the
+                // alpha-channel rejection was dropped (fe2f3ae8b) — the icon is
+                // drawn with rounded corners, so an opaque photo reads as a
+                // normal avatar. `SoulIconImage.RejectionReason` now has one
+                // case, `unreadable`, and nothing checks for transparency.
+                Text(AppLocalized("Any image works. It's cropped to a square and shown with rounded corners."))
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(name.isEmpty ? "Minis" : name)

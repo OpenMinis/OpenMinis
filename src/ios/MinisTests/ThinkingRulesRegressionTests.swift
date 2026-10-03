@@ -1,8 +1,8 @@
 import XCTest
 @testable import Minis
 
-/// Regression safety-net for the thinking/reasoning wire-format rules catalogued in
-/// `/tmp/thinking_rules_evidence.md` §A (17 rules mined from git history).
+/// Regression safety-net for the thinking/reasoning wire-format rules (17 rules mined
+/// from past regressions; each test cites the rule and the commit that fixed it).
 ///
 /// WHY THIS EXISTS: the dominant failure mode for these rules is SILENT DEGRADATION —
 /// not a thrown error, but a field quietly landing at the wrong path or a tier quietly
@@ -73,7 +73,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     // MARK: - Negative: zero fields
 
     /// Rule: Mistral — no thinking request parameter may EVER be sent.
-    /// evidence §A "[Mistral] 完全禁止一切 reasoning 字段" · 4592ca9b · OpenMinis#87.
+    /// Ref: "[Mistral] every reasoning field is strictly forbidden" · 4592ca9b · OpenMinis#87.
     ///
     /// On iOS the guard lives at the CALL SITE (`if !provider.isMistral`,
     /// OpenAIAgentProvider.swift:125) rather than inside `injectThinkingParams`, so this
@@ -140,7 +140,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// Venice's ChatCompletionRequest is `additionalProperties:false`, so an unknown root
     /// key is rejected at schema validation BEFORE model dispatch — which is why every
     /// model failed and why turning thinking OFF did not help (the `{"type":"disabled"}`
-    /// branch still emitted the key). evidence §A · 84f5c9e1 · OpenMinis#86.
+    /// branch still emitted the key). Ref: 84f5c9e1 · OpenMinis#86.
     func testVeniceNeverReceivesRootThinkingKey() {
         // deepseek-v4 is the exact id from the report: without the unified-gateway flag
         // the id-substring branch selects the vendor-native thinking:{} object.
@@ -155,7 +155,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: families that declare NO effort tiers keep the legacy self-reasoning skip.
-    /// evidence §A "[数据驱动重构]" · 22647505.
+    /// Ref: "[data-driven refactor]" · 22647505.
     func testUndeclaredGLMFamilySendsNoThinkingField() {
         let m = model("glm-4.5-air", supportsReasoning: nil, effortValues: nil)
         let body = inject(model: m, level: .high)
@@ -169,7 +169,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: a model DECLARING effort tiers is driven by declared capability, not family
     /// name — the fix for "GLM 5.2 ignores the thinking level while Hermes on the same
-    /// relay honours it". evidence §A · 22647505 / 47dc71b3.
+    /// relay honours it". Ref: 22647505 / 47dc71b3.
     func testDeclaredGLMModelReceivesRootReasoningEffort() {
         let m = model("glm-5.2", effortValues: ["high", "max"])
         let body = inject(model: m, level: .high)
@@ -180,7 +180,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: the requested tier is clamped ONTO the declared set. `["high","max"]` is the
-    /// most common sparse shape in the catalog. evidence §A · 47dc71b3.
+    /// most common sparse shape in the catalog. Ref: 47dc71b3.
     func testSparseDeclaredSetClampsXhigh() {
         let m = model("glm-5.2", effortValues: ["high", "max"])
         let body = inject(model: m, level: .xhigh)
@@ -192,7 +192,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: ULTRA is a client-side "Max + orchestration" concept and must NEVER reach a
-    /// backend as the literal "ultra". evidence §A "[GPT-5.6 / ULTRA]" · b38bf3d5.
+    /// backend as the literal "ultra". Ref: "[GPT-5.6 / ULTRA]" · b38bf3d5.
     func testUltraNeverReachesWireAsLiteral() {
         let m = model("gpt-5.6-sol", effortValues: ["low", "medium", "high", "xhigh", "max"])
         let body = inject(model: m, level: .ultra)
@@ -207,7 +207,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// Rule: MiMo/Agnes validate `reasoning_effort` against a STRICT low/medium/high enum.
     /// At OFF the field must be OMITTED — sending "minimal" killed the whole request
     /// on-device (iPhone 11, api.xiaomimimo.com): no reply at all, strictly worse than the
-    /// vendor-default reasoning the change targeted. evidence §A · c5efeb1e.
+    /// vendor-default reasoning the change targeted. Ref: c5efeb1e.
     ///
     /// Note the explicit `offEffort: "minimal"`: this is the hostile input the rule exists
     /// to neutralize. Passing nil would make the test pass vacuously.
@@ -222,7 +222,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: OFF-tier injection is an ALLOWLIST. Vendors with undocumented off semantics
-    /// keep field omission. evidence §A "[全局] thinking-off 显式值是 ALLOWLIST" · ff60c818.
+    /// keep field omission. Ref: "[global] explicit thinking-off values are an ALLOWLIST" · ff60c818.
     func testUnknownVendorOmitsOffTierWhenNoneOffered() {
         let m = model("some-relay-model", effortValues: ["low", "medium", "high"])
         let body = inject(model: m, level: .off, offEffort: nil)
@@ -233,7 +233,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: an allowlisted vendor's documented off tier IS sent, so the vendor default
-    /// cannot silently re-enable reasoning. evidence §A · 4a89f5ca / ff60c818.
+    /// cannot silently re-enable reasoning. Ref: 4a89f5ca / ff60c818.
     func testAllowlistedOffTierIsSentExplicitly() {
         let m = model("gpt-5.3", effortValues: ["none", "low", "medium", "high"])
         let body = inject(model: m, level: .off, offEffort: "none")
@@ -250,7 +250,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// it an unknown key with no root tier at all, so every V4 request silently ran at the
     /// vendor default for ~3 months. The paired negative assertion is the entire point:
     /// the positive one alone passed throughout that period.
-    /// evidence §A "[DeepSeek V4] …根级兄弟" · 847822eb.
+    /// Ref: "[DeepSeek V4] …root-level siblings" · 847822eb.
     func testDeepSeekV4SendsRootSiblings() {
         let m = model("deepseek-v4-pro", effortValues: ["high", "max"])
         let body = inject(model: m, level: .high)
@@ -266,7 +266,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: thinking is ON by default on DeepSeek V4, so OFF must be sent EXPLICITLY.
-    /// evidence §A · 847822eb.
+    /// Ref: 847822eb.
     func testDeepSeekV4ExplicitlyDisablesWhenOff() {
         let m = model("deepseek-v4-pro", effortValues: ["high", "max"])
         let body = inject(model: m, level: .off)
@@ -282,7 +282,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// Rule: Ark/Azure re-host third-party families behind a uniform OpenAI surface where
     /// thinking is controlled ONLY by `reasoning_effort`; the vendor-native `thinking:{}`
     /// shape is not honoured. Same model id, different endpoint, different shape.
-    /// evidence §A "[Volcengine Ark / Azure]" · ba055121.
+    /// Ref: "[Volcengine Ark / Azure]" · ba055121.
     func testArkHostedDeepSeekUsesUniformEffort() {
         let m = model("deepseek-v4-flash", effortValues: ["low", "high", "max"])
         let body = inject(model: m, level: .high, unifiedReasoningEffort: true)
@@ -293,7 +293,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: Qwen dual-sends at root AND `extra_body` (DashScope reads extra_body;
-    /// vLLM/SGLang accept top-level). evidence §A "[Qwen] 根级 + extra_body 双发" · 25165700.
+    /// vLLM/SGLang accept top-level). Ref: "[Qwen] sent both at root level and in extra_body" · 25165700.
     func testQwenDualSendsAtRootAndExtraBody() {
         let body = inject(model: model("qwen3-32b"), level: .medium)
         XCTAssertNotNil(body["enable_thinking"], "root enable_thinking expected: \(body)")
@@ -304,7 +304,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: OpenRouter uses the unified nested `reasoning: {effort:…}` and OMITS the
     /// parameter entirely when off, so forced-reasoning models don't reject `effort:"none"`.
-    /// evidence §A / design §6.1 · OpenAIAgentProvider.swift:881.
+    /// Ref: design §6.1 · OpenAIAgentProvider.swift:881.
     func testOpenRouterUsesNestedReasoningAndOmitsWhenOff() {
         let m = model("anthropic/claude-sonnet-4-6", effortValues: ["low", "medium", "high"])
         let on = inject(model: m, level: .high, isOpenRouter: true)
@@ -322,7 +322,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: DashScope enforces `thinking_budget < max_completion_tokens` STRICTLY —
     /// equal values are rejected too ("[16384] must be greater than [16384]").
-    /// evidence §A "[Qwen / DashScope] …等值也拒" · 8db455ff → a5a0de20 · issues #35 / #641.
+    /// Ref: "[Qwen / DashScope] …equal values rejected too" · 8db455ff → a5a0de20 · issues #35 / #641.
     func testQwenBudgetStaysStrictlyBelowMaxTokens() {
         for maxTokens in [16384, 64000, 4096, 2] {
             let body = inject(model: model("qwen3-32b"), level: .max, maxTokens: maxTokens)
@@ -337,7 +337,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: pathological max_tokens leaves no room for a positive budget strictly below
     /// max, so the field is dropped rather than emitted invalid.
-    /// evidence §A · a5a0de20 ("maxTokens < 2 → drop thinking_budget entirely").
+    /// Ref: a5a0de20 ("maxTokens < 2 → drop thinking_budget entirely").
     func testQwenDropsBudgetWhenMaxTokensLeavesNoRoom() {
         let body = inject(model: model("qwen3-32b"), level: .max, maxTokens: 1)
         let budget = (body["thinking_budget"] as? Int) ?? 0
@@ -348,7 +348,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: Anthropic `budget_tokens` must be strictly below max_tokens.
-    /// evidence §A "[Anthropic] budget_tokens 必须严格小于 max_tokens" · 5aa9dc64.
+    /// Ref: "[Anthropic] budget_tokens must be strictly less than max_tokens" · 5aa9dc64.
     func testAnthropicBudgetStaysBelowMaxTokens() {
         for maxTokens in [1024, 16384, 64000] {
             let budget = AnthropicAgentProvider.thinkingBudget(
@@ -366,7 +366,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// Rule: catalog rules matched dotted ids (`claude-opus-4.7`) while real ids use
     /// hyphens (`claude-opus-4-8`), so the Opus rules NEVER matched any built-in model and
     /// every Opus fell through to the wrong ceiling. Third-party proxies emit BOTH forms,
-    /// so both must resolve identically. evidence §A "[Claude Opus] id 分隔符" · 5aa9dc64.
+    /// so both must resolve identically. Ref: "[Claude Opus] id separators" · 5aa9dc64.
     func testClaudeOpusIdSeparatorNormalization() {
         let hyphen = ThinkingLevelCatalog.declaredMaxLevel(for: "claude-opus-4-8")
         let dotted = ThinkingLevelCatalog.declaredMaxLevel(for: "claude-opus-4.8")
@@ -377,7 +377,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: MiMo ships BOTH spellings — docs say `mimo-2.5`, the live API returns
     /// `mimo-v2.5`. A rule matching one silently misses the other, letting xhigh through
-    /// to a backend that 400s. evidence §A "[MiMo] 模型 id 拼写变体" · 72968c4f.
+    /// to a backend that 400s. Ref: "[MiMo] model id spelling variants" · 72968c4f.
     func testBothMimoSpellingsResolveToSameCeiling() {
         for id in ["mimo-2.5", "mimo-v2.5", "mimo-v2.5-pro"] {
             XCTAssertEqual(
@@ -389,7 +389,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
 
     /// Rule: a broadened family substring must NOT lift the ceiling of same-family
     /// NON-reasoning members (mimo-v2.5-tts / -asr). `supportsReasoning == false` is
-    /// checked BEFORE the catalog rules. evidence §A · 72968c4f · LLMTypes.swift:820-822.
+    /// checked BEFORE the catalog rules. Ref: 72968c4f · LLMTypes.swift:820-822.
     func testNonReasoningFamilyMemberCapsAtOff() {
         let tts = model("mimo-v2.5-tts", supportsReasoning: false)
         XCTAssertEqual(
@@ -399,7 +399,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: seed / bytedance-seed reject xhigh ("Invalid reasoning_effort: xhigh"); the
-    /// Ark ladder tops out at high. evidence §A "[ByteDance seed]" · 72968c4f.
+    /// Ark ladder tops out at high. Ref: "[ByteDance seed]" · 72968c4f.
     func testSeedFamilyCapsAtHigh() {
         for id in ["seed-1.6", "bytedance-seed/seed-2.0"] {
             XCTAssertEqual(
@@ -412,7 +412,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     /// Rule: a declared effort set is a STRONGER statement than any id-substring rule and
     /// must raise the ceiling to the declared top tier — otherwise a tier the catalog
     /// declares is clamped to on the wire yet unselectable in the UI.
-    /// evidence §A "[数据驱动重构]" · 47dc71b3 · LLMTypes.swift:820-836.
+    /// Ref: "[data-driven refactor]" · 47dc71b3 · LLMTypes.swift:820-836.
     func testDeclaredTiersOverrideSubstringCeiling() {
         let m = model("glm-5.2", effortValues: ["high", "max"])
         XCTAssertEqual(
@@ -421,10 +421,79 @@ final class ThinkingRulesRegressionTests: XCTestCase {
         )
     }
 
+    // MARK: - [T-thinking-max-unreachable]
+
+    /// Rule: a declared set RAISES the ceiling but must never LOWER a known family rule.
+    /// models.dev often lists an incomplete set for a model we know reaches Max —
+    /// gpt-5.6-sol has an explicit `.max` rule yet commonly declares only
+    /// ["low","medium","high"] — and taking the declared top verbatim hid Max from the
+    /// picker for exactly the models the rule exists to describe (user report:
+    /// "模型组配了极高，会话里却不展示极高").
+    func testIncompleteDeclarationDoesNotLowerRuleCeiling() {
+        let m = model("gpt-5.6-sol", effortValues: ["low", "medium", "high"])
+        XCTAssertEqual(
+            ThinkingLevelCatalog.declaredMaxLevel(for: "gpt-5.6-sol"), .max,
+            "precondition: the family rule reaches .max"
+        )
+        XCTAssertEqual(
+            m.catalogMaxThinkingLevel, .max,
+            "an incomplete declaration must not cut the rule's ceiling down to .high"
+        )
+    }
+
+    /// The same shape one tier up: a declaration topping out at xhigh must not hide Max.
+    func testDeclarationToppingAtXHighKeepsMaxReachable() {
+        let m = model("gpt-5.6-sol", effortValues: ["high", "xhigh"])
+        XCTAssertEqual(m.catalogMaxThinkingLevel, .max)
+    }
+
+    /// A declaration reaching ABOVE the rule still wins — the original behaviour this
+    /// code was written for must survive the fix.
+    func testDeclarationAboveRuleStillRaisesCeiling() {
+        // gpt-5.5's rule caps at .xhigh; a ["high","max"] declaration lifts it.
+        XCTAssertEqual(ThinkingLevelCatalog.declaredMaxLevel(for: "gpt-5.5-turbo"), .xhigh)
+        let m = model("gpt-5.5-turbo", effortValues: ["high", "max"])
+        XCTAssertEqual(m.catalogMaxThinkingLevel, .max)
+    }
+
+    /// A non-reasoning model stays .off no matter what else is declared.
+    func testNonReasoningModelIgnoresBothSources() {
+        let m = model("gpt-5.6-sol", supportsReasoning: false, effortValues: ["high", "max"])
+        XCTAssertEqual(m.catalogMaxThinkingLevel, .off)
+    }
+
+    /// With the ceiling raised above every declared tier, the picker must OFFER the
+    /// levels above it — otherwise the ceiling is correct and Max is still unreachable.
+    /// Sparse tiers below the declared top stay collapsed (one option per wire value).
+    func testEntryOffersLevelsAboveASparseDeclaration() {
+        let entry = ModelEntry(
+            providerInstanceId: "inst",
+            model: model("gpt-5.6-sol", effortValues: ["high"])
+        )
+        let levels = entry.selectableThinkingLevels
+        XCTAssertTrue(levels.contains(.max), "Max must be offered: \(levels.map(\.rawValue))")
+        XCTAssertTrue(levels.contains(.xhigh), "XHigh must be offered: \(levels.map(\.rawValue))")
+        XCTAssertFalse(levels.contains(.low), "tiers below the declared top stay collapsed")
+        XCTAssertEqual(levels, levels.sorted(), "levels must stay ascending")
+    }
+
+    /// The offered list must not depend on the CURRENT selection — the reported
+    /// "switch to XHigh and Max disappears" would be this going wrong.
+    func testOfferedLevelsAreIndependentOfCurrentSelection() {
+        let entry = ModelEntry(
+            providerInstanceId: "inst",
+            model: model("gpt-5.6-sol", effortValues: ["low", "medium", "high"])
+        )
+        let first = entry.selectableThinkingLevels
+        let second = entry.selectableThinkingLevels
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first.contains(.max))
+    }
+
     /// Rule: sparse declarations must yield one option per DISTINCT wire tier, so every
     /// option the user can pick produces a different request. Verified on-device
     /// 2026-08-01: glm-5.2 sent "high" for Low AND Med AND High AND XHigh.
-    /// evidence §A · 47dc71b3 · LLMTypes.swift:858.
+    /// Ref: 47dc71b3 · LLMTypes.swift:858.
     func testSparseDeclarationYieldsDistinctSelectableLevels() {
         let m = model("glm-5.2", effortValues: ["high", "max"])
         let levels = m.selectableThinkingLevels
@@ -437,7 +506,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: a model that cannot reason caps at .off regardless of any family rule.
-    /// evidence §A · 72968c4f · LLMTypes.swift:820-822.
+    /// Ref: 72968c4f · LLMTypes.swift:820-822.
     func testNonReasoningModelCapsAtOff() {
         XCTAssertEqual(
             model("gpt-4o", supportsReasoning: false).catalogMaxThinkingLevel, .off,
@@ -446,7 +515,7 @@ final class ThinkingRulesRegressionTests: XCTestCase {
     }
 
     /// Rule: `supportsReasoning == false` is a hard veto on injection — non-reasoning
-    /// models reject the parameter outright. evidence §A · OpenAIAgentProvider.swift:1042.
+    /// models reject the parameter outright. Ref: OpenAIAgentProvider.swift:1042.
     func testNonReasoningModelReceivesNoEffortField() {
         let body = inject(model: model("gpt-4o-mini", supportsReasoning: false), level: .high)
         XCTAssertNil(

@@ -147,9 +147,11 @@ fun TerminalScreen(
     // only thing auto-focus changes is that the keys the user presses arrive
     // somewhere. Without it, opening the terminal and typing does nothing at
     // all, with no on-screen hint as to why.
-    val cfg = LocalConfiguration.current
-    val hasHardwareKeyboard = cfg.keyboard == Configuration.KEYBOARD_QWERTY &&
-        cfg.hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO
+    // [T-android-hwkeyboard-virtual-false-positive] Same rule as the chat
+    // composer — see HardwareKeyboard. Configuration.keyboard alone also
+    // counts virtual HID keyboards (scrcpy --uhid), which would auto-focus the
+    // terminal input on a touch-only phone.
+    val hasHardwareKeyboard = com.openminis.app.ui.components.rememberHasHardwareKeyboard()
     LaunchedEffect(hasHardwareKeyboard) {
         if (hasHardwareKeyboard) inputController.requestFocus()
     }

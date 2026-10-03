@@ -549,47 +549,59 @@ actor ProviderConfigDB {
         let now = Date().timeIntervalSince1970
 
         Self.exec(db: db, "BEGIN IMMEDIATE")
-        Self.exec(db: db, "DELETE FROM provider_model_groups")
-        Self.exec(db: db, "DELETE FROM provider_model_entries")
-        Self.exec(db: db, "DELETE FROM provider_instances")
+        // [T-icloud-sync-tier3-row-level] Synced tables (instances, entries,
+        // groups) are no longer wiped and rewritten. The old shape —
+        // `DELETE FROM` all three, then INSERT OR REPLACE every row with
+        // `updated_at = now` — meant that ANY save re-stamped EVERY row:
+        // measured 1005/1013 entry rows sharing one timestamp, and a single
+        // provider import re-pushing 23 unchanged instances (server:
+        // conflict=8). Last-writer-wins on such a timestamp compares "who
+        // saved last", not "what changed". Now each row is compared against
+        // its stored content (secrets and extras excluded — this path never
+        // carries them) and upserted only when different, keeping its stored
+        // `updated_at` otherwise; rows absent from the snapshot are deleted
+        // explicitly. Callers see the same "snapshot wins" result; only the
+        // timestamps become honest. The four local-only tables below keep
+        // their delete-and-rewrite shape — they do not sync.
+        let storedInst = Dictionary(uniqueKeysWithValues: loadAllInstanceRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        let storedEntry = Dictionary(uniqueKeysWithValues: loadAllEntryRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        let storedGroup = Dictionary(uniqueKeysWithValues: loadAllGroupRows().compactMap { r in (r["id"] as? String).map { ($0, r) } })
+        var instChanged = 0, entryChanged = 0, groupChanged = 0
+
         Self.exec(db: db, "DELETE FROM provider_local_kv")
         Self.exec(db: db, "DELETE FROM provider_session_bindings")
         Self.exec(db: db, "DELETE FROM provider_session_inference_configs")
-
-        // [T-icloud-agentloop-wipe] `provider_agent_loop_ids` is LOCAL-ONLY
-        // state, but it rides along in ProviderConfig and therefore gets
-        // rewritten by every whole-config replace — including the one that
-        // fires on each inbound V3 provider record. Wiping it whenever the
-        // incoming config happens to carry an empty list is how a peer's sync
-        // silently erased the user's agent-loop selection (OpenMinis#98).
-        //
-        // CRITICAL: this guard is gated on `preserveLocalOnlyStateIfEmpty`, i.e.
-        // the inbound-sync caller ONLY. A user-initiated save() also reaches
-        // bulkReplace, and "clear every agent-loop model" is a legitimate user
-        // action that arrives here as an empty list — blanket-preserving would
-        // silently undo it, turning this fix into a worse bug than the one it
-        // repairs.
         let incomingAgentLoop = config.agentLoopModelEntryIds.count + config.agentLoopGroupIds.count
         let existingAgentLoop = preserveLocalOnlyStateIfEmpty ? agentLoopRowCount() : 0
         let preserveAgentLoop = preserveLocalOnlyStateIfEmpty && incomingAgentLoop == 0 && existingAgentLoop > 0
         if preserveAgentLoop {
-            logger.warning("[v3] bulkReplace PRESERVING agent-loop ids: incoming=0 existing=\(existingAgentLoop) — refusing to wipe local-only state from an empty INBOUND config")
+            logger.warning("[v3] bulkReplace PRESERVING agent-loop ids: incoming=0 existing=\(existingAgentLoop) — refusing to erase the user's selection (OpenMinis#98 defect 2)")
         } else {
             Self.exec(db: db, "DELETE FROM provider_agent_loop_ids")
         }
 
-        // Instances (with inline secret_blob — actual secret material
-        // still lives in Keychain; the blob is populated by S5 when
-        // the v3 sync-emit path packages it for upload. Migration
-        // only seeds the metadata; secret_blob is left NULL until a
-        // mutate happens or the v3 builder runs once.).
+        // Instances
         for (idx, inst) in config.instances.enumerated() {
+            let providerType = inst.unknownProviderTypeRaw ?? inst.providerType.rawValue
+            if let r = storedInst[inst.id],
+               (r["label"] as? String) == inst.label,
+               (r["provider_type"] as? String) == providerType,
+               (r["credential_type"] as? String) == inst.credentialType.rawValue,
+               (r["custom_base_url"] as? String) == inst.customBaseURL,
+               ((r["append_v1_suffix"] as? Int) ?? ((r["append_v1_suffix"] as? Bool) == true ? 1 : 0)) == (inst.appendV1Suffix ? 1 : 0),
+               (r["image_endpoint_mode"] as? String) == inst.imageEndpointMode.rawValue,
+               (r["image_endpoint_resolved"] as? String) == inst.imageEndpointResolved?.rawValue,
+               ((r["is_enabled"] as? Int) ?? ((r["is_enabled"] as? Bool) == true ? 1 : 0)) == (inst.isEnabled ? 1 : 0),
+               (r["sort_order"] as? Int) == idx,
+               (r["custom_user_agent"] as? String) == inst.customUserAgent,
+               ((r["azure_mode"] as? Int) ?? ((r["azure_mode"] as? Bool) == true ? 1 : 0)) == (inst.azureMode ? 1 : 0) {
+                continue   // identical — keep the stored row and its updated_at
+            }
+            instChanged += 1
             upsertInstanceRow(
                 id: inst.id,
                 label: inst.label,
-                // Preserve the original raw type for unsupported (newer-build)
-                // instances so we never overwrite it with the sentinel string.
-                providerType: inst.unknownProviderTypeRaw ?? inst.providerType.rawValue,
+                providerType: providerType,
                 credentialType: inst.credentialType.rawValue,
                 customBaseURL: inst.customBaseURL,
                 appendV1Suffix: inst.appendV1Suffix,
@@ -597,53 +609,70 @@ actor ProviderConfigDB {
                 imageEndpointResolved: inst.imageEndpointResolved?.rawValue,
                 isEnabled: inst.isEnabled,
                 sortOrder: idx,
-                secretBlob: nil,
-                secretKind: nil,
-                secretUpdatedAt: nil,
+                secretBlob: storedInst[inst.id]?["secret_blob"] as? String,
+                secretKind: storedInst[inst.id]?["secret_kind"] as? String,
+                secretUpdatedAt: storedInst[inst.id]?["secret_updated_at"] as? Double,
                 createdAt: inst.createdAt.timeIntervalSince1970,
                 updatedAt: now,
-                extrasJson: nil,
+                extrasJson: storedInst[inst.id]?["extras_json"] as? String,
                 customUserAgent: inst.customUserAgent,
                 azureMode: inst.azureMode
             )
         }
+        let keepInst = Set(config.instances.map(\.id))
+        for id in storedInst.keys where !keepInst.contains(id) { deleteInstanceRow(id: id) }
 
-        // Entries. baseModel + overrides go in as JSON columns so the
-        // row layout doesn't need to track every LLMModel/Overrides
-        // field individually (those evolve independently).
+        // Entries
         for (idx, entry) in config.modelEntries.enumerated() {
             let baseJSON = (try? Self.jsonString(entry.baseModel)) ?? "{}"
-            let overridesJSON: String?
-            if entry.overrides.isEmpty {
-                overridesJSON = nil
-            } else {
-                overridesJSON = try? Self.jsonString(entry.overrides)
+            let overridesJSON: String? = entry.overrides.isEmpty ? nil : (try? Self.jsonString(entry.overrides))
+            let userMod = entry.userModifiedAt?.timeIntervalSince1970
+            if let r = storedEntry[entry.uuid],
+               (r["provider_instance_id"] as? String) == entry.providerInstanceId,
+               (r["base_model_json"] as? String) == baseJSON,
+               (r["overrides_json"] as? String) == overridesJSON,
+               ((r["is_custom"] as? Int) ?? ((r["is_custom"] as? Bool) == true ? 1 : 0)) == (entry.isCustom ? 1 : 0),
+               ((r["is_hidden"] as? Int) ?? ((r["is_hidden"] as? Bool) == true ? 1 : 0)) == (entry.isHidden ? 1 : 0),
+               (r["user_modified_at"] as? Double) == userMod,
+               (r["sort_order"] as? Int) == idx {
+                continue
             }
+            entryChanged += 1
             upsertEntryRow(
-                // [T-provider-entry-composite-key] DB primary key stays the
-                // random uuid (NOT entry.id, which is now the composite key).
-                // Keeping the uuid in the id column means old group/binding
-                // references (also uuids) still match the row, downgrade is
-                // safe, and compositeKey lives only in memory + as the sync
-                // record key (computed). Writing entry.id here was the bug that
-                // put composite keys into the DB and orphaned every uuid
-                // reference.
                 id: entry.uuid,
                 providerInstanceId: entry.providerInstanceId,
                 baseModelJson: baseJSON,
                 overridesJson: overridesJSON,
                 isCustom: entry.isCustom,
                 isHidden: entry.isHidden,
-                userModifiedAt: entry.userModifiedAt?.timeIntervalSince1970,
+                userModifiedAt: userMod,
                 sortOrder: idx,
-                updatedAt: entry.userModifiedAt?.timeIntervalSince1970 ?? now,
-                extrasJson: nil
+                updatedAt: now,
+                extrasJson: storedEntry[entry.uuid]?["extras_json"] as? String
             )
         }
+        let keepEntry = Set(config.modelEntries.map(\.uuid))
+        for id in storedEntry.keys where !keepEntry.contains(id) { deleteEntryRow(id: id) }
 
-        // Groups. memberEntryIds → JSON array column.
+        // Groups
         for (idx, group) in config.modelGroups.enumerated() {
             let memberJSON = (try? Self.jsonString(group.memberEntryIds)) ?? "[]"
+            let removedJSON = Self.encodeMemberTimestamps(group.removedMembers)
+            let addedJSON = Self.encodeMemberTimestamps(group.addedMembers)
+            if let r = storedGroup[group.id],
+               (r["name"] as? String) == group.name,
+               (r["strategy"] as? String) == group.strategy.rawValue,
+               (r["fallback_strategy"] as? String) == group.fallbackStrategy.rawValue,
+               (r["default_thinking_level"] as? String) == group.defaultThinkingLevel?.rawValue,
+               (r["context_limit_tokens"] as? Int) == group.contextLimitTokens,
+               (r["context_limit_remembered"] as? Int) == group.lastContextLimitTokens,
+               (r["member_entry_ids_json"] as? String) == memberJSON,
+               (r["sort_order"] as? Int) == idx,
+               ((r["removed_members_json"] as? String) ?? "{}") == removedJSON,
+               ((r["added_members_json"] as? String) ?? "{}") == addedJSON {
+                continue
+            }
+            groupChanged += 1
             upsertGroupRow(
                 id: group.id,
                 name: group.name,
@@ -655,11 +684,14 @@ actor ProviderConfigDB {
                 memberEntryIdsJson: memberJSON,
                 sortOrder: idx,
                 updatedAt: now,
-                extrasJson: nil,
-                removedMembersJson: Self.encodeMemberTimestamps(group.removedMembers),
-                addedMembersJson: Self.encodeMemberTimestamps(group.addedMembers)
+                extrasJson: storedGroup[group.id]?["extras_json"] as? String,
+                removedMembersJson: removedJSON,
+                addedMembersJson: addedJSON
             )
         }
+        let keepGroup = Set(config.modelGroups.map(\.id))
+        for id in storedGroup.keys where !keepGroup.contains(id) { deleteGroupRow(id: id) }
+        logger.info("[v3] bulkReplace row-level: changed inst=\(instChanged) entry=\(entryChanged) group=\(groupChanged) of \(config.instances.count)/\(config.modelEntries.count)/\(config.modelGroups.count)")
 
         // Per-device fields — never synced.
         if let v = config.defaultPrimaryGroupId {

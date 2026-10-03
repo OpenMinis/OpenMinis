@@ -751,7 +751,29 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
     int hops = 0;
     while (t != NULL && hops < MAX_PID) {
         if (t->pid == rootPid) return YES;
-        t = t->parent;
+        struct task *parent = t->parent;
+        // [T-ish-killpg-stale-parent] Only walk to a parent the pid table
+        // still vouches for.
+        //
+        // `task_destroy` zeroes the struct and defers the free, but it never
+        // clears the `parent` pointer of the children it leaves behind. A
+        // surviving child therefore keeps pointing at its dead parent, and
+        // once `flush_deferred_frees` releases that block and malloc hands
+        // the address to something else, the pointer is neither NULL nor
+        // zeroed — it is another object's memory. Reading `->pid` off it
+        // faulted (EXC_BAD_ACCESS at 0x7a8, 1.14(12), iOS 17.0).
+        //
+        // Re-deriving the parent through `pid_get_task` closes that: a
+        // destroyed task's pid slot was set to NULL by `task_destroy`, and a
+        // recycled slot returns a DIFFERENT pointer, which fails the identity
+        // check below. Either way the walk stops instead of chasing freed
+        // memory. Costs one table lookup per hop, on a path that already
+        // scans MAX_PID entries.
+        if (parent == NULL) return NO;
+        pid_t_ parentPid = parent->pid;
+        if (parentPid == 0 || parentPid >= MAX_PID) return NO;
+        if (pid_get_task((dword_t)parentPid) != parent) return NO;
+        t = parent;
         hops++;
     }
     return NO;
@@ -786,7 +808,10 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
         for (int i = 2; i < MAX_PID; i++) {
             struct task *t = pid_get_task(i);
             if (!t) continue;
-            BOOL byPgid = (pgid != 0 && t->group->pgid == pgid);
+            // [T-ish-killpg-stale-parent] `task_destroy` zeroes the struct
+            // before deferring the free, so a task still reachable from the
+            // pid table can have a NULL group for that window.
+            BOOL byPgid = (pgid != 0 && t->group != NULL && t->group->pgid == pgid);
             BOOL byAncestry = ISHTaskIsDescendantOf(t, (pid_t_)pid);
             if (byPgid || byAncestry) {
                 send_signal(t, SIGTERM_, info);
@@ -822,7 +847,7 @@ static BOOL ISHTaskIsDescendantOf(struct task *t, pid_t_ rootPid) {
         for (int i = 2; i < MAX_PID; i++) {
             struct task *t = pid_get_task(i);
             if (!t) continue;
-            BOOL byPgid = (capturedPgid != 0 && t->group->pgid == capturedPgid);
+            BOOL byPgid = (capturedPgid != 0 && t->group != NULL && t->group->pgid == capturedPgid);
             BOOL byAncestry = ISHTaskIsDescendantOf(t, (pid_t_)capturedPid);
             if (byPgid || byAncestry) {
                 send_signal(t, SIGKILL_, info);

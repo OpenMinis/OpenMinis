@@ -498,6 +498,23 @@ struct BackupRestoreView: View {
         }
     }
 
+    /// [T-restore-result-severity] The "warning, not failure" row style.
+    ///
+    /// The ⚠️ is an `Image`, deliberately NOT a character inside the string:
+    /// each of these lines is a localized key with 17-18 translations, and
+    /// prefixing the key would orphan every one of them and drop all locales
+    /// back to English. Taking a `Text` (not a `String`) keeps the call site's
+    /// literal a `LocalizedStringKey`.
+    private func restoreNotice(_ text: Text) -> some View {
+        Label {
+            text
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .font(.caption)
+        .foregroundStyle(.orange)
+    }
+
     private func reportSection(_ r: BackupImporter.Report) -> some View {
         Section {
             LabeledContent("Restored", value: "\(r.totalImported)")
@@ -512,41 +529,49 @@ struct BackupRestoreView: View {
             if credsRestored > 0 {
                 LabeledContent("API keys restored", value: "\(credsRestored)")
             }
+            // [T-restore-result-severity] Two tiers, told apart by colour AND
+            // icon so the difference survives for colour-blind users:
+            //   • red, no icon  — the category's restore actually FAILED;
+            //   • orange + ⚠️   — the restore succeeded, but some files were
+            //     not in the package to begin with.
+            // Every "not in the package" line used to be red or grey, and red
+            // read as a crash or corruption to users whose restore had in fact
+            // gone fine.
             ForEach(r.categories, id: \.category) { c in
                 if let failed = c.failed {
                     Text("\(displayNameRaw(c.category)): \(failed)")
                         .font(.caption)
                         .foregroundStyle(.red)
                 } else {
+                    // Was `.secondary`, which made a real gap look like fine print.
                     if c.sizeSkippedInPackage > 0 {
-                        Text("\(displayNameRaw(c.category)): \(c.sizeSkippedInPackage) file(s) weren't in the backup (size limit)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        restoreNotice(Text("\(displayNameRaw(c.category)): \(c.sizeSkippedInPackage) file(s) weren't in the backup (size limit)"))
                     }
                     // [review S9] Different remedy from the size cap, so it gets
                     // its own line rather than being folded into "skipped":
                     // these files exist, they just weren't on the device that
                     // made the backup.
                     if c.notDownloadedInPackage > 0 {
-                        Text("\(displayNameRaw(c.category)): \(c.notDownloadedInPackage) file(s) weren't in the backup (not downloaded from iCloud on the source device)")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
+                        restoreNotice(Text("\(displayNameRaw(c.category)): \(c.notDownloadedInPackage) file(s) weren't in the backup (not downloaded from iCloud on the source device)"))
                     }
                     // [review S7] The package's own index referenced content it
-                    // did not contain — the backup is incomplete. Shown in red:
-                    // this is the case that used to be silently swallowed and
-                    // reported as a clean success.
+                    // did not contain (the export is not a snapshot, so a file
+                    // written between the index pass and the blob copy can be
+                    // listed but not stored). Still always surfaced — that is
+                    // what S7 fixed, since it used to be swallowed as a clean
+                    // success — but as a warning, not a failure, per product
+                    // decision: the restore itself worked, and the old
+                    // "— the backup is incomplete" wording in red read as
+                    // corruption. Note this is a genuine gap in THAT backup,
+                    // not a policy skip: tombstones (size cap, not downloaded,
+                    // unreadable) are filtered out before this is counted.
                     if c.missingBlobs > 0 {
-                        Text("\(displayNameRaw(c.category)): \(c.missingBlobs) file(s) were listed in the backup but missing from it — the backup is incomplete")
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                        restoreNotice(Text("\(displayNameRaw(c.category)): \(c.missingBlobs) file(s) were listed in the backup but missing from it"))
                     }
                 }
             }
             if !r.rolledBack.isEmpty {
-                Text("Rolled back: \(r.rolledBack.joined(separator: ", "))")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                restoreNotice(Text("Rolled back: \(r.rolledBack.joined(separator: ", "))"))
             }
         } header: {
             Text("Restore Complete")
@@ -960,7 +985,12 @@ struct ServerRestorePickerSheet: View {
                 }
             }
             .sheet(isPresented: $showAddServer) {
-                RcloneAddServerView { remotes = RcloneRemoteStore.remotes }
+                // [T-connect-and-save] Restore source: no folder step. The
+                // stored path only seeds the browser the user is about to open
+                // anyway, so connecting successfully is the whole job.
+                RcloneAddServerView(
+                    onAdded: { remotes = RcloneRemoteStore.remotes },
+                    picksFolder: false)
             }
             .onAppear { remotes = RcloneRemoteStore.remotes }
         }

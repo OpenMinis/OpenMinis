@@ -22,6 +22,11 @@ struct SyncedSession: Syncable {
     var modelBinding: String?
     var pinnedAt: Date?
     var folderId: String?
+    // [T-p1-delegate-task] Child-session linkage; optional, no version bump
+    // (same shape as folderId). Old builds ignore it and show the child as a
+    // normal session titled "Agent · …" — accepted build-skew.
+    var parentSessionId: String?
+    var parentToolUseId: String?
 
     static let syncMetadata: SyncTypeMetadata<SyncedSession> = {
         typealias F = FieldDescriptor<SyncedSession>
@@ -43,6 +48,8 @@ struct SyncedSession: Syncable {
                 // bump): old devices ignore the unknown CKRecord field on read
                 // and omit it on write, both of which decode as nil here.
                 F.optionalString("folderId", \SyncedSession.folderId),
+                F.optionalString("parentSessionId", \SyncedSession.parentSessionId),
+                F.optionalString("parentToolUseId", \SyncedSession.parentToolUseId),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedSession.updatedAt),
             version: 1
@@ -60,7 +67,9 @@ struct SyncedSession: Syncable {
             memoryEnabled: memoryEnabled ? 1 : 0,
             modelBinding: modelBinding,
             pinnedAt: s.pinnedAt,
-            folderId: s.folderId
+            folderId: s.folderId,
+            parentSessionId: s.parentSessionId,
+            parentToolUseId: s.parentToolUseId
         )
     }
 }
@@ -303,33 +312,6 @@ struct SyncedProviderConfig: Syncable {
                 F.date("updatedAt",      \SyncedProviderConfig.updatedAt),
             ],
             conflictPolicy: .lastWriteWinsByField(\SyncedProviderConfig.updatedAt),
-            version: 1
-        )
-    }()
-}
-
-// MARK: - SyncedMCPServers
-
-/// [T-mcp-integration-ios] Whole-file sync of /var/minis/mcp-servers/servers.json
-/// (the MCP server list). One record per app; last-write-wins by updatedAt
-/// (the file mtime), aligned with how the other config files sync.
-struct SyncedMCPServers: Syncable {
-    /// Constant id — only one MCP server list per app.
-    var id: String = "mcp-servers"
-    var serversJson: String
-    var updatedAt: Date
-
-    static let syncMetadata: SyncTypeMetadata<SyncedMCPServers> = {
-        typealias F = FieldDescriptor<SyncedMCPServers>
-        return SyncTypeMetadata<SyncedMCPServers>(
-            recordType: "MCPServersV2",
-            idKeyPath: \SyncedMCPServers.id,
-            scope: .global,
-            fields: [
-                F.string("serversJson", \SyncedMCPServers.serversJson),
-                F.date("updatedAt",     \SyncedMCPServers.updatedAt),
-            ],
-            conflictPolicy: .lastWriteWinsByField(\SyncedMCPServers.updatedAt),
             version: 1
         )
     }()
@@ -600,6 +582,59 @@ struct SyncedProviderThinkingRuleV3: Syncable {
     }()
 }
 
+/// [T-subagent-own-store] One CK record per sub agent definition.
+///
+/// Per-record rather than whole-roster so two devices editing different agents
+/// merge as a natural union instead of one overwriting the other — the same
+/// reason EnvVarItem replaced the whole-file EnvVarV2.
+///
+/// `sortOrder` rides on each record because it is disclosure order in the
+/// roster the model reads, i.e. real content, and a single record cannot
+/// express "the list moved" — a reorder therefore pushes one upsert per id.
+///
+/// `modelGroupId` is the one field pointing into provider-land. It is a plain
+/// foreign key and is synced verbatim; a group that does not exist on the
+/// receiving device resolves to "model chooses", which is the same fallback a
+/// locally-deleted group produces.
+struct SyncedSubAgentV3: Syncable {
+    var id: String                  // definition UUID (or SubAgentDefinition.builtInId)
+    var name: String
+    var subAgentDescription: String // `description` is taken on Syncable conformers
+    var instructions: String
+    var modelGroupId: String?
+    /// [T-subagent-thinking-override] ThinkingLevel raw value, nil = not set.
+    /// `optionalString`, so a peer on an older build that sends no such key
+    /// decodes as nil rather than throwing — no protocol version bump needed.
+    var thinkingLevelOverride: String?
+    /// 0/1 rather than Bool: the sync framework's FieldDescriptor offers
+    /// string / int / date only, and adding a bool descriptor for one field
+    /// would change shared infrastructure for no behavioural gain.
+    var isBuiltIn: Int
+    var sortOrder: Int
+    var updatedAt: Date
+
+    static let syncMetadata: SyncTypeMetadata<SyncedSubAgentV3> = {
+        typealias F = FieldDescriptor<SyncedSubAgentV3>
+        return SyncTypeMetadata<SyncedSubAgentV3>(
+            recordType: "SubAgentV3",
+            idKeyPath: \SyncedSubAgentV3.id,
+            scope: .global,
+            fields: [
+                F.string("name",                 \SyncedSubAgentV3.name),
+                F.string("description",          \SyncedSubAgentV3.subAgentDescription),
+                F.string("instructions",         \SyncedSubAgentV3.instructions),
+                F.optionalString("modelGroupId", \SyncedSubAgentV3.modelGroupId),
+                F.optionalString("thinkingLevelOverride", \SyncedSubAgentV3.thinkingLevelOverride),
+                F.int("isBuiltIn",               \SyncedSubAgentV3.isBuiltIn),
+                F.int("sortOrder",               \SyncedSubAgentV3.sortOrder),
+                F.date("updatedAt",              \SyncedSubAgentV3.updatedAt),
+            ],
+            conflictPolicy: .lastWriteWinsByField(\SyncedSubAgentV3.updatedAt),
+            version: 1
+        )
+    }()
+}
+
 // MARK: - SyncedEnvVars (legacy whole-file record)
 //
 // Kept for inbound compatibility ONLY. New devices push per-variable
@@ -861,7 +896,6 @@ enum SyncedTypesBootstrap {
         r.register(SyncedSessionFile.self)
         r.register(SyncedSkill.self)
         r.register(SyncedProviderConfig.self)
-        r.register(SyncedMCPServers.self)   // legacy whole-file, inbound only
         r.register(SyncedMCPServer.self)    // per-server, current schema
         // v3 per-record provider sync. These coexist with the legacy
         // SyncedProviderConfig dual-write outbound until all peer
@@ -871,6 +905,10 @@ enum SyncedTypesBootstrap {
         r.register(SyncedProviderModelEntryV3.self)
         r.register(SyncedProviderModelGroupV3.self)
         r.register(SyncedProviderThinkingRuleV3.self)
+        // [T-subagent-own-store] Missing this line is a SILENT failure:
+        // metadata(for: "SubAgentV3") returns nil, buildPortable is never
+        // reached, and the builder pushes nothing while dirty rows drain.
+        r.register(SyncedSubAgentV3.self)
         r.register(SyncedEnvVars.self)   // legacy whole-file, inbound only
         r.register(SyncedEnvVar.self)    // per-variable, current schema
         r.register(SyncedDevice.self)

@@ -69,10 +69,29 @@ data class ToolLoopConfig(
  *   3. known_poll_no_progress    — poll-style tool with frozen results.
  *   4. generic_repeat            — same args ≥10, regardless of result.
  *
- * One detector instance per Session. Not thread-safe; serialize calls
- * through the agent loop's existing single-threaded dispatch.
+ * One detector instance per Session.
+ *
+ * [T-android-concurrent-tools] Thread-safe by an instance lock. This class used
+ * to say "serialize calls through the agent loop's existing single-threaded
+ * dispatch" — and that dispatch is no longer single-threaded: a turn's tool
+ * calls now run concurrently, so several threads reach [check] and [record] on
+ * the same detector at once.
+ *
+ * The failure was not theoretical. On a Pixel 6 a sub agent died with
+ * "Attempt to invoke virtual method 'String ToolCallRecord.getToolName()' on a
+ * null object reference": ArrayDeque is unsynchronized, so a concurrent
+ * `addLast` that grows the backing array leaves a transiently-null slot, and
+ * the scans below dereference it. The whole run was lost — the parent got
+ * "the agent ended with status failed before writing a final answer".
+ *
+ * Every public entry point takes the lock. Contention is irrelevant here: the
+ * work is hashing a small map and scanning a 30-element window, next to tool
+ * calls that take seconds.
  */
 class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
+
+    /** [T-android-concurrent-tools] Guards [history] and [warningBuckets]. */
+    private val lock = Any()
 
     private val history = ArrayDeque<ToolCallRecord>()
     // warningKey -> last bucket index already emitted, used to throttle warnings
@@ -80,13 +99,13 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
     private val warningBuckets = HashMap<String, Int>()
 
     /** Drop all in-flight state. Call on session reset / new chat. */
-    fun reset() {
+    fun reset() = synchronized(lock) {
         history.clear()
         warningBuckets.clear()
     }
 
     /** Test-only window inspection. */
-    internal fun historySnapshot(): List<ToolCallRecord> = history.toList()
+    internal fun historySnapshot(): List<ToolCallRecord> = synchronized(lock) { history.toList() }
 
     // ─── before-execution hook ────────────────────────────────────────────────
 
@@ -95,7 +114,7 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
      * skip tool execution and surface `result.message` as a tool-error result
      * when `result.level == CRITICAL`.
      */
-    fun check(toolName: String, params: Map<String, Any?>): LoopCheckResult {
+    fun check(toolName: String, params: Map<String, Any?>): LoopCheckResult = synchronized(lock) {
         val argsHash = argsHashFor(toolName, params)
 
         // 1. unknown_tool_repeat — most specific signal, runs first.
@@ -172,7 +191,7 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
         result: String?,
         errorMessage: String? = null,
         toolCallId: String? = null,
-    ): LoopCheckResult {
+    ): LoopCheckResult = synchronized(lock) {
         val argsHash = argsHashFor(toolName, params)
         val resultHash = resultHashFor(result, errorMessage)
         val unknownToolName = extractUnknownToolName(errorMessage)

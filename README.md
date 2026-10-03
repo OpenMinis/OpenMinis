@@ -119,8 +119,8 @@ always carries the latest APK.
 ## Building from source
 
 Minis ships a Linux sandbox inside the app, so the native dependencies (iSH on
-iOS, PRoot on Android, FFmpeg, LAME) and the Alpine rootfs are **built from
-source** rather than committed as binaries.
+iOS, PRoot on Android, FFmpeg, LAME, rclone) and the Alpine rootfs are **built
+from source** rather than committed as binaries.
 
 **→ See [BUILDING.md](BUILDING.md) for the full first-build guide.**
 
@@ -130,13 +130,18 @@ The short version:
 git clone --recurse-submodules https://github.com/OpenMinis/OpenMinis.git
 cd OpenMinis
 
-# iOS  — order matters: FFmpeg links against LAME
+# iOS  — needs Go 1.25+ and Xcode's Metal Toolchain
+#        (xcodebuild -downloadComponent MetalToolchain)
+#        order matters: FFmpeg links against LAME
 ./deps/build_lame.sh && ./deps/build_ffmpeg.sh
 ./deps/build_ish.sh && ./deps/prepare_alpine_rootfs.sh
+./deps/build_rclone_ios.sh
 open src/ios/Minis.xcodeproj
 
-# Android — needs NDK r28+
+# Android — needs NDK r28+, Go 1.25+ and gomobile
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
+./deps/build_rclone_android.sh
+mkdir -p src/android/app/libs && cp deps/build/rclone/rclone.aar src/android/app/libs/
 cd src/android && ./gradlew :app:assembleDebug
 ```
 

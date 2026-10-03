@@ -742,8 +742,20 @@ private fun openMediaExternally(context: Context, file: File, mime: String) {
 private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
     val surfaceBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+    // [T-android-image-session-direct] Carry the owning chat session (when
+    // this markdown is rendered inside one) so a minis:// image resolves in
+    // that session's directory rather than through global state.
+    val sessionId = com.openminis.app.ui.chat.LocalMarkdownSessionId.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val model = androidx.compose.runtime.remember(block.url, sessionId) {
+        if (sessionId == null || !block.url.startsWith("minis://")) block.url
+        else coil.request.ImageRequest.Builder(context)
+            .data(block.url)
+            .setParameter(com.openminis.app.ui.MinisImageFetcher.SESSION_PARAM, sessionId)
+            .build()
+    }
     AsyncImage(
-        model = block.url,
+        model = model,
         contentDescription = block.alt.ifEmpty { filenameFromUrl(block.url) },
         contentScale = ContentScale.Fit,
         modifier = Modifier

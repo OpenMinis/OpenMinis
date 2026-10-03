@@ -1,5 +1,8 @@
 package com.openminis.app.ui.settings.backup
 
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -64,11 +67,30 @@ fun BackupHistoryDetailScreen(
     record: BackupHistory.Record,
     onBack: () -> Unit,
     onRemove: () -> Unit,
-    onRemoveWithFiles: (() -> Unit)? = null,
+    /**
+     * [T-android-backup-delete-files-feedback] Deletes the package from every
+     * destination, then the record. SUSPENDS until that finishes and returns
+     * the outcome, so this screen can stay up, show progress and report what
+     * happened. A fire-and-forget callback could not: the caller popped the
+     * screen immediately, which cancelled the work.
+     */
+    onRemoveWithFiles: (suspend () -> BackupViewModel.DeleteWithFilesResult)? = null,
+    /** Leave the screen once the record is actually gone. */
+    onRemoved: () -> Unit = {},
     onOpenSkipped: () -> Unit = {},
     onOpenDestination: ((String) -> Unit)? = null,
 ) {
     var confirmRemove by remember { mutableStateOf(false) }
+    // [T-android-backup-delete-files-feedback] The destructive branch is a
+    // SECOND, explicit confirmation naming the package and the destination
+    // count — the first sheet only asks which KIND of delete, and agreeing to
+    // "record and files" there is not the same as agreeing to destroy a named
+    // package on N servers.
+    var confirmDeleteFiles by remember { mutableStateOf(false) }
+    var deletingFiles by remember { mutableStateOf(false) }
+    var deleteFailure by remember { mutableStateOf<List<String>?>(null) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     // [T-backup-delete-files-too] Offering to delete the packages too only
     // makes sense when we can name the file AND some destination actually
     // received it.
@@ -224,7 +246,7 @@ fun BackupHistoryDetailScreen(
                     }
                     if (canDeleteFiles) {
                         MinisTextButton(
-                            onClick = { confirmRemove = false; onRemoveWithFiles?.invoke() },
+                            onClick = { confirmRemove = false; confirmDeleteFiles = true },
                         ) {
                             Text(
                                 stringResource(R.string.backup_history_remove_with_files),
@@ -237,6 +259,108 @@ fun BackupHistoryDetailScreen(
             dismissButton = {
                 MinisTextButton(onClick = { confirmRemove = false }) {
                     Text(stringResource(R.string.backup_dest_cancel))
+                }
+            },
+        )
+    }
+
+    // [T-android-backup-delete-files-feedback] Second confirmation, naming the
+    // package and how many destinations lose it.
+    if (confirmDeleteFiles) {
+        val destCount = record.destinations.count { it.succeeded }
+        AlertDialog(
+            onDismissRequest = { confirmDeleteFiles = false },
+            title = { Text(stringResource(R.string.backup_delete_files_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.backup_delete_files_confirm_body,
+                        record.packageName.orEmpty(),
+                        destCount,
+                    ),
+                )
+            },
+            confirmButton = {
+                MinisTextButton(
+                    onClick = {
+                        confirmDeleteFiles = false
+                        val action = onRemoveWithFiles ?: return@MinisTextButton
+                        deletingFiles = true
+                        scope.launch {
+                            val result = action()
+                            deletingFiles = false
+                            when (result) {
+                                is BackupViewModel.DeleteWithFilesResult.Success -> {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        context.getString(
+                                            if (result.destinations > 0) {
+                                                R.string.backup_delete_files_success
+                                            } else {
+                                                R.string.backup_delete_files_success_none
+                                            },
+                                        ),
+                                        android.widget.Toast.LENGTH_LONG,
+                                    ).show()
+                                    onRemoved()
+                                }
+                                is BackupViewModel.DeleteWithFilesResult.Failed -> {
+                                    // Stay on the screen: the record is still
+                                    // there, and it is the only thing naming
+                                    // the file left behind on the remote.
+                                    deleteFailure = result.failures
+                                }
+                            }
+                        }
+                    },
+                ) {
+                    Text(
+                        stringResource(R.string.backup_delete_files_confirm_action),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { confirmDeleteFiles = false }) {
+                    Text(stringResource(R.string.backup_dest_cancel))
+                }
+            },
+        )
+    }
+
+    // Progress. Non-dismissible on purpose — rclone is mid-delete, and a
+    // second tap must not start a second run.
+    if (deletingFiles) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text(stringResource(R.string.backup_delete_files_progress)) },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Text(record.packageName.orEmpty())
+                }
+            },
+            confirmButton = { },
+        )
+    }
+
+    // Failure, with the per-destination reason. Never silent.
+    deleteFailure?.let { failures ->
+        AlertDialog(
+            onDismissRequest = { deleteFailure = null },
+            title = { Text(stringResource(R.string.backup_delete_files_failed_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.backup_delete_files_failed_body,
+                        failures.joinToString("\n"),
+                    ),
+                )
+            },
+            confirmButton = {
+                MinisTextButton(onClick = { deleteFailure = null }) {
+                    Text(stringResource(R.string.ok))
                 }
             },
         )

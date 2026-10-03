@@ -17,8 +17,14 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
     case xAI
     /// Kimi Code / Coding Plan (Moonshot). RFC 8628 device-code OAuth,
     /// OpenAI-compatible coding upstream — flows through OpenAIProvider with
-    /// custom base URL + OAuth bearer, like xAI. See the Kimi Code OAuth design notes.
+    /// custom base URL + OAuth bearer, like xAI.
     case kimiCode
+    /// [T-copilot-provider] GitHub Copilot via an UNOFFICIAL reverse-engineered
+    /// integration: RFC 8628 device-code sign-in to GitHub, then a short-lived
+    /// Copilot session token. The chat surface is OpenAI-compatible, so it
+    /// flows through OpenAIProvider like xAI/Kimi. Opt-in, warned about in the
+    /// sign-in UI, and hideable via CopilotConstants.isEnabled.
+    case githubCopilot
     /// Sentinel for a provider type this app build doesn't recognize — e.g. a
     /// NEWER build synced an instance whose `provider_type` string isn't a known
     /// case here. We DECODE to this instead of throwing/dropping, so the instance
@@ -43,7 +49,45 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
         case .openAIResponses: return "Responses API (v3)"
         case .xAI: return "xAI (Grok)"
         case .kimiCode: return "Kimi Code"
+        case .githubCopilot: return "GitHub Copilot"
         case .unsupported: return "Unsupported"
+        }
+    }
+
+    /// Whether an OAuth instance of this provider can discover its model list
+    /// from the network, rather than only reporting a compiled-in catalog.
+    ///
+    /// [T-provider-oauth-model-discovery] This drives the one-shot refresh
+    /// `ProviderConfigStore.addInstance` fires after a provider is added, so a
+    /// freshly-authenticated account shows the vendor's CURRENT models instead
+    /// of whatever this build happened to ship with (GH#265: xAI OAuth seeded a
+    /// static catalog with no grok-4.6, and only a manual Settings → Models →
+    /// Refresh fixed it).
+    ///
+    /// Deliberately a property of the TYPE rather than a check at the call
+    /// site: the same question is asked of every provider, and the answer is a
+    /// fact about how that provider's OAuth branch in
+    /// `fetchModelsForInstance` is implemented. Keeping it here means adding a
+    /// provider means answering it, instead of silently inheriting "no".
+    ///
+    /// `false` for the two whose OAuth branch returns a static list without a
+    /// request — refreshing them would spend a network round-trip to arrive
+    /// back at the catalog already seeded.
+    var oauthSupportsModelDiscovery: Bool {
+        switch self {
+        case .anthropic, .gemini, .antigravity, .openRouter, .xAI, .kimiCode, .githubCopilot:
+            // These OAuth branches all reach a real /models endpoint.
+            return true
+        case .openAI:
+            // OpenAIModelsAPI.fetchModelsOAuth() is a compiled-in list.
+            return false
+        case .openAIResponses:
+            // Responses-API instances are API-key only; the OAuth branch
+            // returns builtInModels.
+            return false
+        case .unsupported:
+            // Synced from a newer build — nothing to fetch with.
+            return false
         }
     }
 
@@ -58,6 +102,10 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
         case .openAIResponses: return LLMModel.allOpenAI
         case .xAI: return XAIModelsAPI.allModels
         case .kimiCode: return KimiModelsAPI.allModels
+        // Deliberately empty: the task requires the list come from the server
+        // (`model_picker_enabled`), never a compiled-in guess that would go
+        // stale and offer models the account cannot use.
+        case .githubCopilot: return []
         case .unsupported: return []
         }
     }
@@ -80,6 +128,8 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
             return AppLocalized("Works with the Grok series of models")
         case .kimiCode:
             return AppLocalized("Sign in with your Kimi Code / Coding Plan subscription")
+        case .githubCopilot:
+            return AppLocalized("Sign in with GitHub — unofficial, use at your own risk")
         case .antigravity:
             return AppLocalized("\(builtInModels.count) built-in models")
         case .unsupported:
@@ -98,6 +148,7 @@ enum ProviderType: String, Codable, CaseIterable, Hashable, Sendable {
         case .openAIResponses: return .vision
         case .xAI: return .vision
         case .kimiCode: return .vision
+        case .githubCopilot: return .vision
         case .unsupported: return .vision
         }
     }

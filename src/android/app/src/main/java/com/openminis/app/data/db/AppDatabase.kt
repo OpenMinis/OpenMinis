@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WebAppShortcutEntity::class,
         FolderEntity::class,
     ],
-    version = 12,
+    version = 14,
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -308,6 +308,74 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * [T-p1-delegate-task] Child-session ownership: `parent_session_id` +
+         * `parent_tool_use_id` on `sessions` (design v4 §3.1). Two nullable
+         * TEXT columns, no DEFAULT, no index — children are only ever
+         * enumerated on parent delete, and the sessions table is small.
+         * Existing rows read NULL = "top-level session", which is exactly what
+         * they are.
+         */
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+                db.execSQL("ALTER TABLE sessions ADD COLUMN parent_tool_use_id TEXT")
+            }
+        }
+
+        /**
+         * [T-p1-delegate-task] Same no-op downgrade contract as
+         * [MIGRATION_12_11]: the two columns stay; a build that does not know
+         * them ignores them (Room binds by name) and simply shows child
+         * sessions in its home list with their `Helper · …` title prefix —
+         * the documented skew behaviour (§3.3), not data loss.
+         */
+        val MIGRATION_13_12 = object : Migration(13, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Intentionally empty — see above.
+            }
+        }
+
+        /**
+         * [T-android-moveto-perf] Index `sessions.updated_at`.
+         *
+         * Every session listing orders by this column; with no index SQLite
+         * scans the whole table and sorts, which is what made the "Move to"
+         * sheet visibly pause on large histories.
+         *
+         * The index name and column list must match what Room derives from the
+         * entity's @Index EXACTLY — Room validates the live schema on open and
+         * aborts with IllegalStateException on any difference. In particular
+         * this is `(updated_at)`, not `(updated_at DESC)`: Room's annotation
+         * cannot express a sort order, and SQLite reads a B-tree index in
+         * either direction anyway.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_sessions_updated_at " +
+                        "ON sessions(updated_at)",
+                )
+            }
+        }
+
+        /**
+         * [T-android-moveto-perf] Downgrade counterpart of [MIGRATION_13_14].
+         *
+         * This one is NOT a no-op, unlike the ADD COLUMN downgrades above. An
+         * older build's entity does not declare index_sessions_updated_at, and
+         * Room's open-time validation rejects an index it finds on disk but
+         * does not expect just as firmly as one that is missing — leaving it in
+         * place would make the older build fail to start. Dropping an index
+         * destroys no data (it is derived entirely from the column), so unlike
+         * DROP COLUMN this is safe to undo; re-upgrading simply recreates it.
+         */
+        val MIGRATION_14_13 = object : Migration(14, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS index_sessions_updated_at")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -321,7 +389,8 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_11,
+                        MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_12, MIGRATION_12_11,
+                        MIGRATION_13_14, MIGRATION_14_13,
                     )
                     .build()
                     .also { INSTANCE = it }

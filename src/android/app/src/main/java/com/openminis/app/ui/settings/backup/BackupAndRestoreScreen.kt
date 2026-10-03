@@ -19,10 +19,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Sync
@@ -36,12 +41,14 @@ import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderZip
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Terminal
@@ -50,6 +57,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -72,12 +80,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.openminis.app.data.DeviceIdentity
 import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
 import com.openminis.app.backup.BackupCategory
@@ -89,6 +100,14 @@ import com.openminis.app.ui.components.MinisOutlinedButton
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import com.openminis.app.ui.theme.ChatColors
 
 /**
  * [T-backup-primary-action] Shared content for the two primary actions —
@@ -109,13 +128,76 @@ private fun RowScope.PrimaryActionContent(
     icon: ImageVector,
     label: String,
     busy: Boolean,
+    /**
+     * [T-android-restore-perf] 0f..1f when a total is known, null otherwise.
+     * Drives a determinate arc so the indicator repaints on real progress
+     * rather than on every frame — see the busy branch below.
+     */
+    fraction: Float? = null,
+    /**
+     * [T-android-restore-ui] Non-null while a restore is running and stoppable.
+     * Turns the ring into a tap target with a stop glyph at its centre; null
+     * leaves it a plain indicator.
+     */
+    onStopClick: (() -> Unit)? = null,
 ) {
     if (busy) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(18.dp),
-            strokeWidth = 2.dp,
-            color = LocalContentColor.current,
-        )
+        // [T-android-restore-perf] A DETERMINATE arc, not the spinning
+        // indeterminate one.
+        //
+        // CircularProgressIndicator's no-argument form animates forever, and
+        // an infinite animation drives a redraw every frame for as long as it
+        // is on screen. Measured with perfetto during a live restore: 478
+        // frames in 10 s (~48 fps) repainting the whole 1080x2340 surface,
+        // costing RenderThread 2.49 s of CPU per 10 s wall clock — on a device
+        // whose restore was already I/O-bound, spent entirely on a spinner
+        // that conveys nothing the counter beside it does not.
+        //
+        // The determinate form redraws only when `progress` actually changes,
+        // which the importer reports every 200 records (~1.7 s apart at the
+        // measured rate) rather than every frame.
+        val stopActionLabel = stringResource(R.string.restore_stop_action)
+        if (onStopClick != null) {
+            // [T-android-restore-ui] Ring + stop glyph, in one tap target.
+            //
+            // The touch area is 36.dp even though the ring is 24.dp: the
+            // visible arc is below the 48.dp accessibility minimum and cannot
+            // grow without unbalancing the button, so the hit rect is expanded
+            // around it instead. It is the ONLY live control while a restore
+            // runs — the button behind it is disabled — so a near miss does
+            // nothing rather than triggering something else.
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onStopClick)
+                    .semantics {
+                        role = Role.Button
+                        contentDescription = stopActionLabel
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    progress = { fraction ?: 0f },
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.5.dp,
+                    color = LocalContentColor.current,
+                )
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(RoundedCornerShape(1.5.dp))
+                        .background(LocalContentColor.current),
+                )
+            }
+        } else {
+            CircularProgressIndicator(
+                progress = { fraction ?: 0f },
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = LocalContentColor.current,
+            )
+        }
     } else {
         Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
     }
@@ -140,6 +222,9 @@ fun BackupAndRestoreScreen(
     onChooseRestoreServer: () -> Unit = {},
     onOpenHistoryRecord: (String) -> Unit = {},
     onBrowseDestination: (String) -> Unit = {},
+    // 0 = Backup, 1 = Restore. The onboarding restore link opens on Restore
+    // (iOS `BackupAndRestoreView(initialTab: .restore)`); Settings keeps Backup.
+    initialTab: Int = 0,
 ) {
     val vm: BackupViewModel = viewModel()
     // 0 = Backup, 1 = Restore. Saveable, not plain `remember`: navigating to
@@ -148,7 +233,7 @@ fun BackupAndRestoreScreen(
     // who cancelled out of "Choose from Server…" onto the wrong tab, one step
     // further from where they started than when they left. A tab index is not
     // a secret, so unlike the passphrases below it is safe to persist.
-    var tab by rememberSaveable { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(initialTab) }
     // Hoisted out of the tabs so switching tabs does not discard them — see
     // [T-restore-keep-tab-state] below.
     var backupPassphrase by remember { mutableStateOf("") }
@@ -221,12 +306,25 @@ private fun BackupTab(
     val selected by vm.selected.collectAsState()
     val encrypt by vm.encrypt.collectAsState()
     val maxFileSizeMB by vm.maxFileSizeMB.collectAsState()
-    val running by vm.isRunning.collectAsState()
+    // [T-android-backup-run-controller] The backup's own flag, not the
+    // restore/backup union: this tab's Stop button must not appear for a
+    // restore running on the other tab.
+    val running by vm.exportRunning.collectAsState()
     val status by vm.statusText.collectAsState()
     val error by vm.errorText.collectAsState()
     val destinations by vm.destinations.collectAsState()
     val historyRecords by vm.historyRecords.collectAsState()
     val lastResult by vm.lastResult.collectAsState()
+    val exportReady by vm.exportReady.collectAsState()
+    val saveState by vm.saveState.collectAsState()
+
+    // [T-android-backup-local-export] Save to Device: SAF CreateDocument. The
+    // MIME type drives the extension the picker appends (BackupFormat.MIME_TYPE
+    // explains why not octet-stream). The copy itself runs on the backup
+    // controller's process scope, so it survives leaving this screen.
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(com.openminis.app.backup.BackupFormat.MIME_TYPE),
+    ) { uri -> uri?.let(vm::saveExportTo) }
 
     // Re-read destinations every time this tab appears: the user may have just
     // added one via "Manage Destinations…" and navigated back, and a stale
@@ -259,6 +357,9 @@ private fun BackupTab(
 
     val passphraseValid = !encrypt || (passphrase.isNotEmpty() && passphrase == confirm)
     val hasFileTree = selected.any { it.carriesFileTree }
+
+    // -- Device Name --
+    DeviceNameSection(enabled = !running)
 
     // -- Include --
     // Footer changes with the Max Per-File Size selection, but only when a
@@ -327,6 +428,10 @@ private fun BackupTab(
             showDivider = encrypt,
         )
         if (encrypt) {
+            // [T-android-backup-passphrase-keyboard] (GH#345) One toggle for the
+            // pair: the user is typing the same secret twice and needs to
+            // compare them, so revealing only one half would defeat the point.
+            var revealPassphrase by remember { mutableStateOf(false) }
             Column(Modifier.padding(16.dp)) {
                 OutlinedTextField(
                     value = passphrase,
@@ -334,7 +439,37 @@ private fun BackupTab(
                     label = { Text(stringResource(R.string.backup_passphrase)) },
                     singleLine = true,
                     enabled = !running,
-                    visualTransformation = PasswordVisualTransformation(),
+                    // [T-android-backup-passphrase-keyboard] (GH#345)
+                    // `PasswordVisualTransformation` alone only masks the
+                    // GLYPHS — the field still declares itself as ordinary
+                    // text, so the IME treats it as one: third-party keyboards
+                    // offer clipboard history and network-backed prediction,
+                    // and learn the passphrase into their personal dictionary.
+                    // KeyboardType.Password is what tells the IME this is a
+                    // secret, which is what makes a keyboard drop those
+                    // features (and what lets the system substitute its own
+                    // secure keyboard).
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (revealPassphrase) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { revealPassphrase = !revealPassphrase },
+                            enabled = !running,
+                        ) {
+                            Icon(
+                                if (revealPassphrase) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
+                                contentDescription = stringResource(
+                                    if (revealPassphrase) R.string.backup_hide_passphrase
+                                    else R.string.backup_show_passphrase,
+                                ),
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(8.dp))
@@ -344,7 +479,12 @@ private fun BackupTab(
                     label = { Text(stringResource(R.string.backup_confirm_passphrase)) },
                     singleLine = true,
                     enabled = !running,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (revealPassphrase) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
                     isError = confirm.isNotEmpty() && confirm != passphrase,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -395,12 +535,12 @@ private fun BackupTab(
             // while running would disable the button mid-run and leave no way
             // to stop the backup from this screen.
             //
-            // A package with no destination reaches only our own sandbox and
-            // dies with the app it protects — that is not a backup, so the
-            // button refuses rather than producing one (iOS parity).
-            enabled = running || (
-                selected.isNotEmpty() && passphraseValid && destinations.isNotEmpty()
-                ),
+            // [T-android-backup-local-export] A destination is no longer one
+            // of them. With none, the run is local-only and ends in Save to
+            // Device / Share, and the result card says it is not saved outside
+            // the app yet — so the "reads as success" problem the old gate
+            // guarded against is answered in words, not by a dead button.
+            enabled = running || (selected.isNotEmpty() && passphraseValid),
             colors = if (running) {
                 androidx.compose.material3.ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
@@ -438,10 +578,13 @@ private fun BackupTab(
         // a new user is most likely to be missing, since the categories arrive
         // already selected (same ordering and rationale as iOS).
         if (!running) {
+            // [T-android-backup-local-export] Real blockers first; "no
+            // destination" is now information about where the package will
+            // (not) go, not a reason the button is disabled.
             val hint = when {
-                destinations.isEmpty() -> stringResource(R.string.backup_needs_destination)
                 selected.isEmpty() -> stringResource(R.string.backup_needs_category)
                 encrypt && passphrase.isEmpty() -> stringResource(R.string.backup_needs_passphrase)
+                destinations.none { it.enabled } -> stringResource(R.string.backup_no_destination_hint)
                 else -> null
             }
             hint?.let {
@@ -493,6 +636,30 @@ private fun BackupTab(
                     )
                 }
             }
+            // [T-android-backup-local-export] The exits for a run that had
+            // nowhere to go. Same condition as iOS (`deliveryResults.isEmpty`):
+            // what matters is whether THIS run was carried anywhere, not
+            // whether a destination is configured now. A run whose delivery
+            // partly failed keeps its local copy but does not get these —
+            // its per-destination rows already say what to fix.
+            val pkg = exportReady?.packageFile
+            if (r.localOnly && pkg != null && pkg.exists()) {
+                LocalExportActions(
+                    saving = saveState is com.openminis.app.backup.BackupRunController.SaveState.Saving,
+                    onSave = { saveLauncher.launch(pkg.name) },
+                    onShare = { shareBackupPackage(context, pkg) },
+                )
+                saveStateLine(saveState)?.let { (text, isError) ->
+                    Text(
+                        text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (isError) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                }
+            }
         }
     }
 
@@ -501,6 +668,82 @@ private fun BackupTab(
         records = historyRecords,
         onOpen = onOpenHistoryRecord,
     )
+}
+
+/**
+ * [T-android-backup-device-name-setting] Names this device for backup
+ * filenames (`<device>-<date>-<id>.minisbak`) and the manifest's
+ * `device_name` — the iOS Backup settings section of the same name.
+ *
+ * Committed on every change rather than on IME Done: the screen is usually
+ * left with Back or by tapping Start Backup, neither of which submits. The
+ * draft is local state so the field can sit empty while the user retypes
+ * without the placeholder jumping; storing blank clears the override.
+ */
+@Composable
+private fun DeviceNameSection(enabled: Boolean) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val automatic = remember { DeviceIdentity.automaticName(context) }
+    var draft by remember { mutableStateOf(DeviceIdentity.customName(context).orEmpty()) }
+    SettingsSection(
+        header = stringResource(R.string.backup_device_name),
+        footer = stringResource(R.string.backup_device_name_footer, automatic),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier.size(30.dp).background(Color(0xFF007AFF), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PhoneAndroid,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(17.dp),
+                )
+            }
+            Spacer(Modifier.width(14.dp))
+            val textStyle = MaterialTheme.typography.bodyLarge
+            androidx.compose.foundation.text.BasicTextField(
+                value = draft,
+                onValueChange = {
+                    draft = it.take(DeviceIdentity.CUSTOM_NAME_MAX_LENGTH)
+                    DeviceIdentity.setCustomName(context, draft)
+                },
+                enabled = enabled,
+                singleLine = true,
+                textStyle = textStyle.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Words,
+                    autoCorrectEnabled = false,
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Done,
+                ),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner ->
+                    Box {
+                        // The placeholder is the automatic name, so an empty
+                        // field shows what will be used instead of a blank.
+                        if (draft.isEmpty()) {
+                            Text(
+                                automatic,
+                                style = textStyle,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        inner()
+                    }
+                },
+            )
+        }
+    }
 }
 
 /**
@@ -760,7 +1003,6 @@ private fun RestoreTab(
     val restoreSelected by vm.restoreSelected.collectAsState()
     val report by vm.report.collectAsState()
     val error by vm.errorText.collectAsState()
-    val restoreProgress by vm.restoreProgress.collectAsState()
 
     // Which destination the user is browsing for a package to restore from.
     var browsing by remember {
@@ -786,12 +1028,22 @@ private fun RestoreTab(
         // is almost always on a server they already set up, so making that the
         // first thing on the screen — instead of a button that opens a list —
         // removes a step from the common path.
-        if (destinations.isNotEmpty()) {
+        // [T-android-backup-local-folder] Server destinations only. Browsing a
+        // destination goes through rclone, which has no backend for a
+        // SAF-picked folder — listing one here would hand the user a row that
+        // opens an empty browser. Restoring FROM a local folder is already
+        // covered, and better, by "Choose Backup File…" below: the system
+        // picker reaches every folder on the device, not just the ones that
+        // happen to be registered as backup destinations.
+        val serverDestinations = destinations.filterNot {
+            com.openminis.app.backup.remote.RcloneRemoteStore.isLocalFolder(it.backend)
+        }
+        if (serverDestinations.isNotEmpty()) {
             SettingsSection(
                 header = stringResource(R.string.backup_restore_destinations),
                 footer = stringResource(R.string.backup_restore_destinations_footer),
             ) {
-                destinations.forEachIndexed { i, r ->
+                serverDestinations.forEachIndexed { i, r ->
                     RestoreSourceRow(
                         icon = Icons.Outlined.Cloud,
                         iconColor = Color(0xFFAF52DE),
@@ -803,7 +1055,7 @@ private fun RestoreTab(
                         ),
                         enabled = !running,
                         onClick = { onBrowseDestination(r.name) },
-                        showDivider = i < destinations.lastIndex,
+                        showDivider = i < serverDestinations.lastIndex,
                     )
                 }
             }
@@ -927,13 +1179,37 @@ private fun RestoreTab(
             footer = stringResource(R.string.backup_restore_passphrase_footer),
         ) {
             Column(Modifier.padding(16.dp)) {
+                // [T-android-backup-passphrase-keyboard] (GH#345) Same
+                // treatment as the backup side — see the comment there for why
+                // the keyboard type matters beyond the masking.
+                var revealRestorePassphrase by remember { mutableStateOf(false) }
                 OutlinedTextField(
                     value = passphrase,
                     onValueChange = onPassphraseChange,
                     label = { Text(stringResource(R.string.backup_passphrase)) },
                     singleLine = true,
                     enabled = !running,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (revealRestorePassphrase) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { revealRestorePassphrase = !revealRestorePassphrase },
+                            enabled = !running,
+                        ) {
+                            Icon(
+                                if (revealRestorePassphrase) Icons.Default.VisibilityOff
+                                else Icons.Default.Visibility,
+                                contentDescription = stringResource(
+                                    if (revealRestorePassphrase) R.string.backup_hide_passphrase
+                                    else R.string.backup_show_passphrase,
+                                ),
+                            )
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -941,55 +1217,22 @@ private fun RestoreTab(
     }
 
     Column(Modifier.padding(16.dp)) {
-        MinisButton(
-            onClick = { vm.startRestore(passphrase.takeIf { p.manifest.encryption != null }) },
+        // [T-android-restore-ui] The button and its subtitle live in their own
+        // composable so that progress — which ticks every 200 records — only
+        // recomposes THEM.
+        //
+        // They used to read `vm.restoreProgress` from RestoreTab's top level,
+        // which put every category switch, text field and card on this screen
+        // in the same recomposition scope as a counter updating several times
+        // a second. Moving the collect down here is the whole fix; the
+        // subtitle reads a separate flow for the same reason.
+        RestoreProgressSection(
+            vm = vm,
+            running = running,
             enabled = !running && restoreSelected.isNotEmpty(),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            // [T-android-restore-progress-counts] While running, the label
-            // carries the live position: "Restoring chats 1200/2350". A restore
-            // of a large package spends minutes inside one category, and a
-            // static "Restoring…" beside a spinner cannot distinguish steady
-            // progress from a hang — which is exactly the question the user is
-            // asking by then.
-            //
-            // Falls back to the plain label before the first count arrives, and
-            // for categories whose manifest carried no total.
-            val liveLabel = when {
-                !running -> stringResource(R.string.backup_restore)
-                restoreProgress == null -> stringResource(R.string.backup_restoring)
-                else -> {
-                    val p = restoreProgress!!
-                    val name = categoryLabel(p.categoryKey)
-                    when {
-                        p.total != null && p.done > 0 ->
-                            stringResource(R.string.backup_restoring_counted, name, p.done, p.total!!)
-                        p.done > 0 -> stringResource(R.string.backup_restoring_running, name, p.done)
-                        else -> stringResource(R.string.backup_restoring_category, name)
-                    }
-                }
-            }
-            PrimaryActionContent(
-                icon = Icons.Outlined.CloudDownload,
-                label = liveLabel,
-                busy = running,
-            )
-        }
-        // The live step ("Importing chats…") used to BE the button's label.
-        // Moving it below keeps the control a fixed size while a restore runs,
-        // without losing the only readout of what it is currently doing —
-        // the source pickers that carry the same status are hidden by now.
-        if (running) {
-            status?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
+            statusText = status,
+            onStart = { vm.startRestore(passphrase.takeIf { p.manifest.encryption != null }) },
+        )
         MinisOutlinedButton(
             onClick = { vm.cancelRestore(); onPassphraseChange("") },
             enabled = !running,
@@ -1022,52 +1265,58 @@ private fun RestoreReport(
         }
     }
 
-    // Per-category problems. The totals above say a restore had issues; these
+    // Per-category outcomes. The totals above say a restore had issues; these
     // say WHICH data was affected and why, which is the difference between
     // "something went wrong" and knowing whether it matters. Each line names
     // the category, as on iOS.
-    val problems = buildList {
-        for (c in report.categories) {
-            val name = BackupCategory.fromKey(c.category)
-                ?.let { stringResource(categoryNameRes(it)) } ?: c.category
-            // The category threw outright — the most serious line here, and
-            // the one iOS lists first.
-            c.failed?.let { add(stringResource(R.string.backup_report_failed, name, it)) }
-            if (c.sizeSkippedInPackage > 0) {
-                add(stringResource(R.string.backup_report_size_skipped, name, c.sizeSkippedInPackage))
-            }
-            if (c.notDownloadedInPackage > 0) {
-                add(stringResource(R.string.backup_report_not_downloaded, name, c.notDownloadedInPackage))
-            }
-            if (c.missingBlobs > 0) {
-                // The package itself is incomplete — worth distinguishing from
-                // a file the user deliberately capped out of it.
-                add(stringResource(R.string.backup_report_missing_from_package, name, c.missingBlobs))
-            }
-            if (c.unreadable > 0) {
-                add(stringResource(R.string.backup_report_unreadable, name, c.unreadable))
+    //
+    // [T-android-restore-report-severity] Split by severity. Everything used
+    // to render in the error colour, so a file the SOURCE device deliberately
+    // left out — over the size cap, or never downloaded there — read as if the
+    // restore had broken. Those are the backup's own policy, recorded as
+    // tombstones in the index, and they get their own amber section.
+    //
+    // Which counter is which severity is decided in restoreIssues(), not here,
+    // so the rule is tested as data rather than inferred from colours.
+    val issues = restoreIssues(report)
+    val lines = issues.map { issue ->
+        val name = BackupCategory.fromKey(issue.categoryKey)
+            ?.let { stringResource(categoryNameRes(it)) } ?: issue.categoryKey
+        issue.severity to when (issue.kind) {
+            RestoreIssueKind.FAILED ->
+                stringResource(R.string.backup_report_failed, name, issue.detail.orEmpty())
+            RestoreIssueKind.MISSING_FROM_PACKAGE ->
+                stringResource(R.string.backup_report_missing_from_package, name, issue.count)
+            RestoreIssueKind.UNREADABLE ->
+                stringResource(R.string.backup_report_unreadable, name, issue.count)
+            RestoreIssueKind.SIZE_SKIPPED ->
+                stringResource(R.string.backup_report_size_skipped, name, issue.count)
+            RestoreIssueKind.NOT_DOWNLOADED ->
+                stringResource(R.string.backup_report_not_downloaded, name, issue.count)
+        }
+    }
+    val errors = lines.filter { it.first == RestoreIssueSeverity.ERROR }.map { it.second }
+    // report.warnings are advisories (count mismatches and the like), already
+    // sentences rather than counts; they read as notices, not failures.
+    val notices = lines.filter { it.first == RestoreIssueSeverity.NOTICE }.map { it.second } +
+        report.warnings
+    if (errors.isNotEmpty()) {
+        SettingsSection(header = stringResource(R.string.backup_report_issues)) {
+            Column(Modifier.padding(16.dp)) {
+                errors.forEach {
+                    ReportLine(it, Icons.Outlined.ErrorOutline, MaterialTheme.colorScheme.error)
+                }
             }
         }
     }
-    if (problems.isNotEmpty() || report.warnings.isNotEmpty()) {
-        SettingsSection(header = stringResource(R.string.backup_report_issues)) {
+    if (notices.isNotEmpty()) {
+        SettingsSection(
+            header = stringResource(R.string.backup_report_notices),
+            footer = stringResource(R.string.backup_report_notices_footer),
+        ) {
             Column(Modifier.padding(16.dp)) {
-                problems.forEach {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(vertical = 2.dp),
-                    )
-                }
-                report.warnings.forEach {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(vertical = 2.dp),
-                    )
-                }
+                val amber = reportNoticeColor()
+                notices.forEach { ReportLine(it, Icons.Outlined.Warning, amber) }
             }
         }
     }
@@ -1161,12 +1410,18 @@ private fun DestinationRow(
     onClick: () -> Unit,
 ) {
     // Material equivalents of the SF Symbols iOS picks per backend.
-    val icon = when (remote.backend) {
-        "smb" -> Icons.Outlined.Dns
-        "webdav" -> Icons.Outlined.Cloud
-        "sftp" -> Icons.Outlined.Terminal
-        "s3" -> Icons.Outlined.Storage
-        "ftp" -> Icons.Outlined.SwapVert
+    val isLocal = com.openminis.app.backup.remote.RcloneRemoteStore
+        .isLocalFolder(remote.backend)
+    val icon = when {
+        // [T-android-backup-local-folder] A folder icon, so the one
+        // destination that is NOT a server is distinguishable at a glance
+        // from the five that are.
+        isLocal -> Icons.Outlined.Folder
+        remote.backend == "smb" -> Icons.Outlined.Dns
+        remote.backend == "webdav" -> Icons.Outlined.Cloud
+        remote.backend == "sftp" -> Icons.Outlined.Terminal
+        remote.backend == "s3" -> Icons.Outlined.Storage
+        remote.backend == "ftp" -> Icons.Outlined.SwapVert
         else -> Icons.Outlined.Cloud
     }
     Column {
@@ -1197,7 +1452,8 @@ private fun DestinationRow(
                 Text(
                     stringResource(
                         R.string.backup_dest_row_subtitle,
-                        remote.backend.uppercase(),
+                        if (isLocal) stringResource(R.string.backup_dest_kind_local_folder)
+                        else remote.backend.uppercase(),
                         remote.path,
                     ),
                     style = MaterialTheme.typography.bodySmall,
@@ -1281,10 +1537,95 @@ private fun ResultDestinationRow(
     }
 }
 
+/**
+ * [T-android-backup-local-export] Save to Device / Share for a local-only run.
+ * Two equal buttons side by side, matching iOS's "Share…" / "Save to Files…".
+ */
+@Composable
+private fun LocalExportActions(
+    saving: Boolean,
+    onSave: () -> Unit,
+    onShare: () -> Unit,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        MinisOutlinedButton(
+            onClick = onSave,
+            enabled = !saving,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(stringResource(R.string.backup_save_to_device))
+        }
+        MinisOutlinedButton(
+            onClick = onShare,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(stringResource(R.string.backup_share_package))
+        }
+    }
+}
+
+/** The Save to Device progress / outcome line, or null when idle. */
+@Composable
+private fun saveStateLine(
+    state: com.openminis.app.backup.BackupRunController.SaveState?,
+): Pair<String, Boolean>? = when (state) {
+    null -> null
+    is com.openminis.app.backup.BackupRunController.SaveState.Saving ->
+        stringResource(R.string.backup_saving_to_device, state.percent) to false
+    is com.openminis.app.backup.BackupRunController.SaveState.Saved ->
+        stringResource(R.string.backup_saved_to_device, state.name) to false
+    is com.openminis.app.backup.BackupRunController.SaveState.Failed ->
+        stringResource(R.string.backup_save_failed, state.message) to true
+}
+
+/**
+ * [T-android-backup-local-export] Hand the package to another app through the
+ * system share sheet (Drive, a chat app, a file manager…).
+ *
+ * `application/octet-stream`, not [com.openminis.app.backup.BackupFormat.MIME_TYPE]:
+ * a share target filters on the MIME type it declares, and almost none
+ * declare `application/x-minisbak`, so the precise type would hide exactly
+ * the apps a user wants to send a backup to. The `.minisbak` name travels
+ * with the URI regardless. The grant is per-URI and read-only.
+ */
+private fun shareBackupPackage(context: android.content.Context, file: java.io.File) {
+    runCatching {
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file,
+        )
+        val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+            type = "application/octet-stream"
+            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+            putExtra(android.content.Intent.EXTRA_TITLE, file.name)
+            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = android.content.Intent.createChooser(send, file.name)
+        if (context !is android.app.Activity) chooser.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(chooser)
+    }.onFailure {
+        com.openminis.app.logging.AppLogger.error("BackupScreen", "[Backup] share failed: ${it.message}")
+        android.widget.Toast.makeText(
+            context, context.getString(R.string.backup_share_failed), android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
+}
+
 /** Where the package ended up, in words. */
 @Composable
-private fun backupResultFooter(r: BackupViewModel.RunResult): String {
-    if (r.destinations.isEmpty()) return stringResource(R.string.backup_result_local_only)
+private fun backupResultFooter(r: com.openminis.app.backup.BackupRunController.RunResult): String {
+    // [T-android-backup-local-export] A local-only run is not "saved": say so
+    // until the user has actually put it somewhere outside the app.
+    if (r.destinations.isEmpty()) {
+        return r.savedAs?.let { stringResource(R.string.backup_saved_to_device, it) }
+            ?: stringResource(R.string.backup_result_local_pending)
+    }
     val ok = r.destinations.count { it.succeeded }
     // Once every destination is verified the local package is deleted, so the
     // footer has to say that rather than claim a copy is still on the device.
@@ -1600,3 +1941,170 @@ internal fun humanBytes(bytes: Long): String = when {
 // Max Per-File Size sentinel tags, matching iOS noFilesTag / unlimitedTag.
 internal const val MAX_FILE_NO_FILES = -1
 internal const val MAX_FILE_UNLIMITED = 0
+
+/**
+ * [T-android-restore-ui] The restore button, its progress ring, and the
+ * remaining-time line under it.
+ *
+ * Exists as its own composable purely to bound recomposition: progress ticks
+ * every 200 records, and reading it from RestoreTab's top level put the whole
+ * settings form — every category switch, the passphrase field, the cards — in
+ * the same scope as a counter that moves several times a second.
+ */
+@Composable
+private fun RestoreProgressSection(
+    vm: BackupViewModel,
+    running: Boolean,
+    enabled: Boolean,
+    statusText: String?,
+    onStart: () -> Unit,
+) {
+    val progress by vm.restoreProgress.collectAsState()
+    val etaSeconds by vm.restoreEtaSeconds.collectAsState()
+    var confirmStop by rememberSaveable { mutableStateOf(false) }
+
+    val p = progress
+    val total = p?.total?.takeIf { it > 0 }
+    val fraction = if (p != null && total != null) {
+        (p.done.toFloat() / total).coerceIn(0f, 1f)
+    } else {
+        null
+    }
+
+    val label = when {
+        !running -> stringResource(R.string.backup_restore)
+        p == null -> stringResource(R.string.backup_restoring)
+        else -> {
+            val name = categoryLabel(p.categoryKey)
+            when {
+                // Percent first: on a package with hundreds of thousands of
+                // records the raw pair is too long to read at a glance, and
+                // "36%" answers "how far along" without arithmetic.
+                total != null && p.done > 0 -> stringResource(
+                    R.string.backup_restoring_percent,
+                    name,
+                    (p.done.toLong() * 100 / total).toInt().coerceIn(0, 100),
+                    p.done,
+                    total,
+                )
+                p.done > 0 -> stringResource(R.string.backup_restoring_running, name, p.done)
+                else -> stringResource(R.string.backup_restoring_category, name)
+            }
+        }
+    }
+
+    MinisButton(
+        onClick = onStart,
+        // While a restore runs the button itself is inert — the only live
+        // control is the stop target in the middle of the ring, so a stray tap
+        // on the bar cannot start or abort anything.
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        PrimaryActionContent(
+            icon = Icons.Outlined.CloudDownload,
+            label = label,
+            busy = running,
+            fraction = fraction,
+            onStopClick = { confirmStop = true }.takeIf { running },
+        )
+    }
+
+    if (running) {
+        // The step line and the estimate share one row: they answer the same
+        // question ("what is happening, and for how much longer") and stacking
+        // them would push the layout around as the estimate appears.
+        val eta = RestoreEta.bucket(etaSeconds)?.let { bucket ->
+            when (bucket) {
+                is RestoreEta.EtaBucket.AlmostDone ->
+                    stringResource(R.string.restore_eta_almost_done)
+                is RestoreEta.EtaBucket.Seconds ->
+                    stringResource(R.string.restore_eta_seconds, bucket.seconds)
+                is RestoreEta.EtaBucket.MinutesSeconds ->
+                    stringResource(R.string.restore_eta_minutes, bucket.minutes, bucket.seconds)
+            }
+        }
+        val line = listOfNotNull(statusText, eta).joinToString(" · ")
+        if (line.isNotEmpty()) {
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text(stringResource(R.string.restore_stop_title)) },
+            text = { Text(stringResource(R.string.restore_stop_message)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStop = false
+                    vm.stopRunningRestore()
+                }) {
+                    Text(
+                        stringResource(R.string.restore_stop_confirm),
+                        // Destructive: this abandons work in progress.
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStop = false }) {
+                    Text(stringResource(R.string.restore_stop_cancel))
+                }
+            },
+        )
+    }
+}
+
+/**
+ * [T-android-restore-report-severity] One restore-report line with a leading
+ * status icon, both drawn in [tint] so the icon and the words agree on
+ * severity.
+ *
+ * Material icons rather than emoji: an emoji draws in its own fixed colours,
+ * so a warning glyph could not follow the amber below into dark mode, and an
+ * error glyph would not match the theme's error red.
+ */
+@Composable
+private fun ReportLine(text: String, icon: ImageVector, tint: Color) {
+    Row(
+        modifier = Modifier.padding(vertical = 3.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = tint,
+            // Nudged down to sit on the first text line rather than
+            // centring on a paragraph that may wrap.
+            modifier = Modifier.padding(top = 1.dp).size(16.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(text, style = MaterialTheme.typography.bodySmall, color = tint)
+    }
+}
+
+/**
+ * [T-android-restore-report-severity] Amber for "left out on purpose".
+ *
+ * Two values because no single amber works on both grounds at body-text size.
+ * The commonly used #E6A23C measures 2.19:1 against a light surface — well
+ * under the 4.5:1 small text needs — so it would be close to unreadable in
+ * light mode. #B45309 gives 5.02:1 on light; #FFB74D gives 9.83:1 on dark.
+ *
+ * Keyed on ChatColors.isDark, the theme the app actually resolved, so it
+ * follows the in-app Appearance setting rather than the OS one (GH#187).
+ */
+@Composable
+private fun reportNoticeColor(): Color =
+    if (ChatColors.isDark) {
+        Color(0xFFFFB74D)
+    } else {
+        Color(0xFFB45309)
+    }

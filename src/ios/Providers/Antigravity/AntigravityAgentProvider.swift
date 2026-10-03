@@ -43,6 +43,19 @@ final class AntigravityAgentProvider: AgentProvider {
             let task = Task {
                 var emittedTextStart = false
                 var hasToolCalls = false
+                // [T-gemini-thinking-persist] Same gap as GeminiAgentProvider
+                // (shared GeminiStreamEvent): thoughts arrived only as
+                // `.thinkingDelta`, which paints the UI but never reaches the
+                // `reasoning_content` column, so the thinking block vanished on
+                // reload. Accumulate and emit once at the terminal event.
+                var reasoningAccumulator = ""
+                var emittedReasoning = false
+
+                func flushReasoning() {
+                    guard !emittedReasoning, !reasoningAccumulator.isEmpty else { return }
+                    emittedReasoning = true
+                    continuation.yield(.reasoningContent(reasoningAccumulator))
+                }
 
                 do {
                     for try await event in stream {
@@ -55,6 +68,7 @@ final class AntigravityAgentProvider: AgentProvider {
                             continuation.yield(.textDelta(text))
 
                         case .thinkingDelta(let text):
+                            reasoningAccumulator += text
                             continuation.yield(.thinkingDelta(text))
 
                         case .functionCall(let name, let args, let thoughtSignature):
@@ -69,6 +83,9 @@ final class AntigravityAgentProvider: AgentProvider {
                         case .usage(let u):
                             continuation.yield(.usage(u))
 
+                        case .responseModel(let m):
+                            continuation.yield(.responseModel(m))
+
                         case .finishReason(let reason):
                             let mapped: AgentStopReason
                             if hasToolCalls {
@@ -79,12 +96,16 @@ final class AntigravityAgentProvider: AgentProvider {
                                 default: .endTurn
                                 }
                             }
+                            flushReasoning()
                             continuation.yield(.done(stopReason: mapped))
 
                         case .done:
+                            flushReasoning()
                             continuation.yield(.done(stopReason: hasToolCalls ? .toolUse : .endTurn))
                         }
                     }
+                    // Stream closed with no terminal event — keep the thoughts.
+                    flushReasoning()
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: self.provider.mapError(error))
@@ -99,11 +120,13 @@ final class AntigravityAgentProvider: AgentProvider {
     /// Whether the current model is a Claude model (requires `id` on functionCall/functionResponse).
     private var isClaude: Bool { model.id.lowercased().contains("claude") }
 
-    private func convertMessages(_ messages: [AgentMessage]) -> [[String: Any]] {
+    // Internal rather than private ONLY so ToolResultImageWireTests can pin the
+    // tool-result image contract directly. See [T-openai-tool-result-image].
+    func convertMessages(_ messages: [AgentMessage]) -> [[String: Any]] {
         var toolNameMap: [String: String] = [:]
         for msg in messages {
             for part in msg.parts {
-                if case .toolUse(let id, let name, _) = part {
+                if case .toolUse(let id, let name, _, _) = part {
                     toolNameMap[id] = name
                 }
             }
@@ -114,7 +137,7 @@ final class AntigravityAgentProvider: AgentProvider {
         if requiresSig {
             for msg in messages {
                 for part in msg.parts {
-                    if case .toolUse(let id, _, _) = part {
+                    if case .toolUse(let id, _, _, _) = part {
                         if toolCallMetadataMap[id]?.thoughtSignature == nil {
                             unsignedToolCallIds.insert(id)
                         }
@@ -135,11 +158,12 @@ final class AntigravityAgentProvider: AgentProvider {
                 case .text(let text):
                     parts.append(["text": text])
 
-                case .toolUse(let id, let name, let input):
+                case .toolUse(let id, let name, let input, _):
                     if unsignedToolCallIds.contains(id) {
-                        let argsDesc = (try? JSONSerialization.data(withJSONObject: input))
-                            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                        parts.append(["text": "[Called \(name) with: \(argsDesc)]"])
+                        // [T-gemini-unsigned-narration] Plain prose, not a
+                        // bracketed marker the model would imitate. Shared with
+                        // GeminiAgentProvider — same wire family, same hazard.
+                        parts.append(["text": GeminiAgentProvider.narratedToolCall(name: name, input: input)])
                     } else {
                         let sig = toolCallMetadataMap[id]?.thoughtSignature
                         var fcPart = GeminiConversation.functionCallPart(
@@ -153,11 +177,10 @@ final class AntigravityAgentProvider: AgentProvider {
                         parts.append(fcPart)
                     }
 
-                case .toolResult(let id, let name, let content, _, let imageData, let imageMimeType, _, _):
+                case .toolResult(let id, let name, let content, _, let imageData, let imageMimeType, _, _, _):
                     let resolvedName = (!name.isEmpty ? name : toolNameMap[id]) ?? "unknown"
                     if unsignedToolCallIds.contains(id) {
-                        let truncated = content.count > 500 ? String(content.prefix(500)) + "..." : content
-                        parts.append(["text": "[Result of \(resolvedName): \(truncated)]"])
+                        parts.append(["text": GeminiAgentProvider.narratedToolResult(name: resolvedName, content: content)])
                         if let data = imageData {
                             let mime = imageMimeType ?? "image/jpeg"
                             parts.append(["inlineData": ["mimeType": mime, "data": data.base64EncodedString()]])

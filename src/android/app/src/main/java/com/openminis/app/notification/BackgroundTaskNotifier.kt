@@ -73,6 +73,35 @@ class BackgroundTaskNotifier(
         scope.launch {
             try {
                 val session = chatRepository.getSession(sessionId)
+                // [T-android-subagent-no-system-notification] A sub agent run
+                // is not a task the user is waiting on — it is one step inside
+                // the parent's turn, and its result is already delivered into
+                // the parent chat as an "代理任务·摘要" card. Posting a system
+                // notification for it interrupts the user to tell them about
+                // work they did not start, and a parent that delegates several
+                // children fires one per child.
+                //
+                // iOS never did this. Its notification has exactly ONE call
+                // site — AIChatViewModel+BackgroundTask, the MAIN chat's
+                // background-completion path — and `HelperRunner` (the sub
+                // agent runner) posts nothing at all; it only reads
+                // SessionActivityTracker for display. Android diverged because
+                // the notifier is wired to SessionActivityTracker's completion
+                // hook, which fires for EVERY session, child sessions included.
+                //
+                // Checked here rather than at the tracker hook because the
+                // session row is already being loaded for the title, so the
+                // parent test is free, and the tracker stays a pure
+                // "is this session streaming" signal with no opinion about
+                // which sessions deserve a notification.
+                if (session?.isChild == true) {
+                    AppLogger.info(
+                        TAG,
+                        "skipping completion notification for sub agent session " +
+                            sessionId.take(8),
+                    )
+                    return@launch
+                }
                 val rawTitle = session?.title?.takeIf { it.isNotBlank() }
                     ?: context.getString(R.string.notif_task_completed_default_title)
                 val title = if (isError) "❌ $rawTitle" else rawTitle

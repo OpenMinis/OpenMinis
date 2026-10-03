@@ -14,8 +14,9 @@ import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.repository.ProviderRepository
 
 /**
- * Exposes ModelEntry overrides under `models.<entryUUID>.…`. Mirrors
- * iOS `ModelsCollection`.
+ * Exposes ModelEntry overrides under `models.<entry_id>.…`, where entry_id is
+ * the raw "<instanceUUID>/<modelId>" `get models` prints (dots allowed).
+ * Mirrors iOS `ModelsCollection`.
  *
  * `add` creates a custom entry (`isCustom = true`). `remove` is allowed
  * only for those custom entries — API-reported models can be hidden
@@ -35,24 +36,52 @@ class ModelsCollection(
     override val risk: ConfigRisk get() = ConfigRisk.SENSITIVE
     override val addPayloadSchema: ConfigSchema get() = ConfigSchema.Json
 
+
+    // -- [T-config-path-dotted-id] Entry ids in paths ---------------------------
+    //
+    // OpenMinis#390. A model's config id is the composite
+    // `<instanceUUID>/<modelId>`, and model ids usually contain DOTS (glm-5.1,
+    // gpt-4.1, mimo-v2.6-pro). Paths now carry that id VERBATIM — exactly as
+    // `get models` prints it as `entry_id` — because
+    // ConfigRegistry.splitCollectionPath takes everything between the first
+    // and last dot as the id.
+    //
+    // Before, the resolver cut the id at its first dot, so this collection
+    // escaped dots on the way into a path ("." -> "~d", "~" -> "~~",
+    // [T-android-config-model-id-dot]). That worked, but nothing told a
+    // caller: `get` printed the raw id, the help never mentioned `~d`, and the
+    // reporter of #390 tried four escaping schemes without guessing it. The
+    // escaped form is still ACCEPTED ([lookup]), so audit-log keys and scripts
+    // written against builds 09-19 … #390 keep resolving and reverting.
+    // Same shape as iOS cef38f13b.
+
+    /**
+     * The entry a path id names: the raw id first, then the legacy escaped
+     * form. Raw wins, so an id that literally contains "~d" is never decoded
+     * into a different id.
+     */
+    private fun lookup(idOrSegment: String): ModelEntry? = lookupIn(idOrSegment, ::entry)
+
     override fun childIds(): List<String> =
         repo.config.value.modelEntries.map { it.id }
 
     override fun fields(forId: String): List<ConfigField> {
-        val entry = entry(forId) ?: return emptyList()
+        // Raw id, or the legacy escaped form ([T-config-path-dotted-id]). The
+        // factories build their paths from the entry's RAW id either way.
+        val id = lookup(forId)?.id ?: return emptyList()
         return listOf(
-            providerInstanceId(forId),
-            modelId(forId),
-            isCustom(forId),
-            displayNameField(forId),
-            maxOutputTokensField(forId),
-            isHiddenField(forId),
-            modalitiesField(forId),
-            modalitiesOverrideField(forId),
-            contextWindowField(forId),
-            contextWindowOverrideField(forId),
-            supportsToolsField(forId),
-            supportsVisionField(forId),
+            providerInstanceId(id),
+            modelId(id),
+            isCustom(id),
+            displayNameField(id),
+            maxOutputTokensField(id),
+            isHiddenField(id),
+            modalitiesField(id),
+            modalitiesOverrideField(id),
+            contextWindowField(id),
+            contextWindowOverrideField(id),
+            supportsToolsField(id),
+            supportsVisionField(id),
         )
     }
 
@@ -110,26 +139,29 @@ class ModelsCollection(
             userModifiedAt = System.currentTimeMillis(),
         )
         repo.addEntry(entry)
+        // Used verbatim as a path id ([T-config-path-dotted-id]).
         return entry.id
     }
 
     override fun remove(id: String) {
-        val entry = entry(id) ?: throw ConfigError.UnknownPath("models.$id")
+        // Raw id, or the legacy escaped form ([T-config-path-dotted-id]).
+        val entry = lookup(id) ?: throw ConfigError.UnknownPath("models.$id")
         if (!entry.isCustom) {
             throw ConfigError.PermissionDenied(
-                "Only custom-added models can be removed; use `set models.$id.isHidden true` for API-reported models"
+                "Only custom-added models can be removed; use `set models.${entry.id}.isHidden true` for API-reported models"
             )
         }
-        repo.removeEntry(id)
+        repo.removeEntry(entry.id)
     }
 
     // -- Field factories --
 
+    /** Exact match on the raw entry id. Callers with a path id use [lookup]. */
     private fun entry(id: String): ModelEntry? =
         repo.config.value.modelEntries.firstOrNull { it.id == id }
 
     private fun mutate(id: String, apply: (ModelEntry) -> ModelEntry) {
-        val e = entry(id) ?: throw ConfigError.UnknownPath("models.$id")
+        val e = lookup(id) ?: throw ConfigError.UnknownPath("models.$id")
         repo.updateEntry(apply(e))
     }
 
@@ -414,4 +446,42 @@ class ModelsCollection(
                 ConfigValue.Bool("image_input" in effectiveModalities(e))
             },
         )
+
+    companion object {
+        /**
+         * Decode the legacy `~d` / `~~` escape. ONE left-to-right scan,
+         * deliberately — not two `replace` calls: sequential replaces break on
+         * ids that contain the escape text itself (a literal `~d~` round-trips
+         * to the wrong string). One pass consuming the escape and its argument
+         * together has no such ambiguity.
+         */
+        internal fun decodeLegacySegment(segment: String): String {
+            val out = StringBuilder(segment.length)
+            var i = 0
+            while (i < segment.length) {
+                val c = segment[i]
+                if (c == '~' && i + 1 < segment.length) {
+                    when (segment[i + 1]) {
+                        '~' -> { out.append('~'); i += 2; continue }
+                        'd' -> { out.append('.'); i += 2; continue }
+                    }
+                }
+                out.append(c)
+                i++
+            }
+            return out.toString()
+        }
+
+        /**
+         * [lookup]'s rule, with the entry source injected so it can be tested
+         * without a ProviderRepository: [find] on the id as given, then on its
+         * legacy decode if that differs.
+         */
+        internal fun <T : Any> lookupIn(idOrSegment: String, find: (String) -> T?): T? {
+            find(idOrSegment)?.let { return it }
+            val decoded = decodeLegacySegment(idOrSegment)
+            if (decoded == idOrSegment) return null
+            return find(decoded)
+        }
+    }
 }

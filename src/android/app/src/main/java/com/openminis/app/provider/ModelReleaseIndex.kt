@@ -86,6 +86,21 @@ object ModelReleaseIndex {
         AppLogger.info(TAG, "release index built: full=${full.size} tail=${tail.size}")
     }
 
+    /**
+     * [T-android-model-sort-anr] Build the index now, off the main thread.
+     *
+     * Same work [ensureIndex] does lazily, exposed so app start can pay for it
+     * on a background thread instead of leaving the bill to whichever caller
+     * happens to be first. That caller was `ChatViewModel.init` on the main
+     * thread, and parsing a 4.5 MB catalog there ANR'd the app while opening a
+     * chat on a loaded device.
+     *
+     * Idempotent and safe to call from any thread: [ensureIndex] is
+     * @Synchronized and returns immediately once built, so this races correctly
+     * with a real caller rather than duplicating the work.
+     */
+    fun warmUp() = ensureIndex()
+
     /** Drop a cached index so a refreshed catalog is picked up. */
     @Synchronized
     fun invalidate() {

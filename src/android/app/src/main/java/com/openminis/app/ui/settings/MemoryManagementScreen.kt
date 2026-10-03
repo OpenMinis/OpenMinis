@@ -278,7 +278,7 @@ private fun MemoryFileRow(
  * onValueChange. Programmatic content changes (paste, IME commit, state
  * restore) don't always route through onValueChange, so Save could fail
  * to appear after a paste until the user typed another key — the exact
- * symptom reported on iOS/macOS (XIN msg 41384). Keeping Save permanently
+ * symptom reported on iOS/macOS. Keeping Save permanently
  * visible removes the dependency entirely; saveFile is idempotent so a
  * no-op Save on unchanged content is harmless.
  */

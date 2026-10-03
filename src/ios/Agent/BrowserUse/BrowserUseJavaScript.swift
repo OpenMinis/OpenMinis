@@ -540,7 +540,21 @@ enum BrowserUseJS {
                 }
                 if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
                     info.inputType = el.type || null;
-                    if (el.value) info.value = el.value.substring(0, 60);
+                    // [T-ios-backbone-password-leak] GH#285. A password field's
+                    // value went into the backbone verbatim (`val=hunter2`), so
+                    // anything the user had typed — or that an env-var fill had
+                    // placed there — reached the agent context and the model.
+                    //
+                    // Redacted at CAPTURE rather than at serialization so the
+                    // plaintext never enters the intermediate node tree at all;
+                    // the emptiness of the field is still reported, since
+                    // whether a password box is filled is what the agent
+                    // legitimately needs to know to drive a login form.
+                    if (el.value) {
+                        info.value = (el.type === 'password')
+                            ? '[redacted]'
+                            : el.value.substring(0, 60);
+                    }
                     if (el.placeholder) info.placeholder = el.placeholder.substring(0, 60);
                 }
                 var role = el.getAttribute('role');

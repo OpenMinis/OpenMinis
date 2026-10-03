@@ -35,21 +35,116 @@ enum BackupZipExtractor {
 
         let handle = try FileHandle(forReadingFrom: zipURL)
         defer { try? handle.close() }
+        let entries = try centralDirectory(handle: handle)
 
-        for entry in try centralDirectory(handle: handle) {
+        // [T-backup-zip-parallel-unpack] Resolve every destination, and create
+        // every directory, BEFORE any file is written.
+        //
+        // Two reasons this is a separate sequential pass rather than part of
+        // the write loop. First, `safeDestination` is the path-traversal guard
+        // ([T-ios-backup-zip-canonical-containment]) and it resolves symlinks
+        // against what is already on disk — running it while other workers are
+        // creating files would make its answer depend on timing, which is not
+        // a property a security check may have. Second, concurrent
+        // `createDirectory` on the same parent is the classic racy-mkdir bug;
+        // doing it once up front means the writers only ever open files.
+        var jobs: [(Entry, URL)] = []
+        jobs.reserveCapacity(entries.count)
+        for entry in entries {
             guard let out = try safeDestination(for: entry.name, under: destination) else {
                 throw ExtractError.unsafePath(entry.name)
             }
-
             if entry.name.hasSuffix("/") {
                 try fm.createDirectory(at: out, withIntermediateDirectories: true)
                 continue
             }
             try fm.createDirectory(at: out.deletingLastPathComponent(),
                                    withIntermediateDirectories: true)
-            try writeEntry(entry, from: handle, to: out)
+            jobs.append((entry, out))
         }
+
+        guard jobs.count >= parallelBatchThreshold else {
+            // Same salvage semantics as the parallel branch below: a bad entry
+            // is recorded, its partial file removed, and the rest still
+            // attempted. Reported at the end.
+            var seqError: Error?
+            for (entry, out) in jobs {
+                do {
+                    try writeEntry(entry, from: handle, to: out)
+                } catch {
+                    if seqError == nil { seqError = error }
+                    try? fm.removeItem(at: out)
+                }
+            }
+            if let seqError { throw seqError }
+            return
+        }
+
+        // Each worker gets its OWN read handle: entries are addressed by
+        // absolute offset from the central directory, so workers seek
+        // independently — sharing one handle would have them fighting over a
+        // single file position. This is what the forward `ZipInputStream`
+        // shape cannot do, and why reading the central directory (which this
+        // extractor already did) is the enabler rather than a new cost.
+        var firstError: Error?
+        let lock = NSLock()
+        let workers = min(ProcessInfo.processInfo.activeProcessorCount, maxUnpackWorkers)
+        DispatchQueue.concurrentPerform(iterations: workers) { slot in
+            guard let local = try? FileHandle(forReadingFrom: zipURL) else {
+                lock.lock()
+                if firstError == nil { firstError = ExtractError.truncated }
+                lock.unlock()
+                return
+            }
+            defer { try? local.close() }
+            var index = slot
+            while index < jobs.count {
+                let (entry, out) = jobs[index]
+                index += workers
+                do {
+                    // Per-entry pool: writeEntry reads autoreleased NSData, and
+                    // 23,000 entries accumulate without draining.
+                    try autoreleasepool { try writeEntry(entry, from: local, to: out) }
+                } catch {
+                    // [T-backup-zip-parallel-unpack] Record and KEEP GOING.
+                    //
+                    // A damaged package is the case partial extraction exists
+                    // for: `BackupRescueIndex` is built on the premise that a
+                    // ZIP survives partial damage because every member is
+                    // stored independently, so one unreadable member must not
+                    // cost the reader the ones after it.
+                    //
+                    // The sequential loop this replaces did NOT manage that —
+                    // it threw at the first bad entry, so everything after it
+                    // was never attempted. Continuing here strictly increases
+                    // what a damaged package yields, and the error is still
+                    // reported at the end, so a caller that wants all-or-
+                    // nothing still gets its throw.
+                    // The partial file is REMOVED rather than left behind.
+                    // Measured on a package truncated mid-payload, keeping it
+                    // yields one extra "file" — 2,183 bytes of a declared
+                    // 20,000. For a content-addressed blob (`blobs/<sha256>`)
+                    // that is worse than nothing: the name asserts a hash the
+                    // bytes no longer have, so a later reader treats a corrupt
+                    // member as authoritative. A missing blob is a legible
+                    // gap; a short one is a lie.
+                    lock.lock()
+                    if firstError == nil { firstError = error }
+                    lock.unlock()
+                    try? FileManager.default.removeItem(at: out)
+                }
+            }
+        }
+        if let firstError { throw firstError }
     }
+
+    /// Below this many entries the dispatch overhead outweighs the win.
+    private static let parallelBatchThreshold = 16
+
+    /// Cap on extraction workers — past a handful this is storage-bound, and
+    /// each worker holds its own read buffer on a device that is also writing
+    /// the restored tree.
+    private static let maxUnpackWorkers = 8
 
     /// Where `name` may be written, or `nil` if it would land outside `root`.
     ///

@@ -71,6 +71,26 @@ enum SoulIconImage {
         return UIImage(data: data)
     }
 
+    /// [T-soul-icon-sidecar] The sidecar filename stored in `icon:` when the
+    /// icon is an image. A bare filename, not a path — it always sits next to
+    /// SOUL.md, and a relative name keeps the yaml portable across the
+    /// app-container UUID changes that make absolute paths worthless.
+    static let sidecarName = "SOUL.icon.png"
+
+    /// True when `value` names the sidecar file rather than holding bytes.
+    static func isSidecarRef(_ s: String) -> Bool { s == sidecarName }
+
+    /// Raw PNG bytes behind a stored data URI, or nil if not a data URI.
+    static func pngData(from dataURI: String) -> Data? {
+        guard isDataURI(dataURI) else { return nil }
+        return Data(base64Encoded: String(dataURI.dropFirst(prefix.count)))
+    }
+
+    /// Wrap raw PNG bytes back into the canonical stored data URI.
+    static func dataURI(fromPNG data: Data) -> String {
+        prefix + data.base64EncodedString()
+    }
+
     /// Centre-crop to 1:1, keeping the shorter edge.
     private static func squareCropped(_ image: UIImage) -> UIImage {
         let w = image.size.width, h = image.size.height
@@ -434,10 +454,18 @@ struct SoulIconView: View {
     /// Gradient used for the default sparkle in the chat header. Nil renders
     /// the plain emoji glyph, which is what the settings card wants.
     var sparkleGradient: LinearGradient? = nil
+    /// Explicit corner radius, overriding the proportional default. The chat
+    /// header pins its own value so the shape stays where it was tuned by eye
+    /// rather than drifting whenever `size` is adjusted.
+    var cornerRadius: CGFloat? = nil
 
     /// ~22% of the edge: iOS's own app-icon "squircle" proportion, which
-    /// reads as rounded at 18pt without rounding away image content.
+    /// reads as rounded at small sizes without rounding away image content.
     static func cornerRadius(for size: CGFloat) -> CGFloat { size * 0.22 }
+
+    private var resolvedCornerRadius: CGFloat {
+        cornerRadius ?? Self.cornerRadius(for: size)
+    }
 
     var body: some View {
         if let image = SoulIconImage.decode(icon) {
@@ -445,7 +473,7 @@ struct SoulIconView: View {
                 .resizable()
                 .aspectRatio(contentMode: .fill)
                 .frame(width: size, height: size)
-                .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius(for: size),
+                .clipShape(RoundedRectangle(cornerRadius: resolvedCornerRadius,
                                             style: .continuous))
         } else if icon.isEmpty, let gradient = sparkleGradient {
             // Default: keep the SF Symbol so the chat header's existing
@@ -651,6 +679,95 @@ enum SoulStore {
         AIChatViewModel.minisMemoryPersistentDir.appendingPathComponent("SOUL.md")
     }
 
+    // MARK: - [T-soul-icon-sidecar] Icon sidecar file
+    //
+    // A picked avatar is ~20 KB of base64. Held inline in the frontmatter it
+    // made SOUL.md a ~20 KB file whose bulk is one unreadable line, which is a
+    // problem in three separate places: anything that reads the file as text
+    // (a misread by minis-config, a debug dump, a diff) drags the payload with
+    // it; the whole blob rides every `contentMarkdown` sync record; and a
+    // user opening SOUL.md in the file browser sees noise instead of their
+    // persona.
+    //
+    // So the BYTES live in `SOUL.icon.png` beside SOUL.md, and the frontmatter
+    // holds the filename. In memory `SoulMetadata.icon` still carries the data
+    // URI exactly as before — every consumer (SoulIconView, minis-config's
+    // `<image>` summary, the Settings picker) is unchanged. The split happens
+    // only at the disk boundary: `load()` folds the sidecar back in,
+    // `save()` writes it out.
+
+    /// `SystemPromptBuilder` owns the other `Soul`-category logger in this
+    /// file; SoulStore needs its own since that one is private to that type.
+    private static let iconLogger = AppLogger(category: "Soul")
+
+    /// URL of the PNG sidecar holding the icon bytes.
+    static var iconFileURL: URL {
+        AIChatViewModel.minisMemoryPersistentDir
+            .appendingPathComponent(SoulIconImage.sidecarName)
+    }
+
+    /// Resolve a parsed-from-disk `icon:` value into the in-memory form.
+    ///
+    /// Handles all three shapes a file can legitimately hold:
+    ///   - the sidecar filename  → read the PNG, return a data URI
+    ///   - an inline data URI    → return as-is (a file written by a build
+    ///                             predating this change, or synced from one)
+    ///   - an emoji / empty      → return as-is
+    ///
+    /// A sidecar reference whose file is missing resolves to "" rather than
+    /// leaving a dangling filename in `icon`: `displayIcon` then falls back to
+    /// the sparkle, which is the same thing the user would see if the icon had
+    /// never been set. Returning the raw filename instead would make
+    /// `iconIsImage` false and render the literal text "SOUL.icon.png" in the
+    /// chat header.
+    private static func resolveIconForRead(_ raw: String) -> String {
+        guard SoulIconImage.isSidecarRef(raw) else { return raw }
+        guard let data = try? Data(contentsOf: iconFileURL),
+              !data.isEmpty else { return "" }
+        return SoulIconImage.dataURI(fromPNG: data)
+    }
+
+    /// Write (or clear) the sidecar to match `icon`, and return the value that
+    /// should go into the frontmatter.
+    ///
+    /// Failing to write the PNG returns the data URI unchanged, so the icon
+    /// falls back to being stored inline rather than being lost. A disk error
+    /// here is not a reason to drop the user's avatar.
+    private static func persistIconSidecar(_ icon: String) -> String {
+        let fm = FileManager.default
+        guard SoulIconImage.isDataURI(icon) else {
+            // Emoji, empty, or already a sidecar ref: no image bytes to keep.
+            // Remove a stale sidecar so clearing the icon doesn't leave an
+            // orphan file that backup and sync would keep carrying around.
+            if !SoulIconImage.isSidecarRef(icon) {
+                try? fm.removeItem(at: iconFileURL)
+            }
+            return icon
+        }
+        guard let png = SoulIconImage.pngData(from: icon) else { return icon }
+        try? fm.createDirectory(at: iconFileURL.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        do {
+            try png.write(to: iconFileURL, options: .atomic)
+            return SoulIconImage.sidecarName
+        } catch {
+            iconLogger.error("[Soul] failed to write icon sidecar: \(error.localizedDescription)")
+            return icon
+        }
+    }
+
+    /// Re-inline a sidecar reference for transports that carry ONE text blob.
+    ///
+    /// iCloud sync keeps shipping the icon as base64 inside `contentMarkdown`
+    /// (deliberate: no schema change, and a build predating the sidecar still
+    /// receives a working icon). This turns the on-disk form into that wire
+    /// form. Callers that write files, not records, must NOT use this.
+    static func serializedForWire(_ file: SoulFile) -> String {
+        var f = file
+        f.metadata.icon = resolveIconForRead(f.metadata.icon)
+        return SoulMDParser.serialize(f)
+    }
+
     // MARK: - Body length rules (unified token count)
     //
     // The personality body has a single hard cap of 2000 tokens, applied
@@ -784,7 +901,12 @@ enum SoulStore {
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url),
               let str = String(data: data, encoding: .utf8) else { return nil }
-        return SoulMDParser.parse(str)
+        var file = SoulMDParser.parse(str)
+        // [T-soul-icon-sidecar] Frontmatter may name the PNG sidecar; every
+        // consumer expects `icon` to be a data URI (or an emoji), so resolve
+        // it here at the single disk-read boundary.
+        file.metadata.icon = resolveIconForRead(file.metadata.icon)
+        return file
     }
 
     /// Best-effort cached metadata for synchronous call sites that cannot
@@ -811,7 +933,12 @@ enum SoulStore {
         let url = fileURL
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
-        let text = SoulMDParser.serialize(file)
+        // [T-soul-icon-sidecar] Write the image bytes to SOUL.icon.png and put
+        // only the filename in the frontmatter. `cachedMetadata` keeps the
+        // resolved data URI so in-memory consumers are unaffected.
+        var onDisk = file
+        onDisk.metadata.icon = persistIconSidecar(file.metadata.icon)
+        let text = SoulMDParser.serialize(onDisk)
         try text.data(using: .utf8)?.write(to: url, options: .atomic)
         cachedMetadata = file.metadata
         NotificationCenter.default.post(name: .soulMdChanged, object: nil)
@@ -843,9 +970,13 @@ enum SoulStore {
         // [T-icloud-local-edit-clobber] Content-equality short circuit: an
         // echo of what we already have must not rewrite the file (rewriting
         // refreshes the LWW clock and fires soulMdChanged for nothing).
-        if let data = try? Data(contentsOf: url),
-           let localText = String(data: data, encoding: .utf8),
-           localText == markdown {
+        //
+        // [T-soul-icon-sidecar] Compare in WIRE form, not against the raw
+        // file. On disk the icon is now the sidecar FILENAME while the inbound
+        // record carries the base64 — a byte comparison of those two never
+        // matches, so every echo would rewrite the file and re-fire
+        // soulMdChanged, exactly what this guard exists to prevent.
+        if let localFile = load(), serializedForWire(localFile) == markdown {
             return
         }
         // Reject a remote default-seed payload when the local file is
@@ -854,22 +985,35 @@ enum SoulStore {
         // landed in iCloud before the buildSoul guard existed (or that
         // came from a downgraded device) would otherwise wipe out a
         // customized local SOUL.md via LWW.
+        // [T-soul-icon-sidecar] `defaultContent` has no icon line, so a local
+        // file that differs ONLY by its sidecar reference must still count as
+        // customized here. Comparing the wire form keeps that true.
         if markdown == defaultContent,
-           let data = try? Data(contentsOf: url),
-           let localText = String(data: data, encoding: .utf8),
-           localText != defaultContent {
+           let localFile = load(),
+           serializedForWire(localFile) != defaultContent {
             return
         }
         try? fm.createDirectory(at: url.deletingLastPathComponent(),
                                 withIntermediateDirectories: true)
-        try? markdown.data(using: .utf8)?.write(to: url, options: .atomic)
+        // [T-soul-icon-sidecar] A peer ships the icon as base64 inside this
+        // text (the wire format is deliberately unchanged, so a build
+        // predating the sidecar still receives a working icon). Writing it
+        // verbatim would silently restore the ~20 KB SOUL.md this change
+        // exists to remove, so normalize inbound content the same way a local
+        // save does: bytes to the sidecar, filename in the frontmatter.
+        var inbound = SoulMDParser.parse(markdown)
+        let resolvedIcon = resolveIconForRead(inbound.metadata.icon)
+        inbound.metadata.icon = persistIconSidecar(resolvedIcon)
+        let textToWrite = SoulMDParser.serialize(inbound)
+        try? textToWrite.data(using: .utf8)?.write(to: url, options: .atomic)
         // Stamp the file's mtime to match the remote updatedAt so the
         // local mtime comparison stays meaningful across round-trips.
         try? fm.setAttributes([.modificationDate: remoteUpdatedAt],
                               ofItemAtPath: url.path)
-        if let parsed = SoulMDParser.parse(markdown).metadata as SoulMetadata? {
-            cachedMetadata = parsed
-        }
+        // Cache the RESOLVED icon, not the filename now on disk.
+        var cached = inbound.metadata
+        cached.icon = resolvedIcon
+        cachedMetadata = cached
         NotificationCenter.default.post(name: .soulMdChanged, object: nil)
     }
 }

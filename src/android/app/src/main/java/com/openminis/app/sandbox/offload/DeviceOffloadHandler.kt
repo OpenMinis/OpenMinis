@@ -136,11 +136,19 @@ class DeviceOffloadHandler(private val context: Context) : NativeOffloadHandler 
         return json
     }
 
-    private fun dirSize(dir: File): Long {
-        var n = 0L
-        dir.walkTopDown().forEach { if (it.isFile) n += it.length() }
-        return n
-    }
+    /**
+     * [T-android-storage-symlink-inflation] Fourth copy of the sizing walk,
+     * found by the sweep that followed 754e65eac. Same following-walk defect:
+     * `walkTopDown()`, `isFile` and `length()` all resolve symlinks, so a
+     * directory link had its subtree counted again.
+     *
+     * Worth fixing even though this is "only" a diagnostic: the number goes to
+     * the MODEL as `app_data_mb`, and an agent reasoning about whether to free
+     * space from a figure several times the truth is worse than one with no
+     * figure at all.
+     */
+    private fun dirSize(dir: File): Long =
+        com.openminis.app.data.session.SessionStorage.directorySize(dir)
 
     companion object {
         private const val HELP = """android-device — device model, OS, battery, storage (JSON)

@@ -177,6 +177,8 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleShellExecute(params: params)
         case "debug.appInfo":
             return handleAppInfo(params: params)
+        case "debug.ish.memStats":
+            return handleISHMemStats()
         case "debug.backup.export":
             return try await DebugRPCBackup.export(params: params)
         case "debug.backup.inspect":
@@ -325,6 +327,12 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await handleScrollOffset(params: params)
         case "debug.openSession":
             return try await handleOpenSession(params: params)
+        case "debug.helper.openSheet":
+            return try await handleOpenHelperSheet(params: params)
+        case "debug.agentCallback.openSheet":
+            return try await handleOpenAgentCallbackSheet(params: params)
+        case "debug.agent.openToolSheet":
+            return try await handleOpenAgentToolSheet(params: params)
         // MARK: Hang detector
         case "debug.hangDetector.start":
             return DebugRPCHangDetector.start(params: params)
@@ -457,6 +465,8 @@ final class DebugJSONRPC: @unchecked Sendable {
             return try await DebugRPCChat.foldersPin(params: params)
         case "debug.folders.setAutoGrouping":
             return try await DebugRPCChat.foldersSetAutoGrouping(params: params)
+        case "chat.title.regenerate":
+            return try await DebugRPCChat.titleRegenerate(params: params)
         case "chat.compact.markers.list":
             return try await DebugRPCChat.compactMarkersList(params: params)
         case "chat.compact.before":
@@ -2206,6 +2216,65 @@ final class DebugJSONRPC: @unchecked Sendable {
         var result: ISHShellExecutionResult?
     }
 
+    /// [T-ish-cluster-hitrate] Cluster-commit effectiveness, read live during a
+    /// workload. Reports the hit rate AND the reason for every miss, plus the
+    /// all-paths anonymous mmap totals the rate has to be read against, plus
+    /// the host footprint so the guest/host ratio can be computed from one
+    /// consistent sample instead of correlating two clocks by hand.
+    private func handleISHMemStats() -> Any {
+        var calls: UInt64 = 0, full: UInt64 = 0, single: UInt64 = 0
+        var whyMapped: UInt64 = 0, whyFlags: UInt64 = 0
+        var whyNoCluster: UInt64 = 0, whyEnomem: UInt64 = 0
+        var pagesCommitted: UInt64 = 0
+        ish_cluster_stats(&calls, &full, &single, &whyMapped, &whyFlags,
+                          &whyNoCluster, &whyEnomem, &pagesCommitted)
+
+        var anonMmaps: UInt64 = 0, anonPages: UInt64 = 0
+        ish_anon_mmap_stats(&anonMmaps, &anonPages)
+
+        let hostPage = UInt64(getpagesize())
+        let guestPage: UInt64 = 4096
+        // What the anonymous mappings cost the host vs what the guest got.
+        // Multi-page mappings pack perfectly; only single-page ones waste.
+        let guestBytes = anonPages * guestPage
+        let hostBytes = anonMmaps > 0
+            ? (anonPages &* guestPage &+ (anonMmaps &* (hostPage &- 1)))
+            : 0
+
+        var footprintMB: Double = 0
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            footprintMB = Double(info.phys_footprint) / (1024 * 1024)
+        }
+
+        let decided = full &+ single
+        return [
+            "clusterCalls": calls,
+            "clusterFull": full,
+            "clusterSingle": single,
+            "clusterHitRatePct": decided > 0 ? Double(full) * 100.0 / Double(decided) : 0,
+            "missWhyNeighbourMapped": whyMapped,
+            "missWhySameFlagsRefused": whyFlags,
+            "missWhyHostPageEqualsGuest": whyNoCluster,
+            "missWhyClusterMmapFailed": whyEnomem,
+            "clusterPagesCommitted": pagesCommitted,
+            "avgPagesPerClusterCall": decided > 0 ? Double(pagesCommitted) / Double(decided) : 0,
+            "anonMmapCalls": anonMmaps,
+            "anonPagesMapped": anonPages,
+            "anonGuestMB": Double(guestBytes) / (1024 * 1024),
+            "anonHostMBUpperBound": Double(hostBytes) / (1024 * 1024),
+            "avgPagesPerAnonMmap": anonMmaps > 0 ? Double(anonPages) / Double(anonMmaps) : 0,
+            "hostPageSize": hostPage,
+            "appFootprintMB": footprintMB,
+        ]
+    }
+
     private func handleAppInfo(params: [String: Any] = [:]) -> Any {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
@@ -2709,6 +2778,73 @@ final class DebugJSONRPC: @unchecked Sendable {
     ///
     /// The session id is validated first so a typo fails loudly instead of
     /// posting a notification that silently does nothing.
+    /// debug.agentCallback.openSheet — open the detail sheet for an
+    /// `<agent_callback>` message. [T-p3-agent-callback-cell] Params:
+    /// `text` (the raw callback XML), or `sessionId` — the last callback
+    /// message of that (cached, on-screen) session is used. Synthesized taps
+    /// cannot reach the SwiftUI cell, so this posts the same notification.
+    private func handleOpenAgentCallbackSheet(params: [String: Any]) async throws -> Any {
+        let callback: AgentCallback? = await MainActor.run {
+            if let text = params["text"] as? String, !text.isEmpty {
+                return AgentCallback.parse(text)
+            }
+            guard let sid = params["sessionId"] as? String,
+                  let vm = ViewModelCache.shared.get(for: sid) else { return nil }
+            return vm.messages.reversed().lazy.compactMap { $0.agentCallback }.first
+        }
+        guard let callback else {
+            throw RPCError(code: -32602, message: "No agent callback message found")
+        }
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openAgentCallback, object: nil,
+                                            userInfo: ["callback": callback])
+        }
+        return ["ok": true, "kind": callback.kind.rawValue, "job": callback.jobId, "status": callback.status]
+    }
+
+    /// debug.agent.openToolSheet — open the regular tool sheet (ToolLiveSheet
+    /// + HelperDetailCard) for the LAST delegate_task block of `sessionId`,
+    /// i.e. what a tap on the inline block or the tool bar opens.
+    /// [T-agent-tool-sheet-unified] Synthesized taps cannot reach SwiftUI.
+    private func handleOpenAgentToolSheet(params: [String: Any]) async throws -> Any {
+        guard let sid = params["sessionId"] as? String else {
+            throw RPCError(code: -32602, message: "Missing required param: sessionId")
+        }
+        let block: AssistantBlock? = await MainActor.run {
+            guard let vm = ViewModelCache.shared.get(for: sid) else { return nil }
+            for msg in vm.messages.reversed() where msg.role == .assistant {
+                if let b = msg.blocks.last(where: { if case .delegateTool = $0.kind { return true }; return false }) { return b }
+            }
+            return nil
+        }
+        guard let block else { throw RPCError(code: -32602, message: "No delegate_task block in that session") }
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openAgentCallback, object: nil, userInfo: ["block": block])
+        }
+        return ["ok": true, "toolUseId": block.toolUseId ?? ""]
+    }
+
+    /// debug.helper.openSheet — open the read-only helper mirror sheet for a
+    /// child session on whatever chat is on screen. [T-p1-delegate-task]
+    /// The capsule and the delegate block are SwiftUI tap targets that the
+    /// synthesized-tap ladder cannot reach without iCTRL; this is the same
+    /// notification the P2 notification-tap path will post.
+    private func handleOpenHelperSheet(params: [String: Any]) async throws -> Any {
+        guard let childId = params["childSessionId"] as? String, !childId.isEmpty else {
+            throw RPCError(code: -32602, message: "Missing required param: childSessionId")
+        }
+        guard let child = await ChatStore.shared.getSession(childId) else {
+            throw RPCError(code: -32602, message: "Session not found: \(childId)")
+        }
+        let title = AgentJobRegistry.stripChildSessionTitlePrefix(child.title ?? "")
+        await MainActor.run {
+            NotificationCenter.default.post(name: .openHelperSheet, object: nil,
+                                            userInfo: ["childSessionId": childId, "title": title,
+                                                       "parentSessionId": child.parentSessionId ?? ""])
+        }
+        return ["ok": true, "childSessionId": childId, "parentSessionId": child.parentSessionId ?? ""] as [String: Any]
+    }
+
     private func handleOpenSession(params: [String: Any]) async throws -> Any {
         guard let sessionId = params["sessionId"] as? String, !sessionId.isEmpty else {
             throw RPCError(code: -32602, message: "Missing required param: sessionId")

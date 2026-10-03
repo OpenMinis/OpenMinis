@@ -107,6 +107,7 @@ enum SyncV2Bootstrap {
     static var isMigrationRequested: Bool {
         UserDefaults.standard.bool(forKey: migrationRequestedKey)
     }
+    private static var provisionalRetryTask: Task<Void, Never>?
     static func setMigrationRequested(_ requested: Bool) {
         UserDefaults.standard.set(requested, forKey: migrationRequestedKey)
         logger.info("[SyncCore] migration requested=\(requested)")
@@ -142,6 +143,39 @@ enum SyncV2Bootstrap {
         }
         guard #available(iOS 17.0, *) else {
             logger.warning("[SyncCore] v2 requires iOS 17+ — disabling")
+            return
+        }
+
+        // [T-ios-reboot-keychain-identity-rotation] Same guard as
+        // CloudSyncEngine.start, for the same reason: this runs from
+        // scenePhase→.active, which iOS can deliver on a background relaunch
+        // BEFORE first unlock after a reboot. The Keychain is unreadable then, so
+        // `DeviceIdentity.deviceId` returns a throwaway id — and both
+        // `setSyncZoneName` below and the `registerDevice(recordId:)` call further
+        // down would bake it in, tagging every dirty row for a zone that is not
+        // this device's. Bail and let the post-unlock activation start v2 for real.
+        guard !DeviceIdentity.isProvisional else {
+            // [T-icloud-device-provisional-retry] On iOS a later scenePhase →
+            // .active retries this. On an iPad app running on macOS Apple does
+            // not document which scene-phase transitions fire on window close
+            // vs quit, so the retry is not guaranteed — and a device that never
+            // registers is invisible to peers AND blind to them. Arm a timed
+            // retry as well; idempotent (one pending at a time).
+            logger.warning("[SyncCore] v2 startup deferred — device identity is provisional (keychain locked after reboot); retrying in 30s and on next activation")
+            if provisionalRetryTask == nil {
+                provisionalRetryTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                    provisionalRetryTask = nil
+                    if !DeviceIdentity.isProvisional {
+                        logger.info("[SyncCore] device identity now available — starting v2 (timed retry)")
+                        await startIfEnabled()
+                    } else {
+                        logger.warning("[SyncCore] device identity still provisional after 30s; will retry again")
+                        // re-enter to re-arm
+                        await startIfEnabled()
+                    }
+                }
+            }
             return
         }
 
@@ -227,6 +261,16 @@ enum SyncV2Bootstrap {
                         recordType: "SyncDeviceV2",
                         recordId: DeviceIdentity.deviceId
                     )
+                    // [T-icloud-device-retire-old-id] If this install just
+                    // re-minted its id, retire the previous one: tombstone it
+                    // locally (so a stale echo cannot resurrect it) and queue
+                    // op=delete so peers drop the ghost row. Older peers ignore
+                    // a delete for a type they never delete — harmless.
+                    if let old = DeviceIdentity.takeRetiredDeviceId() {
+                        await ChatStore.shared.recordDeletedRecordTombstone(type: "SyncDeviceV2", id: old)
+                        await ChatStore.shared.markDirty(recordType: "SyncDeviceV2", recordId: old, operation: "delete")
+                        logger.info("[SyncCore] retiring previous device id \(old.prefix(8)) (op=delete queued)")
+                    }
                 }
                 logger.info("[SyncCore] v2 startup STEP=device registered (deviceId=\(DeviceIdentity.deviceId.prefix(8)))")
                 logger.info("[SyncCore] v2 startup STEP=migration begin")

@@ -28,7 +28,9 @@ import androidx.compose.ui.viewinterop.AndroidView
  *   - Tab             → 0x09
  *   - Esc             → 0x1B
  *   - Printable char  → utf-8 bytes
- *   - Ctrl+letter     → control code (via Shift state from the accessory bar)
+ *   - Ctrl+key        → control code (hardware Ctrl, or the accessory bar's
+ *                       sticky Ctrl); see [TerminalKeyMapper]
+ *   - F1-F12, Ctrl/Alt/Shift+arrows → xterm sequences
  *
  * Uses a custom BaseInputConnection that refuses to buffer text — every
  * `commitText()` is flushed immediately so the PTY sees keystrokes in the
@@ -170,14 +172,35 @@ class TerminalInputEditText @JvmOverloads constructor(
         }
     }
 
+    /**
+     * [OpenMinis#277] Key codes whose ACTION_DOWN this view consumed. Their
+     * ACTION_UP must be consumed too (iOS 0b249c31f: pressesEnded forwards
+     * only presses pressesBegan did not consume). Otherwise the up reaches
+     * EditText.onKeyUp, and for a single-line field an Enter key-up is an
+     * editor action that moves focus to the next view: after the first
+     * hardware Enter every later keystroke went to the Compose root instead
+     * of the terminal.
+     */
+    private val consumedKeyDowns = HashSet<Int>()
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        return handleKeyEvent(event) || super.onKeyDown(keyCode, event)
+        if (handleKeyEvent(event)) {
+            consumedKeyDowns.add(keyCode)
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (consumedKeyDowns.remove(keyCode)) return true
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun handleKeyEvent(event: KeyEvent): Boolean {
         val appCursor = getAppCursorMode()
         val ctrl = event.isCtrlPressed
         val alt = event.isAltPressed
+        val shift = event.isShiftPressed
 
         val bytes: ByteArray? = when (event.keyCode) {
             KeyEvent.KEYCODE_ENTER -> byteArrayOf(0x0D)
@@ -185,39 +208,52 @@ class TerminalInputEditText @JvmOverloads constructor(
             KeyEvent.KEYCODE_FORWARD_DEL -> "\u001B[3~".toByteArray()
             KeyEvent.KEYCODE_TAB -> byteArrayOf(0x09)
             KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(0x1B)
-            KeyEvent.KEYCODE_DPAD_UP -> arrow('A', appCursor)
-            KeyEvent.KEYCODE_DPAD_DOWN -> arrow('B', appCursor)
-            KeyEvent.KEYCODE_DPAD_RIGHT -> arrow('C', appCursor)
-            KeyEvent.KEYCODE_DPAD_LEFT -> arrow('D', appCursor)
+            // [OpenMinis#277] Modified arrows use xterm's ESC [ 1 ; <mod> X,
+            // as iOS sendModifiedArrow does (word jumps in readline/vim/tmux).
+            KeyEvent.KEYCODE_DPAD_UP -> TerminalKeyMapper.arrow('A', appCursor, shift, alt, ctrl)
+            KeyEvent.KEYCODE_DPAD_DOWN -> TerminalKeyMapper.arrow('B', appCursor, shift, alt, ctrl)
+            KeyEvent.KEYCODE_DPAD_RIGHT -> TerminalKeyMapper.arrow('C', appCursor, shift, alt, ctrl)
+            KeyEvent.KEYCODE_DPAD_LEFT -> TerminalKeyMapper.arrow('D', appCursor, shift, alt, ctrl)
             KeyEvent.KEYCODE_MOVE_HOME -> "\u001B[H".toByteArray()
             KeyEvent.KEYCODE_MOVE_END -> "\u001B[F".toByteArray()
             KeyEvent.KEYCODE_PAGE_UP -> "\u001B[5~".toByteArray()
             KeyEvent.KEYCODE_PAGE_DOWN -> "\u001B[6~".toByteArray()
+            in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F12 ->
+                TerminalKeyMapper.functionKey(event.keyCode - KeyEvent.KEYCODE_F1 + 1)
             else -> {
-                val unicode = event.unicodeChar
-                if (unicode != 0) {
-                    val ch = unicode.toChar()
-                    when {
-                        ctrl && ch.uppercaseChar() in 'A'..'Z' -> {
-                            byteArrayOf((ch.uppercaseChar() - 'A' + 1).toByte())
-                        }
-                        alt -> {
-                            // Meta-prefixed: ESC + char (xterm metaSendsEscape)
-                            byteArrayOf(0x1B) + ch.toString().toByteArray(Charsets.UTF_8)
-                        }
-                        else -> ch.toString().toByteArray(Charsets.UTF_8)
-                    }
+                // [OpenMinis#277] Hardware Ctrl+key. With Ctrl in the meta
+                // state, KeyCharacterMap finds no mapping for most keys and
+                // getUnicodeChar() returns 0, so the old Ctrl branch (nested
+                // under `unicode != 0`) never ran and Ctrl+C / Ctrl+D did
+                // nothing. Resolve the character with Ctrl and Alt masked out
+                // (Shift kept, so Ctrl+Shift+- still reads as '_'), then map it
+                // like iOS TerminalControlKeyMapper. Meta (Cmd/Win) combinations
+                // are left to the system.
+                val controlCode = if (ctrl && !event.isMetaPressed) {
+                    val base = event.getUnicodeChar(
+                        event.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK).inv(),
+                    )
+                    if (base > 0) TerminalKeyMapper.controlCode(base.toChar()) else null
                 } else null
+                if (controlCode != null) {
+                    // Ctrl+Alt+key → Meta (ESC) prefix + control code.
+                    if (alt) byteArrayOf(0x1B, controlCode) else byteArrayOf(controlCode)
+                } else {
+                    val unicode = event.unicodeChar
+                    if (unicode != 0) {
+                        val ch = unicode.toChar()
+                        when {
+                            alt -> {
+                                // Meta-prefixed: ESC + char (xterm metaSendsEscape)
+                                byteArrayOf(0x1B) + ch.toString().toByteArray(Charsets.UTF_8)
+                            }
+                            else -> ch.toString().toByteArray(Charsets.UTF_8)
+                        }
+                    } else null
+                }
             }
         }
         return if (bytes != null) { send(bytes); true } else false
-    }
-
-    private fun arrow(dir: Char, applicationCursorKeys: Boolean): ByteArray {
-        // applicationCursorKeys (DECCKM) switches CSI [ → SS3 O
-        val prefix = if (applicationCursorKeys) byteArrayOf(0x1B, 'O'.code.toByte())
-                     else byteArrayOf(0x1B, '['.code.toByte())
-        return prefix + byteArrayOf(dir.code.toByte())
     }
 
     private fun send(bytes: ByteArray) {

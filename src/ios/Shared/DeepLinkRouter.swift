@@ -137,6 +137,9 @@ enum DeepLinkRouter {
         case "soul":
             coord.pendingSettingsTarget = .soul
 
+        case "tools":
+            coord.pendingSettingsTarget = .tools
+
         // [T-mcp-oauth-deeplink] minis://settings/mcp-servers/<serverId> —
         // jump straight to the server's edit form (Authorize button). The
         // AUTH_REQUIRED error from minis-mcp-cli embeds this link. Server

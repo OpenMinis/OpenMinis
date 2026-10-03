@@ -1,6 +1,7 @@
 package com.openminis.app.ui.navigation
 
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -562,7 +563,19 @@ fun ChatSplitScaffold(
                             color = MaterialTheme.colorScheme.outlineVariant,
                         )
                     }
-                    Box(Modifier.weight(1f)) {
+                    // [T-android-no-keyboard-on-open] Focusable so it takes
+                    // the scaffold's pane focus itself. ThreePaneScaffold
+                    // requests focus on the pane that becomes current
+                    // (`LaunchedEffect(currentDestination) {
+                    // focusRequesters[role].requestFocus() }`); the pane is
+                    // not focusable, so Compose passes that focus to the
+                    // pane's first focusable child - the chat composer - and
+                    // the soft keyboard came up every time a chat was opened.
+                    // A focusable container here is that first child instead,
+                    // and it has no text input. Tapping the composer focuses
+                    // it as before; ChatScreen still focuses it on its own
+                    // for a new chat and when a hardware keyboard is attached.
+                    Box(Modifier.weight(1f).focusable()) {
                 if (sessionId == null) {
                     // [T-android-tablet-sidebar-collapse] The placeholder gets
                     // the toggle too. It has no app bar of its own, so without
@@ -861,6 +874,10 @@ fun ChatSplitScaffoldRoute(
                 onSettingsClick = { navController.safeNavigate(Routes.SETTINGS) },
                 onAddProviderClick = { navController.safeNavigate(Routes.ADD_PROVIDER) },
                 onSelectModelsClick = { navController.safeNavigate(Routes.ONBOARDING_MODELS) },
+                onRestoreBackupClick = {
+                    navController.currentBackStackEntry?.savedStateHandle?.set(Routes.BACKUP_INITIAL_TAB_KEY, 1)
+                    navController.safeNavigate(Routes.BACKUP)
+                },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onRootfsClick = { navController.safeNavigate(Routes.ROOTFS_MANAGEMENT) },
                 onScheduledTasksClick = { navController.safeNavigate(Routes.SCHEDULED_TASKS) },
@@ -910,6 +927,11 @@ fun ChatSplitScaffoldRoute(
                         Routes.terminal(initCommand = command, sessionId = sessionId),
                     )
                 },
+                // [T-agent-transcript-page] Full-screen push on the OUTER host,
+                // like the terminal — it must not swap the detail pane.
+                onOpenAgentTranscript = { childId ->
+                    navController.safeNavigate(Routes.agentTranscript(childId))
+                },
                 // Move-to targets another chat, which is still inside the
                 // list/detail pair — so it swaps the detail pane rather than
                 // pushing. (The old popUpTo(SESSION_LIST) existed to avoid
@@ -919,11 +941,13 @@ fun ChatSplitScaffoldRoute(
                 // the same reason onNewChat does.
                 onMoveToSession = { targetId -> onMoveToInPane(targetId) },
                 onBrowseChatFiles = { navController.safeNavigate(Routes.chatFiles(sessionId)) },
+                onBrowseChatFolder = { path -> navController.safeNavigate(Routes.chatFiles(sessionId, path)) },
                 onPreviewAttachment = { item ->
                     FilePreviewHolder.currentItem = item
                     navController.safeNavigate(Routes.FILE_PREVIEW)
                 },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
+                onEditProviderClick = { id -> navController.safeNavigate(Routes.providerDetail(id)) },
             )
         },
     )

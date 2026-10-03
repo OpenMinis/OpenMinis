@@ -9,9 +9,10 @@ private let logger = AppLogger(category: "Backup")
 ///
 /// ## Chosen parameters, and the Android equivalent for each
 ///
-/// Selection rule (§5.2's "全部算法双端标准库/成熟库可得", reaffirmed by the
-/// 2026-08-14 cross-platform constraint): **an algorithm both platforms can do
-/// with a standard library beats one that is better on a single platform.**
+/// Selection rule (§5.2's "every algorithm available from a standard or mature
+/// library on both platforms", reaffirmed by the 2026-08-14 cross-platform
+/// constraint): **an algorithm both platforms can do with a standard library
+/// beats one that is better on a single platform.**
 /// Nothing below needs a third-party dependency on either side.
 ///
 /// | Parameter | iOS (this file) | Android equivalent |

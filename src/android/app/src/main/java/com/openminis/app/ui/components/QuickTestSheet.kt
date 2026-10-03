@@ -483,6 +483,7 @@ internal suspend fun performTest(
                                 input = "Hi! This is Minis testing text to speech.",
                                 model = entry.model.id,
                                 voice = entry.model.id,
+                                resolvedModel = entry.model,
                             ),
                         )
                         if (data.isEmpty()) {
@@ -520,7 +521,7 @@ internal suspend fun performTest(
     }
 
     val provider = runCatching {
-        ProviderFactory.create(instance, apiKey, entry.model, context)
+        ProviderFactory.create(instance, apiKey, entry.model, context, overrides = entry.overrides)
     }.getOrElse { return@withContext failure(it.message ?: "Couldn't create provider.") }
 
     when (kind) {

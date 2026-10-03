@@ -46,6 +46,22 @@ object ProviderConfigMetaKeys {
     const val VOICE_OUTPUT_GROUP_ID = "voice_output_group_id"
     // [T-android-vision-group / GH#182] Vision Group pointer (per-device meta KV).
     const val VISION_GROUP_ID = "vision_group_id"
+    /**
+     * [T-subagent-own-store] The sub agent roster, as a JSON array.
+     *
+     * The roster lives here rather than only in ProviderConfig because the
+     * config is mirrored into TWO stores of different shape: the JSON blob,
+     * which carries every field, and this database, which carries instances,
+     * entries and groups. On launch the config is rebuilt FROM THIS DATABASE —
+     * so any field the database does not hold comes back as its default and
+     * then overwrites the complete copy on the next save.
+     *
+     * For the roster that is silent data loss: custom agents vanish on relaunch
+     * and the list looks merely empty, because the read accessor re-inserts the
+     * built-in. iOS reproduced exactly this (T-subagent-own-store). A meta row
+     * is additive, so this needs no Room migration.
+     */
+    const val SUB_AGENTS_JSON = "sub_agents_json"
     const val JSON_SYNC_HASH = "json_sync_hash"
 }
 
@@ -181,6 +197,22 @@ fun ProviderConfig.toSnapshot(
     visionGroupId?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.VISION_GROUP_ID, it))
     }
+    // [T-subagent-own-store] Always written, including when empty: an absent
+    // row is indistinguishable from "this build did not know about sub agents",
+    // and the read side has to be able to tell those apart.
+    metaRows.add(
+        ProviderConfigMetaEntity(
+            ProviderConfigMetaKeys.SUB_AGENTS_JSON,
+            runCatching {
+                jsonForBlobs.encodeToString(
+                    kotlinx.serialization.builtins.ListSerializer(
+                        com.openminis.app.data.model.SubAgentDefinition.serializer(),
+                    ),
+                    subAgents.toList(),
+                )
+            }.getOrDefault("[]"),
+        ),
+    )
     jsonSyncHash?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.JSON_SYNC_HASH, it))
     }
@@ -277,6 +309,22 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         visionGroupId = metaMap[ProviderConfigMetaKeys.VISION_GROUP_ID],
         agentLoopModelEntryIds = entryLoopIds,
         agentLoopGroupIds = groupLoopIds,
+        // [T-subagent-own-store] Restored from the meta row; a build that
+        // predates it has no row and gets an empty roster, which normalize
+        // turns into "built-in only" — the same as a fresh install.
+        subAgents = metaMap[ProviderConfigMetaKeys.SUB_AGENTS_JSON]
+            ?.let { raw ->
+                runCatching {
+                    jsonForBlobs.decodeFromString(
+                        kotlinx.serialization.builtins.ListSerializer(
+                            com.openminis.app.data.model.SubAgentDefinition.serializer(),
+                        ),
+                        raw,
+                    )
+                }.getOrDefault(emptyList())
+            }
+            .orEmpty()
+            .toMutableList(),
     )
 }
 

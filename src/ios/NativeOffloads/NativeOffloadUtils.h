@@ -54,6 +54,23 @@ NSDate *_Nullable noff_parse_date(NSString *str);
 /// Format a date as ISO 8601 with timezone.
 NSString *noff_format_date(NSDate *date);
 
+// ── All-day event helpers ──  [T-calendar-all-day]
+
+/// YES when `str` is exactly a calendar date with no time component
+/// (`YYYY-MM-DD`, 10 characters). A caller that receives a bare date for an
+/// event's --start/--end treats the event as all-day: EventKit stores an
+/// all-day event by its day range, and a bare date carries no time to lose.
+BOOL noff_is_date_only_string(NSString *_Nullable str);
+
+/// Normalise an inclusive [start, end] pair to EventKit's all-day convention in
+/// the local calendar: `*outStart` is 00:00:00 of start's day, `*outEnd` is
+/// 23:59:59 of end's day. An end before start collapses to a single day.
+/// Computed with calendar arithmetic (not `+ 86399`) so a DST transition inside
+/// the range cannot shift the boundary onto the wrong day.
+void noff_all_day_bounds(NSDate *start, NSDate *end,
+                         NSDate *_Nonnull *_Nonnull outStart,
+                         NSDate *_Nonnull *_Nonnull outEnd);
+
 // ── JSON output ──
 
 /// Build a success envelope: {ok:true, tool, action, data, timestamp}.

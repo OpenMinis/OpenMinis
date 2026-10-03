@@ -88,7 +88,15 @@ private func makeStreamingSession() -> URLSession {
 ///   - API Key: Standard Chat Completions API at api.openai.com
 ///   - OAuth (Codex): Responses API at chatgpt.com/backend-api/codex/responses
 final class OpenAIProvider: LLMProvider {
-    static let codexClientVersion = "0.144.1"
+    // OpenAI gates models by client version (codex_client_models.json
+    // `minimal_client_version`) — gpt-6-astra needs >= 0.153.0; older
+    // fingerprints get 400 / empty replies for it. UA format unchanged.
+    //
+    // [T-gpt6-sol-luna] 0.153.3 → 0.155.0 for gpt-6-sol / gpt-6-luna, which
+    // declare `minimal_client_version: 0.155.0` (CLIProxyAPI 2430354330af bumped
+    // its own default in the same commit that added the two ids). Monotonic, so
+    // the models already gated at 0.153.0 are unaffected: the field is a floor.
+    static let codexClientVersion = "0.155.0"
 
     /// [T-codex-fast-mode] UserDefaults key for the Codex Fast Mode toggle.
     /// Read at request-build time (not cached at init) so flipping the "..."
@@ -113,6 +121,22 @@ final class OpenAIProvider: LLMProvider {
     /// Extra HTTP headers to include in every request (e.g. OpenRouter attribution).
     var extraHeaders: [String: String] = [:]
 
+    /// [T-copilot-per-request-headers] Headers that depend on the REQUEST, not
+    /// the provider — given the outgoing body so they can be derived from it.
+    /// Applied after `extraHeaders`, so a key present in both wins here.
+    ///
+    /// Copilot is the only user today: `X-Initiator` must say whether a person
+    /// or the agent loop drove this turn, and `Copilot-Vision-Request` must be
+    /// set only when images are actually attached. Both were previously
+    /// computed by `CopilotConstants.requestHeaders` — which nothing ever
+    /// called, so neither header reached the wire. Pinning them to a constant
+    /// in `extraHeaders` is not an option: labelling agent traffic as human is
+    /// the specific thing that gets a Copilot account flagged.
+    ///
+    /// Kept as a closure rather than a subclass hook so the shared OpenAI
+    /// request builders stay free of provider-specific branching.
+    var perRequestHeaders: (@Sendable ([String: Any]) -> [String: String])?
+
     /// [T-model-use-image-passthrough GH#62] Arbitrary extra fields merged into the
     /// /images/generations JSON body, so `minis-model-use` can pass provider-specific
     /// params our fixed schema never modeled (e.g. Volcengine Seedream's `image` for
@@ -129,6 +153,54 @@ final class OpenAIProvider: LLMProvider {
     /// `web_search_options`, provider-specific knobs) but `model` is
     /// force-restored after the merge. Empty = no passthrough (default).
     var chatExtraBody: [String: Any] = [:]
+
+    // MARK: - [T-model-custom-params] Per-model user overrides
+    //
+    // Phase two: the values phase one made storable are now actually sent.
+    //
+    // Kept as their OWN channel rather than folded into `chatExtraBody`. That
+    // one is the `model_use` passthrough envelope, documented as "caller owns
+    // the shape, user keys win"; putting a settings-screen override in the same
+    // bucket would make two different owners fight over one dictionary with no
+    // way to tell whose value is whose. Separate fields also let the precedence
+    // below be stated explicitly instead of depending on merge order.
+    //
+    // Set by `LLMProviderFactory.applyModelOverrides` at construction time —
+    // the same seam `applyCustomUserAgent` / `applyAzure` /
+    // `applyOpenCodeSession` already use.
+
+    /// User-set sampling temperature for THIS model. nil = don't send the key.
+    var overrideTemperature: Double?
+
+    /// User-set nucleus-sampling cutoff. nil = don't send the key.
+    var overrideTopP: Double?
+
+    /// User-set body parameters merged into chat/responses requests.
+    var overrideExtraBody: [String: String] = [:]
+
+    /// Merge the per-model override body params into `body`.
+    ///
+    /// Precedence, deliberately in this order:
+    ///   1. what the caller/agent already put in `body` for temperature/top_p
+    ///      — an explicit per-request value beats a stored preference;
+    ///   2. the model's stored overrides;
+    ///   3. `chatExtraBody` (applied by the caller AFTER this), so a
+    ///      `model_use` passthrough still wins over a settings-screen value,
+    ///      matching its existing "user keys win" contract.
+    ///
+    /// Values are injected only when set, so a model with no overrides produces
+    /// a byte-identical request to before this change.
+    func applyModelOverrides(to body: inout [String: Any]) {
+        if let t = overrideTemperature, body["temperature"] == nil {
+            body["temperature"] = t
+        }
+        if let p = overrideTopP, body["top_p"] == nil {
+            body["top_p"] = p
+        }
+        for (k, v) in overrideExtraBody where body[k] == nil {
+            body[k] = v
+        }
+    }
 
     /// [T-model-use-endpoint-override] Absolute-path endpoint override.
     /// When set (must start with "/"), it replaces the ENTIRE URL path after
@@ -172,10 +244,54 @@ final class OpenAIProvider: LLMProvider {
     /// unchanged. Set by LLMProviderFactory for instances with `azureMode == true`.
     var isAzure: Bool = false
 
+    /// [T-xai-priority-processing] Whether this request should carry
+    /// `service_tier: "priority"` for xAI Priority Processing.
+    ///
+    /// Reads the SAME global toggle as Codex Fast Mode
+    /// (`fastModeDefaultsKey`, the "…" menu's "Enable Fast Mode") rather than a
+    /// per-provider setting: it is one user-facing feature — "pay more, go
+    /// faster" — and xAI is simply another provider that supports it. The chat
+    /// UI decides whether to *offer* the switch via
+    /// `activeModelSupportsFastMode`; this decides whether it actually *applies*
+    /// to the request being built.
+    ///
+    /// The `isXAI` gate is deliberate: `service_tier` is an xAI extension, so a
+    /// user who leaves Fast Mode on and then points a *custom* base URL at some
+    /// other vendor must not have an unknown field injected — strict endpoints
+    /// answer 400. Off ⇒ the key is omitted entirely, so bodies are unchanged.
+    var sendsPriorityServiceTier: Bool {
+        isXAI && UserDefaults.standard.bool(forKey: Self.fastModeDefaultsKey)
+    }
+
     /// Whether this provider points at Alibaba DashScope (supports Qwen cache_control).
     var isDashScope: Bool {
         guard let base = customBaseURL?.lowercased() else { return false }
         return base.contains("dashscope")
+    }
+
+    /// [T-ios-cerebras-reasoning-400] Whether this is Cerebras' inference API
+    /// (OpenMinis#361).
+    ///
+    /// Cerebras validates the request body strictly, and in two ways that both
+    /// bite us:
+    ///
+    ///   * Its assistant message is a CLOSED schema — exactly Mistral's problem
+    ///     (see `isMistral`). Echoing a captured `reasoning_content` back in
+    ///     history answers `400 … property 'messages.N.assistant.reasoning_content'
+    ///     is unsupported`, so turn 1 succeeds and every turn after it fails.
+    ///   * It re-hosts Qwen-named models (`qwen-3.8-27b`) that would otherwise
+    ///     match the `*qwen*` thinking rule and receive Qwen's native
+    ///     `enable_thinking`, which Cerebras does not accept. Their documented
+    ///     control is root `reasoning_effort` — which the bundled models-dev
+    ///     catalog already states for both Cerebras models.
+    ///
+    /// Carries the same caveat as `isMistral` / `isDashScope` / `isOpenRouter`:
+    /// a relay or vanity domain that doesn't carry `cerebras.ai` in its URL is
+    /// not recognised, which fails safe — the request simply goes out unchanged,
+    /// which is the pre-existing behaviour rather than a new breakage.
+    var isCerebras: Bool {
+        guard let base = customBaseURL?.lowercased() else { return false }
+        return base.contains("cerebras.ai")
     }
 
     /// Whether this provider actually talks to OpenRouter.
@@ -816,8 +932,8 @@ final class OpenAIProvider: LLMProvider {
             // cache on the conversation identity carried in these HEADERS, not
             // on the `prompt_cache_key` body field alone. Sending the body
             // field by itself produced a measured 0% cache-hit rate across
-            // every multi-turn test on device (see /tmp/gpt56_cache_findings.md
-            // — 0% even for two byte-identical 8.7k-token requests sent
+            // every multi-turn test on device
+            // (0% even for two byte-identical 8.7k-token requests sent
             // back-to-back), which is what motivated this change.
             //
             // Mirrors CLIProxyAPI's codex_executor.go `cacheHelper`, which sets
@@ -861,6 +977,11 @@ final class OpenAIProvider: LLMProvider {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         for (key, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        // [T-copilot-per-request-headers] The agent loop's own request path —
+        // this is where `X-Initiator: agent` actually matters.
+        for (key, value) in perRequestHeaders?(body) ?? [:] {
             request.setValue(value, forHTTPHeaderField: key)
         }
         // [T-ios-openai-body-oom] Must run BEFORE serializing: an out-of-memory
@@ -1012,6 +1133,12 @@ final class OpenAIProvider: LLMProvider {
         for (key, value) in extraHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // [T-copilot-per-request-headers] This builder takes `messages` rather
+        // than an assembled body, so hand the hook the same `messages` key the
+        // other two sites carry — the closure only ever reads the message list.
+        for (key, value) in perRequestHeaders?(["messages": messages]) ?? [:] {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
 
         var allMessages = messages
         if let sys = systemPrompt, !sys.isEmpty {
@@ -1044,6 +1171,16 @@ final class OpenAIProvider: LLMProvider {
         // fields verbatim (no OpenAI→native conversion — callers own the shape).
         // User keys win over our defaults, but `model` is force-kept so a stray
         // override can't misroute the call. Mirrors generateImage's merge.
+        // [T-xai-priority-processing] xAI Priority Processing. Placed BEFORE the
+        // chatExtraBody merge so an explicit `extra_body.service_tier` from the
+        // agent still wins, per the documented "user keys win" contract. Omitted
+        // entirely when off, so non-priority bodies are unchanged.
+        if sendsPriorityServiceTier {
+            body["service_tier"] = "priority"
+        }
+        // [T-model-custom-params] Before the chatExtraBody merge, so a
+        // `model_use` passthrough still overrides a stored per-model value.
+        applyModelOverrides(to: &body)
         if !chatExtraBody.isEmpty {
             for (k, v) in chatExtraBody { body[k] = v }
             body["model"] = model.id
@@ -1119,6 +1256,11 @@ final class OpenAIProvider: LLMProvider {
         for (key, value) in extraHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // [T-copilot-per-request-headers] Responses-API shape: the message list
+        // travels as `input`, so pass it under that key — the hook checks both.
+        for (key, value) in perRequestHeaders?(["input": messages]) ?? [:] {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
 
         var body: [String: Any] = [
             "model": model.id,
@@ -1162,6 +1304,16 @@ final class OpenAIProvider: LLMProvider {
         // [T-model-use-chat-passthrough GH#72] Same verbatim merge as the
         // chat-completions builder. Skipped for Codex OAuth — its body shape
         // is part of the client fingerprint and must stay untouched.
+        // [T-xai-priority-processing] xAI Priority Processing on the Responses
+        // path. Cannot collide with the [T-codex-fast-mode] block above: that
+        // one is gated on a gpt-family model id, and xAI models are grok-*.
+        if sendsPriorityServiceTier {
+            body["service_tier"] = "priority"
+        }
+        // [T-model-custom-params] Same placement as the chat path. Skipped for
+        // Codex OAuth for the same reason chatExtraBody is: that backend takes
+        // a fixed request shape and rejects unexpected sampling fields.
+        if !isCodexOAuth { applyModelOverrides(to: &body) }
         if !chatExtraBody.isEmpty && !isCodexOAuth {
             for (k, v) in chatExtraBody { body[k] = v }
             body["model"] = model.id
@@ -1900,11 +2052,16 @@ final class OpenAIProvider: LLMProvider {
     /// - Parameters:
     ///   - topLevelModel: Codex text model placed in `body["model"]` that
     ///     triggers the tool (e.g. the latest gpt-* model). nil → `model.id`.
-    ///   - imageModel: informational; the tool resolves gpt-image-2 itself.
+    ///   - imageModel: [T-codex-gpt-image25-variants] the image model the tool
+    ///     should run. nil → `model.id`, this provider's bound entry. For
+    ///     `gpt-image-2` the tool object stays bare and the backend resolves it
+    ///     by default (unchanged); for the 2.5 variants the id is written into
+    ///     the tool object, which is the only way to select them.
     func generateImageViaCodexResponses(
         prompt: String,
         inputImages: [LLMMessage.ImageAttachment] = [],
         topLevelModel: String? = nil,
+        imageModel: String? = nil,
         size: String? = nil,
         quality: String? = nil
     ) async throws -> LLMResponse {
@@ -1931,12 +2088,22 @@ final class OpenAIProvider: LLMProvider {
             input = [["role": "user", "content": parts]]
         }
 
+        // [T-codex-gpt-image25-variants] The tool object names the image model
+        // only for the 2.5 variants. `body["model"]` is a different thing — the
+        // Codex TEXT model that drives the tool — so the two must not be
+        // conflated: writing the image id there would 400.
+        let resolvedImageModel = imageModel ?? model.id
+        var imageTool: [String: Any] = ["type": "image_generation"]
+        if LLMModel.codexImageToolNeedsExplicitModel(resolvedImageModel) {
+            imageTool["model"] = resolvedImageModel
+        }
+
         let body: [String: Any] = [
             "model": topLevelModel ?? model.id,
             "instructions": "You are a helpful assistant. Use tools when available.",
             "input": input,
             "store": false,
-            "tools": [["type": "image_generation"]],
+            "tools": [imageTool],
             "reasoning": ["effort": "low"],
             "include": [],
             "tool_choice": "auto",
@@ -2070,7 +2237,7 @@ final class OpenAIProvider: LLMProvider {
         // Transient server errors: retry same model, do not trigger group fallback.
         let transientStatusCodes: Set<Int> = [500, 502, 503, 504, 529]
         if transientStatusCodes.contains(statusCode) {
-            return .transientError(message: "HTTP \(statusCode): \(body.prefix(200))")
+            return .transientError(message: "HTTP \(statusCode): \(body.prefix(200))", statusCode: statusCode)
         }
 
         // Try to extract error message from JSON body

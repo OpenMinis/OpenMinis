@@ -227,6 +227,27 @@ internal object KatexWebViewPool {
                     isReady = true
                     readyDeferred?.complete(Unit)
                 }
+
+                // [T-android-webview-render-process-gone] (GH#341)
+                // Route to the pool's OWN teardown, not a bare destroy():
+                // releaseWebView() also nulls `webView` and clears `isReady`,
+                // which is what lets ensureWebView() build a fresh one on the
+                // next render. A plain destroy() would leave the singleton
+                // holding a dead object and every later formula would come
+                // back blank, for the rest of the process's life.
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: android.webkit.RenderProcessGoneDetail?,
+                ): Boolean {
+                    // Unblock anyone awaiting a render that can no longer
+                    // arrive — the renderer that would have called the JS
+                    // bridge is gone, so `pending` would hang until timeout.
+                    runCatching { pending?.complete(Triple(0, 0, "render process gone")) }
+                    runCatching { readyDeferred?.complete(Unit) }
+                    runCatching { releaseWebView() }
+                    return com.openminis.app.ui.webview.WebViewRenderProcess
+                        .handle("KatexWebViewPool", detail)
+                }
             }
             loadUrl(ASSET_HTML)
         }

@@ -105,6 +105,12 @@ final class EnvVarStore: ObservableObject {
     /// Reload entries from disk (e.g. after iCloud sync merges new data).
     func reloadFromDisk() {
         entries = Self.loadEntries(from: fileURL)
+        // [T-envvar-redactor-reload-invalidate] The iCloud whole-file merger
+        // (CloudSyncEngine.mergeEnvVars) rewrites env-vars.json directly and
+        // then calls this. When the new key's value already arrived via iCloud
+        // Keychain, importEnvVarSecrets skips saveValue, so nothing else drops
+        // the redactor cache and the new secret would stay unmasked.
+        EnvVarRedactor.invalidateCache()
     }
 
     private func saveEntries() {
@@ -114,6 +120,12 @@ final class EnvVarStore: ObservableObject {
         } catch {
             logger.error("Failed to save env var entries: \(error)")
         }
+        // [T-envvar-redactor-main-thread-keychain] The redactor caches the
+        // decoded values so it does not re-read disk + keychain on every tool
+        // result. Every entry mutation funnels through here, so this is the one
+        // place that has to drop the cache — a newly added secret is then
+        // masked from the very next tool output.
+        EnvVarRedactor.invalidateCache()
         // v2 sync uses per-variable EnvVarItem records. Per-key markDirty
         // is issued by the call sites that actually mutate a specific
         // entry (add / update / delete / updateNote). Bulk re-emit when
@@ -200,13 +212,39 @@ final class EnvVarStore: ObservableObject {
 
         if status == errSecSuccess {
             dropLegacyNonSyncItem()
+            // [T-envvar-redactor-main-thread-keychain] A VALUE can change
+            // without `saveEntries()` running (the sync path writes values
+            // directly), so the redactor's cache has to be dropped here too or
+            // it would keep masking the old secret and miss the new one.
+            EnvVarRedactor.invalidateCache()
             return true
         }
         logger.error("Keychain save failed for \(key): OSStatus \(status) — prior value left intact")
         return false
     }
 
+    /// [T-envvar-redactor-crash] One fresh `result` per SecItemCopyMatching.
+    ///
+    /// This used to declare a single `var result: AnyObject?` and pass `&result`
+    /// to BOTH calls. SecItemCopyMatching follows the Copy rule: it hands back a
+    /// +1 reference by writing straight through the pointer, without releasing
+    /// whatever was there. Swift, meanwhile, treats the inout `AnyObject?` as an
+    /// owning reference. So on the fallback call the first call's +1 object was
+    /// overwritten (leaked) while ARC's ownership bookkeeping still pointed at
+    /// it, and the eventual release landed on a stale pointer — EXC_BAD_ACCESS
+    /// at 0xffffffff inside CFRelease, surfacing as a crash in whatever happened
+    /// to be tearing down at the time (field report: EnvVarRedactor's decoded
+    /// entry array, mid-tool-call, iOS 16.7).
+    ///
+    /// Only reachable when the synchronizable lookup misses AND a legacy
+    /// non-synchronizable item exists, which is why it took a long-lived
+    /// session to hit.
     nonisolated private static func loadValue(forKey key: String) -> String? {
+        func copyData(_ query: [String: Any]) -> Data? {
+            var result: AnyObject?
+            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+            return result as? Data
+        }
         // Try synchronizable first
         let syncQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -216,9 +254,7 @@ final class EnvVarStore: ObservableObject {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        var result: AnyObject?
-        if SecItemCopyMatching(syncQuery as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data { return String(data: data, encoding: .utf8) }
+        if let data = copyData(syncQuery) { return String(data: data, encoding: .utf8) }
         // Fallback to legacy non-sync
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -227,8 +263,7 @@ final class EnvVarStore: ObservableObject {
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
+        guard let data = copyData(query) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
@@ -242,6 +277,10 @@ final class EnvVarStore: ObservableObject {
         var syncQuery = query
         syncQuery[kSecAttrSynchronizable as String] = true
         SecItemDelete(syncQuery as CFDictionary)
+        // [T-envvar-redactor-main-thread-keychain] Deleting is a value change
+        // too — without this the redactor would keep masking a secret the user
+        // has removed.
+        EnvVarRedactor.invalidateCache()
     }
 
     /// Non-isolated read for use from CloudSyncEngine (background thread).

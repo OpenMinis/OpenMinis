@@ -21,6 +21,19 @@ object ThinkingLevelCatalog {
         // client-side "Max + orchestration" concept, never a wire effort — the
         // effort layer maps both MAX and ULTRA to "max". Keep in lockstep with
         // iOS ThinkingLevelCatalog.swift.
+        // [T-gpt6-astra] gpt-6-astra: same tier as sol/terra. Its catalog
+        // metadata lists an "ultra" wire value, but that is deliberately NOT
+        // special-cased — MAX and ULTRA both go out as "max" (see above), so
+        // the existing clamp already covers it.
+        Rule({ it.startsWith("gpt-6-astra") }, ThinkingLevel.MAX),
+        // [T-gpt6-sol-luna] gpt-6-sol / gpt-6-luna: same MAX tier as astra.
+        // Sol's catalog metadata omits "ultra" (the backend rejects that tier,
+        // exactly as on gpt-5.6-sol), but that needs no special case here —
+        // MAX and ULTRA both serialize to "max", so the ceiling is the whole
+        // story. Kept as its own rule rather than widening astra's to
+        // `gpt-6-` so a future gpt-6 member with a LOWER ceiling cannot be
+        // silently lifted to MAX by a family-wide match.
+        Rule({ it.startsWith("gpt-6-sol") || it.startsWith("gpt-6-luna") }, ThinkingLevel.MAX),
         Rule({ it.startsWith("gpt-5.6-sol") || it.startsWith("gpt-5.6-terra") }, ThinkingLevel.MAX),
         Rule({ it.startsWith("gpt-5.6-luna") }, ThinkingLevel.MAX),
         Rule({ it.startsWith("gpt-5.5") }, ThinkingLevel.XHIGH),
@@ -35,6 +48,21 @@ object ThinkingLevelCatalog {
         // "bytedance-seed/…"): rejects xhigh with "Invalid reasoning_effort:
         // xhigh". Ark's ladder tops out at high.
         Rule({ it.contains("seed-") || it.contains("bytedance-seed") }, ThinkingLevel.HIGH),
+        // [T-android-deepseek-flash-scope] (GH#356, iOS 466b00f9b) DeepSeek's
+        // ladder tops out at max and it rejects xhigh.
+        //
+        // This is a FALLBACK, not the primary fix: the catalog is consulted
+        // only when the model declares no reasoning-effort tiers of its own, so
+        // whenever the models.dev snapshot resolves, the declared set already
+        // yields the right ceiling. It matters when that lookup misses — a
+        // relay publishing the id under its own name, snapshot drift, or a
+        // future `deepseek-flash-lite` — where the XHIGH default would
+        // otherwise offer the user a tier the backend refuses. Exactly why the
+        // neighbouring mimo / seed- entries exist.
+        //
+        // Covers both the bare `deepseek-flash` DeepSeek now recommends and the
+        // legacy `deepseek-v4-*` alias.
+        Rule({ it.startsWith("deepseek-flash") || it.contains("deepseek-v4") }, ThinkingLevel.MAX),
         // Anthropic Opus 4.x adaptive-thinking family. The old per-version
         // startsWith("claude-opus-4.7"/"claude-opus-4.6") checks never matched:
         // LLMModel.id separates the minor version with a hyphen
@@ -43,6 +71,25 @@ object ThinkingLevelCatalog {
         // rule at all. Normalize dots→hyphens first, then a single prefix match
         // covers 4.6 / 4.7 / 4.8 and future 4.x (mirrors iOS normalizedHasPrefix).
         Rule({ normalizedHasPrefix(it, "claude-opus-4") }, ThinkingLevel.MAX),
+        // [T-anthropic-opus55-catalog] Claude Opus 5.x. NOT covered by the
+        // rule above — that one is anchored on "claude-opus-4", so Opus 5.5
+        // would have fallen through to the XHIGH default and quietly denied
+        // the user the `max` effort tier the model actually accepts. Spelled
+        // as its own 5-series rule for the same reason the 4.x one is a
+        // prefix: it has to keep matching 5.6, 5.7, … without another edit.
+        Rule({ normalizedHasPrefix(it, "claude-opus-5") }, ThinkingLevel.MAX),
+        // [T-anthropic-sonnet55] Claude Sonnet 5.5 declares low…max. The
+        // bundled models.dev snapshot carries it now, so the declared set
+        // already yields MAX; this rule is the floor for when that lookup
+        // misses (a stale on-device catalog, a relay spelling), where
+        // catalogMaxThinkingLevel would otherwise fall to `ruleTop ?: XHIGH`
+        // and Max would vanish from the picker — the Opus 5.5 trap above.
+        // Scoped to 5-5: claude-sonnet-5 itself resolves from the catalog.
+        // Direct ids only (hyphen or dotted), not vendor-prefixed relay ids
+        // such as `anthropic/claude-sonnet-5.5`: a rule can RAISE a ceiling
+        // above declared tiers, and those relays speak their own ladder.
+        // Same rule as iOS ThinkingLevelCatalog.swift (965ff194d).
+        Rule({ normalizedHasPrefix(it, "claude-sonnet-5-5") }, ThinkingLevel.MAX),
     )
 
     /** Prefix match that treats "." and "-" interchangeably in the version
@@ -96,8 +143,21 @@ val LLMModel.catalogMaxThinkingLevel: ThinkingLevel
         // is — its job is to stop an undeclared tier reaching the backend
         // (which 400s), and loosening it would trade this bug for that one.
         // Mirrors iOS LLMTypes.swift `catalogMaxThinkingLevel` (47dc71b3).
-        selectableThinkingLevels.lastOrNull()?.let { return it }
-        return ThinkingLevelCatalog.declaredMaxLevel(id) ?: ThinkingLevel.XHIGH
+        // [T-thinking-max-unreachable] …but only ever as a RAISE, never as a cut.
+        //
+        // The declared set is what models.dev happens to list, and it is often
+        // incomplete for a model whose family rule we know reaches higher:
+        // gpt-5.6-sol has an explicit MAX rule, yet commonly declares only
+        // ["low","medium","high"]. Returning the declared top verbatim let that
+        // incomplete list LOWER a known ceiling, so MAX vanished from the picker
+        // for exactly the models the rule exists to describe. Take the higher of
+        // the two. clampEffort is untouched, so this cannot send an undeclared
+        // tier. Mirrors iOS LLMTypes.swift `catalogMaxThinkingLevel`.
+        val ruleTop = ThinkingLevelCatalog.declaredMaxLevel(id)
+        selectableThinkingLevels.lastOrNull()?.let { declaredTop ->
+            return if (ruleTop != null && ruleTop.rank > declaredTop.rank) ruleTop else declaredTop
+        }
+        return ruleTop ?: ThinkingLevel.XHIGH
     }
 
 /**

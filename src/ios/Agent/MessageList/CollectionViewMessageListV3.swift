@@ -15,8 +15,8 @@ extension Notification.Name {
     ///
     /// The mount is a +70pt-per-row in-place content change on a cell whose
     /// item identity does not move, so nothing on the normal invalidation path
-    /// (reconfigure / prepareForReuse) runs. Device forensics (msg 5956CCDD,
-    /// log hash 1BFDAB45, 2026-08-08) showed the failure chain when the cell's
+    /// (reconfigure / prepareForReuse) runs. Device forensics (2026-08-08)
+    /// showed the failure chain when the cell's
     /// FIRST real self-size lands inside the pre-mount window: the tile-less
     /// height (~68pt) enters `heightCache`, every later correct re-seed is
     /// rejected by `setPrecalcHeight`'s occupied-slot guard, and the
@@ -48,6 +48,11 @@ struct CollectionViewMessageListV3: UIViewControllerRepresentable {
     var onWithdraw: ((UUID) -> Void)?
     var onResume: (() -> Void)?
     var onStop: (() -> Void)?
+    /// [T-p2-shared-workspace] Human takeover of a browser tab from a tool
+    /// sheet opened in THIS list (parent or helper mirror). Pauses that vm's
+    /// loop; `onTakeoverDone` resumes it.
+    var onBrowserTakeover: (() -> Void)?
+    var onTakeoverDone: (() -> Void)?
     var onCompact: ((UUID) -> Void)?
     var onRevertCompact: (() -> Void)?
     var onForceSync: (() -> Void)?
@@ -89,6 +94,8 @@ struct CollectionViewMessageListV3: UIViewControllerRepresentable {
         coord.onWithdraw = onWithdraw
         coord.onResume = onResume
         coord.onStop = onStop
+        coord.sheetPresenter.onBrowserTakeover = onBrowserTakeover
+        coord.sheetPresenter.onTakeoverDone = onTakeoverDone
         coord.onCompact = onCompact
         coord.onRevertCompact = onRevertCompact
         coord.onForceSync = onForceSync
@@ -229,18 +236,21 @@ private struct BridgedAssistantHeaderV3: View {
             // [T-soul-custom-icon] Honours a user-chosen emoji or image;
             // falls back to the gradient sparkle when unset, so headers for
             // users who never customized are pixel-identical to before.
-            // 18pt keeps the measured 28pt row height below intact — the
-            // icon is square by construction (SoulIconImage.encode crops),
-            // so an image cannot make this row taller than a glyph does.
+            // The icon is square by construction (SoulIconImage.encode
+            // crops), so an image cannot make this row taller than a glyph
+            // does. At 22pt it now exceeds the .body cap-height beside it,
+            // so it — not the text — sets the row height; the estimated
+            // height seed below was re-measured to match.
             SoulIconView(
                 icon: soulMeta.icon,
-                size: 18,
+                size: 22,
                 sparkleGradient: LinearGradient(
                     colors: [Color(red: 0.72, green: 0.69, blue: 0.59),
                              Color(red: 0.6, green: 0.6, blue: 0.55)],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
-                )
+                ),
+                cornerRadius: 5
             )
             Text(soulMeta.name.isEmpty ? "Minis" : soulMeta.name)
                 .font(.body.weight(.semibold))
@@ -258,8 +268,8 @@ private struct BridgedAssistantHeaderV3: View {
         // hittable rather than only the glyph and text pixels.
         //
         // On the 44pt HIG target: the row is deliberately NOT grown to 44pt.
-        // The comment above records that this header measures 28pt and that
-        // the cell height is UIKit-self-sized, so enlarging the frame would
+        // This header measures ~30pt (icon-driven since 22pt) and the cell
+        // height is UIKit-self-sized, so enlarging the frame would
         // shift every assistant message in the transcript — the task explicitly
         // asks not to disturb layout. Instead the touch target is widened
         // horizontally (the tappable box spans icon + gap + full name, well
@@ -305,6 +315,7 @@ private struct BridgedAssistantBlockV3: View {
         case .browserTool: return "assistantBrowserBlock"
         case .readImageTool: return "assistantReadImageBlock"
         case .memoryTool: return "assistantMemoryBlock"
+        case .delegateTool: return "assistantDelegateBlock"
         case .info: return "assistantInfoBlock"
         }
     }
@@ -354,7 +365,7 @@ private struct BridgedAssistantBlockV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(AppLocalized("Copy Markdown"), systemImage: "text.quote")
+                        Label(AppLocalized("Copy as Markdown"), systemImage: "text.quote")
                     }
                     if let onReadAloud = bridge.onReadAloud {
                         Button {
@@ -482,6 +493,23 @@ private struct BridgedAssistantFooterV3: View {
                             .opacity(bridge.usageContentVisible ? 1 : 0)
                     }
                     Spacer()
+                    // [T-usage-capsule-time] The completion clock sits at the
+                    // far RIGHT of the row, on its own — not inside the usage
+                    // capsule. It answers a different question ("when did this
+                    // land") from the capsule's ("what did it cost"), and the
+                    // capsule is a variable-width run of numbers, so a time
+                    // tacked onto its end drifted horizontally from reply to
+                    // reply. Anchored past the Spacer it lines up down the
+                    // whole conversation and stays readable as a column.
+                    //
+                    // Gated on showUsage too, so it reveals and hides with the
+                    // capsule rather than lingering on its own after a tap.
+                    if bridge.showUsage, let completedAt = message.completedAt {
+                        Text(Self.completedAtFormatter.string(from: completedAt))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(ChatColors.tertiaryText)
+                            .opacity(bridge.usageContentVisible ? 1 : 0)
+                    }
                 }
             }
         }
@@ -512,7 +540,7 @@ private struct BridgedAssistantFooterV3: View {
                             .map(\.content).joined(separator: "\n\n")
                         UIPasteboard.general.string = text
                     } label: {
-                        Label(AppLocalized("Copy Markdown"), systemImage: "text.quote")
+                        Label(AppLocalized("Copy as Markdown"), systemImage: "text.quote")
                     }
                     if let onReadAloud = bridge.onReadAloud {
                         Button {
@@ -620,6 +648,19 @@ private struct BridgedAssistantFooterV3: View {
         .background(Color.orange.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
+    /// [T-usage-capsule-time] 24-hour HH:mm, locale-pinned.
+    ///
+    /// `en_US_POSIX` is not cosmetic: a bare `dateFormat = "HH:mm"` is still
+    /// resolved against the device locale, and a region on a 12-hour clock
+    /// renders it as 12-hour. Static so the DateFormatter alloc is not paid
+    /// per message per render pass. Mirrors ChatMessageRow's formatter.
+    private static let completedAtFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm"
+        return f
+    }()
+
     @ViewBuilder
     private func usageCapsule(_ usage: TokenUsage) -> some View {
         HStack(spacing: 4) {
@@ -684,13 +725,134 @@ private struct BridgedWholeMessageV3: View {
             browserPool: nil,
             toolSnapshots: []
         )
-        .frame(maxWidth: maxWidth > 0 ? maxWidth : nil)
+        // [T-ios-wholemessage-leading] `alignment: .leading`, like every other
+        // bridged wrapper (header :291, block :344, footer :517). Without it the
+        // frame defaults to `.center`, and in regular size class — where maxWidth
+        // caps at 900 — the row's own 16pt horizontal padding is applied INSIDE
+        // the cap, so the content measures 868 and gets centred in the 900 column.
+        // That left the agent-callback card visibly narrower and inset by an extra
+        // 16pt per side compared with the delegate-tool card next to it, which is
+        // padded outside its cap. User bubbles keep their trailing look from the
+        // `HStack { Spacer(minLength: 60) … }` inside `userRow`, so leading here
+        // only removes the stray centring.
+        .frame(maxWidth: maxWidth > 0 ? maxWidth : nil, alignment: .leading)
         .frame(maxWidth: .infinity)
+        // [T-agent-callback-card-width] The callback card's inset is applied
+        // HERE, after the cap, so the card fills the same 900pt column the
+        // delegate-tool card beside it gets (that cell pads after its cap at
+        // :346). Padding inside the cap made it 868 — the leftover half of the
+        // problem [T-ios-wholemessage-leading] described but only half fixed:
+        // that change removed the stray centring, not the lost 32pt.
+        //
+        // Scoped to the callback: `userRow` keeps its own padding, because its
+        // trailing bubble look comes from `HStack { Spacer(minLength: 60) … }`
+        // measured against the padded width, and the height precalc
+        // (`measureUserBubbleHeight`, :3756) documents that same geometry.
+        .padding(.horizontal, message.agentCallback != nil ? AgentCallbackCellView.horizontalInset : 0)
         .accessibilityIdentifier(message.role == .user ? "userMessage" : "wholeMessage")
     }
 }
 
 // MARK: - Per-type Cell Subclasses (enable correct reuse)
+
+
+// MARK: - Height cache [T-ios-listsessions-perf]
+
+/// Cache key for a measured text-block height.
+///
+/// Built from the MARKDOWN SOURCE (`block.content`), not the rendered
+/// `NSAttributedString.string`. That distinction is load-bearing: the rendered
+/// plain text has the markup stripped, so `**bold**` and `bold` produce the
+/// same string of the same length while carrying different attribute runs and
+/// therefore measuring to different heights at the same width. Keying on the
+/// rendered string would hand back a height for the wrong content, which is
+/// exactly the stale-height-gap failure this file has been burned by before
+/// (see [ios_stale_height_gap_family], [ios_render_collapse_cell_undersized]).
+/// The attributed string is a deterministic function of the source plus the
+/// font size, so the source is both the safer key and the cheaper one.
+///
+/// `width` and `fontSize` are part of the key rather than reasons to clear:
+/// the LRU deliberately survives session change, so it also survives rotation
+/// and a Dynamic Type change, and both must MISS rather than serve a stale
+/// height. Font size in particular is not optional — the identity-keyed cache
+/// was only ever safe across a font change because `reconfigureAllCells()`
+/// wiped it.
+///
+/// Length is kept alongside the hash for the same reason
+/// `userBubbleHeightCache`'s key does: it makes an accidental hash collision
+/// between two different bodies vanishingly unlikely without storing the text.
+struct HeightCacheKey: Hashable {
+    let contentLength: Int
+    let contentHash: Int
+    let width: Int
+    let fontSize: Int
+
+    init(content: String, width: CGFloat, fontSize: CGFloat) {
+        self.contentLength = content.count
+        self.contentHash = content.hashValue
+        // 0.01 pt precision, NOT Int truncation. A wrap decision can turn on
+        // a fraction of a point (@3x widths are thirds; the font-scale steps
+        // land on .49/.51), and two widths that merely round to the same
+        // integer must MISS rather than share a height. A distinct key only
+        // costs one re-measure; a shared key can seed a wrong height, which is
+        // the stale-height-gap failure again.
+        self.width = Int((width * 100).rounded())
+        self.fontSize = Int((fontSize * 100).rounded())
+    }
+}
+
+/// Small insertion-ordered LRU for measured heights.
+///
+/// Capacity-bounded because it outlives session change: without a cap a
+/// long-running app accumulates an entry per distinct (block, width, font)
+/// ever measured. 300 entries covers several screens of several sessions,
+/// which is the reuse window that matters (reopening a session you were just
+/// in), while staying far too small to matter for memory — each entry is two
+/// Ints, a Double and a key.
+struct HeightLRU {
+    private var storage: [HeightCacheKey: CGFloat] = [:]
+    /// Keys oldest-first. Only touched on insert and eviction, not on read:
+    /// making reads reorder would turn every cache hit into an O(n) array
+    /// removal on the main thread, which is the opposite of the point.
+    /// Insertion order is therefore the eviction order — a bounded FIFO. For
+    /// this access pattern (a snapshot pass sweeping a page of blocks) that is
+    /// equivalent to true LRU and costs nothing.
+    private var order: [HeightCacheKey] = []
+    private let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = max(1, capacity)
+        storage.reserveCapacity(self.capacity)
+        order.reserveCapacity(self.capacity)
+    }
+
+    var count: Int { storage.count }
+
+    subscript(key: HeightCacheKey) -> CGFloat? {
+        get { storage[key] }
+        set {
+            guard let newValue else {
+                if storage.removeValue(forKey: key) != nil {
+                    order.removeAll { $0 == key }
+                }
+                return
+            }
+            if storage.updateValue(newValue, forKey: key) == nil {
+                order.append(key)
+                // Evict oldest until back under the cap.
+                while order.count > capacity {
+                    let oldest = order.removeFirst()
+                    storage.removeValue(forKey: oldest)
+                }
+            }
+        }
+    }
+
+    mutating func removeAll() {
+        storage.removeAll(keepingCapacity: true)
+        order.removeAll(keepingCapacity: true)
+    }
+}
 
 private final class WholeMessageCellV3: SelfSizingCell {}
 private final class AssistantHeaderCellV3: SelfSizingCell {}
@@ -742,6 +904,17 @@ extension CollectionViewMessageListV3 {
                 // grow) and skip that adjustment while the user browses.
                 // [T-ios-stream-natural-transitions]
                 viewController?.messageListLayout?.isAutoScrollPinning = (scrollMode == .autoScrolling)
+                // [T-ios-wheel-scroll-pin-fight] Re-seed the indirect-scroll
+                // baseline whenever the mode changes. Entering `.autoScrolling`
+                // is always followed by a jump to the bottom (button, first
+                // load, new turn), and that jump's first `scrollViewDidScroll`
+                // would otherwise be compared against a stale offset from
+                // wherever the user had browsed to — a large apparent upward
+                // move that would immediately bounce the mode back out.
+                // Seeding at the single choke point covers every jump site.
+                if let cv = viewController?.collectionView {
+                    lastDidScrollOffsetY = cv.contentOffset.y
+                }
             }
         }
         /// True during settleAfterInteraction flush — suppresses contentSize KVO offset changes.
@@ -780,13 +953,42 @@ extension CollectionViewMessageListV3 {
         private var cellBridges: [UUID: CellStateBridgeV2] = [:]
 
         // === Height Measurement Cache ===
-        /// Caches measureAttributedStringHeight results by NSAttributedString identity.
-        /// Avoids redundant TextKit layout on repeated snapshots for the same content.
-        private var attrStringHeightCache: [ObjectIdentifier: CGFloat] = [:]
+        /// [T-ios-listsessions-perf] Caches measureAttributedStringHeight
+        /// results by CONTENT, in an LRU that survives session change.
+        ///
+        /// This used to be `[ObjectIdentifier: CGFloat]` keyed on the identity
+        /// of the NSAttributedString. That made every re-render a guaranteed
+        /// miss even when the text was byte-identical — a streaming block
+        /// finalizing, a re-parse after compaction and a session reload all
+        /// mint a new attributed string object — and the cache was cleared
+        /// outright on session change. The result was the 0.42-0.73 s
+        /// main-thread hangs the CPU Profiler trace recorded on applySnapshot
+        /// (4 of them), where a page of long assistant blocks was measured
+        /// from cold through the near-O(n^2) `sizeThatFits` path.
+        ///
+        /// Keyed and bounded per `HeightCacheKey` / `HeightLRU` below.
+        private var attrStringHeightCache = HeightLRU(capacity: 300)
+
+        /// [T-ios-listsessions-perf] Per-applySnapshot instrumentation for the
+        /// height cache. Counted in every build (the arithmetic is three
+        /// increments) but only LOGGED in DEBUG — the on-device pass reads
+        /// these numbers to confirm or refute the hit-rate assumption that
+        /// motivated the content-keyed cache.
+        private var heightCacheHits = 0
+        private var heightCacheMisses = 0
+        private var heightMeasureSeconds: CFAbsoluteTime = 0
+        private let heightCacheLogger = AppLogger(category: "HeightCache")
         /// [T-ios-user-msg-estimate-tail-jitter] Caches accurate user-bubble
         /// heights keyed by "content|width|fontsize" (user text has no
-        /// cachedAttributedString identity to key on). Cleared alongside
-        /// attrStringHeightCache on session change / font change.
+        /// cachedAttributedString identity to key on).
+        ///
+        /// Still cleared on session change / font change, unlike
+        /// attrStringHeightCache: this one is a plain unbounded dictionary, so
+        /// clearing is what bounds it. [T-ios-listsessions-perf] gave the
+        /// assistant-side cache an LRU and a font-aware key so it could stop
+        /// being cleared; the same could be done here if user bubbles ever show
+        /// up in a profile, but they measure with a cheap UILabel rather than
+        /// the near-O(n^2) sizeThatFits path, so there is no evidence it matters.
         private var userBubbleHeightCache: [String: CGFloat] = [:]
 
         /// [T-ios-earlier-stream-seed-freeze] Memo for
@@ -952,7 +1154,7 @@ extension CollectionViewMessageListV3 {
         private var clampDeadline: Date = .distantPast
 
         // === Sheet Presenters ===
-        private let sheetPresenter = ToolSheetPresenter()
+        fileprivate let sheetPresenter = ToolSheetPresenter()
         private let compactSummaryPresenter = CompactSummaryPresenter()
         private var sheetOverlayHost: UIHostingController<SheetOverlayView>?
 
@@ -1316,7 +1518,18 @@ extension CollectionViewMessageListV3 {
                 // — the reported "文字与工具卡片重叠交叉". Same rule (and now
                 // the same code) as the layout's `streamingCellRanges`.
                 let itemMsgId = Self.messageId(of: item)
-                let isStreamingCell = itemMsgId.map { liveAssistantIds(in: messages, isProcessing: vm.isProcessing).contains($0) } ?? false
+                // [T-ios-compacting-row-vanishes-on-scroll] Same rule as the
+                // streaming-range builder in applySnapshot: the live compact
+                // status row grows its text on every delta, so it must not be
+                // seeded or memoized either. These two exclusions are required
+                // to agree — the last time they drifted apart, a still-growing
+                // cell got seeded at a stale height and froze
+                // ([T-ios-earlier-stream-seed-freeze]).
+                let isLiveCompactRow: Bool = itemMsgId.flatMap { id in
+                    messageIndex[id].map { messages[$0] }
+                }.map { $0.role == .systemInfo && $0.isCompactLoading } ?? false
+                let isStreamingCell = isLiveCompactRow
+                    || (itemMsgId.map { liveAssistantIds(in: messages, isProcessing: vm.isProcessing).contains($0) } ?? false)
                 if isStreamingCell {
                     cell.contentKey = nil
                     layout.invalidateMemo(forKey: key)
@@ -1362,7 +1575,7 @@ extension CollectionViewMessageListV3 {
                 // layout height (set via setPrecalcHeight in applySnapshot) so the
                 // cell's initial POSITION is approximately right, but the cell's
                 // real height is always decided by an actual measure, never frozen
-                // at an estimate. (The first-mount-measure-storm 方案 D was trading
+                // at an estimate. (The first-mount-measure-storm option D was trading
                 // correctness for fewer measures here; correctness wins — a too-
                 // short estimate that truncates content is worse than a measure.)
             }
@@ -1460,7 +1673,10 @@ extension CollectionViewMessageListV3 {
                 return SessionActivityTracker.shared.isActive(sid)
             }()
             bridge.canResume = isLast ? (vm.canResume && !vm.isProcessing && !trackerActive) : false
-            bridge.onResume = isLast ? { [weak self] in self?.onResume?() } : nil
+            // [T-p1-delegate-task] Only offer Resume when the host actually
+            // wired one — the read-only helper sheet passes nil, and a dead
+            // "Resume" button in a mirror that forbids input is a lie.
+            bridge.onResume = (isLast && self.onResume != nil) ? { [weak self] in self?.onResume?() } : nil
             bridge.onWithdraw = message.isQueued ? { [weak self] in self?.onWithdraw?(message.id) } : nil
             // "Read from Start": replay this whole reply via TTS. Only for assistant
             // messages; disabled while it's the actively-streaming reply.
@@ -1832,7 +2048,15 @@ extension CollectionViewMessageListV3 {
                     // a duplicate dispatch from clearing caches that won't be rebuilt.
                     if let msgs = self.vm?.messages {
                         self.viewController?.messageListLayout?.clearHeightCache()
-                        self.attrStringHeightCache.removeAll()
+                        // [T-ios-listsessions-perf] attrStringHeightCache is
+                        // deliberately NOT cleared here any more. Its key is
+                        // (content, width, fontSize), so an entry from another
+                        // session can only be returned for text that is
+                        // byte-identical at the same width and font — in which
+                        // case the height is correct by construction. Keeping
+                        // it across the switch is what makes reopening a
+                        // session you were just in avoid re-measuring the whole
+                        // page, which is where the applySnapshot hangs were.
                         self.userBubbleHeightCache.removeAll()
                         // This is the authoritative post-load apply; it carries the
                         // latest messages, so any snapshot deferred during the load
@@ -1920,6 +2144,25 @@ extension CollectionViewMessageListV3 {
                 }
                 .store(in: &subscriptions)
 
+            // 7b. Memory pressure — drop the measured-height LRU.
+            // [T-ios-listsessions-perf] This cache now outlives session change,
+            // so it needs an explicit pressure release. Dropping it is always
+            // safe: every entry is a pure function of its key, so the worst
+            // case is re-measuring on the next snapshot.
+            NotificationCenter.default.publisher(
+                for: UIApplication.didReceiveMemoryWarningNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    let dropped = self.attrStringHeightCache.count
+                    self.attrStringHeightCache.removeAll()
+                    self.userBubbleHeightCache.removeAll()
+                    if dropped > 0 {
+                        self.heightCacheLogger.info("memory warning — dropped \(dropped) cached height(s)")
+                    }
+                }
+                .store(in: &subscriptions)
+
             // 8a. Background entry — snapshot content length so we can detect
             //     whether significant content accumulated while backgrounded.
             NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
@@ -1984,7 +2227,46 @@ extension CollectionViewMessageListV3 {
                         AppLogger(category: "FGLayout").info("[FGLayout] skip layout (content unchanged)")
                         return
                     }
-                    self.remeasureVisibleCells(reason: "foreground(delta=\(accumulated))")
+                    // [T-ios-scenephase-active-sigkill / issue #355] Defer the
+                    // re-measure by one yield instead of running it inside the
+                    // notification delivery.
+                    //
+                    // `remeasureVisibleCells` invalidates every visible cell and
+                    // re-measures it synchronously. With the text caches cold —
+                    // which is the normal state after a memory warning is
+                    // delivered to the suspended app, and is exactly why a
+                    // healthy 18MB footprint accompanies this hang — each cell is
+                    // a miss and lands on `measureAttributedStringHeight`'s
+                    // near-O(n²) branch. On a CJK-heavy transcript a few such
+                    // cells sum to seconds: the measured table in
+                    // ChatMessageViews.swift puts 24k chars at 6.48s, and #355
+                    // reported 6.3s in one uninterrupted block, then a watchdog
+                    // SIGKILL.
+                    //
+                    // Same treatment the rest of the app's foreground-resume work
+                    // already gets (MinisApp.swift scenePhase→.active,
+                    // BackgroundKeepAliveManager.willEnterForeground): yielding
+                    // first lets the view-graph transition settle and gives this
+                    // pass its own runloop turn with a full frame budget. The
+                    // `:2199` intent is preserved — it still lands before the
+                    // first user-visible layout, just not inside the transition
+                    // tick.
+                    //
+                    // The delta above is captured SYNCHRONOUSLY on purpose:
+                    // `contentLengthAtBackground` is consumed here, so reading it
+                    // after the yield would race a bg→fg→bg cycle that re-armed
+                    // it. Only the expensive work moves.
+                    Task { @MainActor in
+                        await Task.yield()
+                        // Re-check after the yield: a rapid fg→bg flip may have
+                        // re-backgrounded us, and re-measuring while not active is
+                        // both wasted and the case UIKit can apply incompletely.
+                        guard UIApplication.shared.applicationState != .background else {
+                            AppLogger(category: "FGLayout").info("[FGLayout] skip layout (re-backgrounded before yield)")
+                            return
+                        }
+                        self.remeasureVisibleCells(reason: "foreground(delta=\(accumulated))")
+                    }
                 }
                 .store(in: &subscriptions)
 
@@ -2379,6 +2661,23 @@ extension CollectionViewMessageListV3 {
         /// set to true so we know to re-apply later.
         private var hasPendingSnapshot: Bool = false
 
+        /// [T-messagelist-snapshot-unique-ids] `items` with every repeat of an
+        /// identifier removed (first occurrence wins). Returns the input
+        /// untouched in the normal, duplicate-free case.
+        static func uniqueItems(_ items: [MessageListItem], caller: String) -> [MessageListItem] {
+            var seen = Set<MessageListItem>()
+            seen.reserveCapacity(items.count)
+            var dropped: [MessageListItem] = []
+            let unique = items.filter { item in
+                if seen.insert(item).inserted { return true }
+                dropped.append(item)
+                return false
+            }
+            guard !dropped.isEmpty else { return items }
+            AppLogger(category: "SnapshotDiag").error("[SnapshotDiag] dropped \(dropped.count) duplicate item id(s) before apply (caller=\(caller)) first=\(dropped[0])")
+            return unique
+        }
+
         private func applySnapshot(messages rawMessages: [ChatMessage], caller: String = "?") {
             guard let vm, !vm.isLoadingSession else { return }
 
@@ -2392,6 +2691,23 @@ extension CollectionViewMessageListV3 {
             let messages = rawMessages.contains(where: { $0.isInternalBridge })
                 ? rawMessages.filter { !$0.isInternalBridge }
                 : rawMessages
+            // [T-subagent-callback-visible] Every sub agent callback renders,
+            // progress and final alike.
+            //
+            // There used to be a dedup here ([T-agent-callback-dedup]): a final
+            // report was hidden whenever the parent still held the delegate
+            // block for that child, since the block already shows status, tier,
+            // elapsed and opens the same detail. That was defensible on its own
+            // terms and still left the transcript with no record that the sub
+            // agent reported back AT ALL — and the block quietly changing state
+            // is not the same as seeing the hand-off happen where it happened,
+            // in order, among the other turns. Progress reports were exempted
+            // first (they were invisible for minutes at a time); the final
+            // report now follows for the same reason.
+            //
+            // The scan that built the child-id set went with it: it walked
+            // every message and every block on each snapshot, and nothing reads
+            // the result any more.
 
             // Content changed (new/removed messages) — the up-button's turn-walk
             // anchor may no longer line up, so restart it on the next tap.
@@ -2564,6 +2880,16 @@ extension CollectionViewMessageListV3 {
                       let last = messages.last, last.role == .user else { return nil }
                 return last.id
             }()
+            // [T-assistant-header-dedup] The avatar + name header opens a
+            // reply to the PERSON: it is emitted only for the first assistant
+            // message after a real user turn. Consecutive assistant messages
+            // (tool-result message → text summary) share one header, and an
+            // agent callback — user role on the wire, but written by the
+            // system — does not restart the sequence either. compactDivider /
+            // systemInfo are not turns, so they leave the state untouched.
+            // The first message of a transcript gets a header (nothing to
+            // compare against).
+            var lastSpeakerWasUser = true
             for message in messages {
                 switch message.role {
                 case .user, .compactDivider, .systemInfo:
@@ -2571,9 +2897,22 @@ extension CollectionViewMessageListV3 {
                     if message.id == orphanTailUserId {
                         newItems.append(.assistantFooter(message.id))
                     }
+                    if message.role == .user, message.agentCallback == nil {
+                        lastSpeakerWasUser = true
+                    }
                 case .assistant:
-                    newItems.append(.assistantHeader(message.id))
+                    if lastSpeakerWasUser {
+                        newItems.append(.assistantHeader(message.id))
+                    }
+                    lastSpeakerWasUser = false
                     for block in message.blocks {
+                        // [T-subagent-control-row] Control calls are no longer
+                        // skipped here. They used to be: rendering one as an
+                        // EmptyView was not enough, because each block is its
+                        // own cell and an empty one still measured full height,
+                        // leaving a band of blank space. They now draw a real
+                        // real tool capsule, so the cell has content matching
+                        // its height and the gap cannot recur.
                         newItems.append(.assistantBlock(message.id, block.id))
                     }
                     // Only emit a footer cell when it will actually render
@@ -2593,6 +2932,16 @@ extension CollectionViewMessageListV3 {
                     }
                 }
             }
+
+            // [T-messagelist-snapshot-unique-ids] Diffable data sources abort
+            // (NSInternalInconsistencyException, "identifiers are not unique")
+            // when an item appears twice. That needs only one duplicated
+            // message or block id in `messages` — e.g. a sync merge or reload
+            // race leaving the same row twice — and it takes the whole app
+            // down (field crash: build 25, iOS 16.0.3, inside this apply). Keep
+            // the first occurrence and log, so a data glitch costs one hidden
+            // duplicate row instead of a crash.
+            newItems = Self.uniqueItems(newItems, caller: caller)
 
             // Remap height cache + set accurate estimates for ALL item types
             if let layout = viewController?.messageListLayout {
@@ -2697,6 +3046,11 @@ extension CollectionViewMessageListV3 {
                 streamGeneration &+= 1
 
                 let cvWidth = viewController?.collectionView.bounds.width ?? 390
+                // [T-ios-listsessions-perf] Reset the height-cache tally for
+                // this pass; the summary is logged once the loop finishes.
+                heightCacheHits = 0
+                heightCacheMisses = 0
+                heightMeasureSeconds = 0
                 for (i, item) in newItems.enumerated() {
                     // [T-ios-scroll-decel-height-drift] Register the stable
                     // content key for this index so a later self-size writes the
@@ -2765,8 +3119,14 @@ extension CollectionViewMessageListV3 {
 
                     switch item {
                     case .assistantHeader:
-                        // Header is always a fixed "sparkles Minis" label row (measured: 28pt)
-                        layout.setEstimatedHeight(28, at: i)
+                        // Header is always a fixed "icon + name" label row.
+                        // Was 28 when the icon was 18pt and the .body text
+                        // (20.3pt line) set the height; at 22pt the icon is
+                        // now the taller element, adding 1.67pt. Seeding 30
+                        // keeps the estimate on the same side of the real
+                        // height as before rather than under-seeding every
+                        // assistant turn.
+                        layout.setEstimatedHeight(30, at: i)
 
                     case .assistantFooter:
                         // Prominent banners (error/resume/typing) measure
@@ -2811,17 +3171,50 @@ extension CollectionViewMessageListV3 {
                         switch block.kind {
                         case .text:
                             // Use TextKit layout for accurate height pre-calculation.
-                            // Results are cached by NSAttributedString identity to avoid
-                            // redundant TextKit layout on repeated snapshots.
+                            // [T-ios-listsessions-perf] Cached by CONTENT (see
+                            // HeightCacheKey) rather than by the attributed
+                            // string's identity, so a re-render of unchanged
+                            // text — stream finalize, compaction re-parse,
+                            // session reload — hits instead of re-measuring
+                            // through the near-O(n^2) sizeThatFits path.
                             if let attrStr = block.cachedAttributedString {
                                 let textWidth = max(cvWidth - 32, 100)
-                                let key = ObjectIdentifier(attrStr)
+                                let key = HeightCacheKey(
+                                    content: block.content,
+                                    width: textWidth,
+                                    // 16.5 = the base size MarkdownNSRenderer is
+                                    // built with for assistant markdown
+                                    // (SelectableMarkdownView:387). Must track
+                                    // the RENDERER's size, not the list's own
+                                    // `scale` (16), or a Dynamic Type change
+                                    // would collide instead of missing.
+                                    fontSize: FontSettings.shared.scaledMessage(16.5)
+                                )
+                                // Never cache a string that carries attachments. An
+                                // image's height is decided at LAYOUT time by
+                                // attachmentBounds from NativeMediaImageCache —
+                                // 200 pt placeholder until the bitmap's size is
+                                // known — so the SAME content measures differently
+                                // before and after decode. Cached, that placeholder
+                                // height would be re-seeded by every later precalc
+                                // (handleAttachmentSizeChanged invalidates the
+                                // layout height, and the next pass re-reads this
+                                // cache), and now that the cache outlives session
+                                // change it would follow the message into its next
+                                // open. Images are rare in text blocks; measuring
+                                // them every pass is the pre-5c behaviour.
+                                let cacheable = !attrStr.containsAttachments(
+                                    in: NSRange(location: 0, length: attrStr.length))
                                 let height: CGFloat
-                                if let cached = attrStringHeightCache[key] {
+                                if cacheable, let cached = attrStringHeightCache[key] {
                                     height = cached
+                                    heightCacheHits += 1
                                 } else {
+                                    let t0 = CFAbsoluteTimeGetCurrent()
                                     height = Self.measureAttributedStringHeight(attrStr, width: textWidth)
-                                    attrStringHeightCache[key] = height
+                                    heightMeasureSeconds += CFAbsoluteTimeGetCurrent() - t0
+                                    if cacheable { attrStringHeightCache[key] = height }
+                                    heightCacheMisses += 1
                                 }
                                 // height includes the text view's 8pt insets;
                                 // +4 = the SwiftUI wrapper's .padding(.vertical, 2)
@@ -2949,6 +3342,24 @@ extension CollectionViewMessageListV3 {
                     }
                 }
 
+                #if DEBUG
+                // [T-ios-listsessions-perf] One line per snapshot pass. This is
+                // the evidence the on-device run reads to confirm (or refute)
+                // that the identity-keyed cache was missing on re-render — the
+                // assumption behind switching to a content key. A healthy
+                // steady state is hits >> misses with measured_ms near zero;
+                // misses staying high would mean the key is still too specific.
+                let measured = heightCacheHits + heightCacheMisses
+                if measured > 0 {
+                    let ms = heightMeasureSeconds * 1000
+                    let rate = Int((Double(heightCacheHits) / Double(measured)) * 100)
+                    heightCacheLogger.debug(
+                        "caller=\(caller) items=\(measured) hits=\(heightCacheHits) "
+                        + "misses=\(heightCacheMisses) hitRate=\(rate)% "
+                        + "measured=\(String(format: "%.1f", ms))ms "
+                        + "cacheSize=\(attrStringHeightCache.count)")
+                }
+                #endif
             }
 
             // Rebuild item→index lookup
@@ -2975,12 +3386,45 @@ extension CollectionViewMessageListV3 {
                                                                      isProcessing: true))
                 var ranges: [Range<Int>] = []
                 for id in streamingIds {
-                    guard let start = newItems.firstIndex(of: .assistantHeader(id)) else { continue }
+                    // [T-assistant-header-dedup] A message without its own
+                    // header starts at its first block.
+                    guard let start = newItems.firstIndex(where: {
+                        $0 == .assistantHeader(id) || Self.item($0, belongsTo: id)
+                    }) else { continue }
                     var end = start + 1
                     while end < newItems.count, Self.item(newItems[end], belongsTo: id) {
                         end += 1
                     }
                     ranges.append(start..<end)
+                }
+
+                // [T-ios-compacting-row-vanishes-on-scroll] The live
+                // "Compacting conversation… (N chars)" row counts as streaming
+                // too, even though it is a `systemInfo` row rather than an
+                // assistant turn.
+                //
+                // Its text is rewritten on every SSE delta, exactly like
+                // streamed assistant text. But `SelfSizingCell`'s interaction
+                // guard short-circuits any NON-streaming cell that has a cached
+                // height while `deferSelfSizing || streamingActive` — it returns
+                // the cached height and skips `super` entirely, so the cell's
+                // `UIHostingConfiguration` is never re-rendered. Compaction sets
+                // `isProcessing = true`, so `streamingActive` is already true;
+                // once the user drags, `deferSelfSizing` is set as well. The row
+                // therefore froze at whatever it last displayed and the spinner
+                // stopped updating — reported as the indicator "disappearing"
+                // mid-compaction while the work carried on in the background.
+                //
+                // Registering it here is the same fix the earlier-streaming
+                // regression used ([T-ios-earlier-stream-seed-freeze]): one
+                // rule, expressed in the one place that decides which cells may
+                // skip measuring. Scoped to rows still marked
+                // `isCompactLoading`, so a finished/failed/cancelled status row
+                // settles back to the cheap path immediately.
+                for msg in messages where msg.role == .systemInfo && msg.isCompactLoading {
+                    if let idx = newItems.firstIndex(of: .wholeMessage(msg.id)) {
+                        ranges.append(idx..<(idx + 1))
+                    }
                 }
                 ranges.sort { $0.lowerBound < $1.lowerBound }
                 viewController?.messageListLayout?.streamingCellRanges = ranges
@@ -3151,9 +3595,10 @@ extension CollectionViewMessageListV3 {
                         case .browserTool: "browser_use"
                         case .readImageTool: "read_image"
                         case .memoryTool: "memory"
+                        case .delegateTool: SubAgentDefinition.toolName
                         default: "unknown"
                         }
-                        AppLogger(category: "ToolLC").info("[ToolLifecycle] RENDERED_CHATUI toolId=\(block.toolUseId?.prefix(20) ?? "nil") tool=\(toolName) sid=\(sid) appState=\(appState) suspended=\(suspended) isProcessing=\(processing) caller=\(caller)")
+                        AppLogger(category: "ToolLC").verbose("[ToolLifecycle] RENDERED_CHATUI toolId=\(block.toolUseId?.prefix(20) ?? "nil") tool=\(toolName) sid=\(sid) appState=\(appState) suspended=\(suspended) isProcessing=\(processing) caller=\(caller)")
                     }
                 }
             }
@@ -3265,7 +3710,11 @@ extension CollectionViewMessageListV3 {
 
         private func reconfigureAllCells() {
             viewController?.messageListLayout?.clearHeightCache()
-            attrStringHeightCache.removeAll()
+            // [T-ios-listsessions-perf] Not cleared: the font size is IN the
+            // key, so the post-change measurements miss and re-measure while
+            // the pre-change entries simply age out of the LRU. Clearing would
+            // throw away every other session's still-valid heights to solve a
+            // problem the key already solves.
             userBubbleHeightCache.removeAll()
             reconfigureVisibleCells()
         }
@@ -3297,8 +3746,10 @@ extension CollectionViewMessageListV3 {
         /// ground truth showed the drift is engine-internal (usesFontLeading was
         /// ruled out: identical results), so no formula over the bare engine can
         /// close it. Measuring with the same engine is exact BY CONSTRUCTION.
-        /// Cost: avg 1.4ms/block (vs 0.67ms bare), cached per attributed string
-        /// in attrStringHeightCache, main-thread only (seed loop already is).
+        /// Cost: avg 1.4ms/block (vs 0.67ms bare), cached by content in
+        /// attrStringHeightCache (see HeightCacheKey — keyed on the markdown
+        /// source plus width and font size, NOT the attributed string's
+        /// identity), main-thread only (seed loop already is).
         ///
         /// RETURNS the full text-view height INCLUDING its 8pt vertical insets
         /// (4 top + 4 bottom) — callers add only the SwiftUI wrapper's
@@ -3345,6 +3796,8 @@ extension CollectionViewMessageListV3 {
         /// No on-screen view is touched; pure TextKit measurement (usedRect).
         static func measureUserBubbleHeight(for message: ChatMessage, cvWidth: CGFloat,
                                             cache: inout [String: CGFloat]) -> CGFloat? {
+            // [T-p3-agent-callback-cell] Callback cards have a fixed height.
+            if message.agentCallback != nil { return AgentCallbackCellView.rowHeight }
             // userDisplayText: strip the <user-attached-files> block, trim.
             var text = message.content
             if let start = text.range(of: "<user-attached-files>") {
@@ -3719,6 +4172,22 @@ extension CollectionViewMessageListV3 {
                 // 40→36 (-4) mid-decel; the +4 growths that motivated 40 were actually
                 // collapsed THINKING blocks (handled above with headerH = 40).
                 case .readImageTool: return 36
+                // [T-subagent-control-capsule] A delegateTool block is one of
+                // two very different views, and estimating both at 36 left a
+                // visible gap under every one of them.
+                //
+                // A CONTROL call (status / steer / resume / cancel) renders as
+                // an ordinary ToolCapsuleView — 36pt, like the default below.
+                // A real delegation renders HelperBlockView, a two-line card
+                // with 12pt of vertical padding per side, which measures ~58pt.
+                // Estimating the card at 36 seeded every delegate cell short;
+                // the correction that followed was applied to the cell but the
+                // extra space stayed reserved around it.
+                case .delegateTool:
+                    // `isControlOnly`, not `controlSummary`: same answer, and
+                    // this runs per item on a layout hot path — no point
+                    // building a localized label just to discard it.
+                    return HelperBlockInfo.isControlOnly(block) ? 36 : 58
                 case .info:
                     let lineCount = max(1, block.content.components(separatedBy: "\n").count)
                     return CGFloat(20 + lineCount * 16)
@@ -3861,6 +4330,50 @@ extension CollectionViewMessageListV3 {
         /// [T-ios-trackpad-scroll-jitter]
         private let reacquireAutoScrollThreshold: CGFloat = 4
 
+        /// [T-ios-wheel-scroll-pin-fight] How far the offset must move UP in one
+        /// callback before it counts as the user scrolling away from the bottom.
+        ///
+        /// Sized to sit above self-sizing noise and below one wheel notch: cells
+        /// at the bottom re-measure by roughly +/-1-5pt while TextKit lays out,
+        /// images load and tables reflow, and treating that as intent would drop
+        /// auto-follow mid-stream. A wheel notch or trackpad flick moves far more.
+        private let indirectScrollExitThreshold: CGFloat = 10
+
+        /// [T-ios-wheel-scroll-pin-fight] Is this scroll being driven by an
+        /// indirect pointer (mouse wheel, trackpad, iPhone Mirroring) rather
+        /// than a finger?
+        ///
+        /// The scroll view's own pan recognizer answers this precisely: a touch
+        /// drag always has at least one touch down while it is active, whereas
+        /// indirect scrolling drives the same recognizer with NO touches. So
+        /// "recognizer is active AND reports zero touches" is exactly the
+        /// indirect case, with no private API and nothing platform-specific.
+        ///
+        /// This gate is what keeps the fix off touch-only devices entirely: on
+        /// a plain iPhone or iPad the condition is never true, so the
+        /// auto-follow exit below can never run and behaviour there is
+        /// unchanged. It is deliberately the FIRST condition checked.
+        ///
+        /// Momentum after a trackpad flick still reports zero touches while
+        /// decelerating, which is correct -- that is still the user's scroll.
+        private static func isIndirectScroll(_ scrollView: UIScrollView) -> Bool {
+            let pan = scrollView.panGestureRecognizer
+            switch pan.state {
+            case .began, .changed, .ended:
+                return pan.numberOfTouches == 0
+            default:
+                // .possible/.failed/.cancelled: not an active user scroll.
+                // Momentum frames after an indirect flick arrive with the
+                // recognizer ended and no touches, covered by .ended above.
+                return scrollView.isDecelerating && pan.numberOfTouches == 0
+            }
+        }
+
+        /// Previous `scrollViewDidScroll` offset, for the comparison above.
+        /// Seeded on every mode change and programmatic jump so the first
+        /// callback after one cannot read as a large upward move.
+        private var lastDidScrollOffsetY: CGFloat = 0
+
         /// Whether a list item is part of the given assistant message's span
         /// (block or footer — the header is the span's start, matched
         /// separately). [T-stream-hover-earlier-streaming]
@@ -3919,7 +4432,7 @@ extension CollectionViewMessageListV3 {
             guard let cv = viewController?.collectionView,
                   let vm, let ds = dataSource else { return (-1, 0) }
             let msgs = vm.messages
-            let userIds = msgs.compactMap { $0.role == .user ? $0.id : nil }
+            let userIds = msgs.compactMap { $0.isUserTurnAnchor ? $0.id : nil }
             guard !userIds.isEmpty else { return (-1, 0) }
             let topItemMsgId: UUID? = cv.indexPathsForVisibleItems.min()
                 .flatMap { ds.itemIdentifier(for: $0) }
@@ -3962,11 +4475,21 @@ extension CollectionViewMessageListV3 {
                 .flatMap { ds.itemIdentifier(for: $0) }
                 .flatMap { Self.messageId(of: $0) }
             let topMsgIdx = topItemMsgId.flatMap { id in msgs.firstIndex(where: { $0.id == id }) } ?? 0
-            let currentAnchor = msgs[...topMsgIdx].reversed().first(where: { $0.role == .user })?.id ?? userIds.first!
+            let currentAnchor = msgs[...topMsgIdx].reversed().first(where: { $0.isUserTurnAnchor })?.id ?? userIds.first!
 
             // Decide the target: if the viewport is already at the anchor we last
             // jumped to (user has seen this turn's start), step to the previous
             // turn; otherwise land on the current turn's anchor first.
+            // [T-sub-agents-turn-anchor] A remembered id that is no longer a
+            // valid anchor (it was a callback before this fix, or its message
+            // was deleted) would make the first tap look like a no-op: the
+            // comparison below fails, so it re-lands on the current anchor
+            // instead of stepping back. Forget it and treat this as a fresh
+            // jump.
+            if let last = lastJumpedUserId, !userIds.contains(last) {
+                lastJumpedUserId = nil
+            }
+
             let target: UUID
             if lastJumpedUserId == currentAnchor,
                let pos = userIds.firstIndex(of: currentAnchor), pos > 0 {
@@ -5032,6 +5555,52 @@ extension CollectionViewMessageListV3 {
         private var settleJustFinished = false
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            // [T-ios-wheel-scroll-pin-fight] Leave auto-follow when the user
+            // scrolls up with an INDIRECT pointer (mouse wheel, trackpad,
+            // iPhone Mirroring).
+            //
+            // `scrollViewWillBeginDragging` is the only ordinary way out of
+            // `.autoScrolling` (the other two are scroll-to-top and the
+            // screenshot pass), and indirect scrolling never fires it -- it is
+            // not a touch drag. So the mode stayed `.autoScrolling` no matter
+            // how far the user scrolled, and the contentSize KVO re-pinned the
+            // viewport on every self-sizing tick: at the bottom, where cells
+            // are still measuring, that reads as the view repeatedly yanking
+            // itself back down. (The `[KVO] PIN-WHILE-SCROLLING ... MODE SHOULD
+            // BE userBrowsing` line exists for exactly this case.)
+            //
+            // Scoped to INDIRECT scrolling only, so a touch-only device cannot
+            // reach this at all and its behaviour is bit-for-bit unchanged --
+            // see `isIndirectScroll`. Within that scope the trigger is the
+            // offset moving up, and every other condition is a veto. Each guard
+            // below protects one behaviour that must survive:
+            //
+            //   - moved up by more than noise -> streaming (offset grows) and
+            //     cell self-sizing jitter (a few pt) can never trigger it;
+            //   - not animating to bottom -> the scroll-to-bottom button's
+            //     animation travels upward and must not cancel itself;
+            //   - not in the session-load clamp -> the first-load settle window
+            //     adjusts the offset on its own and is not user intent.
+            //
+            // The way back in is untouched: `settleAfterInteraction` re-acquires
+            // auto-scroll only within `reacquireAutoScrollThreshold` (4pt) of the
+            // bottom, the tight rule [T-ios-trackpad-scroll-jitter] already
+            // settled on. Touch dragging is unaffected -- it still goes through
+            // `scrollViewWillBeginDragging` and gets there first.
+            let offsetY = scrollView.contentOffset.y
+            if scrollMode == .autoScrolling,
+               Self.isIndirectScroll(scrollView),
+               !isAnimatingScrollToBottom,
+               !clampAfterSessionLoad,
+               offsetY < lastDidScrollOffsetY - indirectScrollExitThreshold {
+                AppLogger(category: "ScrollDiag").info("[ScrollDiag][indirectScrollExit] offset \(String(format: "%.0f", lastDidScrollOffsetY))→\(String(format: "%.0f", offsetY)) panState=\(scrollView.panGestureRecognizer.state.rawValue) touches=\(scrollView.panGestureRecognizer.numberOfTouches) tracking=\(scrollView.isTracking) decel=\(scrollView.isDecelerating) — auto→browse")
+                scrollMode = .userBrowsing
+                // Same follow-ups willBeginDragging performs for a touch drag.
+                lastJumpedUserId = nil
+                viewController?.messageListLayout?.deferSelfSizing = true
+            }
+            lastDidScrollOffsetY = offsetY
+
             // [ScrollDecel] Detect dropped frames during the deceleration phase
             // (cheap: early-returns unless decelerating + frame gap exceeded).
             logDecelFrameIfSlow(scrollView)
@@ -5263,6 +5832,8 @@ private final class ToolSheetPresenter: ObservableObject {
 
     @Published var sheetData: SheetData?
     var onDismiss: (() -> Void)?
+    var onBrowserTakeover: (() -> Void)?
+    var onTakeoverDone: (() -> Void)?
 }
 
 // MARK: - Compact Summary Sheet Presenter
@@ -5287,12 +5858,29 @@ private struct SheetOverlayView: View {
     var body: some View {
         Color.clear
             .frame(width: 0, height: 0)
+            // [T-agent-transcript-navbar-lost] This host is a child VC inside
+            // whatever navigation controller contains the message list, so
+            // SwiftUI bridges ITS navigation-bar state to that controller. Its
+            // root has no title and no toolbar, so that state computes as
+            // "automatic -> hidden", and it is re-applied on presentation
+            // events -- i.e. exactly when the tool sheet dismisses. When the
+            // containing page is a NavigationStack ROOT (the agent transcript
+            // page) that hides the page's bar for good. Pin visible so the
+            // bridged state can never be "hidden"; a no-op where the bar is
+            // already shown.
+            .toolbar(.visible, for: .navigationBar)
             .sheet(item: $toolPresenter.sheetData) { data in
+                // [T-agent-tool-sheet-unified] Every tool block — the agent
+                // block included — opens the same live sheet (this is the
+                // path a tap in the collection view actually takes), with
+                // human takeover wired through.
                 ToolLiveSheet(
                     toolBlocks: data.toolBlocks,
                     initialIdx: data.toolBlocks.firstIndex(where: { $0.id == data.block.id }) ?? 0,
                     toolSnapshots: data.toolSnapshots,
-                    browserPool: data.browserPool
+                    browserPool: data.browserPool,
+                    onBrowserTakeover: toolPresenter.onBrowserTakeover,
+                    onTakeoverDone: toolPresenter.onTakeoverDone
                 )
             }
             .onChange(of: toolPresenter.sheetData?.id) { newVal in

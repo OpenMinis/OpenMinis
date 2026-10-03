@@ -674,7 +674,7 @@ object CrashFrequencyDetector {
      * Launch a mail-only intent that carries the crash zip as a real
      * attachment. Previously this used `ACTION_SENDTO mailto:` with
      * EXTRA_STREAM, but most major mail clients (Gmail in particular,
-     * reproduced on 0.10-preview by LeeeSe / TG 36234) silently drop
+     * reproduced on 0.10-preview) silently drop
      * EXTRA_STREAM when the action is ACTION_SENDTO — the user lands
      * in a compose window with To/Subject filled but no attachment,
      * and the developer never gets the log.

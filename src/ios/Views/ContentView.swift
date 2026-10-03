@@ -17,13 +17,121 @@ private final class SessionMenuActionChannel {
     func send(_ action: SessionMenuAction) { handler?(action) }
 }
 
+/// [T-ios-crash-objectdestroy-fab-uaf] Action relay for the draggable FABs,
+/// mirroring SessionMenuActionChannel above and for the same reason.
+///
+/// `DraggableFAB` stores an `onTap` closure, and both call sites' closures
+/// capture `self` (`openSession`, `fabDidDrag`, `showSearchBar`, …). That drags
+/// a whole ContentView copy into a heap closure context; when SwiftUI's graph
+/// teardown releases it, the stale copy is destroyed field-by-field after its
+/// `@State` boxes are already gone — the `objectdestroy.NNTm` use-after-free.
+///
+/// Routing the action through a class with a stable lifetime means the stored
+/// closure captures only this one reference, never the view struct.
+@MainActor
+private final class FABActionChannel {
+    enum Action { case newChat, newChatInGroup(String), openSearch }
+    var handler: ((Action) -> Void)?
+    func send(_ action: Action) { handler?(action) }
+}
+
 /// One sidebar section: a date bucket (folderId == nil) or a folder section.
 /// Equatable and cheap on purpose — the sidebar ForEach diffs this on every
 /// transaction flush, so it must stay a [String] + small scalars, never a
 /// [ChatSession] ([T-ios-session-list-equatable-jank]).
-struct SidebarGroup: Equatable {
+struct SidebarGroup: Equatable, Identifiable {
+    /// [T-ios-sidebar-foreach-index-id] Stable identity for the section ForEach.
+    ///
+    /// The list was keyed by `\.offset` — the array INDEX. Group order is not
+    /// stable: `groupedSessionIDs` emits "Pinned" only when a pinned session
+    /// exists, folder groups sort by pin state and newest member, and date
+    /// buckets appear and disappear as sessions age. Pinning one chat, or a
+    /// background sync bumping a folder's newest `updatedAt`, renumbers every
+    /// group after it, so SwiftUI sees the sections it already has under new
+    /// identities and rebuilds them as remove+insert rather than an update.
+    ///
+    /// That is the churn the 2026-08-26 crash lands in: EXC_BAD_ACCESS in
+    /// `assignWithTake for ForEachState.LazyEdits` inside a graph transaction,
+    /// i.e. a double release while ForEach applied its edit list. The
+    /// folderId/label pair is what actually names a group, and it survives
+    /// reordering — an update stays an update.
+    var id: String { folderId.map { "f:\($0)" } ?? "b:\(label)" }
+
     var label: String            // English key for date buckets; folder name otherwise
-    var ids: [String]            // emptied when the folder is collapsed
+
+    /// Member session ids, in display order. Emptied when the folder is
+    /// collapsed.
+    ///
+    /// [T-ios-foreach-lazyedits-dup-guard] DEFENSIVE: writes are de-duplicated,
+    /// first occurrence wins. This is NOT a diagnosed fix — see the property's
+    /// full rationale on `dedupedPreservingOrder` below.
+    ///
+    /// The invariant lives here, on the property, rather than at the two
+    /// construction sites, so a third site added later cannot bypass it and so
+    /// the `g.ids = []` collapse write is covered by the same rule.
+    var ids: [String] {
+        get { _ids }
+        set { _ids = Self.dedupedPreservingOrder(newValue) }
+    }
+    private var _ids: [String] = []
+
+    /// First occurrence wins, order otherwise untouched.
+    ///
+    /// Why this guard exists: the sidebar renders members with
+    /// `ForEach(group.ids, id: \.self)`, i.e. keyed by the session id itself.
+    /// A repeated id would hand SwiftUI two rows with the SAME identity inside
+    /// one ForEach, which is a documented trigger for the double release this
+    /// app has already crashed on twice —
+    /// `assignWithTake for ForEachState.LazyEdits` →
+    /// `_swift_release_dealloc`, EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE at
+    /// 0x24 (2026-08-26 on iOS 26.6.1, again 2026-09-17 on iOS 27.0, both
+    /// iPhone18,1).
+    ///
+    /// Honest status: an audit on 2026-09-17 could NOT find a way to reach a
+    /// duplicate. `groupedSessions` partitions with `continue`/`else if`,
+    /// `filteredSessions` is a filter, both writes to `sessions` are
+    /// @MainActor from `listSessions()`, and ChatStore's incremental
+    /// `patchedSessionList` appends at most one row per cached entry. The
+    /// crashing stack carries no app frames at all (frames 0-39 are
+    /// libswiftCore / SwiftUICore / AttributeGraph / UIKitCore), so the .ips
+    /// cannot name the offending view either. This is therefore a cheap
+    /// backstop against one specific, known-fatal input shape — not a claim
+    /// about the cause.
+    ///
+    /// If the crash STOPS after this ships, duplicates were reachable and the
+    /// real bug is whatever produced them (a merge/restore path appending
+    /// without deduping is the likeliest candidate); the `#if DEBUG` report in
+    /// `computeGroupedSessionIDs` is what would name it. If the crash
+    /// CONTINUES, duplicate identity was not the trigger and this guard should
+    /// stay only as belt-and-braces while the search moves elsewhere.
+    /// Explicit memberwise-equivalent init. Needed because the private `_ids`
+    /// backing store suppresses the synthesised one, and required anyway so
+    /// every construction path goes through the de-duplicating setter.
+    init(label: String, ids: [String], folderId: String? = nil) {
+        self.label = label
+        self.folderId = folderId
+        self.ids = ids          // via the setter — dedup applies here too
+    }
+
+    static func dedupedPreservingOrder(_ input: [String]) -> [String] {
+        // Fast path: the overwhelmingly common case is already unique, and
+        // this runs inside a hot AttributeGraph aggregation pass.
+        var seen = Set<String>(minimumCapacity: input.count)
+        var hasDuplicate = false
+        for id in input where !seen.insert(id).inserted {
+            hasDuplicate = true
+            break
+        }
+        guard hasDuplicate else { return input }
+
+        seen.removeAll(keepingCapacity: true)
+        var out: [String] = []
+        out.reserveCapacity(input.count)
+        for id in input where seen.insert(id).inserted {
+            out.append(id)
+        }
+        return out
+    }
     var folderId: String? = nil
     var totalCount: Int = 0      // member count incl. hidden-by-collapse rows
     var glyphs: [FolderGlyph] = []   // top-3 distinct member category glyphs
@@ -404,6 +512,101 @@ private struct FolderMemberRowBackground: View {
 
 /// Rename + dissolve alerts for the folder-header menu, extracted into a
 /// modifier so their inline Binding(get:set:) expressions don't count against
+
+// MARK: - [T-ios-foreach-lazyedits-dup-guard] Sidebar identity tracer
+
+#if DEBUG
+/// Records the sidebar's ForEach IDENTITY SEQUENCE on every body evaluation, so
+/// the last line before a crash is the actual state SwiftUI was diffing.
+///
+/// Why this exists: the `ForEachState.LazyEdits` crash
+/// (EXC_BAD_ACCESS / KERN_PROTECTION_FAILURE at 0x24, CODESIGNING/Invalid Page)
+/// has been seen three times — 2026-08-26, and twice on 2026-09-17 — and its
+/// stack carries **zero app frames**: frames 0-39 are libswiftCore /
+/// SwiftUICore / AttributeGraph / UIKitCore, with only `MinisApp.$main()` and
+/// `main` at the bottom. A .ips therefore cannot name the offending view, and
+/// the one structural guess already tried (duplicate session ids) was falsified
+/// when the crash recurred on a build that contained the dedup guard.
+///
+/// So instead of guessing again, record what ForEach was actually handed. A
+/// LazyEdits fault is an edit-list fault: it happens while SwiftUI applies
+/// inserts/removes/moves computed from the identity sequence. Logging that
+/// sequence's TRANSITIONS gives the crash a cause to point at.
+///
+/// Deliberately DEBUG-only and transition-gated:
+///  * the sidebar body re-evaluates on every activity tick and, in the
+///    2026-09-17 report, under a display-link driven render — logging every
+///    pass would be both a flood and a measurable drag on the very path being
+///    diagnosed;
+///  * it logs only when the identity sequence CHANGES, which is exactly when an
+///    edit list is produced, i.e. the only passes that can crash this way.
+///
+/// This is instrumentation, not a fix. It must not alter what the body returns:
+/// `note(...)` is a plain function called from the `let groups = …` binding
+/// site, and its result is discarded — no extra view is inserted into the
+/// ViewBuilder, so the view tree's shape is unchanged.
+enum SidebarIdentityTracer {
+    private static let logger = AppLogger(category: "SidebarIdentity")
+    /// Per-list previous state, keyed by call site ("sidebar" / "selection").
+    nonisolated(unsafe) private static var previous: [String: (sections: [String], rows: [String])] = [:]
+
+    /// - Parameter site: which of the two sidebar lists is reporting.
+    static func note(_ groups: [SidebarGroup], site: String) {
+        let sections = groups.map(\.id)
+        // Flattened row identities, in the order ForEach receives them. The
+        // inner `ForEach(group.ids, id: \.self)` keys rows by the session id,
+        // so this IS the identity sequence SwiftUI diffs.
+        let rows = groups.flatMap(\.ids)
+
+        guard let old = previous[site] else {
+            previous[site] = (sections, rows)
+            logger.debug("[\(site)] first pass — sections=\(sections.count) rows=\(rows.count)")
+            return
+        }
+        guard old.sections != sections || old.rows != rows else { return }
+        previous[site] = (sections, rows)
+
+        // Describe the transition the way an edit list would: what left, what
+        // arrived, and whether anything merely moved. A pure reorder is the
+        // shape that historically crashed here (c86add406 was an index-keyed
+        // reorder), so it is called out explicitly.
+        let oldSectionSet = Set(old.sections), newSectionSet = Set(sections)
+        let oldRowSet = Set(old.rows), newRowSet = Set(rows)
+        let sectionsRemoved = oldSectionSet.subtracting(newSectionSet)
+        let sectionsInserted = newSectionSet.subtracting(oldSectionSet)
+        let rowsRemoved = oldRowSet.subtracting(newRowSet)
+        let rowsInserted = newRowSet.subtracting(oldRowSet)
+        let sectionsReordered = sectionsRemoved.isEmpty && sectionsInserted.isEmpty
+            && old.sections != sections
+        let rowsReordered = rowsRemoved.isEmpty && rowsInserted.isEmpty && old.rows != rows
+
+        func brief(_ ids: Set<String>) -> String {
+            ids.isEmpty ? "-" : ids.prefix(6).map { String($0.prefix(8)) }.joined(separator: ",")
+                + (ids.count > 6 ? "+\(ids.count - 6)" : "")
+        }
+
+        logger.debug(
+            "[\(site)] sections \(old.sections.count)->\(sections.count)"
+            + " (-\(brief(sectionsRemoved)) +\(brief(sectionsInserted))"
+            + "\(sectionsReordered ? " REORDER" : ""))"
+            + " rows \(old.rows.count)->\(rows.count)"
+            + " (-\(brief(rowsRemoved)) +\(brief(rowsInserted))"
+            + "\(rowsReordered ? " REORDER" : ""))"
+            + " sectionOrder=[\(sections.map { String($0.prefix(10)) }.joined(separator: "|"))]")
+
+        // A duplicate here would mean SidebarGroup.ids' guard was bypassed —
+        // impossible through the setter, but if it ever shows up it is the
+        // whole answer, so check rather than assume.
+        if rows.count != newRowSet.count {
+            logger.error(
+                "[\(site)] DUPLICATE ROW IDENTITY reached ForEach — "
+                + "rows=\(rows.count) unique=\(newRowSet.count). "
+                + "SidebarGroup.ids' dedup was bypassed; this is the crash shape.")
+        }
+    }
+}
+#endif
+
 /// ContentView.body's type-check budget (adding them inline tipped the
 /// compiler into "unable to type-check in reasonable time").
 private struct FolderAlertsModifier: ViewModifier {
@@ -832,8 +1035,106 @@ private struct RowHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 private let rowHeightLog = AppLogger(category: "RowHeight")
+#endif
 
+// [T-macos27-liquid-glass-navbar] NOTE: everything from here to the matching
+// `#if DEBUG` below is SHIPPING code and must stay OUTSIDE that block. It was
+// originally added inside the temporary SessionRow height probe's `#if DEBUG`,
+// which compiled `MacOS27GlassWorkaround` and `MacOS27OpaqueNavigationBar` out
+// of Release while their two call sites (ContentView.swift and
+// AIChatView.swift) stayed unconditional -- Debug built fine and only the
+// Release archive failed with "cannot find 'MacOS27OpaqueNavigationBar' in
+// scope". Do not merge these blocks back together.
+/// [T-macos27-liquid-glass-navbar] Two regressions in the iOS 26-style
+/// navigation bar on macOS 27 (iOS app on Mac).
+///
+/// An iOS 26+ navigation bar draws no background of its own; the backdrop comes
+/// from the top scroll edge effect of the scroll view beneath it (liquid glass
+/// sampled by a CABackdropLayer). On macOS 27 that chain breaks in two places.
+/// macOS 26 and every iOS version are fine (verified under LLDB, view trees
+/// compared line by line):
+///
+/// 1. Sidebar (`.plain` List with sticky date headers): the edge effect's
+///    height runs away — it measures 416x883 while the list sits at the top
+///    (contentOffset=-74), where 75 is correct. Scrolling up re-pins a header
+///    and triggers it, and it never recovers, so a broad band of rows at the
+///    top of the sidebar renders blurred. Controls: the detail column (no
+///    sections) is a steady 997x75; switching to `.listStyle(.sidebar)` (which
+///    does not pin headers on Mac) returns it to 416x75.
+///    `.scrollEdgeEffectHidden(top)` removes the blur — but then the bar has no
+///    backdrop at all.
+/// 2. Detail column: the effect is sized correctly (75), yet while the window
+///    is in the FOREGROUND the glass does not render at all — the bar is fully
+///    transparent and body text shows through the title. It looks right once
+///    the window loses focus. The foreground and background view trees are
+///    identical line by line (hidden, alpha, z-order included); the difference
+///    is one layer down, in the compositor — backdrop sampling fails in an
+///    active window.
+///
+/// Conclusion: on this system the bar's backdrop cannot rely on the edge effect
+/// / backdrop path. The workaround is to switch the top edge effect off and give
+/// the bar an explicit background. The List style is untouched, so the sticky
+/// date headers stay.
+///
+/// Already ruled out, do not retry: `.scrollEdgeEffectStyle(.hard)` (the style
+/// applies but the height is unchanged, and it does not cover sticky headers —
+/// same report in Apple forums thread/795159); an opaque `.background` plus
+/// `.scrollContentBackground(.hidden)` (the list background is not what is
+/// sampled); mutating the effect view's hidden/alpha/frame at runtime (the
+/// system rebuilds and restores it on every layout, so the experiment shows
+/// nothing).
+///
+/// Once Apple fixes this: delete this enum, `MacOS27OpaqueNavigationBar` and the
+/// two `.modifier(...)` call sites.
+enum MacOS27GlassWorkaround {
+    /// Scope: running on a Mac, on system 27.
+    ///
+    /// This app runs on the Mac as "Designed for iPad" (the iOS binary run
+    /// as-is, `Wrapper/Minis.app`, `LSRequiresIPhoneOS=true`) — it is NOT a Mac
+    /// Catalyst build, so `#if targetEnvironment(macCatalyst)` is always false
+    /// here and gating on it compiles the whole workaround out as dead code
+    /// (already tried once). The only reliable test is the runtime
+    /// `isiOSAppOnMac`; the Catalyst branch is kept as well so this still holds
+    /// if the build form ever changes.
+    ///
+    /// System version: for iOS-on-Mac, `UIDevice.systemVersion` reports the HOST
+    /// macOS major version (measured: 27.0), so `#available(iOS 27.0, *)`
+    /// excludes macOS 26 exactly as intended.
+    static let isActive: Bool = {
+        guard #available(iOS 27.0, *) else { return false }
+        #if targetEnvironment(macCatalyst)
+        return true
+        #else
+        return ProcessInfo.processInfo.isiOSAppOnMac
+        #endif
+    }()
+}
+
+/// See MacOS27GlassWorkaround. The choice of `background` matters:
+/// - The detail column MUST use an opaque colour (`ChatColors.background`) —
+///   its backdrop does not render in an active window, so any Material would
+///   fail the same way.
+/// - The sidebar uses `Material.bar`: the sidebar column's backdrop DOES render
+///   in the foreground (the runaway blur is itself the proof), and the material
+///   blends with the Mac sidebar's system grey without leaving a colour seam.
+struct MacOS27OpaqueNavigationBar<S: ShapeStyle>: ViewModifier {
+    let background: S
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), MacOS27GlassWorkaround.isActive {
+            content
+                .scrollEdgeEffectHidden(true, for: .top)
+                .toolbarBackground(background, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+        } else {
+            content
+        }
+    }
+}
+
+#if DEBUG
 // Availability-gated scroll-phase probe (onScrollPhaseChange is iOS 18+).
+// Its only call site is DEBUG-gated too (see `.modifier(ScrollPhaseProbe())`).
 private struct ScrollPhaseProbe: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
@@ -926,6 +1227,54 @@ struct ContentView: View {
     // refresh the rows, not the header pass.
     @ObservedObject private var sidebarBadgeStore = SessionBadgeStore.shared
     @ObservedObject private var sidebarConcurrencyManager = SessionConcurrencyManager.shared
+    // [T-sidebar-subagent-running] The registry too: a conversation whose only
+    // remaining work is a delegated sub agent is still running, and nothing in
+    // the trackers above knows that.
+    @ObservedObject private var sidebarJobRegistry = AgentJobRegistry.shared
+    /// [T-sidebar-subagent-running] Is this conversation busy, by the same
+    /// rule the composer uses (`AIChatView.isBusy`)?
+    ///
+    /// `SessionActivityTracker` only knows about a session's OWN agent loop.
+    /// When a turn delegates to background sub agents the parent's loop ends
+    /// while they work, so the row went back to looking idle even though the
+    /// composer still showed Stop and results were still on their way. The two
+    /// surfaces have to answer this the same way.
+    /// [T-ios-listsessions-perf] Every session id currently running work, as
+    /// ONE set built per body pass.
+    ///
+    /// This used to be two calls per row per body pass —
+    /// `SessionActivityTracker.isActive(id)` plus
+    /// `AgentJobRegistry.hasActiveChildren(parent: id)`, the latter of which
+    /// scans the job registry for a matching parent. The CPU Profiler trace
+    /// measured 8.4 G cycles in that pair alone (inside 28.6 G of total
+    /// `erasedSessionRow` work), because the cost is O(rows x registry) on a
+    /// path that re-runs whenever ANY tracked activity ticks.
+    ///
+    /// Both underlying properties are already materialised sets — the folder
+    /// header aggregate in `sidebarGroups` computes exactly this union — so
+    /// gathering them once per pass and letting each row do a hash lookup
+    /// makes the row side O(1) and the pass O(rows + registry).
+    ///
+    /// Held as @State rather than recomputed per row: the two ForEach bodies
+    /// that build rows would each pay the union again, which is the cost this
+    /// removes. `sidebarGroups` already builds the same union for its folder
+    /// aggregates and publishes it here (see `noteRunningSessionIds`), so the
+    /// set costs nothing extra to maintain.
+    @State private var runningSessionIds: Set<String> = []
+
+    /// Publish the running-id set computed by the groups pass. Assigns only on
+    /// a real change: Set == is O(n) but the sets are small, and an
+    /// unconditional write would invalidate the sidebar on every activity tick
+    /// even when nothing started or stopped.
+    private func noteRunningSessionIds(_ ids: Set<String>) {
+        guard ids != runningSessionIds else { return }
+        DispatchQueue.main.async { runningSessionIds = ids }
+    }
+
+    private func sessionIsRunning(_ id: String) -> Bool {
+        runningSessionIds.contains(id)
+    }
+
     @State private var sessions: [ChatSession] = []
     @State private var folders: [ChatFolder] = []
     /// Collapsed folder sections. Pure UI view-state: persisted locally, never
@@ -1073,6 +1422,20 @@ struct ContentView: View {
     // array, so this mainly prevents redundant Task churn.
     @State private var sessionRefreshInFlight = false
     @State private var sessionRefreshPending = false
+    /// [T-ios-listsessions-perf] When the last refresh FINISHED. The cooldown
+    /// is measured from completion, not from the notification that triggered
+    /// it — see `SessionRefreshScheduler`.
+    @State private var lastRefreshFinishedAt: Date?
+    /// When the one outstanding cooldown run is due, or nil if none is
+    /// pending; overlapping notifications coalesce onto it rather than
+    /// stacking. A `Date` driving `.task(id:)` rather than a stored
+    /// `DispatchWorkItem`: a work item held in @State keeps a heap closure
+    /// that captures this whole view struct, which is the exact pattern
+    /// behind the objectdestroy.NNTm use-after-free cluster (a stale
+    /// ContentView copy destroyed during graph teardown — see
+    /// [T-ios-crash-contextmenu-uaf]). `.task` is owned by the view graph
+    /// and cancelled with it.
+    @State private var sessionRefreshCooldownDeadline: Date?
     /// Whether the initial session load has completed (prevents showing the list before we decide to auto-navigate).
     @State private var didInitialLoad = false
     /// Controls sidebar visibility on iPad (automatic handles iPhone collapse).
@@ -1126,6 +1489,9 @@ struct ContentView: View {
 
     // [T-ios-crash-contextmenu-uaf] Stable action relay for session context menus.
     @State private var menuActions = SessionMenuActionChannel()
+
+    // [T-ios-crash-objectdestroy-fab-uaf] Same, for the draggable FABs.
+    @State private var fabActions = FABActionChannel()
 
     // Search
     @State private var showSearchBar = false
@@ -1278,6 +1644,7 @@ struct ContentView: View {
             .onAppear {
                 isWideLayout = wide
                 wireMenuActions()
+                wireFABActions()
             }
         }
         .onReceive(
@@ -1391,12 +1758,29 @@ struct ContentView: View {
             // so the preview keeps up with each tool round without thrashing
             // `listSessions`.
             NotificationCenter.default.publisher(for: .sessionDidUpdate)
+            // [T-ios-listsessions-perf] This 1 s window is now only a cheap
+            // pre-filter on the notification storm; the real floor on refresh
+            // frequency is the completion-measured cooldown in
+            // refreshSessionList (SessionRefreshScheduler).
                 .throttle(for: .seconds(1), scheduler: RunLoop.main, latest: true)
         ) { _ in
             // [T-ios-state-publish-offmain-crash] force main-thread @State write
             Task { @MainActor in
                 refreshSessionList()
             }
+        }
+        // [T-ios-listsessions-perf] The refresh cooldown timer. See
+        // `sessionRefreshCooldownDeadline` for why this is a task keyed on a
+        // Date rather than a stored DispatchWorkItem.
+        .task(id: sessionRefreshCooldownDeadline) {
+            guard let deadline = sessionRefreshCooldownDeadline else { return }
+            let delay = deadline.timeIntervalSinceNow
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard !Task.isCancelled else { return }
+            sessionRefreshCooldownDeadline = nil
+            refreshSessionList()
         }
         .onReceive(NotificationCenter.default.publisher(for: .moveInputToSession)) { note in
             guard let targetId = (note.userInfo as? [String: String])?["targetId"] else { return }
@@ -1601,8 +1985,20 @@ struct ContentView: View {
                 ZStack {
                     Color.black.opacity(0.3).ignoresSafeArea()
                     VStack(spacing: 12) {
+                        // [T-ios-hud-spinner-contrast] Tint the spinner with the
+                        // adaptive label colour (GH#333).
+                        //
+                        // The card behind it is `.ultraThinMaterial`, which is
+                        // LIGHT in light mode. An untinted ProgressView takes
+                        // the ambient tint rather than the label colour, and
+                        // over a pale material that lands close to the
+                        // background — the reported "can't tell whether it is
+                        // loading". `UIColor.label` is dark on light and light
+                        // on dark, so this fixes light mode without touching
+                        // how dark mode looks today.
                         ProgressView()
                             .controlSize(.large)
+                            .tint(ChatColors.primaryText)
                         if let p = exportProgress, p.total > 0 {
                             Text(AppLocalized("Exporting… \(p.done) / \(p.total)"))
                                 .font(.subheadline)
@@ -1621,7 +2017,13 @@ struct ContentView: View {
             }
         }
         .task {
-            sessions = await ChatStore.shared.listSessions()
+            // [T-p1-delegate-task] Hidden child sessions never reach the
+            // sidebar; they are entered from their parent's helper block.
+            sessions = await ChatStore.shared.listSessions().filter { !$0.isChild }
+            // [T-ios-moveto-seed] Hand the sidebar's freshly-loaded list to the
+            // Move-to sheet's seed, so opening the picker paints populated
+            // instead of waiting on the ChatStore actor.
+            ViewModelCache.noteSessionsLoaded(sessions)
             // Folders must load WITH the first session batch: groupedSessionIDs
             // treats a folder_id whose folder isn't loaded as an orphan and
             // renders the session ungrouped, so a first paint with sessions
@@ -2251,7 +2653,13 @@ struct ContentView: View {
         // returned.
         let unreadIds = sidebarBadgeStore.unreadSessionIds
         let freshCornerIds = sidebarBadgeStore.freshCornerBadgeSessionIds(within: 24 * 3600)
+        // Folder-header aggregates use the same rule as the rows, or a folder
+        // holding only sub-agent work would read as quiet while its rows spin.
         let activeIds = sidebarActivityTracker.resolvedActiveSessionIds
+            .union(sidebarJobRegistry.parentsWithActiveChildren)
+        // [T-ios-listsessions-perf] Same set the rows need; publish it so each
+        // row is an O(1) lookup instead of two per-row tracker queries.
+        noteRunningSessionIds(activeIds)
         let key = SidebarGroupsMemoKey(
             sessions: list.map {
                 SidebarSessionKey(
@@ -2342,6 +2750,26 @@ struct ContentView: View {
                 unfiled.append(s)
             }
         }
+
+        // [T-ios-foreach-lazyedits-dup-guard] If a duplicate id ever reaches
+        // the sidebar, SidebarGroup.ids silently drops it (see
+        // dedupedPreservingOrder) — which keeps the app alive but hides WHERE
+        // it came from. Report it here, where the source list is still intact,
+        // so the real producer can be named instead of guessed at. DEBUG-only:
+        // this runs inside a hot AttributeGraph aggregation pass, and the
+        // dedup itself is what protects Release.
+        #if DEBUG
+        var seenSessionIds = Set<String>(minimumCapacity: list.count)
+        let duplicateIds = list.map(\.id).filter { !seenSessionIds.insert($0).inserted }
+        if !duplicateIds.isEmpty {
+            AppLogger(category: "SidebarDupGuard").error(
+                "duplicate session id(s) in the sidebar source list: "
+                + "\(Set(duplicateIds).map { $0.prefix(8) }.joined(separator: ",")) "
+                + "— total=\(list.count) unique=\(seenSessionIds.count). "
+                + "This is the input shape that can crash ForEachState.LazyEdits; "
+                + "find the path that appended without deduping.")
+        }
+        #endif
 
         let dateGroups = groupedSessions(unfiled).map {
             SidebarGroup(label: $0.label, ids: $0.sessions.map(\.id))
@@ -2763,12 +3191,134 @@ struct ContentView: View {
     /// Plain List with NavigationLink for stack (iPhone) layout.
     /// ScrollViewReader feeds the mini-bar's "back to header" jump; wrapping
     /// the List is inert otherwise (no layout/behavior change).
+    // [T-ios-stacklist-metadata-explosion] Split points for the generic type.
+    //
+    // Crash 2026-08-25 14:34 (iPhone18,1): a 218,971 ms main-thread hang whose
+    // stack is entirely swift_getTypeByMangledName / swift_getTypeByMangledNode
+    // under this property. That is the runtime INSTANTIATING TYPE METADATA, not
+    // evaluating a body — and the type it was decoding is this one: a single
+    // 2,146-character mangled name with 32 nested `QOy` modifier wrappers and
+    // 13 generic requirements, because every modifier from `.listRowInsets` out
+    // to `.toolbar` folds into one recursive generic. Resolving it walks the
+    // whole nest, and the cost explodes with depth.
+    //
+    // The fix is the same one AIChatView.inputFieldOrWaveform already uses for
+    // the identical failure (crash 2026-04-17, `AIChatView.inputBar.getter` via
+    // __swift_instantiateConcreteTypeFromMangledNameV2): erase at a few chosen
+    // seams so the runtime decodes several shallow types instead of one deep
+    // one. `AnyView` costs an allocation and drops static-diff information for
+    // that subtree — acceptable here precisely because these are the rows and
+    // chrome the List already re-identifies by id, and a 219-second hang is not.
+    //
+    // Do NOT re-inline these. If you add modifiers to the row or the outer
+    // chain, add them INSIDE an existing erased helper rather than lengthening
+    // the top-level chain, or the nesting depth grows straight back.
+
+    /// One session row with its full modifier stack, erased.
+    ///
+    /// This is the deepest sub-chain in the list (equatable → draggable →
+    /// overlay → background → listRowInsets → listRowSeparator →
+    /// listRowBackground → contextMenu). Erasing here removes the largest
+    /// single contributor to the mangled name, and it is also the chain that
+    /// gets instantiated once per visible row.
+    private func erasedSessionRow(_ session: ChatSession, group: SidebarGroup) -> AnyView {
+        AnyView(
+            SessionRow(
+                session: session,
+                // [T-ios-ipad-sidebar-running-indicator-stale]
+                // Pass running/suspended as VALUES so a flip
+                // changes the SessionRow value → body re-evals
+                // in place (same identity, no cell rebuild).
+                isActive: sessionIsRunning(session.id),
+                isSuspended: sidebarConcurrencyManager.isSuspended(session.id),
+                highlightQuery: isSearching ? searchText : nil,
+                matchSnippet: isSearching ? searchMatchSnippets[session.id] : nil
+            )
+            // [T-ios-session-list-equatable-jank] Gate
+            // parent-driven re-eval on SessionRow's cheap
+            // custom == (rendered fields only), so a
+            // transaction flush from unrelated ContentView
+            // state churn doesn't deep-compare ChatSession.
+            .equatable()
+            // Entry D: long-press then move = drag the
+            // session id (never the ChatSession value —
+            // same id-only discipline as the list
+            // projection and the menu's value-semantics
+            // constraint). The SYSTEM arbitrates against
+            // .contextMenu on the same press: hold still →
+            // menu, hold then move → drag. Do not replace
+            // with a hand-rolled gesture sequence — the
+            // gesture layer is where system gestures are
+            // beaten (see the WebView sheet-dismiss fix).
+            .draggable(session.id)
+            .overlay {
+                if regeneratingTitleSessionId == session.id {
+                    ZStack {
+                        Color(.systemBackground).opacity(0.7)
+                        ProgressView()
+                    }
+                }
+            }
+            .background(
+                NavigationLink(value: session.id) { EmptyView() }
+                    .opacity(0)
+            )
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .listRowBackground(Group {
+                if group.folderId != nil {
+                    FolderMemberRowBackground(isLast: session.id == group.ids.last)
+                } else {
+                    Color(.systemBackground)
+                }
+            })
+            .contextMenu {
+                // [T-ios-crash-contextmenu-uaf] Value-only menu view,
+                // no closure captures — see SessionContextMenu.
+                SessionContextMenu(
+                    key: MenuKey(sid: session.id, pinned: session.isPinned, title: session.title, filed: session.isFiled),
+                    actions: menuActions
+                )
+                .equatable()
+            }
+        )
+    }
+
+    /// The folder card row, erased — four modifiers plus a custom modifier that
+    /// would otherwise ride along in the same nest as everything else.
+    private func erasedFolderSectionHeader(_ group: SidebarGroup,
+                                           scrollProxy: ScrollViewProxy?) -> AnyView {
+        AnyView(
+            folderSectionHeader(group, scrollProxy: scrollProxy)
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+                .modifier(SelectionDisabledIfAvailable())
+        )
+    }
+
     private var stackList: some View {
         ScrollViewReader { scrollProxy in
+        stackListBody(scrollProxy: scrollProxy)
+    }
+    }
+
+    /// The list itself. Split from `stackList` so the outer chrome chain
+    /// (`safeAreaInset` → `ignoresSafeArea` → `navigationBarTitleDisplayMode` →
+    /// `toolbar`) is instantiated separately from the list's own generic tree
+    /// rather than wrapping it.
+    private func stackListBody(scrollProxy: ScrollViewProxy) -> AnyView {
+        AnyView(
         List {
             // [T-ios-session-list-equatable-jank] id-list projection — see splitList.
             let groups = groupedSessionIDs(filteredSessions)
-            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+            // [T-ios-foreach-lazyedits-dup-guard] Record the identity sequence
+            // ForEach is about to diff. DEBUG-only, transition-gated, and the
+            // result is discarded so the ViewBuilder's shape is unchanged.
+            #if DEBUG
+            let _ = SidebarIdentityTracer.note(groups, site: "sidebar")
+            #endif
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 Section {
                     // Folder card as the section's FIRST ROW, not its header:
                     // plain-List headers carry platform-specific chrome
@@ -2780,11 +3330,7 @@ struct ContentView: View {
                     // while its members scroll — acceptable, accordion keeps
                     // sections short.)
                     if group.folderId != nil, !isSelecting {
-                        folderSectionHeader(group, scrollProxy: scrollProxy)
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .modifier(SelectionDisabledIfAvailable())
+                        erasedFolderSectionHeader(group, scrollProxy: scrollProxy)
                     }
                     ForEach(group.ids, id: \.self) { sessionId in
                         // [T-ios-session-list-equatable-jank] Resolve via the
@@ -2796,64 +3342,7 @@ struct ContentView: View {
                                 .id("select-\(session.id)")
                                 .listRowInsets(EdgeInsets())
                         } else {
-                            SessionRow(
-                                session: session,
-                                // [T-ios-ipad-sidebar-running-indicator-stale]
-                                // Pass running/suspended as VALUES so a flip
-                                // changes the SessionRow value → body re-evals
-                                // in place (same identity, no cell rebuild).
-                                isActive: sidebarActivityTracker.isActive(session.id),
-                                isSuspended: sidebarConcurrencyManager.isSuspended(session.id),
-                                highlightQuery: isSearching ? searchText : nil,
-                                matchSnippet: isSearching ? searchMatchSnippets[session.id] : nil
-                            )
-                                // [T-ios-session-list-equatable-jank] Gate
-                                // parent-driven re-eval on SessionRow's cheap
-                                // custom == (rendered fields only), so a
-                                // transaction flush from unrelated ContentView
-                                // state churn doesn't deep-compare ChatSession.
-                                .equatable()
-                                // Entry D: long-press then move = drag the
-                                // session id (never the ChatSession value —
-                                // same id-only discipline as the list
-                                // projection and the menu's value-semantics
-                                // constraint). The SYSTEM arbitrates against
-                                // .contextMenu on the same press: hold still →
-                                // menu, hold then move → drag. Do not replace
-                                // with a hand-rolled gesture sequence — the
-                                // gesture layer is where system gestures are
-                                // beaten (see the WebView sheet-dismiss fix).
-                                .draggable(session.id)
-                                .overlay {
-                                    if regeneratingTitleSessionId == session.id {
-                                        ZStack {
-                                            Color(.systemBackground).opacity(0.7)
-                                            ProgressView()
-                                        }
-                                    }
-                                }
-                                .background(
-                                    NavigationLink(value: session.id) { EmptyView() }
-                                        .opacity(0)
-                                )
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Group {
-                                if group.folderId != nil {
-                                    FolderMemberRowBackground(isLast: sessionId == group.ids.last)
-                                } else {
-                                    Color(.systemBackground)
-                                }
-                            })
-                            .contextMenu {
-                                // [T-ios-crash-contextmenu-uaf] Value-only menu view,
-                                // no closure captures — see SessionContextMenu.
-                                SessionContextMenu(
-                                    key: MenuKey(sid: session.id, pinned: session.isPinned, title: session.title, filed: session.isFiled),
-                                    actions: menuActions
-                                )
-                                .equatable()
-                            }
+                            erasedSessionRow(session, group: group)
                         }
                         }  // if let session
                     }
@@ -2890,13 +3379,13 @@ struct ContentView: View {
         // immunity (604a9947 / T-voice-bg-fg-gap): with the inline search bar
         // closed, nothing down here accepts text — any keyboard inset reaching
         // this list is a stale/zombie one (stranded responder, interrupted
-        // bg-snapshot dismiss) and must not push the 新建/搜索 FABs up. With
+        // bg-snapshot dismiss) and must not push the New/Search FABs up. With
         // the search bar open its TextField legitimately rises with the
         // keyboard, so normal avoidance is restored.
         .ignoresSafeArea(.keyboard, edges: showSearchBar ? [] : .bottom)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { sidebarToolbarContent }
-        }
+        )
     }
 
     /// Selection-bound List for split (iPad) layout.
@@ -2908,7 +3397,11 @@ struct ContentView: View {
             // so SwiftUI compares a [String] id list, not a [ChatSession] value
             // array. Rows resolve the model via displaySessionsById.
             let groups = groupedSessionIDs(displaySessions)
-            ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+            // [T-ios-foreach-lazyedits-dup-guard] See the sidebar list above.
+            #if DEBUG
+            let _ = SidebarIdentityTracer.note(groups, site: "selection")
+            #endif
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 Section {
                     // Folder card as first row — see the sidebar list's
                     // comment: plain-List headers carry platform-specific
@@ -2938,7 +3431,7 @@ struct ContentView: View {
                                 // Pass running/suspended as VALUES so a flip
                                 // changes the SessionRow value → body re-evals
                                 // in place (same identity, no cell rebuild).
-                                isActive: sidebarActivityTracker.isActive(session.id),
+                                isActive: sessionIsRunning(session.id),
                                 isSuspended: sidebarConcurrencyManager.isSuspended(session.id),
                                 highlightQuery: isSearching ? searchText : nil,
                                 matchSnippet: isSearching ? searchMatchSnippets[session.id] : nil
@@ -2975,7 +3468,7 @@ struct ContentView: View {
                                 // row's selection gesture swallows the long-press (iPad)
                                 // / right-click (mac), so a contextMenu placed at the
                                 // list-row level never fires for the open session
-                                // (GH#30 / TG36272). Binding it to the SessionRow view
+                                // (GH#30). Binding it to the SessionRow view
                                 // itself puts it below the selection layer, so it
                                 // triggers on every row regardless of selection state.
                                 // iPhone uses `stackList` (no selection:) and is
@@ -3063,6 +3556,10 @@ struct ContentView: View {
         }
         .listStyle(.plain)
         .navigationSplitViewColumnWidth(min: 340, ideal: 380, max: 500)
+        // [T-macos27-liquid-glass-navbar] See MacOS27GlassWorkaround. Applied to
+        // the Mac sidebar List only; the iPhone compact list (the other branch
+        // of sessionList) is unaffected and does not get it.
+        .modifier(MacOS27OpaqueNavigationBar(background: Material.bar))
         .opacity(didInitialLoad ? 1 : 0)
         .overlay { if didInitialLoad, displaySessions.isEmpty, !isSearching { emptyState } }
         .overlay(alignment: .top) { folderMiniBarOverlay(scrollProxy) }
@@ -3273,12 +3770,40 @@ struct ContentView: View {
         return "\(n / 1000)k"
     }
 
+    /// The toolbar's terminal icon, pre-scaled to 24pt.
+    ///
+    /// The asset is a 200x200 bitmap; handing `Image("TerminalCircle")` straight
+    /// to the toolbar makes UIKit build the bar button at its 200pt intrinsic
+    /// size (see the note at the label). Rendering it to a 24pt UIImage with
+    /// UIGraphicsImageRenderer makes the intrinsic size correct at the source,
+    /// so it is the same whether it goes through SwiftUI layout or the
+    /// UIBarButtonItem bridge. `alwaysTemplate` preserves the asset's template
+    /// rendering intent so it still follows the toolbar tint.
+    private static let terminalCircleIcon: UIImage = {
+        let side: CGFloat = 24
+        guard let source = UIImage(named: "TerminalCircle") else {
+            return UIImage()
+        }
+        let size = CGSize(width: side, height: side)
+        let scaled = UIGraphicsImageRenderer(size: size).image { _ in
+            source.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return scaled.withRenderingMode(.alwaysTemplate)
+    }()
+
     @ToolbarContentBuilder
     private var sidebarToolbarContent: some ToolbarContent {
         ToolbarItem(placement: .principal) {
             if isSelecting {
+                // [T-ios-ipad-sidebar-title-offcentre] Same width claim as the
+                // idle title below — this label is LONGER ("Select Sessions"
+                // vs a short SOUL name) and shares the bar with Cancel and
+                // Select All, so the narrow sidebar column squeezes it harder.
                 Text(selectedIds.isEmpty ? "Select Sessions" : "\(selectedIds.count) Selected")
                     .font(.headline)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .frame(maxWidth: .infinity, alignment: .center)
             } else {
                 let canOpenSync: Bool = {
                     if #available(iOS 17.0, *) { return SyncV2Bootstrap.isEnabled }
@@ -3305,6 +3830,12 @@ struct ContentView: View {
                 let titleLabel = Text(soulName)
                     .font(.system(size: 18.5, weight: .semibold))
                     .foregroundStyle(.primary)
+                    // A custom SOUL name can be long, and the width claim below
+                    // hands this label the whole column — without a limit a long
+                    // name would wrap to two lines inside an inline bar or push
+                    // under the buttons. One line, shrink a little, then ellipse.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                     .overlay(alignment: .leading) {
                         if canOpenSync {
                             Button {
@@ -3330,16 +3861,41 @@ struct ContentView: View {
                 // (see migrationSubtitleLoop, T-ios-migration-timer-sessionlist-uaf-crash);
                 // this Text only READS the `migrationSubtitle` @State.
 
-                if canOpenSync {
-                    Button {
-                        activeToolSheet = .syncMigrationDetail
-                    } label: {
+                // [T-ios-ipad-sidebar-title-offcentre] Claim the width the bar
+                // will give us and centre inside it, instead of letting the
+                // item collapse to the title's intrinsic size.
+                //
+                // Why this is needed on iPad mini portrait specifically: at
+                // 744pt the window clears `compactThreshold` (700), so the app
+                // uses `splitLayout`. A NavigationSplitView lays each column's
+                // bar out independently, so the principal item is centred
+                // within the SIDEBAR column — 340pt at its minimum — not the
+                // window. That column also carries the gear (leading) plus the
+                // alarm and terminal-menu buttons (trailing), roughly 150pt of
+                // chrome once margins are counted. UIKit resolves the squeeze
+                // by yielding the centre and pinning the shrunken principal
+                // item toward the leading side, which is the "title pushed to
+                // the left" the report describes.
+                //
+                // `maxWidth: .infinity` makes the item take the space the bar
+                // offers rather than only its text width, so `.center` then has
+                // something to centre within; the title sits mid-column and the
+                // sync dot keeps riding it as a zero-layout overlay. On wider
+                // columns (iPad landscape, larger iPads) this is a no-op — the
+                // item was already getting its full width there.
+                Group {
+                    if canOpenSync {
+                        Button {
+                            activeToolSheet = .syncMigrationDetail
+                        } label: {
+                            titleLabel
+                        }
+                        .buttonStyle(.plain)
+                    } else {
                         titleLabel
                     }
-                    .buttonStyle(.plain)
-                } else {
-                    titleLabel
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         ToolbarItem(placement: .topBarLeading) {
@@ -3411,10 +3967,20 @@ struct ContentView: View {
                     }
                     #endif
                 } label: {
-                    Image("TerminalCircle")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 24, height: 24)
+                    // [T-ios-mac-toolbar-image-intrinsic] TerminalCircle is a
+                    // 200x200 bitmap. SwiftUI's `.frame` only constrains the
+                    // SwiftUI view; when this label is bridged to a
+                    // UIBarButtonItem (Mac / iPad navigation bar) UIKit builds
+                    // the button from the IMAGE's intrinsic size, so it came out
+                    // 200pt wide and squeezed the `.principal` title down to
+                    // 60pt (measured on a 416pt sidebar navbar: gear 44 + this
+                    // item 212 + sidebar toggle 44, leaving 60 for the title,
+                    // which truncated the SOUL name to "Minif..."). Every other
+                    // toolbar item uses an SF Symbol, whose intrinsic size is
+                    // already correct — which is why only this one broke.
+                    // A pre-scaled UIImage makes the intrinsic size 24pt at the
+                    // source, independent of SwiftUI layout.
+                    Image(uiImage: Self.terminalCircleIcon)
                 }
             }
         }
@@ -3436,7 +4002,16 @@ struct ContentView: View {
         // merely referencing the class triggers Swift runtime type resolution
         // that crashes in swift_getTypeByMangledNameInContextImpl.
         // Use a helper that isolates the reference behind @available.
-        guard #available(iOS 26.0, *) else { return }
+        //
+        // [T-visionos-alarmkit-launch] @available alone is the condition the
+        // 1.14(11) xrOS crash passed: visionOS reports a mapped iOS version
+        // >= 26, so the check succeeds and the app enters AlarmKit-typed
+        // Swift with no AlarmKit present. a52085dc2 added the class probe but
+        // only wired it into the apple-alarm shell command; this call runs
+        // on every launch, session change and foreground, so it is the more
+        // likely origin of the report. Same probe, same order: OS version
+        // first, then "does the framework actually exist".
+        guard #available(iOS 26.0, *), alarmkit_is_usable() else { return }
         _fetchAlarmsImpl()
     }
 
@@ -3721,6 +4296,26 @@ struct ContentView: View {
     /// ContentView's instance methods. Called once from onAppear; the closure
     /// captures `self` whose @State backing is stable for the view-graph
     /// lifetime, so the handler remains valid even if body re-evaluates.
+    /// [T-ios-crash-objectdestroy-fab-uaf] Same wiring for the FAB channel.
+    /// Reading `fabDidDrag` / `searchDidDrag` HERE rather than in the stored
+    /// closure is the point: this handler runs against live @State, so the drag
+    /// guard behaves exactly as before while the closure the FAB holds captures
+    /// no view struct.
+    private func wireFABActions() {
+        fabActions.handler = { [self] action in
+            switch action {
+            case .newChat:
+                if !fabDidDrag { openSession(Self.makeNewSessionId()) }
+            case .newChatInGroup(let groupId):
+                openSession(Self.makeNewSessionId(groupId: groupId))
+            case .openSearch:
+                if !searchDidDrag {
+                    withAnimation(.easeInOut(duration: 0.2)) { showSearchBar = true }
+                }
+            }
+        }
+    }
+
     private func wireMenuActions() {
         menuActions.handler = { [self] action in
             switch action {
@@ -3768,10 +4363,11 @@ struct ContentView: View {
                     sessionIds: [sid], fromMultiSelect: false, anyFiled: filed)
             case .delete(let sid):
                 print("[DELETE] Context menu tapped for session: \(sid)")
-                let info = Self.computeDeleteInfo(for: [sid], totalSessions: sessions.count)
-                print("[DELETE] computeDeleteInfo returned: sessionCount=\(info.sessionCount), fileCount=\(info.totalFileCount), size=\(info.totalSize)")
-                singleDeleteInfo = info
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                Task { @MainActor in
+                    let info = await Self.computeDeleteInfoExpanded(for: [sid])
+                    print("[DELETE] computeDeleteInfo returned: sessionCount=\(info.sessionCount) children=\(info.childCount), fileCount=\(info.totalFileCount), size=\(info.totalSize)")
+                    singleDeleteInfo = info
+                    try? await Task.sleep(nanoseconds: 550_000_000)
                     print("[DELETE] singleDeleteInfo set, now setting sessionToDelete")
                     if let current = sessions.first(where: { $0.id == sid }) {
                         sessionToDelete = current
@@ -3920,6 +4516,7 @@ struct ContentView: View {
     @StateObject private var providerStore = ProviderConfigStore.shared
     @State private var showAddProvider = false
     @State private var showSelectModels = false
+    @State private var showRestoreBackup = false
 
     private var emptyState: some View {
         let hasProviders = !providerStore.instances.isEmpty
@@ -3982,6 +4579,25 @@ struct ContentView: View {
             }
             .padding(.horizontal, 8)
             .frame(maxWidth: 400)
+
+            // [T-onboarding-restore-link] A side route for someone moving from
+            // another device: kept to a footnote link (not a fourth card) so it
+            // does not compete with the three steps. Shown only until models
+            // are selected — after that this empty state also greets returning
+            // users with no chats, for whom Settings → Backup & Restore is the
+            // path. Restore merges, so it is safe after step 1 as well.
+            if !hasGroups {
+                Button {
+                    showRestoreBackup = true
+                } label: {
+                    Label("Have a backup? Restore from it", systemImage: "clock.arrow.circlepath")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, -8)
+                .accessibilityIdentifier("onboarding.restoreBackup")
+            }
             Spacer()
         }
         .frame(maxHeight: .infinity)
@@ -3994,6 +4610,20 @@ struct ContentView: View {
         .sheet(isPresented: $showSelectModels) {
             NavigationStack {
                 OnboardingModelSelectionView()
+            }
+        }
+        .sheet(isPresented: $showRestoreBackup) {
+            // Same presentation as opening a .minisbak from Files: straight to
+            // the Restore tab. Not auto-dismissed on success — the result
+            // report is worth reading; the steps above refresh on their own
+            // (restore reloads ProviderConfigStore and the session list).
+            NavigationStack {
+                BackupAndRestoreView(initialTab: .restore)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") { showRestoreBackup = false }
+                        }
+                    }
             }
         }
     }
@@ -4137,13 +4767,43 @@ struct ContentView: View {
             sessionRefreshPending = true
             return
         }
+
+        // [T-ios-listsessions-perf] Cooldown measured from the END of the last
+        // run. A refresh took 4-9 s in the profiled trace, so the 1 s throttle
+        // on the notification publisher never actually gated anything: the run
+        // outlasted its own throttle window, the pending flag re-queued the
+        // moment it finished, and the result was 63 back-to-back rebuilds with
+        // a median idle gap of 2.8 s. Deferring to `finishedAt + cooldown`
+        // instead puts a real floor under the duty cycle.
+        let now = Date()
+        switch SessionRefreshScheduler.decide(now: now, lastFinishedAt: lastRefreshFinishedAt) {
+        case .runNow:
+            break
+        case .defer(let delay):
+            // Coalesce: one deadline; a trigger arriving while one is pending
+            // rides on it rather than pushing it out. The `.task(id:)` on the
+            // body fires it.
+            guard sessionRefreshCooldownDeadline == nil else { return }
+            sessionRefreshCooldownDeadline = Date().addingTimeInterval(delay)
+            return
+        }
+
         sessionRefreshInFlight = true
         Task(priority: .utility) { @MainActor in
-            sessions = await ChatStore.shared.listSessions()
+            // [T-p1-delegate-task] Hidden child sessions never reach the
+            // sidebar; they are entered from their parent's helper block.
+            sessions = await ChatStore.shared.listSessions().filter { !$0.isChild }
+            // [T-ios-moveto-seed] Keep the picker's seed current: this refresh
+            // runs on every list-affecting change, so the snapshot tracks the
+            // sidebar rather than going stale after the first load.
+            ViewModelCache.noteSessionsLoaded(sessions)
             folders = await ChatStore.shared.listFolders()
             sessionRefreshInFlight = false
+            lastRefreshFinishedAt = Date()
             if sessionRefreshPending {
                 sessionRefreshPending = false
+                // Goes back through the scheduler, so a trailing run also
+                // waits out the cooldown instead of starting immediately.
                 refreshSessionList()
             }
         }
@@ -4292,7 +4952,24 @@ struct ContentView: View {
     /// heterogeneous content, so the flicker that forced that type onto a
     /// sampled constant does not apply.
     @ViewBuilder
-    private func fabCircleSurface<Icon: View>(
+    /// [T-ios-crash-objectdestroy-fab-uaf] `static`, deliberately.
+    ///
+    /// This is a pure function of its parameters — it reads no instance state.
+    /// But as an INSTANCE method, calling it from inside `DraggableFAB`'s
+    /// stored `label` closure captured `self`, which drags an entire
+    /// ContentView struct copy into that closure's heap context. When SwiftUI
+    /// tears the graph down it releases the closure, destroying the stale copy
+    /// field by field — and its `@State` boxes are already gone. That is the
+    /// `objectdestroy.90Tm` crash (owner: ContentView), still arriving on
+    /// 1.14(21) after `e3579b381` fixed only the `onTap` half.
+    ///
+    /// Making it static removes the last `self` capture from `label`: every
+    /// other reference in there is `Self.`-qualified, a singleton, or the
+    /// `fabActions` channel, and `Namespace.ID` is a value type that copies.
+    ///
+    /// Keep it static. Adding an instance reference here silently reintroduces
+    /// the capture and the crash.
+    private static func fabCircleSurface<Icon: View>(
         tint: Color?,
         fallbackFill: Color,
         fallbackShadowOpacity: Double,
@@ -4379,10 +5056,13 @@ struct ContentView: View {
                 fabOnLeft: $fabOnLeft,
                 dragOffset: $fabDragOffset,
                 didDrag: $fabDidDrag
-            ) {
-                if !fabDidDrag { openSession(Self.makeNewSessionId()) }
+            ) { [fabActions] in
+                // [T-ios-crash-objectdestroy-fab-uaf] Capture ONLY the channel,
+                // never self. The drag guard moved to the receiver, which reads
+                // the live @State rather than a captured copy.
+                fabActions.send(.newChat)
             } label: {
-                fabCircleSurface(
+                Self.fabCircleSurface(
                     tint: Self.newChatGlassTint,
                     fallbackFill: Self.newChatBrandColor,
                     fallbackShadowOpacity: 0.2
@@ -4399,8 +5079,8 @@ struct ContentView: View {
                         if !groups.isEmpty {
                             Section(AppLocalized("New Chat with Group")) {
                                 ForEach(groups) { group in
-                                    Button {
-                                        openSession(Self.makeNewSessionId(groupId: group.id))
+                                    Button { [fabActions] in
+                                        fabActions.send(.newChatInGroup(group.id))
                                     } label: {
                                         Label(group.name, systemImage: "square.stack.3d.up")
                                     }
@@ -4479,12 +5159,10 @@ struct ContentView: View {
                         dragOffset: $searchDragOffset,
                         didDrag: $searchDidDrag,
                         inverted: true
-                    ) {
-                        if !searchDidDrag {
-                            withAnimation(.easeInOut(duration: 0.2)) { showSearchBar = true }
-                        }
+                    ) { [fabActions] in
+                        fabActions.send(.openSearch)
                     } label: {
-                        fabCircleSurface(
+                        Self.fabCircleSurface(
                             tint: nil,
                             fallbackFill: Color(UIColor.secondarySystemBackground),
                             fallbackShadowOpacity: 0.15
@@ -4904,11 +5582,8 @@ struct ContentView: View {
         deleteInfo = nil
         isComputingDelete = true
         showDeleteConfirm = true
-        let totalSessions = sessions.count
         Task { @MainActor in
-            let info = await Task.detached {
-                Self.computeDeleteInfo(for: memberIds, totalSessions: totalSessions)
-            }.value
+            let info = await Self.computeDeleteInfoExpanded(for: memberIds)
             deleteInfo = info
             isComputingDelete = false
         }
@@ -4981,11 +5656,8 @@ struct ContentView: View {
                 isComputingDelete = true
                 showDeleteConfirm = true
                 let ids = selectedIds
-                let totalSessions = sessions.count
                 Task { @MainActor in
-                    let info = await Task.detached {
-                        Self.computeDeleteInfo(for: ids, totalSessions: totalSessions)
-                    }.value
+                    let info = await Self.computeDeleteInfoExpanded(for: ids)
                     deleteInfo = info
                     isComputingDelete = false
                 }
@@ -5089,6 +5761,9 @@ struct ContentView: View {
 
     struct DeleteInfo {
         let sessionCount: Int
+        /// [T-child-delete-storage] Hidden agent child sessions that go with
+        /// the selected ones — counted separately so the sheet can say so.
+        var childCount: Int = 0
         let fileNames: [String]   // first 3 file names
         let totalFileCount: Int
         let totalSize: Int64      // bytes
@@ -5098,6 +5773,22 @@ struct ContentView: View {
         }
     }
 
+    /// [T-child-delete-storage] Expand the user's selection to everything
+    /// that will actually be deleted (descendant agent sessions included),
+    /// then measure. The database share uses the ALL-sessions count
+    /// (children included) as denominator for a numerator that also
+    /// includes children — one consistent basis.
+    private static func computeDeleteInfoExpanded(for selected: Set<String>) async -> DeleteInfo {
+        let expanded = await ChatStore.shared.sessionIdsWithDescendants(selected)
+        let total = await ChatStore.shared.sessionCount()
+        let childCount = max(0, expanded.count - selected.count)
+        return await Task.detached {
+            var info = Self.computeDeleteInfo(for: Set(expanded), totalSessions: total)
+            info.childCount = childCount
+            return info
+        }.value
+    }
+
     private nonisolated static func computeDeleteInfo(for ids: Set<String>, totalSessions: Int) -> DeleteInfo {
         let fm = FileManager.default
         let libBase = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
@@ -5105,8 +5796,6 @@ struct ContentView: View {
         let dbPath = libBase.appendingPathComponent("MinisChat/minis.db")
 
         var totalSize: Int64 = 0
-        var allFileNames: [String] = []
-        var totalFileCount = 0
 
         // Estimate DB size contribution (rough: divide DB size by total sessions)
         let totalSessions = max(totalSessions, 1)
@@ -5115,26 +5804,13 @@ struct ContentView: View {
             totalSize += dbSize * Int64(ids.count) / Int64(totalSessions)
         }
 
-        for id in ids {
-            let sessionDir = minisBase.appendingPathComponent(id, isDirectory: true)
-            if let enumerator = fm.enumerator(at: sessionDir, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
-                for case let fileURL as URL in enumerator {
-                    let vals = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-                    if vals?.isRegularFile == true {
-                        totalSize += Int64(vals?.fileSize ?? 0)
-                        totalFileCount += 1
-                        if allFileNames.count < 3 {
-                            allFileNames.append(fileURL.lastPathComponent)
-                        }
-                    }
-                }
-            }
-        }
+        let m = SessionStorageCleanup.measure(ids, minisBase: minisBase)
+        totalSize += m.bytes
 
         return DeleteInfo(
             sessionCount: ids.count,
-            fileNames: allFileNames,
-            totalFileCount: totalFileCount,
+            fileNames: m.sampleNames,
+            totalFileCount: m.fileCount,
             totalSize: totalSize
         )
     }
@@ -5154,14 +5830,26 @@ struct ContentView: View {
         if isSessionHighlighted(session.id) {
             selectedSessionId = nil
         }
-        ViewModelCache.shared.remove(sessionId: session.id)
-        BrowserUseOffloadBridge.releasePool(forSession: session.id)
         withAnimation {
             sessions.removeAll { $0.id == session.id }
         }
-        Task {
+        Task { @MainActor in
+            await Self.tearDownForDeletion([session.id])
             await ChatStore.shared.deleteSession(session.id)
-            deleteSessionFiles(session.id)
+        }
+    }
+
+    /// [T-child-delete-storage] Before the rows go: stop every running agent
+    /// under these sessions and drop their in-memory state, for the
+    /// selection AND its descendants (the store's delete funnel removes rows
+    /// and the whole per-session directory for each of them).
+    private static func tearDownForDeletion(_ ids: Set<String>) async {
+        let all = await ChatStore.shared.sessionIdsWithDescendants(ids)
+        for sid in all {
+            AgentJobRegistry.shared.cancelAll(parent: sid, reason: "sessionDeleted")
+            AgentJobRegistry.shared.cancelAll(session: sid, reason: "sessionDeleted")
+            ViewModelCache.shared.remove(sessionId: sid)
+            BrowserUseOffloadBridge.releasePool(forSession: sid)
         }
     }
 
@@ -5173,10 +5861,6 @@ struct ContentView: View {
         if ids.contains(where: { isSessionHighlighted($0) }) {
             selectedSessionId = nil
         }
-        for id in ids {
-            ViewModelCache.shared.remove(sessionId: id)
-            BrowserUseOffloadBridge.releasePool(forSession: id)
-        }
         withAnimation {
             sessions.removeAll { ids.contains($0.id) }
         }
@@ -5185,10 +5869,10 @@ struct ContentView: View {
         deleteInfo = nil
         let folderToDrop = pendingDeleteFolderId
         pendingDeleteFolderId = nil
-        Task {
+        Task { @MainActor in
+            await Self.tearDownForDeletion(ids)
             for id in ids {
                 await ChatStore.shared.deleteSession(id)
-                deleteSessionFiles(id)
             }
             // Delete-all-in-folder: the folder is empty now; dissolving it
             // just drops the row (and pushes the FolderV2 tombstone).
@@ -5200,15 +5884,6 @@ struct ContentView: View {
     }
 
     /// Remove persistent minis files for a session (Library/MinisChat/minis/<sessionId>/).
-    private func deleteSessionFiles(_ sessionId: String) {
-        let fm = FileManager.default
-        let base = fm.urls(for: .libraryDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("MinisChat/minis", isDirectory: true)
-            .appendingPathComponent(sessionId, isDirectory: true)
-        try? fm.removeItem(at: base)
-        BrowserTabPool.deletePersistedData(for: sessionId)
-    }
-
     private func regenerateTitle(for session: ChatSession) {
         regenerateTitle(sessionId: session.id)
     }
@@ -5635,7 +6310,9 @@ private struct DeleteConfirmSheet: View {
                             // Sessions
                             infoRow(
                                 title: "Sessions",
-                                value: "\(info.sessionCount) session\(info.sessionCount == 1 ? "" : "s") and all messages"
+                                value: info.childCount > 0
+                                    ? "\(info.sessionCount - info.childCount) session\(info.sessionCount - info.childCount == 1 ? "" : "s") + \(info.childCount) agent session\(info.childCount == 1 ? "" : "s") and all messages"
+                                    : "\(info.sessionCount) session\(info.sessionCount == 1 ? "" : "s") and all messages"
                             )
 
                             // Files
@@ -6946,6 +7623,15 @@ private let supportedLanguages: [LanguageOption] = [
     LanguageOption(id: "fr",     name: "Français", flag: "🇫🇷"),
     LanguageOption(id: "de",     name: "Deutsch", flag: "🇩🇪"),
     LanguageOption(id: "ru",     name: "Русский", flag: "🇷🇺"),
+    LanguageOption(id: "id",     name: "Bahasa Indonesia", flag: "🇮🇩"),
+    LanguageOption(id: "ms",    name: "Bahasa Melayu", flag: "🇲🇾"),
+    LanguageOption(id: "fil",   name: "Filipino", flag: "🇵🇭"),
+    LanguageOption(id: "th",    name: "ไทย", flag: "🇹🇭"),
+    LanguageOption(id: "tr",    name: "Türkçe", flag: "🇹🇷"),
+    LanguageOption(id: "pl",    name: "Polski", flag: "🇵🇱"),
+    LanguageOption(id: "ro",    name: "Română", flag: "🇷🇴"),
+    LanguageOption(id: "pt-BR", name: "Português (Brasil)", flag: "🇧🇷"),
+    LanguageOption(id: "hr",    name: "Hrvatski", flag: "🇭🇷"),
 ]
 
 private struct FontScaleRow: View {
@@ -7396,6 +8082,8 @@ private enum SettingsDestination: Hashable {
     case skills
     // [T-ios-assistant-header-open-soul]
     case soul
+    // [T-tools-master-switch]
+    case tools
     case memory
     case storage
     case mountedFolders
@@ -7467,6 +8155,42 @@ private struct SettingsSheet: View {
                 }
 
                 Section("Agent Runtime") {
+                    // [T-tools-granular-switches] First row: per-tool switches.
+                    NavigationLink {
+                        ToolsSettingsView()
+                    } label: {
+                        Label {
+                            Text(AppLocalized("Agent Tools"))
+                        } icon: {
+                            Image(systemName: "wrench.and.screwdriver.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white)
+                                .frame(width: 21, height: 21)
+                                .background(.indigo, in: Circle())
+                        }
+                    }
+                    // [T-sub-agents-v1] Directly under Agent Tools: the two pages
+                    // are the tool surface (which tools exist) and the delegation
+                    // surface (who runs a delegated task), so they read as a pair.
+                    NavigationLink {
+                        HelperSettingsView()
+                    } label: {
+                        Label {
+                            Text(AppLocalized("Sub Agents"))
+                        } icon: {
+                            // [T-agent-icon] Same violet and glyph the agent block
+                            // and tool sheet use in chat, so the settings row reads
+                            // as the same feature. `glyph` is the bare figure pair
+                            // meant for a caller that already draws the disc — the
+                            // wider person.2.wave.2 reached the edge of the 21pt
+                            // circle at this section's icon size.
+                            Image(systemName: HelperAccent.glyph)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white)
+                                .frame(width: 21, height: 21)
+                                .background(HelperAccent.color, in: Circle())
+                        }
+                    }
                     NavigationLink {
                         SkillsManagementView()
                     } label: {
@@ -7737,6 +8461,8 @@ private struct SettingsSheet: View {
                     SkillsManagementView()
                 case .soul:
                     SoulSettingsView()
+                case .tools:
+                    ToolsSettingsView()
                 case .memory:
                     MemoryManagementView()
                 case .storage:
@@ -7840,6 +8566,8 @@ private struct SettingsSheet: View {
             navPath.append(SettingsDestination.skills)
         case .soul:
             navPath.append(SettingsDestination.soul)
+        case .tools:
+            navPath.append(SettingsDestination.tools)
         case .memory:
             navPath.append(SettingsDestination.memory)
         case .storage:

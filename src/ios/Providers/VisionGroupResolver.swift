@@ -548,6 +548,32 @@ enum VisionGroupResolver {
         return out
     }
 
+    /// [T-ios-image-path-metadata] Path note appended AFTER the pixels for a
+    /// model that CAN see images.
+    ///
+    /// A vision model was getting the bytes and nothing else, so it could look
+    /// at the picture but had no idea where it lived. That rules out every
+    /// file-level follow-up the sandbox makes possible — re-reading at higher
+    /// fidelity, cropping, OCR, EXIF, a checksum, converting it — none of which
+    /// the pixels alone support.
+    ///
+    /// The wording carries one load-bearing clarification: it states that the
+    /// path IS the image already shown above, not an additional one. Without
+    /// that, N images plus N path notes read as 2N images, and a model asked
+    /// "how many pictures did I send?" answers wrongly — or worse, calls
+    /// read_image on a path believing it is fetching something new.
+    ///
+    /// Returns nil when there is no path to report (never persisted, or an
+    /// older history row), so nothing is appended rather than printing "nil".
+    ///
+    /// English-only by design: model-facing instruction text, not UI.
+    nonisolated static func visionImagePathNote(linuxPath: String?) -> String? {
+        guard let path = linuxPath, !path.isEmpty else { return nil }
+        return "[The image shown above is also saved at \(path) — this is that same image, "
+            + "not an additional one. Use the path only if you need to work on the file "
+            + "itself (re-read it at full resolution, crop, OCR, inspect metadata).]"
+    }
+
     /// [T-ios-vision-group-t264 #182] Text substituted for an image part that a
     /// non-vision model can't receive (the "T264" branch in the OpenAI request
     /// serializers). Message-level attachments never went through `read_image`,
@@ -555,18 +581,48 @@ enum VisionGroupResolver {
     /// support vision input]" — a dead end it would try to route around, in one
     /// observed case by shelling out to the `apple-vision` CLI.
     ///
-    /// With a Vision Group configured we instead name the tool and hand over the
-    /// exact path, so the model can act instead of improvise. Without one the
-    /// original wording stands: there is genuinely no recourse, and inviting a
-    /// `read_image` call that the tool gate never registered would be worse.
+    /// [T-ios-image-path-metadata] The path is now ALWAYS surfaced, whether or
+    /// not a Vision Group is configured.
+    ///
+    /// The earlier shape gated the path on a Vision Group and otherwise fell back
+    /// to the bare literal, reasoning that without one "there is genuinely no
+    /// recourse". That premise was wrong, and the `apple-vision` observation
+    /// above is the evidence: the model was already reaching for a shell. It had
+    /// no path to point at and guessed at a tool that does not exist here.
+    ///
+    /// `shell_execute` runs in the same iSH sandbox the image was written to, so
+    /// a model holding the path can run `file`, `identify`, an OCR pass, a
+    /// Python/Pillow step, a checksum — none of which need a Vision Group, and
+    /// none of which it can attempt without the path. Withholding the path did
+    /// not prevent improvisation; it only made the improvisation fail.
+    ///
+    /// Four tiers, by what is genuinely available:
+    ///  - Vision Group + path -> name `read_image` AND the path;
+    ///  - Vision Group, no path -> name the tool without one (older history rows
+    ///    predate `linuxPath`);
+    ///  - no Vision Group, path -> hand over the path and say the file is
+    ///    reachable from the sandbox, WITHOUT naming `read_image`, which the tool
+    ///    gate has not registered for this model;
+    ///  - no Vision Group, no path -> the historical literal, now the only
+    ///    genuinely recourse-free case.
     ///
     /// English-only by design: this is model-facing instruction text, not UI, and
     /// a single imperative English sentence steers models of every UI locale.
     nonisolated static func attachmentPlaceholder(linuxPath: String?) -> String {
+        let path = (linuxPath?.isEmpty == false) ? linuxPath : nil
         guard isConfiguredCached else {
-            return "[Image attached but this model does not support vision input]"
+            guard let path else {
+                return "[Image attached but this model does not support vision input]"
+            }
+            // Deliberately does NOT mention read_image: without a Vision Group
+            // that tool is not registered for this model, and inviting a call
+            // that can never resolve is worse than staying silent about it.
+            return "[Image attached at \(path). This model cannot view images directly, but the "
+                + "file is readable from the Linux sandbox — you can inspect or process it with "
+                + "shell_execute (for example `file`, `identify`, an OCR or Python/Pillow step) "
+                + "if the task needs it.]"
         }
-        guard let path = linuxPath, !path.isEmpty else {
+        guard let path else {
             // Configured, but this part carries no re-fetchable path (older
             // history rows predate linuxPath). Still better to name the tool
             // than to imply the image is simply gone.

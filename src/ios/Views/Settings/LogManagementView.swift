@@ -86,8 +86,26 @@ struct LogManagementView: View {
         List {
             Section {
                 Toggle("Enable Logging", isOn: $loggingManager.isEnabled)
+                if loggingManager.isEnabled {
+                    // [T-ios-log-verbose-tier] Verbose turns on the
+                    // high-frequency traces (per-syscall filesystem, per-render
+                    // tool lifecycle, per-request context diagnostics). They are
+                    // off by default because they are enormous: two measured
+                    // days ran to 775 MB and 171 MB, of which 73% and 99% came
+                    // from a handful of such traces.
+                    Picker("Detail Level", selection: $loggingManager.level) {
+                        // Two fixed cases, so the localized keys are literals
+                        // (AppLocalized needs a literal, not a runtime String).
+                        Text("Info").tag(AppLogger.Level.info)
+                        Text("Verbose").tag(AppLogger.Level.verbose)
+                    }
+                }
             } footer: {
-                Text("When enabled, all console output is captured to daily log files.")
+                if loggingManager.isEnabled && loggingManager.level == .verbose {
+                    Text("Verbose adds high-frequency traces (filesystem, rendering, context). Useful when reproducing a specific problem — logs grow very quickly, so switch back to Info afterwards.")
+                } else {
+                    Text("When enabled, all console output is captured to daily log files.")
+                }
             }
 
             Section("Log Files") {

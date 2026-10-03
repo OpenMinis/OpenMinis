@@ -55,22 +55,29 @@ class RcloneTlsTimeoutTest {
     }
 
     @Test
-    fun `worst case wait stays within a budget a person will sit through`() {
-        // The timeout applies PER ATTEMPT, so retries multiply it. This is the
-        // property that actually matters to the user — an unreachable host must
-        // fail while they are still looking at the screen, not after rclone's
-        // default 300s x 10 retries. Guard the product, not the parts, so a
-        // future tweak to either number still has to keep the promise.
+    fun `an unreachable server still fails while the user is watching`() {
+        // [T-android-backup-webdav-deadline] What bounds a server that is DOWN
+        // is the connect timeout, not IO_TIMEOUT_SECONDS: the latter is Go's
+        // ResponseHeaderTimeout, which starts only after the request body was
+        // written, so it never runs against a host that cannot be reached.
+        // The old version of this test multiplied the IO timeout instead,
+        // which is what pinned it at a value that failed every slow server.
         val attempts = RcloneBridge.LOW_LEVEL_RETRIES * RcloneBridge.RETRIES
-        val worstCaseSeconds = RcloneBridge.IO_TIMEOUT_SECONDS * attempts
+        val worstCaseConnectSeconds = RcloneBridge.CONNECT_TIMEOUT_SECONDS * attempts
         assertTrue(
-            "worst-case wait $worstCaseSeconds s is too long to feel like a failure",
-            worstCaseSeconds <= 120,
+            "unreachable-host wait $worstCaseConnectSeconds s is too long to feel like a failure",
+            worstCaseConnectSeconds <= 120,
         )
-        assertTrue(
-            "connect timeout should not exceed the io timeout",
-            RcloneBridge.CONNECT_TIMEOUT_SECONDS <= RcloneBridge.IO_TIMEOUT_SECONDS,
-        )
+        assertTrue(RcloneBridge.CONNECT_TIMEOUT_SECONDS <= RcloneBridge.IO_TIMEOUT_SECONDS)
+    }
+
+    @Test
+    fun `a slow but healthy server gets rclone's full response deadline`() {
+        // [T-android-backup-webdav-deadline] A cloud-relay WebDAV server answers
+        // only after re-uploading the file (measured: a 60 s answer failed at 46 s
+        // with 45 s). 300 s is rclone's default and iOS's value (ceac9df0b).
+        assertTrue(RcloneBridge.IO_TIMEOUT_SECONDS >= 300)
+        assertEquals(300_000_000_000L, RcloneBridge.globalTimeoutOptions()["Timeout"])
     }
 
     // -- 2. Certificate-failure detection ---------------------------------

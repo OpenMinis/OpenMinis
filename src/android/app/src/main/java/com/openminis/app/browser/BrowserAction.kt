@@ -51,7 +51,7 @@ enum class BrowserAction(val value: String) {
          * fan out to a fresh tab when an implicit (tab_id-less) call lands while
          * the previously-used tab is still inside its inUse grace window. The
          * grace-based fan-out exists so N back-to-back *navigates* open N
-         * distinct tabs instead of trampling tab 0 (issue #595).
+         * distinct tabs instead of trampling tab 0.
          *
          * Every other action operates on the CURRENT page (read DOM, click,
          * scroll, screenshot, …). For those, fanning out to a fresh/other tab

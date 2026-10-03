@@ -2,10 +2,9 @@ import Foundation
 
 /// How a given endpoint expects the thinking/reasoning control to appear on the wire.
 ///
-/// Every case here is anchored to at least one shipped field report or vendor doc — see
-/// `/tmp/thinking_rules_evidence.md` §A for the full provenance chain (17 rules mined
-/// from git history, each with a file:line and commit hash). The comments below carry the
-/// short form so the reasoning survives next to the code.
+/// Every case here is anchored to at least one shipped field report or vendor doc (17
+/// rules mined from past regressions, each traced to the commit that fixed it). The
+/// comments below carry the short form so the reasoning survives next to the code.
 ///
 /// PHASE 1 SCOPE: this models the OpenAI-compatible family only (the ~10 vendors that
 /// flow through `OpenAIAgentProvider`). Gemini and Anthropic have their own emitters

@@ -121,6 +121,10 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
                 canDrawOverlays =
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
                         Settings.canDrawOverlays(context)
+                // [T-android-island-capability-ttl] The user may have just
+                // flipped Live Updates in system settings: drop the cached
+                // answer so this re-probe really asks the platform.
+                com.openminis.app.service.DynamicIslandSupport.invalidateCapabilityCache()
                 dynamicIslandCapable =
                     com.openminis.app.service.DynamicIslandSupport.isDynamicIslandCapable(context)
             }

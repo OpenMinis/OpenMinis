@@ -16,9 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import com.openminis.app.R
 import org.json.JSONObject
 import java.io.File
@@ -29,11 +27,27 @@ import java.util.concurrent.ConcurrentHashMap
  * Manages up to 3 browser tabs for the agent, mirroring iOS BrowserTabPool.
  * All tabs share the same cookie store by default on Android.
  */
-class BrowserTabPool(private val context: Context) {
+class BrowserTabPool(private val context: Context) : BrowserTabPoolRegistry.RegistryPool {
 
     companion object {
         private const val TAG = "BrowserTabPool"
         private const val MAX_TABS = 3
+
+        /** [T-android-browser-tab-ownership] Tabs one agent may hold at once. */
+        const val AGENT_TAB_QUOTA = 2
+
+        /**
+         * [T-android-browser-tab-ownership] Absolute pool ceiling while agents
+         * run.
+         *
+         * Android has no cross-pool global cap (iOS has BrowserTabPoolRegistry
+         * at 8), and a pool is created per chat view model, so this ceiling is
+         * per chat rather than per device. Six is chosen to stay close to the
+         * old three in the common single-agent case (3 + 2 = 5) while bounding
+         * the fan-out case, precisely because WebView memory is the real
+         * constraint here.
+         */
+        const val MAX_TABS_WITH_AGENTS = 6
         private const val IDLE_CHECK_INTERVAL_MS = 60_000L  // 60 seconds
         /** Default idle timeout — matches iOS BrowserTabPool.idleTimeout (15 minutes). */
         const val DEFAULT_IDLE_TIMEOUT_MINUTES = 15
@@ -53,11 +67,12 @@ class BrowserTabPool(private val context: Context) {
          * [T-browser-use-per-tab-serial-android] Max time a browser_use call
          * waits to acquire the per-tab-id serial lock before giving up. This is
          * ONLY the lock-acquisition wait (waiting for another tool's operation
-         * on the SAME explicit tab id to finish) — it is NOT the browser task
-         * timeout. Once the lock is held the actual page operation keeps its
-         * existing per-action timeout (BrowserUseManager), untouched.
+         * on the SAME explicit tab id to finish). (GH#245) It really is only
+         * that now: it used to wrap the whole locked action too, so a frozen
+         * page was reported as "tab busy". The operation has its own ceiling,
+         * [BrowserActionGuard.ACTION_DEAD_TIMEOUT_MS].
          */
-        private const val TAB_SERIAL_WAIT_TIMEOUT_MS = 60_000L
+        private const val TAB_SERIAL_WAIT_TIMEOUT_MS = BrowserActionGuard.TAB_SERIAL_WAIT_TIMEOUT_MS
 
         /**
          * [T-android-browser-download-ux] Files-app-style middle truncation
@@ -109,6 +124,13 @@ class BrowserTabPool(private val context: Context) {
 
     private fun lockForTab(id: Int): Mutex = tabLocks.getOrPut(id) { Mutex() }
 
+    /**
+     * (GH#245) new tab id → note for the model that the tab it named was
+     * rebuilt. Written by [acquireTab] (Main), consumed once by
+     * [runAcquiredAction] on the caller's dispatcher, hence concurrent.
+     */
+    private val rebuildNotices = ConcurrentHashMap<Int, String>()
+
     data class Tab(
         val id: Int,
         val manager: BrowserUseManager,
@@ -158,6 +180,104 @@ class BrowserTabPool(private val context: Context) {
 
     private var sessionId: String? = null
     private val savedURLs = mutableMapOf<Int, String>()
+
+    // ── Tab ownership  [T-android-browser-tab-ownership] ────────────────────
+    //
+    // One pool per chat, with ownership enforced INSIDE it. Deliberately not a
+    // pool per agent: three agents would mean twelve WebViews, and Android's
+    // WebView is heavier than iOS's — that is a memory-reclaim storm, not
+    // isolation. Also deliberately not per-agent tab id remapping: two
+    // numbering schemes make a human takeover and the logs unreadable. Tab ids
+    // stay globally unique and the pool simply decides who may touch what.
+    //
+    // Ports iOS BrowserTabPool.swift (2026-09-04, 4487da4b1), added after three
+    // research sub agents ping-ponged on tab 0: one agent's get_readable
+    // returned another's page, "Maximum of 3 tabs" made them close each other's
+    // work, and two sat ~3 minutes in the per-tab serial queue. Android has
+    // concurrent sub agent fan-out now, so the same incident is reproducible
+    // here — it just has not been reported yet.
+
+    /** tab id → owning agent's session id. Absent = the chat's own tab. */
+    private val tabOwner = mutableMapOf<Int, String>()
+
+    /** Each agent's most recently used tab, for implicit targeting. */
+    private val lastTabByOwner = mutableMapOf<String, Int>()
+
+    /** Tabs one agent may hold at once. The chat itself keeps [MAX_TABS]. */
+    private val agentTabQuota = AGENT_TAB_QUOTA
+
+    /**
+     * The chat that owns this pool, or a human (null) — full access.
+     *
+     * `owner == sessionId` counts as privileged: a parent chat driving its own
+     * pool is not an agent competing for tabs.
+     */
+    private fun isPrivileged(owner: String?): Boolean =
+        owner == null || owner == sessionId
+
+    /** Agent owners with at least one tab right now. */
+    private fun agentOwners(): Set<String> =
+        tabOwner.values.toSet() - setOfNotNull(sessionId)
+
+    /**
+     * The pool ceiling as it stands: [MAX_TABS] alone, +[AGENT_TAB_QUOTA] per
+     * active agent, hard-capped at [MAX_TABS_WITH_AGENTS].
+     */
+    fun effectiveMaxTabs(requestingOwner: String? = null): Int {
+        val owners = agentOwners().toMutableSet()
+        if (requestingOwner != null && !isPrivileged(requestingOwner)) owners.add(requestingOwner)
+        return if (owners.isEmpty()) MAX_TABS
+        else minOf(MAX_TABS + AGENT_TAB_QUOTA * owners.size, MAX_TABS_WITH_AGENTS)
+    }
+
+    /** True when [owner] may act on [tabId]. */
+    internal fun mayUse(tabId: Int, owner: String?): Boolean {
+        if (isPrivileged(owner)) return true
+        return tabOwner[tabId] == owner
+    }
+
+    /** Tabs currently attributed to [owner], ascending. */
+    internal fun tabIdsOwnedBy(owner: String): List<Int> =
+        tabOwner.filterValues { it == owner }.keys.sorted()
+
+    /**
+     * The error an agent gets for touching someone else's tab.
+     *
+     * It names the tabs the agent DOES own: without them the model has no way
+     * to correct itself and will simply retry the same rejected id.
+     */
+    private fun notYourTabError(tabId: Int, owner: String): BrowserActionResult {
+        val mine = tabIdsOwnedBy(owner)
+        val hint = if (mine.isEmpty()) "open one with action: new_tab"
+        else "use your own tab id(s) ${mine.joinToString(", ")} or action: new_tab"
+        return BrowserActionResult.error(
+            "Tab $tabId belongs to another agent or to the main chat and cannot be used from here — " +
+                "$hint. list_tabs shows only your tabs.",
+        )
+    }
+
+    /**
+     * The tab an agent's implicit (no tab_id) action should prefer: its own
+     * most recently used one, when it still exists.
+     */
+    private fun preferredTab(owner: String?): Int? {
+        val o = owner ?: return null
+        val id = lastTabByOwner[o] ?: return null
+        return if (_tabs.value.any { it.id == id }) id else null
+    }
+
+    /**
+     * Close every tab an agent owns and forget its bookkeeping, so the slots
+     * return to the chat and to other agents. Idempotent.
+     */
+    suspend fun releaseTabs(owner: String) {
+        val mine = tabIdsOwnedBy(owner)
+        for (id in mine) closeTab(id)
+        lastTabByOwner.remove(owner)
+        if (mine.isNotEmpty()) {
+            Log.i(TAG, "[agent] released ${mine.size} tab(s) of owner ${owner.take(8)}")
+        }
+    }
 
     /**
      * Global custom viewport. `0` means "use the UA profile default".
@@ -216,6 +336,16 @@ class BrowserTabPool(private val context: Context) {
         // Load user-configured idle timeout (default 15 min, matches iOS).
         val storedMinutes = prefs.getInt(PREF_IDLE_TIMEOUT_MINUTES, DEFAULT_IDLE_TIMEOUT_MINUTES)
         idleTimeoutMs = storedMinutes.coerceIn(MIN_IDLE_TIMEOUT_MINUTES, MAX_IDLE_TIMEOUT_MINUTES) * 60_000L
+
+        // [T-android-browser-global-tab-cap] Join the process-wide gate. Done
+        // here rather than at each construction site because there are three
+        // of them (MinisApp, ChatViewModel, SessionListScreen) and
+        // `adoptBrowserTabPool` SHARES an existing pool rather than building
+        // one — registering in the constructor is the only placement that
+        // covers every pool exactly once. The registry holds this weakly, so
+        // no unregister call site is required when a chat's ViewModel is
+        // cleared; the pool simply stops being counted once collected.
+        BrowserTabPoolRegistry.register(this)
 
         // Start idle tab eviction timer (60-second interval, matching iOS)
         evictionJob = evictionScope.launch {
@@ -519,17 +649,60 @@ class BrowserTabPool(private val context: Context) {
      *   `BrowserTabPool.execute(action:singleTab:)`. Explicit tab_id always
      *   routes to that tab regardless of this flag.
      */
+    /**
+     * @param owner [T-android-browser-tab-ownership] The agent acting, or null.
+     *
+     *   Null DEFAULTS TO PRIVILEGED on purpose: every existing UI and human
+     *   call site keeps working untouched and unchanged, and only the two agent
+     *   entry points opt into the constraint by passing an id. `owner ==
+     *   sessionId` is privileged too — a chat driving its own pool is not an
+     *   agent competing with itself.
+     */
     suspend fun execute(
         input: BrowserActionInput,
         singleTab: Boolean = false,
+        owner: String? = null,
     ): BrowserActionResult {
+        // [T-android-browser-tab-ownership-newtab] The ownership check is
+        // PER ACTION, not a blanket pre-check, matching iOS
+        // (BrowserTabPool.swift:823-836 handles newTab / listTabs before any
+        // mayUse call and gates only closeTab and the content actions).
+        //
+        // It used to sit here, above the dispatch, applied to every action that
+        // carried a `tab_id`. That deadlocked agents on device: models routinely
+        // fill in `tab_id: 0` on EVERY call — including `new_tab` and
+        // `list_tabs`, where the field is meaningless — so an agent that did not
+        // own tab 0 was refused, read the error's advice ("open one with action:
+        // new_tab"), did exactly that, and was refused again for the same
+        // reason. The advice was unfollowable and the run could never acquire a
+        // tab. Observed on a Pixel 4a: 8 of 25 browser_use calls in one
+        // delegation fan-out failed this way, across three different sub agents,
+        // all on `new_tab` / `list_tabs` / `navigate` carrying `tab_id: 0`.
+        //
+        // `new_tab` creates a tab and `list_tabs` is already scoped to the
+        // caller's own tabs, so neither can touch someone else's page — there
+        // was never anything for the check to protect there. The actions that
+        // DO act on an existing tab keep it, still before any side effect.
+        fun ownershipViolation(tabId: Int?): BrowserActionResult? {
+            if (tabId == null || isPrivileged(owner)) return null
+            if (!_tabs.value.any { it.id == tabId }) return null
+            if (mayUse(tabId, owner)) return null
+            return notYourTabError(tabId, owner!!)
+        }
         // Handle tab management actions at pool level
         return when (input.action) {
-            BrowserAction.NEW_TAB -> newTab(input.url)
-            BrowserAction.CLOSE_TAB -> closeTab(input.tabId)
-            BrowserAction.LIST_TABS -> listTabs()
+            // No ownership check: this CREATES a tab. A stray tab_id on a
+            // new_tab call names nothing it will touch.
+            BrowserAction.NEW_TAB -> newTab(input.url, owner)
+            BrowserAction.CLOSE_TAB -> {
+                val target = resolveCloseTarget(input.tabId, owner)
+                ownershipViolation(target) ?: closeTab(target)
+            }
+            // Already scoped to the caller's own tabs by listTabs(owner).
+            BrowserAction.LIST_TABS -> listTabs(owner)
             BrowserAction.SET_VIEWPORT -> handleSetViewport(input)
             else -> {
+                ownershipViolation(input.tabId)?.let { return it }
                 // [T-browser-use-per-tab-serial-android] Serialize per explicit
                 // tab id. Only an explicit tab_id that names an EXISTING tab can
                 // be contended by two concurrent tools — that's the trampling
@@ -558,9 +731,31 @@ class BrowserTabPool(private val context: Context) {
                     //    in its inUse grace window).
                     //  - opens-new-page actions (navigate, fetch): keep the
                     //    grace-based fan-out so an agent's concurrent navigates
-                    //    still open distinct tabs (#595) instead of trampling.
+                    //    still open distinct tabs instead of trampling.
                     val mustFollowSelected = singleTab || !input.action.opensNewPage
-                    if (mustFollowSelected && _tabs.value.isNotEmpty()) {
+                    // [T-android-browser-tab-ownership] An agent's implicit
+                    // target is its OWN last tab, then a free tab it owns, then
+                    // a fresh one — never the chat's selected tab and never a
+                    // sibling's. This is the actual incident: three agents with
+                    // no tab_id all resolved to the same selected tab, so one
+                    // agent's get_readable returned another's page.
+                    val agentTarget = if (isPrivileged(owner)) null else {
+                        preferredTab(owner)
+                            ?: _tabs.value.firstOrNull { !it.inUse && tabOwner[it.id] == owner }?.id
+                    }
+                    if (agentTarget != null) {
+                        // Keep every ownership-map write on Main, the same
+                        // dispatcher newTab / closeTab / acquireTab mutate from.
+                        // The value here is what preferredTab just read, so this
+                        // is idempotent — but relying on that would leave the
+                        // one write that is not serialised with the rest.
+                        withContext(Dispatchers.Main) { lastTabByOwner[owner!!] = agentTarget }
+                        executeSerialized(agentTarget, input)
+                    } else if (!isPrivileged(owner)) {
+                        // The agent owns nothing usable yet: give it a fresh tab
+                        // of its own rather than borrowing the chat's.
+                        runAcquiredAction(input, implicitTab = true, owner = owner)
+                    } else if (mustFollowSelected && _tabs.value.isNotEmpty()) {
                         // Route to the selected tab under its serial lock. If the
                         // selected id was evicted, fall back to the most-recent
                         // existing tab so we still operate on a real page rather
@@ -572,7 +767,7 @@ class BrowserTabPool(private val context: Context) {
                     } else {
                         // Empty pool (first call) OR an opens-new-page action in
                         // the default agent path → original acquire/fan-out.
-                        runAcquiredAction(input, implicitTab = true)
+                        runAcquiredAction(input, implicitTab = true, owner = owner)
                     }
                 }
             }
@@ -590,25 +785,34 @@ class BrowserTabPool(private val context: Context) {
      */
     private suspend fun executeSerialized(tabId: Int, input: BrowserActionInput): BrowserActionResult {
         val mutex = lockForTab(tabId)
-        val result = withTimeoutOrNull(TAB_SERIAL_WAIT_TIMEOUT_MS) {
-            mutex.withLock {
-                // [T-browser-readaction-follow-tab-and-yolo-android] Pin
-                // acquisition to the locked tab id. The follow-selected and
-                // YOLO paths resolve a target tab id whose lock we hold here,
-                // but input.tabId may be null (tab-less call) — without this
-                // override acquireTab(null) would re-run the fan-out and could
-                // land on a DIFFERENT tab than the one we locked, defeating
-                // both the serialization and the follow-tab fix.
-                runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)
-            }
+        // (GH#245) Two separate limits. Only a lock that ANOTHER call kept past
+        // the window is "tab busy"; the operation run under the lock has its own
+        // deadline inside runAcquiredAction, with its own message. The timeout
+        // used to wrap both, so a frozen page on a tab nobody else was using
+        // told the model to go open a new tab.
+        if (!BrowserActionGuard.lockWithin(mutex, TAB_SERIAL_WAIT_TIMEOUT_MS)) {
+            return BrowserActionResult.error(
+                context.getString(
+                    R.string.browser_use_tab_busy_timeout,
+                    tabId,
+                    (TAB_SERIAL_WAIT_TIMEOUT_MS / 1000L).toInt(),
+                ),
+            )
         }
-        return result ?: BrowserActionResult.error(
-            context.getString(
-                R.string.browser_use_tab_busy_timeout,
-                tabId,
-                (TAB_SERIAL_WAIT_TIMEOUT_MS / 1000L).toInt(),
-            ),
-        )
+        try {
+            // [T-browser-readaction-follow-tab-and-yolo-android] Pin
+            // acquisition to the locked tab id. The follow-selected and
+            // YOLO paths resolve a target tab id whose lock we hold here,
+            // but input.tabId may be null (tab-less call) — without this
+            // override acquireTab(null) would re-run the fan-out and could
+            // land on a DIFFERENT tab than the one we locked, defeating
+            // both the serialization and the follow-tab fix.
+            return runAcquiredAction(input, implicitTab = false, acquireTabId = tabId)
+        } finally {
+            // Also runs on cancellation (the CLI's 90s timeout), so an
+            // abandoned call never leaves the tab locked.
+            mutex.unlock()
+        }
     }
 
     /**
@@ -625,11 +829,56 @@ class BrowserTabPool(private val context: Context) {
         input: BrowserActionInput,
         implicitTab: Boolean,
         acquireTabId: Int? = null,
+        owner: String? = null,
     ): BrowserActionResult {
-        val tab = acquireTab(acquireTabId ?: input.tabId)
+        // [T-android-browser-global-tab-cap] If the registry reclaimed the tab
+        // this call names, report that BEFORE acquiring — otherwise acquireTab
+        // silently creates a replacement under the same id and the agent gets a
+        // blank page where its session used to be, with nothing to explain it.
+        val requestedId = acquireTabId ?: input.tabId
+        if (requestedId != null) {
+            consumePreemptNotice(requestedId)?.let { return BrowserActionResult.error(it) }
+        }
+        val tab = acquireTab(requestedId, owner)
             ?: return BrowserActionResult.error("Failed to acquire browser tab")
+        // (GH#245) If acquireTab just rebuilt the tab this call named, say so
+        // first: element references and page state from before are gone.
+        val rebuildNote = rebuildNotices.remove(tab.id)
         return try {
-            val result = tab.manager.execute(input)
+            // (GH#245) The page operation gets a hard deadline, on every path
+            // (locked or not — the in-app agent's browser_use had none at all).
+            // The deadline wraps execute() only, not acquireTab above, so the
+            // bounded implicit-tab wait cannot eat into a legitimate action's
+            // budget. A deadline hit, or a cancellation that arrives after the
+            // action had already run a long time (the CLI giving up at 90s),
+            // flags the tab; the next acquireTab then rebuilds it.
+            val outcome = BrowserActionGuard.runGuarded(
+                onSuspect = { reason -> tab.manager.markWedged(reason) },
+            ) { tab.manager.execute(input) }
+            val result = when (outcome) {
+                is BrowserActionGuard.Outcome.Done -> outcome.value
+                is BrowserActionGuard.Outcome.DeadlineExceeded -> return BrowserActionResult.error(
+                    withRebuildNote(
+                        rebuildNote,
+                        "Browser action '${input.action.value}' timed out on tab ${tab.id} after " +
+                            "${BrowserActionGuard.ACTION_DEAD_TIMEOUT_MS / 1000}s — the page stopped " +
+                            "responding. The tab has been reset and will be rebuilt on your next " +
+                            "browser call; retry the action.",
+                    ),
+                )
+                is BrowserActionGuard.Outcome.Wedged -> return BrowserActionResult.error(
+                    withRebuildNote(
+                        rebuildNote,
+                        "Browser tab ${tab.id} is not usable: ${outcome.message}. It will be " +
+                            "rebuilt on your next browser call; retry the action.",
+                    ),
+                )
+            }
+            // The registry may have preempted this very tab while we were
+            // suspended inside execute(): its WebView is gone, so `result` is
+            // whatever a destroyed WebView produced. Replace it with the
+            // retryable explanation rather than surfacing that noise.
+            consumePreemptNotice(tab.id)?.let { return BrowserActionResult.error(it) }
             // [T-android-js-dialogs-256] If this tab's page tried to open an
             // alert/confirm/prompt, the agent browser answered it with a default
             // rather than showing a modal (which would hang an unattended loop).
@@ -647,7 +896,12 @@ class BrowserTabPool(private val context: Context) {
             // overwrites mid-flight when it spawns a fresh tab for a concurrent
             // navigate. Without this the agent had to guess tab_id for its
             // follow-up reads/scrolls and routinely picked the wrong tab.
-            stampTabId(withDialogs.copy(pageURL = tab.manager.currentURL.value), tab.id)
+            val withRebuild = if (rebuildNote != null) {
+                withDialogs.copy(text = withRebuildNote(rebuildNote, withDialogs.text))
+            } else {
+                withDialogs
+            }
+            stampTabId(withRebuild.copy(pageURL = tab.manager.currentURL.value), tab.id)
         } finally {
             tab.lastActivityDate = Date()
             if (implicitTab) {
@@ -675,6 +929,9 @@ class BrowserTabPool(private val context: Context) {
             saveState()
         }
     }
+
+    private fun withRebuildNote(note: String?, text: String): String =
+        if (note == null) text else "$note\n$text"
 
     /**
      * [T-android-browser-result-tab-id] Stamp [targetId] onto a tab-contextual
@@ -729,13 +986,36 @@ class BrowserTabPool(private val context: Context) {
      * browser tab" because the model can't know that tab 0 hasn't been
      * lazily created.
      */
-    private suspend fun acquireTab(requestedTabId: Int? = null): Tab? = withContext(Dispatchers.Main) {
+    private suspend fun acquireTab(
+        requestedTabId: Int? = null,
+        owner: String? = null,
+    ): Tab? = withContext(Dispatchers.Main) {
+        // [T-android-webview-render-process-gone] (GH#341) Drop tabs whose
+        // renderer died before any selection runs. Such a tab still looks
+        // perfectly usable here — it is in `_tabs`, not `inUse`, and owned by
+        // the caller — so without this it is the one most likely to be picked,
+        // and every action on it would drive a WebView the system has torn
+        // down. Removing it lets the normal create-a-tab path below build a
+        // live replacement.
+        //
+        // (GH#245) The same applies to a renderer that is alive but frozen
+        // (isWedged): it never fires onRenderProcessGone, so it used to stay
+        // in rotation forever and the CLI's single-tab driver kept landing on
+        // it. Both kinds are now dropped, and the tab the caller actually
+        // named is rebuilt in place — see [dropAndRebuildUnusableTabs].
+        val requested = dropAndRebuildUnusableTabs(requestedTabId) ?: requestedTabId
         var currentTabs = _tabs.value.toMutableList()
 
         // Find requested tab, falling back to default-or-create when the
         // requested id doesn't exist (covers `tab_id: 0` against an empty pool).
-        val tab = if (requestedTabId != null && currentTabs.any { it.id == requestedTabId }) {
-            currentTabs.first { it.id == requestedTabId }
+        // [T-android-browser-tab-ownership] An agent may only be handed a tab
+        // it owns; anything else falls through to pick-or-create below rather
+        // than silently borrowing a sibling's.
+        val mayTakeRequested = requested != null &&
+            currentTabs.any { it.id == requested } &&
+            mayUse(requested, owner)
+        val tab = if (mayTakeRequested) {
+            currentTabs.first { it.id == requested }
         } else {
             // [T-browser-use-per-tab-serial-android] No explicit (existing)
             // tab id: prefer a tab that is NOT already in use, and create a new
@@ -753,7 +1033,11 @@ class BrowserTabPool(private val context: Context) {
             // — that's the trampling this task forbids. Wait (bounded) for a tab
             // to free up; only fall back to reusing the least-recently-active tab
             // if nothing frees within the wait window.
-            var picked = currentTabs.firstOrNull { !it.inUse } ?: createTab(currentTabs)
+            // [T-android-browser-tab-ownership] "Free" means free AND mine (or
+            // unowned when privileged): grabbing a sibling's idle tab is the
+            // trampling this exists to stop.
+            var picked = currentTabs.firstOrNull { !it.inUse && mayUse(it.id, owner) }
+                ?: createTab(currentTabs, owner = owner)
             if (picked == null) {
                 val waitDeadline = IMPLICIT_TAB_WAIT_MS
                 var waited = 0L
@@ -761,7 +1045,8 @@ class BrowserTabPool(private val context: Context) {
                     delay(IMPLICIT_TAB_WAIT_POLL_MS)
                     waited += IMPLICIT_TAB_WAIT_POLL_MS
                     currentTabs = _tabs.value.toMutableList()
-                    picked = currentTabs.firstOrNull { !it.inUse } ?: createTab(currentTabs)
+                    picked = currentTabs.firstOrNull { !it.inUse && mayUse(it.id, owner) }
+                        ?: createTab(currentTabs, owner = owner)
                     if (picked != null) break
                 }
             }
@@ -775,8 +1060,23 @@ class BrowserTabPool(private val context: Context) {
             tab.inUseGraceJob = null
             tab.inUse = true
             tab.lastActivityDate = Date()
-            _selectedTabId.value = tab.id
+            // [T-android-browser-tab-ownership] selectedTabId is what a human
+            // sees when they take over, so only the chat and the human move it.
+            // An agent acquiring a tab used to drag the user's view onto it —
+            // and with several agents running, onto whichever one acted last.
+            if (isPrivileged(owner)) _selectedTabId.value = tab.id
             _tabs.value = currentTabs
+            // Claim it for this agent, and record it as their most recent so
+            // the next implicit call comes back here instead of fanning out.
+            //
+            // Done HERE rather than in the caller because this block already
+            // runs on Dispatchers.Main, which is what serialises these two maps
+            // against newTab / closeTab. Claiming from the caller's context
+            // would race them.
+            if (owner != null && !isPrivileged(owner)) {
+                tabOwner.putIfAbsent(tab.id, owner)
+                if (tabOwner[tab.id] == owner) lastTabByOwner[owner] = tab.id
+            }
         }
 
         // Apply the pending blank-page load from createTab() now that we're
@@ -789,8 +1089,98 @@ class BrowserTabPool(private val context: Context) {
         tab
     }
 
-    private fun createTab(tabs: MutableList<Tab>, url: String? = null): Tab? {
-        if (tabs.size >= MAX_TABS) return null
+    /**
+     * (GH#245, Android counterpart of iOS `rebuildDeadTab`) Remove every tab
+     * whose WebView can no longer be driven — renderer died, or renderer
+     * frozen ([BrowserUseManager.isWedged]) — and release its WebView and
+     * bookkeeping. Before, a dead tab was only filtered out of [_tabs]: its
+     * WebView was never destroyed and its lock entry never removed.
+     *
+     * A tab the caller NAMED (the requested id, or the selected tab the CLI's
+     * single-tab driver follows) is rebuilt in place: a fresh tab under a new
+     * id, reloading the last URL, inheriting the owner, the selection and any
+     * agent's "last tab" pointer. Other unusable tabs are just dropped — nobody
+     * is waiting on them, and a later action recreates tabs on demand.
+     *
+     * Returns the replacement id for [requestedTabId] if that tab was rebuilt,
+     * else null. Main thread only (WebView teardown and the ownership maps).
+     */
+    private fun dropAndRebuildUnusableTabs(requestedTabId: Int?): Int? {
+        val bad = _tabs.value.filter { it.manager.isUnusable }
+        if (bad.isEmpty()) return null
+        Log.w(
+            TAG,
+            "acquireTab: dropping ${bad.size} unusable tab(s) " +
+                bad.joinToString(prefix = "(", postfix = ")") {
+                    "${it.id}:" + if (it.manager.isRendererDead) "renderer-gone" else "unresponsive"
+                },
+        )
+        // Derived from the snapshot above, not re-filtered: the flags are
+        // written from other threads, and a tab flagged between two filters
+        // would leave the pool without ever being released.
+        val badIds = bad.map { it.id }.toSet()
+        val survivors = _tabs.value.filterNot { it.id in badIds }.toMutableList()
+        _tabs.value = survivors.toList()
+        var replacementForRequested: Int? = null
+        for (dead in bad) {
+            val url = dead.manager.currentURL.value.takeIf { it.isNotEmpty() && it != "about:blank" }
+            val owner = tabOwner[dead.id]
+            val wasSelected = _selectedTabId.value == dead.id
+            val pointingOwners = lastTabByOwner.filterValues { it == dead.id }.keys.toList()
+            val cause = if (dead.manager.isRendererDead) "crashed (its renderer process died)"
+                else "stopped responding"
+            releaseTabResources(dead)
+            tabOwner.remove(dead.id)
+            lastTabByOwner.entries.removeAll { it.value == dead.id }
+            savedURLs.remove(dead.id)
+
+            if (dead.id != requestedTabId && !wasSelected) continue
+            val fresh = createTab(survivors, url = url, owner = owner)
+            if (fresh == null) {
+                Log.w(TAG, "acquireTab: could not rebuild tab ${dead.id} (no slot)")
+                continue
+            }
+            if (owner != null) tabOwner[fresh.id] = owner
+            pointingOwners.forEach { lastTabByOwner[it] = fresh.id }
+            if (wasSelected) _selectedTabId.value = fresh.id
+            if (dead.id == requestedTabId) replacementForRequested = fresh.id
+            rebuildNotices[fresh.id] =
+                "[Tab rebuilt] Browser tab ${dead.id} $cause and was rebuilt as tab ${fresh.id}" +
+                    (url?.let { "; page reloaded from $it" } ?: "; it had no page to reload") +
+                    ". Earlier element references and page state are gone — re-locate " +
+                    "elements before interacting, and use tab_id ${fresh.id} from now on."
+            Log.i(TAG, "acquireTab: rebuilt tab ${dead.id} as ${fresh.id} (url=${url ?: "none"})")
+        }
+        if (survivors.isNotEmpty() && survivors.none { it.id == _selectedTabId.value }) {
+            _selectedTabId.value = survivors.first().id
+        }
+        saveState()
+        return replacementForRequested
+    }
+
+    private fun createTab(
+        tabs: MutableList<Tab>,
+        url: String? = null,
+        // [T-android-browser-tab-ownership] The shared allocator has to know
+        // who is asking: the ceiling is MAX_TABS for the chat alone but grows
+        // per active agent, so a hardcoded MAX_TABS here would cap an agent's
+        // quota at the chat's limit and defeat the quota entirely.
+        owner: String? = null,
+    ): Tab? {
+        if (tabs.size >= effectiveMaxTabs(owner)) return null
+
+        // [T-android-browser-global-tab-cap] The local ceiling is necessary but
+        // not sufficient: it bounds THIS pool, and there are several. Ask the
+        // process-wide registry for a slot only after the local check passes,
+        // so a pool that is already over its own budget never causes a sibling
+        // to lose a tab. Denial reuses the existing "no tab available" contract
+        // (return null) rather than inventing a new failure shape — acquireTab
+        // then takes its bounded wait / fall-back-to-existing path, and newTab
+        // reports it as a capacity message, both of which already exist.
+        if (!BrowserTabPoolRegistry.requestSlot(this)) {
+            Log.i(TAG, "Registry denied a global tab slot (cap ${BrowserTabPoolRegistry.GLOBAL_TAB_CAP})")
+            return null
+        }
 
         val id = nextTabId++
         val webView = WebView(context)
@@ -839,16 +1229,53 @@ class BrowserTabPool(private val context: Context) {
 
     // -- Tab Management Actions --
 
-    private suspend fun newTab(url: String?): BrowserActionResult = withContext(Dispatchers.Main) {
+    private suspend fun newTab(url: String?, owner: String? = null): BrowserActionResult = withContext(Dispatchers.Main) {
         val currentTabs = _tabs.value.toMutableList()
-        if (currentTabs.size >= MAX_TABS) {
-            return@withContext BrowserActionResult.error("Maximum $MAX_TABS tabs reached")
+        // [T-android-browser-tab-ownership] An agent is bounded by its own
+        // quota first: the point is that one agent cannot consume the whole
+        // pool and starve its siblings, which is what the incident looked like.
+        if (owner != null && !isPrivileged(owner)) {
+            val mine = tabIdsOwnedBy(owner)
+            if (mine.size >= agentTabQuota) {
+                return@withContext BrowserActionResult.error(
+                    "You already have ${mine.size} tab(s) (limit $agentTabQuota per agent). " +
+                        "Reuse tab id(s) ${mine.joinToString(", ")} — navigate them to the next page — " +
+                        "or close_tab one of yours first.",
+                )
+            }
         }
-        val tab = createTab(currentTabs, url)
+        // The ceiling is dynamic now, so the old hardcoded "Maximum 3 tabs"
+        // text would be a lie whenever an agent is running.
+        val ceiling = effectiveMaxTabs(owner)
+        if (currentTabs.size >= ceiling) {
+            return@withContext BrowserActionResult.error("Maximum $ceiling tabs reached")
+        }
+        val tab = createTab(currentTabs, url, owner)
         if (tab == null) {
-            return@withContext BrowserActionResult.error("Failed to create new tab")
+            // [T-android-browser-global-tab-cap] The local ceiling was already
+            // checked above, so reaching here with tabs below it means the
+            // process-wide registry declined. Say so, and say what works: the
+            // model can act on "reuse a tab you have" but not on a bare
+            // "failed", which reads as a defect and invites a retry loop.
+            return@withContext BrowserActionResult.error(
+                if (currentTabs.size < ceiling) {
+                    "Cannot open another browser tab: the device-wide limit of " +
+                        "${BrowserTabPoolRegistry.GLOBAL_TAB_CAP} is reached and every other " +
+                        "tab is busy. Reuse one of your existing tabs (list_tabs) or " +
+                        "close_tab one first."
+                } else {
+                    "Failed to create new tab"
+                },
+            )
         }
-        _selectedTabId.value = tab.id
+        if (owner != null && !isPrivileged(owner)) {
+            tabOwner[tab.id] = owner
+            lastTabByOwner[owner] = tab.id
+        }
+        // [T-android-browser-tab-ownership] selectedTabId follows the CHAT and
+        // the human only. It is the tab a person sees when they take over, so
+        // an agent opening a tab must not silently move their view.
+        if (isPrivileged(owner)) _selectedTabId.value = tab.id
         if (tab.needsInitialBlankPage) {
             tab.needsInitialBlankPage = false
             tab.manager.loadBlankPage()
@@ -863,14 +1290,38 @@ class BrowserTabPool(private val context: Context) {
         )
     }
 
+    /**
+     * [T-android-browser-tab-ownership] Which tab a `close_tab` should target.
+     *
+     * `closeTab(null)` falls back to [_selectedTabId], which is the CHAT's tab
+     * — so an agent closing "the current tab" without an id would close the
+     * human's. An agent with no id closes its own most recent tab instead, and
+     * an agent with no tabs at all closes nothing (-1 produces "not found"
+     * rather than silently taking someone else's).
+     */
+    internal fun resolveCloseTarget(tabId: Int?, owner: String?): Int? {
+        if (isPrivileged(owner)) return tabId
+        if (tabId != null) return tabId
+        return preferredTab(owner) ?: tabIdsOwnedBy(owner!!).firstOrNull() ?: -1
+    }
+
     private suspend fun closeTab(tabId: Int?): BrowserActionResult = withContext(Dispatchers.Main) {
         val id = tabId ?: _selectedTabId.value
         val currentTabs = _tabs.value.toMutableList()
         val idx = currentTabs.indexOfFirst { it.id == id }
         if (idx < 0) return@withContext BrowserActionResult.error("Tab $id not found")
 
-        currentTabs.removeAt(idx)
+        val closing = currentTabs.removeAt(idx)
         _tabs.value = currentTabs
+        // [T-android-browser-global-tab-cap] Actually release the WebView.
+        // Dropping the list entry alone left the renderer process alive, so a
+        // "closed" tab kept costing what an open one did while no longer being
+        // counted — which would make the global cap under-report real usage.
+        releaseTabResources(closing)
+        // [T-android-browser-tab-ownership] Forget the bookkeeping with the
+        // tab, or a later tab reusing this id would inherit a stale owner.
+        tabOwner.remove(id)
+        lastTabByOwner.entries.removeAll { it.value == id }
 
         // Select next tab
         if (currentTabs.isNotEmpty() && _selectedTabId.value == id) {
@@ -880,15 +1331,23 @@ class BrowserTabPool(private val context: Context) {
         BrowserActionResult(text = "Closed tab $id")
     }
 
-    private fun listTabs(): BrowserActionResult {
-        val lines = _tabs.value.map { tab ->
+    private fun listTabs(owner: String? = null): BrowserActionResult {
+        // [T-android-browser-tab-ownership] An agent sees only its own tabs.
+        // This is what makes the rule discoverable rather than arbitrary: the
+        // ids it is allowed to use are exactly the ids it can see.
+        val visible = if (isPrivileged(owner)) _tabs.value
+        else _tabs.value.filter { tabOwner[it.id] == owner }
+        val lines = visible.map { tab ->
             val marker = if (tab.id == _selectedTabId.value) "*" else " "
             val title = tab.manager.pageTitle.value.ifEmpty { "(blank)" }
             val url = tab.manager.currentURL.value.ifEmpty { "about:blank" }
             "$marker Tab ${tab.id}: $title — $url"
         }
         return if (lines.isEmpty()) {
-            BrowserActionResult(text = "No open tabs")
+            BrowserActionResult(
+                text = if (isPrivileged(owner)) "No open tabs"
+                else "You have no tabs open. Use action: new_tab to open one.",
+            )
         } else {
             BrowserActionResult(text = lines.joinToString("\n"))
         }
@@ -936,12 +1395,20 @@ class BrowserTabPool(private val context: Context) {
         val currentTabs = _tabs.value.toMutableList()
         val idx = currentTabs.indexOfFirst { it.manager === manager }
         if (idx >= 0) {
-            val closedId = currentTabs[idx].id
-            currentTabs.removeAt(idx)
+            val closing = currentTabs.removeAt(idx)
+            val closedId = closing.id
             _tabs.value = currentTabs
             if (_selectedTabId.value == closedId && currentTabs.isNotEmpty()) {
                 _selectedTabId.value = currentTabs.first().id
             }
+            // [T-android-browser-global-tab-cap] Release the WebView, but NOT
+            // synchronously: we are inside this very WebView's own
+            // onCloseWindow callback, and destroying a WebView from within its
+            // own callback is the documented way to crash the renderer. Post it
+            // so teardown happens once the callback has unwound. The other
+            // close paths (closeTab / closeTabFromUI) are not re-entrant this
+            // way and release inline.
+            closing.manager.webView.post { releaseTabResources(closing) }
             Log.i(TAG, "window.close → removed tab $closedId")
         }
     }
@@ -974,8 +1441,12 @@ class BrowserTabPool(private val context: Context) {
         val currentTabs = _tabs.value.toMutableList()
         val idx = currentTabs.indexOfFirst { it.id == tabId }
         if (idx < 0) return@withContext
-        currentTabs.removeAt(idx)
+        val closing = currentTabs.removeAt(idx)
         _tabs.value = currentTabs
+        // [T-android-browser-global-tab-cap] See closeTab: release, don't just
+        // forget. A user closing tabs by hand is the most common way tabs go
+        // away, so leaking here would defeat the cap in ordinary use.
+        releaseTabResources(closing)
         if (_selectedTabId.value == tabId && currentTabs.isNotEmpty()) {
             _selectedTabId.value = currentTabs.first().id
         }
@@ -1065,9 +1536,58 @@ class BrowserTabPool(private val context: Context) {
 
     // -- Release --
 
-    fun releaseAllTabs() {
+    /**
+     * [T-android-browser-release-all-semantics] Hand every tab back to the
+     * user WITHOUT destroying anything.
+     *
+     * This is the "Takeover" action: the user is watching a page the agent is
+     * driving (AgentBrowsingOverlay, "Minis is browsing · Takeover") and wants
+     * the wheel. Dropping `inUse` is the whole job — the page they are looking
+     * at must survive, so this deliberately does NOT release WebView
+     * resources. Destroying here would blank the screen at the exact moment
+     * the user asked to take control.
+     *
+     * Renamed from `releaseAllTabs()`, which promised far more than it did and
+     * was called from two sites wanting opposite things — see
+     * [destroyAllTabs].
+     */
+    fun releaseAllTabsToUser() {
         _tabs.value = _tabs.value.map { it.copy(inUse = false) }
         saveState()
+    }
+
+    /**
+     * [T-android-browser-release-all-semantics] Destroy every tab and free the
+     * native WebView memory.
+     *
+     * The bug this fixes: `releaseAllTabs()` only set `inUse = false`. Clearing
+     * a chat called it expecting "drop the browser resources this session
+     * spawned" (its call-site comment says exactly that, citing the iOS
+     * `deletePersistedData` + `releasePool` pair), but every WebView stayed
+     * alive — tens of MB each, for a session whose messages had just been
+     * deleted, with no way left to reach them. Nothing else would collect
+     * them either: idle eviction only runs at 15 minutes and the pool itself
+     * outlives the cleared chat.
+     *
+     * Mirrors [closeTab]'s teardown for each tab — release the WebView, forget
+     * the ownership bookkeeping — then empties the list in one publish so
+     * observers see a single transition rather than N.
+     */
+    fun destroyAllTabs() {
+        val doomed = _tabs.value
+        if (doomed.isEmpty()) return
+        // Publish the empty list FIRST: anything rendering a tab drops it
+        // before its WebView is torn down, so no composition is left holding
+        // a destroyed view.
+        _tabs.value = emptyList()
+        for (tab in doomed) {
+            releaseTabResources(tab)
+            tabOwner.remove(tab.id)
+            lastTabByOwner.entries.removeAll { it.value == tab.id }
+        }
+        savedURLs.clear()
+        saveState()
+        Log.i(TAG, "destroyed ${doomed.size} tab(s) and released their WebViews")
     }
 
     // -- Idle Eviction (call from a timer) --
@@ -1081,6 +1601,7 @@ class BrowserTabPool(private val context: Context) {
             val url = tab.manager.currentURL.value
             if (url.isNotEmpty()) savedURLs[tab.id] = url
             currentTabs.remove(tab)
+            releaseTabResources(tab)
             Log.i(TAG, "Evicted idle tab ${tab.id}")
         }
         if (toRemove.isNotEmpty()) {
@@ -1090,6 +1611,136 @@ class BrowserTabPool(private val context: Context) {
             }
             saveState()
         }
+    }
+
+    // -- Registry-driven reclaim  [T-android-browser-global-tab-cap] ---------
+    //
+    // Entry points for BrowserTabPoolRegistry to reclaim a tab in THIS pool on
+    // behalf of a different one. All three run on the main thread (their only
+    // callers are already inside `withContext(Dispatchers.Main)`), which is
+    // both what WebView.destroy() requires and what serialises them against
+    // acquireTab / newTab / closeTab without any lock of their own. The
+    // registry deliberately never takes a `tabLocks` mutex — see the
+    // concurrency note on BrowserTabPoolRegistry.
+
+    /**
+     * Tabs the registry preempted while they were `inUse`. The agent driving
+     * such a tab is mid-`execute` and will get whatever a destroyed WebView
+     * produces; the id parked here converts that into one intelligible,
+     * explicitly retryable message on its next call. Consumed on read so the
+     * retry itself sails through. Mirrors iOS `preemptedTabIds`.
+     */
+    private val preemptedTabIds = mutableSetOf<Int>()
+
+    /**
+     * If [id] was preempted, consume the flag and return the message the model
+     * should see. The wording names the cause and the remedy: a bare
+     * "WebView destroyed" would read as a bug and invite the model to give up,
+     * whereas the whole point of preemption is that retrying now works.
+     */
+    private fun consumePreemptNotice(id: Int): String? {
+        if (!preemptedTabIds.remove(id)) return null
+        return "Browser tab $id was reclaimed under memory pressure (another " +
+            "session needed the slot). Please retry — the page URL was saved " +
+            "and will be restored."
+    }
+
+    /**
+     * Actually release a tab's native resources. Dropping the Tab from [_tabs]
+     * is NOT enough: the WebView keeps its own renderer process alive until
+     * `destroy()`, so a gate that only shortened a list would be a gate over
+     * nothing. Detach-then-destroy follows the established recipe in
+     * `ui/preview/WebViewHolder.destroy()` — a WebView still parented to the
+     * browser sheet's container throws on destroy, and the pool's tabs ARE
+     * mounted there whenever the user has the sheet open.
+     *
+     * Main thread only (WebView's own requirement). Never throws: a failed
+     * teardown must not abort the caller's tab list mutation, or we would drop
+     * the tab from the pool's accounting while leaving it live — the worst of
+     * both.
+     */
+    private fun releaseTabResources(tab: Tab) {
+        tab.inUseGraceJob?.cancel()
+        tab.inUseGraceJob = null
+        tabLocks.remove(tab.id)
+        try {
+            val webView = tab.manager.webView
+            webView.stopLoading()
+            (webView.parent as? android.view.ViewGroup)?.removeView(webView)
+            webView.loadUrl("about:blank")
+            webView.destroy()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Tab ${tab.id} teardown failed: ${t.message}")
+        }
+    }
+
+    /** Shared bookkeeping after a tab leaves [_tabs] by reclaim. */
+    private fun forgetTab(id: Int, remaining: List<Tab>) {
+        tabOwner.remove(id)
+        lastTabByOwner.entries.removeAll { it.value == id }
+        if (remaining.isNotEmpty() && remaining.none { it.id == _selectedTabId.value }) {
+            _selectedTabId.value = remaining.first().id
+        }
+    }
+
+    override fun registrySnapshot(): List<BrowserTabPoolRegistry.TabInfo> =
+        _tabs.value.map { BrowserTabPoolRegistry.TabInfo(it.id, it.inUse, it.lastActivityDate) }
+
+    override fun evictTabForRegistry(id: Int) {
+        val currentTabs = _tabs.value.toMutableList()
+        val idx = currentTabs.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val tab = currentTabs[idx]
+        // Safety net: the registry picked this tab as idle, but it scanned a
+        // snapshot and the main thread may have handed the tab out since.
+        // Preempting something the registry believed was free would break the
+        // "idle first" guarantee silently, so decline instead.
+        if (tab.inUse) return
+        val url = tab.manager.currentURL.value
+        if (url.isNotEmpty()) savedURLs[id] = url
+        currentTabs.removeAt(idx)
+        _tabs.value = currentTabs
+        releaseTabResources(tab)
+        forgetTab(id, currentTabs)
+        saveState()
+        Log.i(TAG, "Evicted tab $id at registry request (url=${url.take(60)})")
+    }
+
+    override fun preemptTabForRegistry(id: Int) {
+        val currentTabs = _tabs.value.toMutableList()
+        val idx = currentTabs.indexOfFirst { it.id == id }
+        if (idx < 0) return
+        val tab = currentTabs[idx]
+        val url = tab.manager.currentURL.value
+        if (url.isNotEmpty()) savedURLs[id] = url
+        currentTabs.removeAt(idx)
+        _tabs.value = currentTabs
+        releaseTabResources(tab)
+        preemptedTabIds.add(id)
+        forgetTab(id, currentTabs)
+        saveState()
+        Log.i(TAG, "Preempted in-use tab $id at registry request (url=${url.take(60)})")
+    }
+
+    override fun evictAllIdleForMemoryPressure(): Int {
+        val currentTabs = _tabs.value.toMutableList()
+        val toRemove = currentTabs.filter { !it.inUse }
+        if (toRemove.isEmpty()) return 0
+        for (tab in toRemove) {
+            val url = tab.manager.currentURL.value
+            if (url.isNotEmpty()) savedURLs[tab.id] = url
+            currentTabs.remove(tab)
+            releaseTabResources(tab)
+            tabOwner.remove(tab.id)
+            lastTabByOwner.entries.removeAll { it.value == tab.id }
+        }
+        _tabs.value = currentTabs
+        if (currentTabs.isNotEmpty() && currentTabs.none { it.id == _selectedTabId.value }) {
+            _selectedTabId.value = currentTabs.first().id
+        }
+        saveState()
+        Log.i(TAG, "Evicted ${toRemove.size} idle tab(s) under memory pressure")
+        return toRemove.size
     }
 
     // -- Viewport API (mirrors iOS BrowserTabPool) --

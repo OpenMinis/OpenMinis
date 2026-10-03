@@ -184,19 +184,14 @@ struct ModelGroupsView: View {
         }
         .animation(.spring(response: 0.3), value: forceSyncToast)
         // [T-provider-group-swipe-actions] Swipe-Edit reuses the row's own
-        // destination. iOS 16 target, so the hidden-link form rather than
-        // `navigationDestination(item:)` (17+).
-        .background {
-            NavigationLink(isActive: Binding(
-                get: { editingGroupId != nil },
-                set: { if !$0 { editingGroupId = nil } }
-            )) {
-                if let id = editingGroupId,
-                   store.modelGroups.contains(where: { $0.id == id }) {
-                    ModelGroupDetailView(groupId: id)
-                }
-            } label: { EmptyView() }
-            .opacity(0)
+        // destination.
+        //
+        // [T-swipe-edit-white-screen] Value-driven: the destination is built
+        // from the id captured at push time rather than re-read from
+        // `editingGroupId`, which could read back empty mid-swipe-retraction
+        // and push a blank, inescapable screen. See SwipeEditDestination.swift.
+        .swipeEditDestination(item: $editingGroupId) { id in
+            ModelGroupDetailView(groupId: id)
         }
         // Names the group and spells out the consequence the store actually
         // has: removeGroup clears any default / voice / vision pointer aimed
@@ -374,11 +369,16 @@ private struct GroupRow: View {
                     modalityIcon(modality)
                 }
                 Spacer()
+                // AppLocalized, not a bare literal: `badge` takes a `String`,
+                // so `Text(text)` inside it is the runtime-value initializer
+                // and performs NO table lookup. A literal here renders English
+                // in every locale — caught on device in id, but it affected
+                // all of them equally.
                 if isPrimaryDefault {
-                    badge("Primary", color: .blue)
+                    badge(AppLocalized("Primary"), color: .blue)
                 }
                 if isSubDefault {
-                    badge("Sub", color: .orange)
+                    badge(AppLocalized("Sub"), color: .orange)
                 }
             }
 

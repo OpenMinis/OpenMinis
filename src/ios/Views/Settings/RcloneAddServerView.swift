@@ -12,9 +12,21 @@ private let logger = AppLogger(category: "Rclone")
 /// Step 3 exists because a server's root is rarely where backups belong. The
 /// user drills in the same way they would in a file manager, and the folder
 /// they are standing in becomes the destination.
+///
+/// [T-connect-and-save] Step 3 is SKIPPED when adding a server to restore
+/// FROM (`picksFolder == false`). There the stored path is only where browsing
+/// begins — the user then browses for the `.minisbak` itself — so asking them
+/// to commit to a folder first answered a question that did not matter, inside
+/// a picker that looked like it was saving something. Connecting is the whole
+/// job, and the button says so.
 struct RcloneAddServerView: View {
 
     var onAdded: () -> Void
+
+    /// Whether a successful connection continues into the folder browser
+    /// (backup destination: the folder is where files get WRITTEN) or ends the
+    /// flow (restore source: the folder is only where browsing STARTS).
+    var picksFolder: Bool = true
 
     @Environment(\.dismiss) private var dismiss
 
@@ -275,7 +287,11 @@ struct RcloneAddServerView: View {
                 // rather than being pushed in front of the label, so the row's
                 // text does not shift sideways when a connection starts.
                 Label {
-                    Text(isConnecting ? "Connecting…" : "Connect")
+                    // [T-connect-and-save] "Connect" alone did not say what
+                    // happens next, and what happened next differed by caller.
+                    Text(isConnecting ? String(localized: "Connecting…")
+                         : picksFolder ? String(localized: "Connect")
+                                       : String(localized: "Connect & Save"))
                         .foregroundStyle(isConnecting ? AnyShapeStyle(.secondary)
                                                       : AnyShapeStyle(.tint))
                 } icon: {
@@ -457,6 +473,16 @@ struct RcloneAddServerView: View {
                 try RcloneBridge.rpc("operations/list",
                                      ["fs": RcloneRemoteStore.fsSpec(for: r), "remote": ""])
             }.value
+
+            // [T-connect-and-save] Restore mode: the remote is already stored
+            // (the add above is what the connection test ran against), so a
+            // successful test IS the save. Leave without ever showing the
+            // folder browser.
+            guard picksFolder else {
+                onAdded()
+                dismiss()
+                return
+            }
 
             connectedRemote = r
             await list(dir: "")

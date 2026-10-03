@@ -10,6 +10,7 @@ import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.ChatRepository
+import com.openminis.app.data.session.SessionDeleter
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.ProviderFactory
@@ -23,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -177,40 +179,37 @@ class SessionListViewModel(
     val folders = MutableStateFlow<List<FolderEntity>>(emptyList())
 
     /**
-     * Which groups are collapsed. Never persisted to the DB, but mirrored to
-     * SharedPreferences like iOS mirrors it to UserDefaults — without this the
-     * accordion's "only one group open" state resets to ALL-EXPANDED on every
-     * cold start, which is exactly the wall of open groups the accordion
-     * exists to prevent. (getStringSet's return value must be copied, never
-     * mutated in place.)
+     * [T-android-groups-collapsed-on-launch] The one group that is open, or
+     * null when every group is collapsed.
+     *
+     * Deliberately NOT persisted. The user wants every group folded on each
+     * cold start and at most one open at a time, opened by their own tap. The
+     * previous model kept a persisted set of collapsed groups (the inverse:
+     * which groups are shut) plus a persisted "last expanded" id, and fell
+     * back to "first group not in the set" — so a cold start always opened a
+     * group the user had not just asked for, and a set that had never been
+     * written (fresh install, restore, a group created since) opened one too.
+     * A single nullable id makes both rules structural: null on launch means
+     * all folded, and one id cannot name two open groups.
+     *
+     * Kept in memory for the life of the process, so the open group survives
+     * going into a chat and back.
      */
-    private val uiPrefs = context.getSharedPreferences("session_list_ui", Context.MODE_PRIVATE)
-    val collapsedFolderIds = MutableStateFlow<Set<String>>(
-        uiPrefs.getStringSet("collapsedFolderIds", emptySet())?.toSet() ?: emptySet(),
-    )
+    val expandedFolderId = MutableStateFlow<String?>(null)
 
-    private fun setCollapsedFolders(ids: Set<String>) {
-        collapsedFolderIds.value = ids
-        uiPrefs.edit().putStringSet("collapsedFolderIds", ids).apply()
+    init {
+        // Drop the keys the persisted model wrote; nothing reads them now.
+        context.getSharedPreferences("session_list_ui", Context.MODE_PRIVATE)
+            .edit().remove("collapsedFolderIds").remove("lastExpandedFolderId").apply()
     }
 
     /**
-     * [T-android-group-accordion] Expand exactly [folderId] and collapse every
-     * other group.
-     *
-     * Groups are an accordion (iOS `ContentView.toggleFolder`): at most one is
-     * open at a time. `collapsedFolderIds` stores the INVERSE — the ids that
-     * are shut — so "expand only this" means "collapse all, minus this one".
-     * Removing a single id from the set, which the callers used to do, expands
-     * the target while leaving whatever else was already open still open, and
-     * that is how several groups ended up unfolded at once.
-     *
-     * The mini-bar depends on this invariant: it resolves the floating header
-     * with `firstOrNull { !isCollapsed }`, which only names the right group
-     * while there is just one.
+     * Expand exactly [folderId]; any other open group closes (accordion, as
+     * iOS `ContentView.toggleFolder`). Used where the app itself must show a
+     * group's rows — a group just created from a selection.
      */
     private fun expandOnly(folderId: String) {
-        setCollapsedFolders(folders.value.map { it.id }.toSet() - folderId)
+        expandedFolderId.value = folderId
     }
 
     /** Non-null while the group picker is open. */
@@ -312,7 +311,13 @@ class SessionListViewModel(
                 started.await()
                 runCatching { unsub() }
             }
-            chatRepository.observeSessions().collect {
+            chatRepository.observeSessions().collect { rows ->
+                // [T-p1-delegate-task] Child sessions never appear in the home
+                // list (design §3.2) — filtered HERE, in the UI layer, not in the
+                // DAO: sync, backup and the debug RPC must still see them. Done
+                // at the source rather than only in displayedSessions so group
+                // counts, select-all and the new-session detector agree.
+                val it = rows.filter { !it.isChild }
                 _allSessions.value = it
                 if (!_isInitialLoadComplete.value) _isInitialLoadComplete.value = true
                 detectNewTopSession(it)
@@ -336,16 +341,28 @@ class SessionListViewModel(
                 .debounce(300)
                 .collect { (q, active) ->
                     if (active && q.isNotBlank()) {
-                        val results = chatRepository.searchSessions(q)
-                        searchResults.value = results
-                        // Compute per-session content snippets off the main
-                        // thread. Sessions whose title already matches don't
-                        // need a snippet — we only walk messages when the
-                        // title doesn't contain the query.
-                        val snips = withContext(Dispatchers.IO) {
-                            buildContentSnippets(results, q)
+                        // [T-android-search-visible-only] One query returns each
+                        // result with the line that shows why it matched (iOS
+                        // bbd21900a / 6b0ee14c1). Title matches keep their line
+                        // too, as on iOS; a title-only match has none and the
+                        // row falls back to its normal preview.
+                        // [T-android-search-blob-cap] A failing query must not
+                        // take the app down: this collector runs in
+                        // viewModelScope, where an uncaught SQLiteException
+                        // (e.g. a row past the 2 MB CursorWindow) crashed the
+                        // process on every search for that word.
+                        val hits = withContext(Dispatchers.IO) {
+                            try {
+                                chatRepository.searchSessionsWithHits(q)
+                            } catch (e: android.database.sqlite.SQLiteException) {
+                                com.openminis.app.logging.AppLogger.error(
+                                    "SessionList", "[Search] query failed: ${e.javaClass.simpleName}: ${e.message}",
+                                )
+                                emptyList()
+                            }
                         }
-                        searchSnippets.value = snips
+                        searchResults.value = hits.map { it.session }
+                        searchSnippets.value = hits.mapNotNull { h -> h.snippet?.let { h.session.id to it } }.toMap()
                     } else {
                         searchResults.value = emptyList()
                         searchSnippets.value = emptyMap()
@@ -386,23 +403,17 @@ class SessionListViewModel(
     fun deleteSelected() {
         val ids = selectedIds.value.toList()
         viewModelScope.launch {
-            ids.forEach {
-                chatRepository.deleteSession(it)
-                ChatViewModelStore.release(it)
-                // [T-android-session-paused-badge] Drop badges for the
-                // deleted session so persisted PAUSED entries don't leak
-                // forever in SharedPreferences.
-                com.openminis.app.service.SessionBadgeStore.clear(it)
-            }
+            // [T-android-child-session-delete-storage] One funnel: DB rows,
+            // files, ViewModel, badges, running helper jobs — for the session
+            // AND every hidden child session under it.
+            ids.forEach { SessionDeleter.deleteTree(context, chatRepository, it, "list-multi") }
         }
         clearSelection()
     }
 
     fun deleteSession(id: String) {
         viewModelScope.launch {
-            chatRepository.deleteSession(id)
-            ChatViewModelStore.release(id)
-            com.openminis.app.service.SessionBadgeStore.clear(id)
+            SessionDeleter.deleteTree(context, chatRepository, id, "list-single")
         }
     }
 
@@ -412,7 +423,7 @@ class SessionListViewModel(
     /**
      * True only for a session filed into a group that EXISTS locally. A dangling
      * folder_id is displayed as ungrouped, so treating it as filed would offer
-     * "暂不分组" for a group the user cannot see — and label the action 更换 when
+     * "暂不分组" for a group the user cannot see — and label the action "Change" when
      * there is nothing to change from. Mirrors partitionByFolder's presence test.
      */
     private fun isFiled(session: ChatSessionEntity?): Boolean {
@@ -596,7 +607,11 @@ class SessionListViewModel(
             // [T-android-keyless-provider-selection] usableApiKey: a keyless
             // self-hosted provider is a valid candidate, and `loadApiKey`
             // silently skipped it here. See QuickTestSheet for the rationale.
-            var apiKey = providerRepository.usableApiKey(instance) ?: continue
+            // [T-android-copilot-not-connected] `?: continue` dropped any OAuth
+            // provider that keeps no API key — Copilot stores its credential
+            // under its own keys — so it was never a candidate here.
+            var apiKey = providerRepository.usableApiKey(instance)
+                ?: if (providerRepository.hasAnyCredential(instance)) "" else continue
             if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
                 try {
                     val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
@@ -610,7 +625,7 @@ class SessionListViewModel(
                 }
             }
             val provider = try {
-                ProviderFactory.create(instance, apiKey, entry.model, context)
+                ProviderFactory.create(instance, apiKey, entry.model, context, overrides = entry.overrides)
             } catch (e: Exception) {
                 Log.w(TAG, "GroupSuggest provider creation failed for ${entry.model.displayName}: ${e.message}")
                 continue
@@ -688,18 +703,11 @@ class SessionListViewModel(
     }
 
     /**
-     * Accordion toggle: expanding one group collapses the rest, so the list
-     * never turns into a wall of simultaneously-open groups.
+     * Accordion toggle: tapping a closed group opens it and closes whichever
+     * was open; tapping the open group closes it, leaving all folded.
      */
     fun toggleFolderCollapsed(folderId: String) {
-        val collapsed = collapsedFolderIds.value
-        setCollapsedFolders(
-            if (folderId in collapsed) {
-                folders.value.map { it.id }.toSet() - folderId
-            } else {
-                collapsed + folderId
-            },
-        )
+        expandedFolderId.value = if (expandedFolderId.value == folderId) null else folderId
     }
 
     /**
@@ -715,16 +723,12 @@ class SessionListViewModel(
         viewModelScope.launch {
             val memberIds = chatRepository.sessionIdsInFolder(folderId)
             for (id in memberIds) {
-                chatRepository.deleteSession(id)
-                ChatViewModelStore.release(id)
-                com.openminis.app.service.SessionBadgeStore.clear(id)
+                SessionDeleter.deleteTree(context, chatRepository, id, "folder-delete")
             }
             chatRepository.dissolveFolder(folderId)
-            // Just drop the dead id — do NOT use expandOnly here. The folder no
-            // longer exists, so there is nothing to expand; re-deriving the set
-            // from the surviving folders would leave one of them open purely
-            // because another was deleted.
-            setCollapsedFolders(collapsedFolderIds.value - folderId)
+            // The folder no longer exists: if it was the open one, everything
+            // is folded now. Never open another group in its place.
+            expandedFolderId.compareAndSet(folderId, null)
             AppLogger.info(
                 TAG,
                 "[Group] deleted folder ${folderId.take(8)} with ${memberIds.size} session(s)",
@@ -749,10 +753,26 @@ class SessionListViewModel(
         viewModelScope.launch {
             val freed = chatRepository.dissolveFolder(folderId)
             // Stale-id cleanup only — see deleteFolderWithSessions.
-            setCollapsedFolders(collapsedFolderIds.value - folderId)
+            expandedFolderId.compareAndSet(folderId, null)
             AppLogger.info(TAG, "[Group] dissolved ${folderId.take(8)}, freed ${freed.size} session(s)")
         }
     }
+
+    /**
+     * [T-android-group-picker-recent] Newest member activity per group: the
+     * latest `updatedAt` of the sessions filed in it (a new message, a rename).
+     * Groups with no members are absent. Only the Move to Group picker reads
+     * it — the session list keeps its own group order.
+     */
+    val folderLastActivity: StateFlow<Map<String, Long>> =
+        _allSessions.map { sessions ->
+            buildMap {
+                for (s in sessions) {
+                    val fid = s.folderId ?: continue
+                    if (s.updatedAt > (get(fid) ?: Long.MIN_VALUE)) put(fid, s.updatedAt)
+                }
+            }
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     /** Member count per group, for the picker subtitles and group cards. */
     val folderMemberCounts: StateFlow<Map<String, Int>> =
@@ -841,132 +861,73 @@ class SessionListViewModel(
                     append(com.openminis.app.ui.chat.titleLanguageDirective())
                 }
 
-                // Build candidate list: session's model first, then all others.
-                // T334: filter out non-text-output models (tts/voiceclone/voicedesign/image/video/audio-only)
-                // and models whose id obviously names a non-chat capability — they either reject the
-                // chat/completions schema with HTTP 400 or stream nothing useful, masking the real result
-                // with a misleading "Param Incorrect" tail error.
-                val allEntries = providerRepository.allVisibleEntries()
-                val titleEligible = allEntries.filter { entry ->
-                    val outs = entry.model.outputModalities
-                    val outputsText = outs == null || outs.isEmpty() || outs.contains("text")
-                    val idLower = entry.model.id.lowercase()
-                    val nonChatId = listOf("tts", "voiceclone", "voicedesign", "embedding", "embed-", "whisper", "image", "video")
-                        .any { idLower.contains(it) }
-                    outputsText && !nonChatId
-                }
-                // [T-android-regenerate-title-submodel] Priority: dedicated
-                // title sub-model (defaultSubGroupId's first enabled member) >
-                // session's bound primary model > every other eligible model.
-                // Aligns the manual Regenerate path with the auto-title path
-                // (ChatViewModel.resolveTitleProvider) and iOS resolveSubEntry —
-                // previously the sub-model was ignored here, so users who
-                // configured a cheap/fast title model still paid for the primary.
-                // The sub-entry must pass the same T334 modality filter; when no
-                // sub-group is configured / all members disabled it's null and we
-                // fall through to the existing primary-first ordering.
-                val subEntry = providerRepository.resolveTitleSubEntry()
-                    ?.takeIf { sub -> titleEligible.any { it == sub } }
-                val primary = titleEligible.firstOrNull { it.model.id == session.modelId }
-                    ?.takeIf { it != subEntry }
-                val candidates = (listOfNotNull(subEntry, primary) +
-                    titleEligible.filter { it != subEntry && it != primary })
-
-                var lastError: Exception? = null
-                for (entry in candidates) {
-                    val instance = providerRepository.instance(entry.providerInstanceId) ?: continue
-                    // [T-android-keyless-provider-selection] usableApiKey —
-                    // see the note in runGroupSuggestion above.
-                    var apiKey = providerRepository.usableApiKey(instance) ?: continue
-
-                    // Refresh OAuth token if needed
-                    if (instance.credentialType == com.openminis.app.data.model.ProviderCredential.oauth) {
-                        try {
-                            val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                            val freshToken = manager?.validAccessToken()
-                            if (freshToken != null && freshToken != apiKey) {
-                                providerRepository.saveApiKey(instance.id, freshToken)
-                                apiKey = freshToken
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "OAuth refresh failed: ${e.message}")
-                        }
-                    }
-
-                    val provider = try {
-                        ProviderFactory.create(instance, apiKey, entry.model, context)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Provider creation failed for ${entry.model.displayName}: ${e.message}")
-                        continue
-                    }
-
+                // [T-titlegen-group-order] Candidates in iOS order (title sub
+                // group → the session's own model/group → default primary
+                // group → every other eligible model), each GROUP walked whole
+                // in the order the agent loop falls back through it — not just
+                // its first member. T334 eligibility and availability are
+                // applied inside. See TitleCandidates.
+                val candidates = com.openminis.app.ui.chat.TitleCandidates.forSession(
+                    providerRepository,
+                    sessionId = id,
+                    primary = com.openminis.app.ui.chat.TitleCandidates.PrimarySource.parse(session.modelBinding),
+                    sessionModelId = session.modelId,
+                )
+                val written = com.openminis.app.ui.chat.TitleCandidates.walk(candidates, origin = origin) { entry ->
+                    // [T-android-opencode-subtask-session] Regenerate is this
+                    // chat's traffic: tagged with the chat's id so an OpenCode
+                    // Go title model gets `x-opencode-session`.
+                    val provider = com.openminis.app.ui.chat.TitleCandidates.providerFor(
+                        providerRepository, context, entry, sessionId = id,
+                    ) ?: return@walk null
                     AppLogger.info(
                         "TitleGen",
                         "dispatch origin=$origin session=${id.take(8)} model=${entry.model.id}",
                     )
-
-                    try {
-                        // T334: reasoning models burn the entire token budget on hidden thinking
-                        // before emitting any content. With maxTokens=100 every reasoning candidate
-                        // returned `finish_reason=length` with empty text, then the loop silently
-                        // moved on. Give reasoning models a real budget (1024) so they can finish
-                        // thinking and still emit the JSON title.
-                        val titleMaxTokens = if (entry.model.supportsReasoning == true) 2048 else 100
-                        // [T-android-titlegen-reasoning] Explicitly disable
-                        // thinking (thinkingLevel = OFF), matching iOS
-                        // callSubModelForTitle and the auto-title path. The
-                        // provider's injectThinkingParams honors OFF (e.g.
-                        // DeepSeek V4 → {"thinking":{"type":"disabled"}}), so a
-                        // reasoning model doesn't spend the budget on hidden
-                        // thinking; the T334 maxTokens bump above stays as a
-                        // safety net for models where OFF is a no-op (Qwen3).
-                        val response = provider.sendMessage(
-                            messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-                            // [T-android-titlegen-systemprompt-unify] Shared with
-                            // the auto path via TITLE_GEN_SYSTEM_PROMPT (iOS-aligned
-                            // wording). Passed bare — AnthropicProvider handles the
-                            // OAuth Claude Code prefix at the provider layer.
-                            systemPrompt = com.openminis.app.ui.chat.TITLE_GEN_SYSTEM_PROMPT,
-                            maxTokens = titleMaxTokens,
-                            // [T-android-titlegen-temperature] null (not 0.3) so
-                            // buildRequestBody omits the field — the gpt-5.x
-                            // family only accepts temperature=1 and 400s on any
-                            // other value, which would silently skip that
-                            // candidate. Aligns with the auto-title path and iOS
-                            // AIChatViewModel.swift:11244.
-                            temperature = null,
-                            thinkingLevel = ThinkingLevel.OFF,
-                        )
-                        val (title, category) = parseTitleResponse(response.text)
-                        if (title.isNotEmpty()) {
-                            chatRepository.updateSessionTitleAndCategory(id, title, category)
-                            AppLogger.info(
-                                "TitleGen",
-                                "outcome=set origin=$origin session=${id.take(8)} " +
-                                    "model=${entry.model.id} elapsedMs=${System.currentTimeMillis() - startedAt}",
-                            )
-                            return true
-                        }
-                        // T334: previously this empty-result path was silent — only the *last*
-                        // failing candidate's exception got reported, masking budget exhaustion
-                        // on reasoning models. Surface it explicitly so logs show the real cause.
+                    // T334: reasoning models burn the whole budget on hidden
+                    // thinking before emitting content; give them room.
+                    val titleMaxTokens = if (entry.model.supportsReasoning == true) 2048 else 100
+                    // [T-android-titlegen-reasoning] thinking OFF, matching iOS
+                    // callSubModelForTitle and the auto-title path; the T334
+                    // budget bump stays as a net where OFF is a no-op (Qwen3).
+                    val response = provider.sendMessage(
+                        messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
+                        // [T-android-titlegen-systemprompt-unify] Shared with the
+                        // auto path; passed bare (the OAuth Claude Code prefix is
+                        // handled at the provider layer).
+                        systemPrompt = com.openminis.app.ui.chat.TITLE_GEN_SYSTEM_PROMPT,
+                        maxTokens = titleMaxTokens,
+                        // [T-android-titlegen-temperature] null so the field is
+                        // omitted — gpt-5.x 400s on anything but 1.
+                        temperature = null,
+                        thinkingLevel = ThinkingLevel.OFF,
+                    )
+                    val (title, category) = parseTitleResponse(response.text)
+                    if (title.isEmpty()) {
+                        // T334: an empty result is a failure of THIS candidate
+                        // (often budget exhaustion on a reasoning model) — log
+                        // why and let the walk try the next one.
                         Log.w(
                             TAG,
                             "Title regen empty from ${entry.model.displayName}: " +
                                 "stopReason=${response.stopReason} textLen=${response.text.length} " +
                                 "maxTokens=$titleMaxTokens supportsReasoning=${entry.model.supportsReasoning}",
                         )
-                    } catch (e: Exception) {
-                        lastError = e
-                        Log.w(TAG, "Title regen via ${entry.model.displayName} failed: ${e.message}")
-                        // Continue to next candidate on rate-limit / provider error
-                        continue
+                        return@walk null
                     }
+                    chatRepository.updateSessionTitleAndCategory(id, title, category)
+                    AppLogger.info(
+                        "TitleGen",
+                        "outcome=set origin=$origin session=${id.take(8)} " +
+                            "model=${entry.model.id} elapsedMs=${System.currentTimeMillis() - startedAt}",
+                    )
+                    true
                 }
+                if (written == true) return true
             AppLogger.warning(
                 "TitleGen",
                 "outcome=no-title origin=$origin session=${id.take(8)} " +
-                    "reason=all-candidates-exhausted lastError=${lastError?.javaClass?.simpleName} " +
+                    "reason=all-candidates-exhausted " +
                     "elapsedMs=${System.currentTimeMillis() - startedAt}",
             )
         } catch (e: Exception) {
@@ -1154,43 +1115,4 @@ class SessionListViewModel(
     }
 
     fun hasProviders(): Boolean = providerRepository.instances.isNotEmpty()
-
-    /**
-     * For every session whose title does NOT contain [query] (case-insensitive),
-     * scan its messages to find the first hit in extracted text content and
-     * build a ~100-char snippet around it. Sessions with no content hit are
-     * omitted from the result map — the row will fall back to its existing
-     * lastMessage preview without highlighting.
-     *
-     * Runs on Dispatchers.IO; caller is responsible for thread switching.
-     */
-    private suspend fun buildContentSnippets(
-        sessions: List<ChatSessionEntity>,
-        query: String,
-    ): Map<String, String> {
-        if (query.isBlank() || sessions.isEmpty()) return emptyMap()
-        val q = query.lowercase()
-        val out = HashMap<String, String>()
-        for (session in sessions) {
-            val title = session.title.orEmpty()
-            if (title.lowercase().contains(q)) continue
-            val msgs = chatRepository.loadMessages(session.id)
-            var foundSnippet: String? = null
-            for (m in msgs) {
-                val text = extractText(m.partsJson)
-                val pos = text.lowercase().indexOf(q)
-                if (pos < 0) continue
-                val radius = 50
-                val start = (pos - radius).coerceAtLeast(0)
-                val end = (pos + query.length + radius).coerceAtMost(text.length)
-                val core = text.substring(start, end).replace('\n', ' ').replace('\r', ' ')
-                val prefix = if (start > 0) "…" else ""
-                val suffix = if (end < text.length) "…" else ""
-                foundSnippet = prefix + core + suffix
-                break
-            }
-            if (foundSnippet != null) out[session.id] = foundSnippet
-        }
-        return out
-    }
 }

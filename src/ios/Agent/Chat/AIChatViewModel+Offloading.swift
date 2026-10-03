@@ -10,6 +10,70 @@ extension AIChatViewModel {
 
     // MARK: - Context Window Offloading
 
+    /// Marker that opens every offload stub written into `agentHistory`.
+    ///
+    /// [T-offload-placeholder-write-guard issue #374] Shared with the write-tool
+    /// gate in +ConcurrentTools.swift, which refuses a file_write / file_edit
+    /// whose payload IS a stub: offloading rewrites a historical file_write's
+    /// `content` argument to this text, so a call re-issued from that rewritten
+    /// history would put the ~130-char placeholder on disk over the real file.
+    /// Mirrors Android `ContextOffload.OFFLOADED_PREFIX`.
+    static let offloadedStubPrefix = "[CONTEXT OFFLOADED]"
+
+    /// [T-offload-stub-system-reminder issue #374] Marker for the current stub
+    /// format. The pruned-argument notice is now wrapped in a
+    /// `<system-reminder>` envelope carrying this tag, so the model reads it as
+    /// a meta-instruction about a REMOVED argument rather than as content it may
+    /// copy into its next call. The old plain-text form read like content
+    /// ("Content (~N tokens…) saved to: …"), which is exactly why a model
+    /// re-issuing its own earlier `file_write` pasted the placeholder back in.
+    ///
+    /// Mirrors Android `ContextOffload.SYSTEM_NOTICE_TAG`.
+    static let offloadedStubNoticeTag = "[Minis System Notice]"
+
+    /// Envelope opener for the current stub format. Kept separate from the tag
+    /// so detection can require BOTH (a bare `<system-reminder>` is a legitimate
+    /// thing for other subsystems to emit — see the persona reminder).
+    static let offloadedStubEnvelope = "<system-reminder>"
+
+    /// True when `value` is an offload placeholder in EITHER format.
+    ///
+    /// Both are recognised on purpose and neither branch may be dropped:
+    ///   • the `<system-reminder>` + `[Minis System Notice]` form is what the
+    ///     offloader writes now;
+    ///   • the bare `[CONTEXT OFFLOADED]` form is still present in every
+    ///     session persisted before this change, and in iCloud-synced history
+    ///     from a peer on an older build. Those stubs keep arriving for as long
+    ///     as such histories exist, so the legacy test is not transitional.
+    ///
+    /// Leading whitespace is trimmed first: a provider may prefix a newline.
+    /// The test is anchored at the start, not `contains`, so prose that merely
+    /// discusses the marker is still written normally.
+    ///
+    /// Mirrors Android `ContextOffload.isOffloadPlaceholder`.
+    static func isOffloadedStub(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(offloadedStubPrefix) { return true }
+        return trimmed.hasPrefix(offloadedStubEnvelope)
+            && trimmed.contains(offloadedStubNoticeTag)
+    }
+
+    /// The pruned-argument notice handed to the model in place of a `file_write`
+    /// / `file_edit` payload that was moved to disk. Mirrors Android
+    /// `ContextOffload.stub`.
+    static func offloadedStubNotice(tokens: Int, bytes: Int, linuxPath: String) -> String {
+        """
+        \(offloadedStubEnvelope)
+        \(offloadedStubNoticeTag) The original content (~\(tokens) tokens, \(bytes) bytes) \
+        of this tool argument has been pruned to save context and offloaded to: \(linuxPath)
+
+        CRITICAL: This is a placeholder notice, NOT actual file content. NEVER pass this \
+        placeholder or reuse it in subsequent file_write or file_edit calls. If you need the \
+        original content, call file_read on the offloaded path first.
+        </system-reminder>
+        """
+    }
+
     /// Save context content to disk for later retrieval via file_read.
     /// Returns the Linux-visible path where the file was saved.
     /// Derive a short unique suffix from a tool ID for use in file names.
@@ -131,6 +195,22 @@ extension AIChatViewModel {
         return false
     }
 
+    /// [T-offload-readback-loop] GH#343. True when `path` points into the
+    /// offload store — i.e. reading it returns content the offloader itself
+    /// wrote, not new information from the world.
+    ///
+    /// Deliberately narrower than `isPersistentMinisPath`, which also accepts
+    /// workspace / browser / attachments. Those are legitimate sources whose
+    /// results SHOULD be offloadable when they are large; only the offload
+    /// directory creates the read → offload → read cycle.
+    ///
+    /// `static` and `nonisolated` so the tool layer can call it while building
+    /// a result, off the main actor.
+    nonisolated static func isOffloadStorePath(_ path: String) -> Bool {
+        let p = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.hasPrefix("/var/minis/offloads/") || p.hasPrefix("minis://offloads/")
+    }
+
     /// Extract the original accessible path of an image produced by a known
     /// tool, so the placeholder can reference it as a semantic hint (and,
     /// when the path is persistent, skip writing a snapshot copy).
@@ -197,9 +277,9 @@ extension AIChatViewModel {
         for msg in agentHistory {
             for part in msg.parts {
                 switch part {
-                case .toolUse(let id, let name, let input):
+                case .toolUse(let id, let name, let input, _):
                     toolCallById[id] = (name: name, input: input)
-                case .toolResult(_, _, _, _, let imgData, _, _, _):
+                case .toolResult(_, _, _, _, let imgData, _, _, _, _):
                     if imgData != nil { totalImages += 1 }
                 case .imageData:
                     totalImages += 1
@@ -225,7 +305,7 @@ extension AIChatViewModel {
             for pi in parts.indices {
                 if evicted >= evictCount { break }
                 switch parts[pi] {
-                case .toolResult(let id, let name, let content, let isError, let imgData, let mime, let pageURL, _):
+                case .toolResult(let id, let name, let content, let isError, let imgData, let mime, let pageURL, _, let isReadback):
                     guard let data = imgData else { continue }
 
                     let call = toolCallById[id]
@@ -254,7 +334,9 @@ extension AIChatViewModel {
                     let newContent = content.isEmpty ? placeholder : "\(content)\n\n\(placeholder)"
                     newParts[pi] = .toolResult(
                         id: id, name: name, content: newContent,
-                        isError: isError, imageData: nil, imageMimeType: nil, pageURL: pageURL
+                        isError: isError, imageData: nil, imageMimeType: nil, pageURL: pageURL,
+                        // [T-offload-readback-loop] Carry the flag across the rebuild.
+                        imageLinuxPath: nil, isOffloadReadback: isReadback
                     )
                     mutated = true
                     evicted += 1
@@ -328,12 +410,12 @@ extension AIChatViewModel {
                     partChars = t.count
                     let isSummary = t.contains("<context-summary>")
                     partKind = isSummary ? "SUMMARY" : "text"
-                case .toolUse(_, let name, let input):
+                case .toolUse(_, let name, let input, _):
                     if let data = try? JSONSerialization.data(withJSONObject: input) {
                         partChars = data.count
                     }
                     partKind = "tu:\(name)"
-                case .toolResult(_, _, let content, _, let imgData, _, _, _):
+                case .toolResult(_, _, let content, _, let imgData, _, _, _, _):
                     partChars = content.count
                     if let imgData = imgData {
                         let it = BPETokenizer.shared.countImageTokens(imgData)
@@ -361,8 +443,8 @@ extension AIChatViewModel {
         let totalTokens = Int(Double(totalChars) / 3.5) + imageTokens
         biggest.sort { $0.chars > $1.chars }
         let top = biggest.prefix(5).map { "[\($0.msgIdx)\($0.kind)=\($0.chars)c]" }.joined(separator: " ")
-        logger.info("[CompactDiag] estimate caller=\(caller) slice=\(slice.count) total=\(totalTokens)tok (\(totalChars)chars+\(imageTokens)imgTok) bigParts(≥2kc): \(top)")
-        logger.info("[CompactDiag] estimate perMsg: \(perMsg.joined(separator: " "))")
+        logger.verbose("[CompactDiag] estimate caller=\(caller) slice=\(slice.count) total=\(totalTokens)tok (\(totalChars)chars+\(imageTokens)imgTok) bigParts(≥2kc): \(top)")
+        logger.verbose("[CompactDiag] estimate perMsg: \(perMsg.joined(separator: " "))")
         return totalTokens
     }
 
@@ -370,8 +452,12 @@ extension AIChatViewModel {
     ///   regardless of current context usage. Used after compaction to unconditionally slim down
     ///   the kept messages.
     func offloadContextIfNeeded(model: LLMModel, lastContextTokens: Int, force: Bool = false) {
-        let contextWindow = effectiveContextWindow(for: model)
-        let policy = ContextPolicy(contextWindow: contextWindow)
+        // [T-ctx-user-cap] Build the policy the same way the capacity guards do,
+        // or a 32K user cap lands in the native small-window tier and disables
+        // offload (offloadThreshold == 0) for a model with ample room for it.
+        let resolved = resolvedContextWindow(for: model)
+        let contextWindow = resolved.window
+        let policy = ContextPolicy(contextWindow: contextWindow, isUserCap: resolved.isUserCap)
 
         // Policy disables offloading for this context window tier
         if !force && policy.offloadThreshold == 0 {
@@ -440,14 +526,49 @@ extension AIChatViewModel {
         var candidates: [OffloadCandidate] = []
         var skippedAlreadyOffloaded = 0
         var skippedTooSmall = 0
+        /// [T-offload-readback-loop] Parts skipped because they are the
+        /// offloader's own output read back in. Counted separately from
+        /// `skippedAlreadyOffloaded` so the log distinguishes "we already
+        /// shrank this" from "this came back out of the store" — the second is
+        /// the loop, and it used to be silent.
+        var skippedOffloadReadback = 0
+        /// [T-offload-toolinput-guards issue #374] Tool-use ids that already have
+        /// a matching tool_result anywhere in history — i.e. calls that have
+        /// demonstrably finished. Only their arguments may be pruned. Collected
+        /// over the WHOLE history, not `candidateRange`, because a call inside
+        /// the range is answered by a result that often sits outside it.
+        var skippedUnanswered = 0
+        var answeredToolUseIds: Set<String> = []
+        for msg in agentHistory {
+            for part in msg.parts {
+                if case .toolResult(let id, _, _, _, _, _, _, _, _) = part {
+                    answeredToolUseIds.insert(id)
+                }
+            }
+        }
 
         for msgIdx in candidateRange {
             let msg = agentHistory[msgIdx]
             for (partIdx, part) in msg.parts.enumerated() {
                 switch part {
-                case .toolResult(let id, let name, let content, _, let imgData, _, _, _):
-                    // Skip already-offloaded parts
-                    if content.hasPrefix("[CONTEXT OFFLOADED]") {
+                case .toolResult(let id, let name, let content, _, let imgData, _, _, _, let isReadback):
+                    // [T-offload-readback-loop] GH#343. Skip content this
+                    // offloader produced and `file_read` merely fetched back.
+                    //
+                    // The prefix test below cannot catch it: a read-back carries
+                    // the ORIGINAL payload, so it has no stub prefix and looked
+                    // like brand-new material. Offloading it wrote a second file
+                    // whose stub the model read, and round it went. Checked
+                    // first because it is the cheaper and more specific test.
+                    if isReadback {
+                        skippedOffloadReadback += 1
+                        continue
+                    }
+                    // Skip already-offloaded parts. Routed through the shared
+                    // predicate so the new <system-reminder> stub is recognised
+                    // too — a bare hasPrefix check on the legacy marker silently
+                    // stopped matching when the format changed.
+                    if Self.isOffloadedStub(content) {
                         skippedAlreadyOffloaded += 1
                         continue
                     }
@@ -463,9 +584,43 @@ extension AIChatViewModel {
                     let bytes = content.utf8.count + (imgData?.count ?? 0)
                     candidates.append(OffloadCandidate(msgIdx: msgIdx, partIdx: partIdx, tokens: tokens, bytes: bytes, toolId: id, toolName: name))
 
-                case .toolUse(let id, let name, let input):
+                case .toolUse(let id, let name, let input, let isOffloadedArgument):
                     // Offload large file_write/file_edit tool inputs
                     guard name == "file_write" || name == "file_edit" else { continue }
+
+                    // [T-offload-toolinput-guards issue #374] The two guards the
+                    // `.toolResult` branch above has always had, absent here
+                    // until now.
+                    //
+                    // 1. Already pruned. The flag is authoritative (only the
+                    //    offloader sets it); the text test covers history
+                    //    persisted before the flag existed, and stubs arriving
+                    //    from an older peer over iCloud sync. Re-pruning one
+                    //    would write a second file whose notice replaces the
+                    //    first, losing the path to the real content.
+                    if isOffloadedArgument {
+                        skippedAlreadyOffloaded += 1
+                        continue
+                    }
+                    if let content = input["content"] as? String, Self.isOffloadedStub(content) {
+                        skippedAlreadyOffloaded += 1
+                        continue
+                    }
+
+                    // 2. Not yet answered. Pruning the argument of a call that
+                    //    has no tool_result rewrites something still in flight.
+                    //    Today both offload triggers run at the top of a loop
+                    //    iteration, outside the append->dispatch window, and
+                    //    dispatch reads its arguments from the freshly parsed
+                    //    stream rather than from history — so this cannot bite
+                    //    yet. It is asserted here anyway so the invariant is
+                    //    local to the scanner instead of resting on call-site
+                    //    ordering a later refactor could change silently.
+                    guard answeredToolUseIds.contains(id) else {
+                        skippedUnanswered += 1
+                        continue
+                    }
+
                     if let content = input["content"] as? String, content.count > 500 {
                         let tokens = BPETokenizer.shared.countPartTokens(part)
                         let bytes = content.utf8.count
@@ -491,7 +646,7 @@ extension AIChatViewModel {
 
         let totalCandidateTokens = candidates.reduce(0) { $0 + $1.tokens }
         logger.info("  Candidates: \(candidates.count) parts (~\(totalCandidateTokens) tokens total)")
-        logger.info("  Skipped: \(skippedAlreadyOffloaded) already offloaded, \(skippedTooSmall) too small")
+        logger.info("  Skipped: \(skippedAlreadyOffloaded) already offloaded, \(skippedOffloadReadback) offload readback, \(skippedTooSmall) too small, \(skippedUnanswered) unanswered tool calls")
         if !candidates.isEmpty {
             let top = candidates.prefix(5)
             for (i, c) in top.enumerated() {
@@ -512,7 +667,7 @@ extension AIChatViewModel {
             var linuxPath = ""
 
             switch part {
-            case .toolResult(let id, let name, let content, let isError, let imgData, let imgMime, _, _):
+            case .toolResult(let id, let name, let content, let isError, let imgData, let imgMime, _, _, _):
                 // Offload text content
                 if content.count > 500 {
                     linuxPath = offloadContextContent(content, toolId: id, toolName: name)
@@ -523,24 +678,31 @@ extension AIChatViewModel {
                     if linuxPath.isEmpty { linuxPath = imgPath }
                 }
 
-                let stub = "[CONTEXT OFFLOADED] Content (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
+                let stub = "\(Self.offloadedStubPrefix) Content (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
                 agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .toolResult(
                     id: id, name: name, content: stub, isError: isError
                 )
 
-            case .toolUse(let id, let name, let input):
+            case .toolUse(let id, let name, let input, _):
                 if let content = input["content"] as? String {
                     linuxPath = offloadContextContent(content, toolId: id, toolName: name)
                 }
                 var newInput = input
-                newInput["content"] = "[CONTEXT OFFLOADED] Content (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
+                // [T-offload-stub-system-reminder issue #374] A pruned ARGUMENT
+                // gets the <system-reminder> notice, not the old content-shaped
+                // text: this value is read back by the model as its own prior
+                // call, and the old wording invited it to copy the placeholder
+                // into the next write.
+                newInput["content"] = Self.offloadedStubNotice(
+                    tokens: candidate.tokens, bytes: candidate.bytes, linuxPath: linuxPath
+                )
                 agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .toolUse(
-                    id: id, name: name, input: newInput
+                    id: id, name: name, input: newInput, isOffloadedArgument: true
                 )
 
             case .imageData(let data, let mime, _):
                 linuxPath = offloadContextImage(data, toolId: candidate.toolId, mimeType: mime)
-                let stub = "[CONTEXT OFFLOADED] Image (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
+                let stub = "\(Self.offloadedStubPrefix) Image (~\(candidate.tokens) tokens, \(candidate.bytes) bytes) saved to: \(linuxPath)\nUse file_read tool to retrieve if needed."
                 agentHistory[candidate.msgIdx].parts[candidate.partIdx] = .text(stub)
 
             case .text:
@@ -670,6 +832,54 @@ extension AIChatViewModel {
 
     /// Create symlinks in the fakefs data/ directory so the file browser
     /// can access minis directories without requiring the iSH kernel to be booted.
+    /// [T-minis-symlink-placeholder-dir issue #380] Remove a real directory that
+    /// is squatting where a symlink belongs, escalating until it is gone.
+    ///
+    /// `/var/minis/mcp-servers` and its siblings are symlinks into the App Group.
+    /// When a guest process wins the race and creates a plain directory there
+    /// (the guest CLI used to `mkdir -p` it unconditionally), the host's App Group
+    /// becomes unreachable from the sandbox: the app writes an OAuth bridge file
+    /// the guest can never read. Clearing the squatter is what restores the link,
+    /// so a silent failure here is not acceptable.
+    ///
+    /// Ladder, cheapest first:
+    ///   1. `removeItem` — succeeds for an empty or fully-owned directory.
+    ///   2. Delete the remaining children individually, then `rmdir`. This is the
+    ///      case a plain remove loses to: one undeletable child aborts the whole
+    ///      recursive delete, and the caller is left with a directory it believes
+    ///      it removed.
+    ///
+    /// Returns true when the path is clear (or was never there). `nonisolated` +
+    /// `static` so a test can drive it against a real temporary directory.
+    nonisolated static func forceRemovePlaceholderDirectory(
+        at path: URL, logger: AppLogger, label: String
+    ) -> Bool {
+        let fm = FileManager.default
+        if (try? fm.removeItem(at: path)) != nil { return true }
+
+        // Second pass: clear children one by one so a single stubborn entry
+        // cannot abort the whole delete, then drop the directory itself.
+        var failedChildren = 0
+        if let contents = try? fm.contentsOfDirectory(at: path, includingPropertiesForKeys: nil) {
+            for child in contents {
+                do { try fm.removeItem(at: child) } catch {
+                    failedChildren += 1
+                    logger.error("[MinisSymlink] \(label): cannot delete \(child.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+        }
+        if rmdir(path.path) == 0 {
+            logger.info("[MinisSymlink] \(label): placeholder dir cleared via rmdir after emptying it")
+            return true
+        }
+
+        // Still there. Report why, including whether children blocked it.
+        var buf = stat()
+        if lstat(path.path, &buf) != 0 { return true }   // vanished under us — fine
+        logger.error("[MinisSymlink] \(label): rmdir failed (errno=\(errno), undeletable children=\(failedChildren))")
+        return false
+    }
+
     private func ensureMinisSymlinks(for sid: String) {
         let fm = FileManager.default
         let dataPath = RootfsManager.shared.dataPath
@@ -729,7 +939,26 @@ extension AIChatViewModel {
                     }
                 }
                 logger.info("[MinisSymlink] \(linuxDir): real dir -> persistDir migration, moved=\(moved) skipped(existing)=\(skipped)")
-                try? fm.removeItem(at: hostPath)
+
+                // [T-minis-symlink-placeholder-dir issue #380] The removal must
+                // actually succeed, or the symlink below cannot be created and the
+                // guest keeps reading a local empty directory that shadows the App
+                // Group — which is exactly how #380 presents: the host writes a
+                // bridge file the sandbox can never see.
+                //
+                // `try? removeItem` swallowed the failure, so a directory that
+                // still held un-migrated entries (a name collision above, or a file
+                // the move could not take) left a real dir in place and the next
+                // line failed too. Both errors were logged at different sites and
+                // read as unrelated.
+                //
+                // Recovery ladder: plain remove, then clear whatever survived and
+                // rmdir the now-empty directory. Anything left after that is
+                // reported loudly rather than silently degrading.
+                if !Self.forceRemovePlaceholderDirectory(at: hostPath, logger: logger, label: linuxDir) {
+                    logger.error("[MinisSymlink] \(linuxDir): could not clear placeholder dir at \(hostPath.path) — guest will keep seeing a shadowed local dir")
+                    continue
+                }
             } else if exists {
                 // Regular file — unexpected, remove
                 logger.info("[MinisSymlink] \(linuxDir): unexpected regular file at \(hostPath.path), removing")
@@ -741,7 +970,21 @@ extension AIChatViewModel {
                 try fm.createSymbolicLink(at: hostPath, withDestinationURL: persistDir)
                 logger.info("[MinisSymlink] \(linuxDir): symlink created -> \(persistDir.path)")
             } catch {
-                logger.error("[MinisSymlink] \(linuxDir): createSymbolicLink FAILED: \(error.localizedDescription)")
+                // [issue #380] Read back what is actually there. "createSymbolicLink
+                // failed" alone does not say whether the path is now a stale dir, a
+                // file, or nothing — and that distinction is the whole diagnosis.
+                var after = stat()
+                let kind: String
+                if lstat(hostPath.path, &after) != 0 {
+                    kind = "nothing"
+                } else {
+                    switch after.st_mode & S_IFMT {
+                    case S_IFDIR: kind = "a real directory (guest is shadowed)"
+                    case S_IFLNK: kind = "a symlink"
+                    default: kind = "a regular file"
+                    }
+                }
+                logger.error("[MinisSymlink] \(linuxDir): createSymbolicLink FAILED: \(error.localizedDescription) — path now holds \(kind)")
             }
         }
 

@@ -42,14 +42,22 @@ def main():
         if not isinstance(v, str):
             problems.append(f"non-string value for {k!r}")
             continue
-        a, b = SPEC.findall(k), SPEC.findall(v)
+        # Compare against the source VALUE, not the key. They are usually the
+        # same (the key IS the English string) but not always: entries whose
+        # English uses positional specifiers store `%1$@ · %2$@` as the value
+        # under the key `%@ · %@`, and dotted identifier keys like
+        # `live_activity.status.done` carry no specifiers at all. Comparing
+        # `k` reported 34 false failures on the Croatian batch — every one of
+        # them a translation that correctly matched its English value.
+        en = src[k] if isinstance(src.get(k), str) else k
+        a, b = SPEC.findall(en), SPEC.findall(v)
         if a != b:
             problems.append(f"format specs {a} -> {b} in {k[:60]!r}")
-        if k.count("\n") != v.count("\n"):
-            problems.append(f"newline count {k.count(chr(10))} -> {v.count(chr(10))} in {k[:60]!r}")
-        if (k[:1].isspace() or k[-1:].isspace()) and (k[:1] != v[:1] or k[-1:] != v[-1:]):
+        if en.count("\n") != v.count("\n"):
+            problems.append(f"newline count {en.count(chr(10))} -> {v.count(chr(10))} in {k[:60]!r}")
+        if (en[:1].isspace() or en[-1:].isspace()) and (en[:1] != v[:1] or en[-1:] != v[-1:]):
             problems.append(f"edge whitespace changed in {k[:60]!r}")
-        if v == k and len(k) > 3 and re.search(r"[A-Za-z]{4}", k):
+        if v == en and len(en) > 3 and re.search(r"[A-Za-z]{4}", en):
             notes.append(k)
 
     for p in problems:

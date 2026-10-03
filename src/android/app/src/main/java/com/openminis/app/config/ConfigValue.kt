@@ -112,9 +112,22 @@ sealed class ConfigValue {
          */
         val SECRET_KEYS: Set<String> = setOf("apiKey", "oauthToken", "manualOAuthToken")
 
-        /** Parse a JSON string into a ConfigValue. Returns null on malformed JSON. */
+        /**
+         * Parse a JSON string into a ConfigValue. Returns null on malformed JSON.
+         *
+         * [T-container-network-dns] Null also when text is left over after the
+         * first value. org.json reads an UNQUOTED value only up to the first
+         * `, : ; = # [ ] { } /`, so `set network.dnsCustomServers
+         * 223.5.5.5,8.8.8.8` used to store "223.5.5.5" and drop the rest, an
+         * unquoted IPv6 address kept only what came before its first `:`, and
+         * an unquoted URL kept "https". A silent partial write is worse than
+         * an error, so the whole input must be one value; a quoted string or
+         * an unquoted single word still works as before.
+         */
         fun decode(json: String): ConfigValue? = try {
-            fromJsonAny(JSONTokener(json).nextValue())
+            val tokener = JSONTokener(json)
+            val value = tokener.nextValue()
+            if (tokener.nextClean() != 0.toChar()) null else fromJsonAny(value)
         } catch (_: Throwable) {
             null
         }

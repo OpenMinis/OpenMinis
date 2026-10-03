@@ -66,6 +66,29 @@ struct AssistantBlockView: View {
             ToolCapsuleView(block: block, icon: "brain.head.profile", accentColor: .pink,
                             commandStartTime: commandStartTime, onStop: onStop,
                             toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+        case .delegateTool:
+            if HelperBlockInfo.controlSummary(block) != nil {
+                // [T-subagent-control-capsule] A status / steer / cancel /
+                // resume call is the model operating on its own sub agents —
+                // a tool call like any other, so it gets the ordinary tool
+                // capsule rather than a bespoke row.
+                //
+                // The first cut was a centred grey line. It read as a section
+                // divider rather than an action, said nothing about WHAT was
+                // sent, could not be opened, and its own vertical padding made
+                // it taller than the capsules around it. The shared capsule
+                // fixes all four at once: same metrics as every other tool, a
+                // tappable detail sheet carrying the full arguments and result,
+                // and the sub agent accent so it still reads as agent work.
+                ToolCapsuleView(block: block, icon: "slider.horizontal.3",
+                                accentColor: HelperAccent.color,
+                                commandStartTime: commandStartTime, onStop: onStop,
+                                toolSnapshots: toolSnapshots, detailBlock: $detailBlock)
+            } else {
+                // [T-p2-helper-block-render] Own view: status / tier / elapsed /
+                // summary instead of the generic capsule's raw content.
+                HelperBlockView(block: block, detailBlock: $detailBlock)
+            }
         case .info:
             let allLines = block.content.components(separatedBy: "\n").filter { !$0.isEmpty }
             // Separate reason lines (⚠️) from the final switched line (✅)
@@ -245,6 +268,12 @@ struct ToolCapsuleView: View {
 
     /// Display text: prefer LLM-generated toolSummary, fall back to toolDescription.
     private var displayText: String {
+        // [T-subagent-control-capsule] A control call describes itself from the
+        // action it performed ("Resumed 2 sub agent(s)"), which is the whole
+        // point of the row. Its `tool_title` names the RUN it acted on, so
+        // preferring the summary here would label three different operations
+        // on the same sub agent identically.
+        if let control = HelperBlockInfo.controlSummary(block) { return control }
         if let summary = block.toolSummary, !summary.isEmpty {
             return summary
         }
@@ -268,6 +297,7 @@ struct ToolCapsuleView: View {
         case .browserTool:   toolName = "browser_use"
         case .readImageTool: toolName = "read_image"
         case .memoryTool:    toolName = "memory"
+        case .delegateTool:  toolName = SubAgentDefinition.toolName
         case .text, .thinking, .info: toolName = "unknown"
         }
 
@@ -346,7 +376,19 @@ struct ToolCapsuleView: View {
                 HStack(spacing: 0) {
                     Text(displayText)
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(ChatColors.primaryText)
+                        // [T-subagent-control-capsule] Sub agent control calls
+                        // title in the accent, every other tool in the normal
+                        // text colour.
+                        //
+                        // Elsewhere the accent lives only on the icon, which is
+                        // enough when the title names a file or a command — the
+                        // text itself is the content. A control call's title IS
+                        // the operation ("Sent a course correction"), and it
+                        // belongs to the sub agent world the purple identifies;
+                        // leaving it in the default colour made these read as
+                        // ordinary tool calls that happened to have a purple
+                        // glyph, which is what the report is about.
+                        .foregroundStyle(isSubAgentControl ? accentColor : ChatColors.primaryText)
                         .lineLimit(1)
                     if isStreaming {
                         ForEach(0..<3, id: \.self) { i in
@@ -559,12 +601,30 @@ struct ToolCapsuleView: View {
 
     private var iconColor: Color {
         switch block.toolStatus {
+        // [T-subagent-control-capsule] A sub agent control call keeps its
+        // accent when it succeeds, instead of turning the universal green.
+        //
+        // Green answers "did this tool work", which every other capsule needs
+        // because they are all the same colour once finished. These are the
+        // exception: their accent is what says "this was the model operating
+        // on its sub agents", and that identity is exactly what the reader is
+        // scanning for in a transcript full of tool calls — a succeeded
+        // control call rendered green was indistinguishable from a shell
+        // command. Failure and cancellation still override, since those must
+        // read as problems before they read as anything else.
+        case .success where isSubAgentControl: return accentColor
         case .success: return .green
         case .failed: return .red
         case .cancelled: return .yellow
         default: return accentColor
         }
     }
+
+    /// True for a status / steer / resume / cancel call on a sub agent.
+    /// `isControlOnly`, not `controlSummary`: same answer, and this is read on
+    /// every body pass of every tool capsule — no point building a localized
+    /// label only to compare it against nil.
+    private var isSubAgentControl: Bool { HelperBlockInfo.isControlOnly(block) }
 
     /// Formatted execution duration (e.g. "1.2s", "45s", "2m 10s").
     private var durationText: String? {
@@ -757,16 +817,27 @@ struct ThinkingBlockView: View {
                         .controlSize(.mini)
                         .tint(.blue)
                 }
-                if block.content.count > 0 || block.thinkingContentBuffer.count > 0 {
-                    let charCount = max(block.content.count, block.thinkingContentBuffer.count)
-                    Text(charCount > 1000 ? "\(charCount / 1000)K" : "\(charCount)")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.blue.opacity(0.6))
-                }
                 Spacer()
-                Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.blue.opacity(0.5))
+                // [T-thinking-count-beside-chevron] The character count sits at
+                // the RIGHT end, tight against the chevron, matching Android
+                // (ChatAssistantMessageUI.kt: weight(1f) → count → 4dp → icon).
+                //
+                // It used to sit immediately after the title, on the left of the
+                // spacer, so the two platforms disagreed. The 4pt gap is the
+                // HStack's own `spacing: 6` overridden locally — the enclosing
+                // spacing would otherwise put 6pt here and the number would not
+                // read as belonging to the chevron.
+                HStack(spacing: 4) {
+                    if block.content.count > 0 || block.thinkingContentBuffer.count > 0 {
+                        let charCount = max(block.content.count, block.thinkingContentBuffer.count)
+                        Text(charCount > 1000 ? "\(charCount / 1000)K" : "\(charCount)")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.blue.opacity(0.6))
+                    }
+                    Image(systemName: isExpanded.wrappedValue ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.blue.opacity(0.5))
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

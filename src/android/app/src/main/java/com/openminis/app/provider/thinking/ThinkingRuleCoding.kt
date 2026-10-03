@@ -92,7 +92,7 @@ object ThinkingRuleCoding {
                     val values = mutableMapOf<ThinkingLevel, String>()
                     o.optJSONObject("values")?.let { v ->
                         for (k in v.keys()) {
-                            runCatching { ThinkingLevel.valueOf(k) }.getOrNull()?.let { lvl ->
+                            ThinkingLevel.parseOrNull(k)?.let { lvl ->
                                 values[lvl] = v.optString(k)
                             }
                         }

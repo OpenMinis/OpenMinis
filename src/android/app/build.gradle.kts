@@ -36,10 +36,17 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "1.13"
+        versionCode = 28
+        versionName = "1.14"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // DEV_TOOLS gates the on-device developer tooling (127.0.0.1:5321
+        // debug server, LLM request log, StreamJitterProbe markers). It is
+        // true for `debug` AND for the `perf` build type below, false for
+        // `release`. Kept separate from BuildConfig.DEBUG so a non-debuggable
+        // build can still carry the tooling.
+        buildConfigField("boolean", "DEV_TOOLS", "false")
 
         // System prompt prefix required by Anthropic for Claude Code OAuth
         // credentials. Empty in the public mirror (see provider-customization.properties).
@@ -69,7 +76,41 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "DEV_TOOLS", "true")
+        }
+        // `perf`: the debug variant minus android:debuggable. ART refuses to
+        // AOT-compile a debuggable app (`cmd package compile -m speed`
+        // silently downgrades to `verify`) and runs it interpreter + JIT in
+        // debuggable mode; simpleperf on a streaming turn showed the main
+        // thread ~94% inside the interpreter. Frame-cost measurements taken
+        // on `debug` therefore do not represent what users run. `perf` keeps
+        // the debug server and probes (DEV_TOOLS) so the measurement harness
+        // works, but is profileable/AOT-compilable like a release build.
+        // Same debug signing key as release, so it installs in place.
+        create("perf") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            isProfileable = true
+            matchingFallbacks += listOf("debug")
+            buildConfigField("boolean", "DEV_TOOLS", "true")
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
+            // [OpenMinis#363] Produce native-debug-symbols.zip alongside the
+            // APK so a stripped release .so can still be symbolicated after
+            // the fact (`ndk-stack -sym`, or upload to Play Console). Without
+            // it every native frame in a field report is a bare PC and the
+            // unstripped objects only exist inside the build tree of whoever
+            // happened to compile it.
+            //
+            // NOT `keepDebugSymbols` (the old doNotStrip): that ships the
+            // symbols INSIDE the APK and would add tens of MB to a package
+            // that already carries libgojni.so and libonnxruntime.so. The zip
+            // is a build artifact to archive, not payload for the device.
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -108,6 +149,10 @@ android {
     sourceSets {
         getByName("androidTest") {
             assets.srcDirs("$projectDir/schemas")
+        }
+        // perf shares the debug-only assets (debug-server skill bundle).
+        getByName("perf") {
+            assets.srcDirs("$projectDir/src/debug/assets")
         }
     }
 
@@ -172,8 +217,39 @@ val stageDebugSkillAssets by tasks.registering(Exec::class) {
     outputs.dir(layout.projectDirectory.dir("src/debug/assets/debug-skill"))
     commandLine("bash", script.absolutePath)
 }
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") && it.name.contains("Debug") }
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") && (it.name.contains("Debug") || it.name.contains("Perf")) }
     .configureEach { dependsOn(stageDebugSkillAssets) }
+
+// [T-android-about-build-date] Stamp the build time into the APK so About can
+// show "Built yyyy-MM-dd HH:mm:ss", like iOS. versionName/versionCode are
+// static across rebuilds, so without it an install that silently didn't
+// replace the app looks identical to one that did.
+//
+// An asset, not a BuildConfig field: BuildConfig constants are inlined into
+// every class that reads BuildConfig, so a value that changes on every build
+// would defeat incremental Kotlin compilation. A generated asset only re-runs
+// the asset merge. The task never counts as up to date, so the stamp is the
+// time of the build that produced the APK.
+abstract class WriteBuildInfoTask : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun write() {
+        val file = outputDir.file("build_info/build_time.txt").get().asFile
+        file.parentFile.mkdirs()
+        file.writeText(System.currentTimeMillis().toString())
+    }
+}
+androidComponents {
+    onVariants { variant ->
+        val cap = variant.name.replaceFirstChar { it.uppercase() }
+        val task = tasks.register<WriteBuildInfoTask>("write${cap}BuildInfo") {
+            outputs.upToDateWhen { false }
+        }
+        variant.sources.assets?.addGeneratedSourceDirectory(task, WriteBuildInfoTask::outputDir)
+    }
+}
 
 dependencies {
     // Compose BOM
@@ -299,6 +375,9 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20231013")
+    // [T-android-search-visible-only] Runs the session-search SQL (SQLite JSON functions)
+    // against a real SQLite in JVM tests; the same driver Room's compiler already uses.
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 
     // Testing — Instrumented (on-device) tests
     // [T-android-downgrade-compat] MigrationTestHelper replays the committed

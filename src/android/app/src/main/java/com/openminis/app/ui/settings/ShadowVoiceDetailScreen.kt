@@ -28,8 +28,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.data.model.ModelEntry
-import com.openminis.app.data.model.hasAudioInput
-import com.openminis.app.data.model.hasAudioOutput
+import com.openminis.app.data.model.isVoiceInputCandidate
+import com.openminis.app.data.model.isVoiceOutputCandidate
 import com.openminis.app.data.repository.ProviderRepository
 
 /**
@@ -51,8 +51,8 @@ fun ShadowVoiceDetailScreen(
         return
     }
     val entries = config.modelEntries.filter { it.providerInstanceId == instanceId }
-    val inputModels = entries.filter { it.model.hasAudioInput }
-    val outputModels = entries.filter { it.model.hasAudioOutput }
+    val inputModels = entries.filter { it.model.isVoiceInputCandidate }
+    val outputModels = entries.filter { it.model.isVoiceOutputCandidate }
     val shadowDisabled = providerRepository.isVoiceShadowDisabled(instanceId)
     // Tap a voice model row → modality-matched Quick Test (mirrors iOS Voice
     // Services Quick Test).

@@ -50,7 +50,7 @@ import androidx.compose.ui.unit.sp
 import com.openminis.app.i18n.uppercaseForDisplay
 
 /**
- * Shared primitives for settings pages. Grouped-card layout (iOS/ChatGPT style).
+ * Shared primitives for settings pages. Grouped-card layout (iOS inset-grouped style).
  *
  * Structure:
  *   SettingsScaffold(title, actions?) {
@@ -83,6 +83,9 @@ fun SettingsScaffold(
     centerTitle: Boolean = false,
     floatingActionButton: @Composable (() -> Unit)? = null,
     scrollable: Boolean = true,
+    // [T-android-storage-usage-cache] Optional bottom action bar (e.g. a
+    // selection mode's actions). Null keeps every existing caller unchanged.
+    bottomBar: @Composable (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Scaffold(
@@ -122,6 +125,7 @@ fun SettingsScaffold(
             }
         },
         floatingActionButton = { floatingActionButton?.invoke() },
+        bottomBar = { bottomBar?.invoke() },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
         // T183: imePadding() shrinks the scroll container by the IME's

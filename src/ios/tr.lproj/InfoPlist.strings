@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Türkçe */
+
+"NSLocationWhenInUseUsageDescription" = "Minis, aracı oturumlarının nerede başlatıldığını oturum geçmişinize kaydetmek için konumunuzu kullanır.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis, uygulama kapalıyken aracı görevlerinin çalışmaya devam edebilmesi için arka planda konumu kullanır. Konum verileri yalnızca oturum geçmişini kaydetmek için kullanılır.";
+"NSCalendarsUsageDescription" = "Minis, yapay zekâ aracısının programınızı görüntüleyebilmesi, uygunluğunuzu denetleyebilmesi ve sizin adınıza etkinlik oluşturabilmesi için Takvim'e erişir.";
+"NSCalendarsFullAccessUsageDescription" = "Minis, yapay zekâ aracısının programınızı görüntüleyebilmesi, uygunluğunuzu denetleyebilmesi ve sizin adınıza etkinlik oluşturabilmesi için Takvim'e erişir.";
+"NSRemindersUsageDescription" = "Minis, yapay zekâ aracısının sizin adınıza anımsatıcı arayabilmesi ve oluşturabilmesi için Anımsatıcılar'a erişir.";
+"NSRemindersFullAccessUsageDescription" = "Minis, yapay zekâ aracısının sizin adınıza anımsatıcı arayabilmesi ve oluşturabilmesi için Anımsatıcılar'a erişir.";
+"NSCameraUsageDescription" = "Minis, yapay zekâ sohbetlerinde kullanmak üzere fotoğraf çekebilmek için kamera erişimine gereksinim duyar.";
+"NSPhotoLibraryUsageDescription" = "Minis, yapay zekâ sohbetlerine görsel ekleyebilmek için Fotoğraflar'a erişime gereksinim duyar.";
+"NSPhotoLibraryAddUsageDescription" = "Minis, video ve görselleri Fotoğraflar'ınıza kaydedebilmek için izne gereksinim duyar.";
+"NSHealthShareUsageDescription" = "Minis, yapay zekâ aracısının adım, kalp atış hızı, uyku ve antrenman gibi sağlık verilerinizi sizin adınıza okuyabilmesi için HealthKit'e erişir.";
+"NSHealthUpdateUsageDescription" = "Minis, yapay zekâ aracısının adım, kilo ve su tüketimi gibi sağlık verilerini sizin adınıza kaydedebilmesi için HealthKit'e yazar.";
+"NSContactsUsageDescription" = "Minis, yapay zekâ aracısının kişilerinizi sizin adınıza arayabilmesi, görüntüleyebilmesi ve yönetebilmesi için Kişiler'e erişir.";
+"NSAppleMusicUsageDescription" = "Minis, yapay zekâ aracısının müzik kitaplığınızda arama yapabilmesi ve çalmayı denetleyebilmesi için ortam kitaplığına erişir.";
+"NSMicrophoneUsageDescription" = "Minis, sohbette sesli giriş için mikrofon erişimine gereksinim duyar.";
+"NSSpeechRecognitionUsageDescription" = "Minis, sesinizi metin mesajına dönüştürmek için konuşma tanımayı kullanır.";
+"NSHomeKitUsageDescription" = "Minis, yapay zekâ aracısının akıllı ev aygıtlarınızı sizin adınıza sorgulayabilmesi ve denetleyebilmesi için HomeKit'e erişir.";
+"NSAlarmKitUsageDescription" = "Minis, yapay zekâ aracısının sizin adınıza alarm ve sayaç kurabilmesi için AlarmKit'i kullanır.";
+"NSLocalNetworkUsageDescription" = "Sanal makine, SLIRP ağ bağlantıları için ağ erişimine gereksinim duyar.";

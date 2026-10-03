@@ -1,18 +1,47 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- T354: allow cleartext HTTP globally so user-configured provider
-         endpoints (private/LAN LLM servers like http://192.168.x.x:port or
-         http://my-host:8080) work. Minis is a tool where the user supplies
-         the endpoint — they own the trust decision. -->
+    <!-- T354 & Issue #258: allow cleartext HTTP globally and trust user-installed
+         certificates (user CAs) in addition to system CAs so private/self-hosted
+         endpoints (LAN LLM servers, Ollama, custom gateways with self-signed CA) work.
+         Minis is a developer tool where users supply their own endpoints. -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
+
     <!-- Pre-T354 entry kept for explicitness; the base-config above already
          covers localhost/127.0.0.1 (OAuth callback server). -->
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+
+    <!-- Issue #258 Security Defense: official model provider and auth domains
+         MUST strictly trust system certificates only. User-installed CAs are
+         forbidden for these domains to prevent MITM attacks or API key interception.
+         [T-android-token-host-pinning] Also every host that receives an OAuth
+         bearer token (chatgpt.com: Codex access token; github.com +
+         githubcopilot.com: Copilot device flow and per-request session token;
+         kimi.com: Kimi device flow), and cleartext is refused here: without
+         the explicit "false" these hosts inherited the base config's
+         cleartext permission, so an http:// typo in a base URL would send the
+         key in plaintext and defeat the pin. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">openai.com</domain>
+        <domain includeSubdomains="true">anthropic.com</domain>
+        <domain includeSubdomains="true">claude.ai</domain>
+        <domain includeSubdomains="true">googleapis.com</domain>
+        <domain includeSubdomains="true">openrouter.ai</domain>
+        <domain includeSubdomains="true">deepseek.com</domain>
+        <domain includeSubdomains="true">x.ai</domain>
+        <domain includeSubdomains="true">chatgpt.com</domain>
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">githubcopilot.com</domain>
+        <domain includeSubdomains="true">kimi.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
     </domain-config>
 </network-security-config>

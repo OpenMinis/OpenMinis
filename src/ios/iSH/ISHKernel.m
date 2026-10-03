@@ -12,6 +12,7 @@
 // this file does not pull in ish/fs/sock.h, so there is no clash with iSH's
 // guest-ABI socket structs.
 #include <sys/un.h>
+#include <mach/mach.h>
 #include "ish/kernel/init.h"
 #include "ish/kernel/task.h"
 #include "ish/kernel/calls.h"
@@ -23,6 +24,8 @@
 #include "ish/fs/path.h"
 #include "ish/fs/fd.h"
 #include "ish/emu/cpu.h"
+#include "ish/kernel/mm.h"
+#include <os/proc.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>     // realpath
@@ -63,6 +66,7 @@
 #import "NFCOffload.h"
 #import "SessionsOffload.h"
 #import "ConfigOffload.h"
+#import "ScheduledOffload.h"
 #import "BrowserUseOffload.h"
 #import "DebugOffload.h"
 
@@ -211,9 +215,20 @@ static void minis_fork_guard_start_pressure_source(void) {
 
 // Current phys_footprint in bytes, or 0 if unavailable. Matches the TASK_VM_INFO
 // pattern already used by HangDetector.m and BrowserResourceMonitor.swift.
-static uint64_t minis_current_phys_footprint(void) {
+// [T-resource-diag] Counters live in Swift (ResourceDiagnostics); declared here
+// rather than imported so this file keeps its current include set and the call
+// stays a direct C call on the guest-fork path.
+extern void minis_diag_note_guest_fork(void);
+extern void minis_diag_note_task_info_call(void);
+
+static uint64_t minis_read_phys_footprint(void) {
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    // [T-resource-diag] Counted at the ONLY place the guard issues a MIG RPC.
+    // The port crash happened because this ran once per guest fork; the
+    // counter is what will show that coupling returning, since taskInfoCalls
+    // tracking guestForks 1:1 is precisely the regression signature.
+    minis_diag_note_task_info_call();
     kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO,
                                  (task_info_t) &info, &count);
     if (kr != KERN_SUCCESS)
@@ -221,7 +236,59 @@ static uint64_t minis_current_phys_footprint(void) {
     return (uint64_t) info.phys_footprint;
 }
 
+// [T-ish-forkguard-port-exhaustion] Cached footprint, refreshed at most once per
+// MINIS_FORK_GUARD_FOOTPRINT_TTL_NS.
+//
+// `task_info` is a MIG call, and MIG obtains a per-thread Mach reply port via
+// `mig_get_reply_port`. The guard runs on the CALLING GUEST THREAD inside
+// sys_clone, and iSH creates one detached pthread per guest task
+// (deps/ish/kernel/task.c:243), so a fork-heavy workload burns through
+// thousands of short-lived threads — each one allocating a fresh reply port the
+// first time it touches MIG.
+//
+// Those ports are only reclaimed when the thread's port set is torn down, which
+// for detached threads the system does lazily. With concurrent sub agents each
+// running their own shell pipelines the allocation rate outruns reclamation,
+// and the process is killed with EXC_RESOURCE / PORT_SPACE "Exceeded
+// system-wide per-process Port Limit" (114835 ports) — three such reports on
+// 2026-09-15, two landing exactly in minis_fork_memory_guard -> task_info, with
+// guest thread ids already past 16000.
+//
+// Caching breaks the coupling between fork RATE and MIG call rate: the value is
+// only re-read when it is actually stale, so most forks never touch MIG at all
+// and short-lived guest threads exit without ever allocating a reply port. A
+// slightly stale footprint is fine for this guard — it is a coarse ceiling
+// check, it already tolerates a 0 ("unknown") reading by allowing the fork, and
+// 250ms is far shorter than the memory swings it is meant to catch.
+#define MINIS_FORK_GUARD_FOOTPRINT_TTL_NS (250ull * NSEC_PER_MSEC)
+
+static _Atomic uint64_t g_fork_guard_footprint_cached = 0;
+static _Atomic uint64_t g_fork_guard_footprint_stamp = 0;   // mach_absolute_time units
+
+static uint64_t minis_current_phys_footprint(void) {
+    static mach_timebase_info_data_t tb;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ mach_timebase_info(&tb); });
+
+    uint64_t now = mach_absolute_time();
+    uint64_t stamp = atomic_load_explicit(&g_fork_guard_footprint_stamp, memory_order_relaxed);
+    if (stamp != 0 && tb.denom != 0) {
+        uint64_t elapsed_ns = ((now - stamp) * tb.numer) / tb.denom;
+        if (elapsed_ns < MINIS_FORK_GUARD_FOOTPRINT_TTL_NS)
+            return atomic_load_explicit(&g_fork_guard_footprint_cached, memory_order_relaxed);
+    }
+
+    uint64_t footprint = minis_read_phys_footprint();
+    atomic_store_explicit(&g_fork_guard_footprint_cached, footprint, memory_order_relaxed);
+    atomic_store_explicit(&g_fork_guard_footprint_stamp, now, memory_order_relaxed);
+    return footprint;
+}
+
 static int minis_fork_memory_guard(void) {
+    // [T-resource-diag] Every guest fork/clone passes through here, so this is
+    // the fork RATE the port-exhaustion diagnosis needed and never had.
+    minis_diag_note_guest_fork();
+
     // A 0 reading means task_info failed; treat that as "no information" and
     // allow the fork rather than stalling every process spawn.
     uint64_t footprint = minis_current_phys_footprint();
@@ -260,7 +327,17 @@ static int minis_fork_memory_guard(void) {
         usleep(MINIS_FORK_GUARD_POLL_US);
         waited_us += MINIS_FORK_GUARD_POLL_US;
 
-        footprint = minis_current_phys_footprint();
+        // [T-ish-forkguard-port-exhaustion] Deliberately the UNCACHED read: the
+        // whole point of this loop is to observe the footprint FALLING, and a
+        // cached value would make it spin out its full timeout without ever
+        // seeing the change. The cache exists to keep the common path (a fork
+        // that is nowhere near the ceiling) off MIG entirely; this path already
+        // sleeps between polls, so its MIG rate is bounded by the poll interval
+        // rather than by the fork rate. Refresh the cache while we are here so
+        // concurrent forks see the new value.
+        footprint = minis_read_phys_footprint();
+        atomic_store_explicit(&g_fork_guard_footprint_cached, footprint, memory_order_relaxed);
+        atomic_store_explicit(&g_fork_guard_footprint_stamp, mach_absolute_time(), memory_order_relaxed);
 
         // Pressure clearing is the signal we were waiting for, so stop waiting
         // even if our own footprint is unchanged. Guarded by the same 1.5x
@@ -403,6 +480,62 @@ static void jit_crash_handler(int sig, siginfo_t *info, void *ctx) {
 
 /// Custom die handler for embedded iSH: logs the fatal message and terminates
 /// only the current thread instead of calling abort() which kills the entire app.
+// [T-ish-footprint-brake] Feed the kernel's memory governor the two numbers
+// jetsam actually operates on: the app's physical footprint and its remaining
+// allowance. `limit = phys_footprint + os_proc_available_memory()` is the live
+// per-app jetsam line — both terms are cheap calls, so no hardcoded per-device
+// table and no boot-time snapshot that goes stale (avail on this device has
+// been observed to swing 2030 MB busy -> 3300+ MB idle).
+//
+// The kernel side (ish_set_memory_status) owns the state machine: BRAKE below
+// 10% headroom, release above 15%, critical pressure forces it, and a feed
+// older than 2s fails closed. This function just reports the truth on a 250ms
+// timer plus on OS memory-pressure events. If it ever stops running, the
+// staleness rule brakes the guest rather than letting it allocate blind.
+static void ish_memory_governor_tick(bool pressureCritical) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    uint64_t footprint = 0;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count) == KERN_SUCCESS)
+        footprint = info.phys_footprint;
+    uint64_t avail = (uint64_t)os_proc_available_memory();
+    if (footprint == 0 || avail == 0)
+        return; // couldn't measure — the staleness rule handles a dead feed
+    ish_set_memory_status(footprint + avail, avail, pressureCritical);
+}
+
+static void ish_memory_governor_start(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
+        // 250ms cadence: guest dirtying is bounded by emulation speed
+        // (~40 MB/s measured in the 2026-08-24 incident), so per-tick
+        // overshoot is ~10 MB against a 10%-of-limit brake margin.
+        static dispatch_source_t timer;
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW,
+                                  250 * NSEC_PER_MSEC, 50 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer, ^{ ish_memory_governor_tick(false); });
+        dispatch_resume(timer);
+        // OS pressure events arrive faster than any poll — treat CRITICAL as
+        // an immediate brake regardless of our own arithmetic.
+        static dispatch_source_t pressure;
+        pressure = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,
+                                          0,
+                                          DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                                          q);
+        dispatch_source_set_event_handler(pressure, ^{
+            bool critical = (dispatch_source_get_data(pressure) & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0;
+            ish_memory_governor_tick(critical);
+        });
+        dispatch_resume(pressure);
+    });
+    // Synchronous first feed so footprint mode is active before the first
+    // guest process ever runs — the ledger below stays as the fallback for
+    // the (never-observed) case where both measurements return zero.
+    ish_memory_governor_tick(false);
+}
+
 static void embedded_die_handler(const char *msg) {
     // Log to stderr (captured by LoggingManager)
     char buf[4096];
@@ -566,6 +699,91 @@ static void handle_process_exit(struct task *task, int code) {
     // 0. Install JIT crash recovery handler (must be before any JIT code runs)
     install_jit_crash_handler();
 
+    // [T-ish-anon-cap-dynamic] Derive the guest anonymous-memory cap from what
+    // THIS device can actually spare, instead of one compile-time number that
+    // is decorative on big phones and useless on small ones. os_proc_
+    // available_memory() reports the current distance to the jetsam line;
+    // give the guest a share of it (the app's own UI/WebViews/caches grow too)
+    // and let the kernel-side setter clamp to the 2GB ceiling. Computed once
+    // at boot — this runs foregrounded, which is the relevant budget: the
+    // background line is far lower, but background guest CPU is already
+    // throttled to ~5% duty so it cannot allocate fast enough to matter.
+    //
+    // ┌─────────────────────────────────────────────────────────────────────┐
+    // │ [T-ish-anon-cap-share] GUEST_MEMORY_SHARE = 0.8 — DO NOT RAISE THIS │
+    // │ without re-measuring low-memory devices first.                      │
+    // └─────────────────────────────────────────────────────────────────────┘
+    //
+    // Raised 0.6 -> 0.8 deliberately (2026-08-25) to push the trip point out
+    // for heavy guest workloads. This is a KNOWN, ACCEPTED TRADEOFF, not a
+    // tuning knob: whatever share is NOT given to the guest is all the app
+    // itself gets. Measured/estimated headroom left for the app at 0.8:
+    //
+    //   iPhone 17 Pro  available ~2030 MB -> guest ~1624 MB, app ~406 MB
+    //   iPhone 11      available ~1400 MB -> guest ~1120 MB, app ~280 MB  (est.)
+    //   iPhone 8       available ~700 MB  -> guest ~560 MB,  app ~140 MB  (est.)
+    //
+    // On an iPhone 8 the app alone has been observed at ~130 MB before the
+    // guest allocates anything, so 0.8 leaves it almost nothing — one WebView
+    // or a large transcript can push the APP over the jetsam line even while
+    // the guest is dutifully under its cap. That is the failure this whole
+    // mechanism exists to prevent, reappearing from the other side. Anything
+    // above 0.8 should be considered broken on 2GB-class hardware unless the
+    // iPhone 8/11 numbers above are replaced with real measurements.
+    //
+    // Note also that `avail` is DYNAMIC, not a fixed per-app quota: the same
+    // iPhone 17 Pro reported 2030 MB while the system was busy (sys free
+    // 1035/3851 MB) yet let the app reach 3363 MB on 2026-08-24 when it was
+    // idle. So this cap moves with system pressure by design; the 2GB ceiling
+    // in mm.h is what keeps a roomy moment from handing out an absurd limit.
+    //
+    // [T-ish-anon-cap-page-units] Divide by the HOST page size, not the guest
+    // 4KB one. The counter is in guest pages, but each committed guest page
+    // occupies a whole 16KB host page, so converting a host-byte budget with
+    // 4096 authorises 4x what was intended — the 2026-08-25 device test
+    // installed a nominal 1953MB cap that really allowed ~7.6GB, and the
+    // runaway compile reached jetsam at 3361MB without one refusal firing.
+    {
+        size_t avail = os_proc_available_memory();
+        size_t hostPage = (size_t)getpagesize();
+        if (avail > 0 && hostPage > 0) {
+            // See the GUEST_MEMORY_SHARE box above before changing this.
+            static const double kGuestMemoryShare = 0.8;
+            long pages = (long)((double)avail * kGuestMemoryShare / (double)hostPage);
+            ish_set_anon_page_limit(pages);
+            extern _Atomic long anon_page_limit;
+            long effective = atomic_load(&anon_page_limit);
+            // Report the HOST memory this authorises — the number that has to
+            // stay under jetsam — not the guest-page count times 4KB.
+            double capMB = (double)effective * (double)hostPage / (1024 * 1024);
+            NSLog(@"ISHKernel: guest anon cap = %.0f MB host (%ld guest pages, "
+                  @"host page %zuKB, share %.0f%%, app headroom %.0f MB, "
+                  @"available %.0f MB, ceiling %.0f MB)",
+                  capMB, effective, hostPage / 1024,
+                  kGuestMemoryShare * 100.0,
+                  (double)avail / (1024 * 1024) - capMB,
+                  (double)avail / (1024 * 1024),
+                  (double)ANON_MMAP_LIMIT_PAGES * (double)hostPage / (1024 * 1024));
+        } else {
+            NSLog(@"ISHKernel: os_proc_available_memory unavailable — keeping default anon cap");
+        }
+    }
+
+    // [T-ish-footprint-brake] Start the live memory governor. Once its first
+    // feed lands, the ledger cap installed above stops being the admission
+    // control (it keeps counting for meminfo/diagnostics) and admission
+    // follows real jetsam headroom instead — see mm.h for the design. The
+    // ledger install stays because it is the fallback regime if the governor
+    // can never measure (footprint mode never activates).
+    ish_memory_governor_start();
+    // [T-ish-cpu-top] Continuous per-thread CPU attribution in the daily log
+    // (defined with the governor code further down).
+    extern void ish_cpu_top_start(void);
+    ish_cpu_top_start();
+    // [T-ish-fork-rate] Thermal-driven fork-rate governor (defined next to [CPUTop]).
+    extern void ish_fork_rate_governor_start(void);
+    ish_fork_rate_governor_start();
+
     // Override die() to terminate only the iSH thread instead of abort()ing the app.
     extern void (*die_handler)(const char *msg);
     die_handler = embedded_die_handler;
@@ -620,6 +838,27 @@ static void handle_process_exit(struct task *task, int code) {
 
     // 6. Set exit hook
     exit_hook = handle_process_exit;
+
+    // 6.1. [T-ish-netlink-stub-app-gate] Enable the AF_NETLINK stub.
+    //
+    // `ish_netlink_stub_enabled()` (fs/sock.c) reads `getenv("ISH_NETLINK_STUB")`
+    // — the HOST process environment, not the guest shell's. On the CLI that is
+    // set by the invoking command; inside the app nothing sets it, so the stub
+    // stayed off and Go programs that probe the route table (tailscaled, and
+    // anything using tsnet/netmon) failed with:
+    //
+    //     netmon.New: route ip+net: netlinkrib: address family not supported by protocol
+    //
+    // Exporting it from a guest `export` does NOT work: that writes the GUEST
+    // environment, which `getenv` here never sees. It has to be set on the host
+    // process, and it must happen before any guest process starts because the
+    // gate caches its answer on first call.
+    //
+    // Overwrite flag 0: a value already present in the environment (a future
+    // debug toggle, or a CLI-style launch) wins over this default.
+    setenv("ISH_NETLINK_STUB", "1", 0);
+    NSLog(@"ISHKernel: [Netlink] AF_NETLINK stub enabled (ISH_NETLINK_STUB=%s)",
+          getenv("ISH_NETLINK_STUB") ?: "unset");
 
     // 6.2. Point guest AF_UNIX sockets at the app's sandboxed temp directory.
     // MUST run before any guest process starts (see setUpUnixSocketPrefix).
@@ -677,6 +916,7 @@ static void handle_process_exit(struct task *task, int code) {
     bluetooth_offload_register();
     nfc_offload_register();
     sessions_offload_register();
+    scheduled_offload_register();
     browser_use_offload_register();
     config_offload_register();
     // Registered in every build: the `minis-debug logs` subcommand reads the
@@ -1641,7 +1881,7 @@ static int ish_throttle_trampoline(void) {
 #pragma mark - Background CPU Governor (closed-loop sliding window)
 
 // [T-ish-bg-cpu-governor] Closed-loop governor per
-// docs/ish-bg-cpu-governor-design.md. iOS 26 background budget (empirical,
+// docs/internal/ish-bg-cpu-governor-design.md. iOS 26 background budget (empirical,
 // IPS 2026-08-02): 48 CPU-s per 60s sliding window, enforced by kill.
 // Sense what iOS bills (process-wide CPU via proc_pid_rusage), drive the
 // Q16 throttle ratio as feedback so actuator inaccuracy cannot break safety.
@@ -1885,6 +2125,212 @@ static void gov_tick(void) {
 }
 
 @end
+
+#pragma mark - CPU Top diagnostic (per-thread CPU attribution, every 10 s)
+
+// [T-ish-cpu-top] Answers "which thread is burning CPU right now, and what is
+// it doing" from inside the app, in every scenario: foreground or background,
+// fork storm or idle drain, iSH guest or app-side thread. A `bt all` or an
+// Instruments trace needs Xcode attached and shows one instant; this samples
+// continuously and lands in the daily log next to the [Governor] lines.
+//
+// Every 10 s: walk task_threads(), read THREAD_EXTENDED_INFO (cumulative
+// user+system time, run state, pthread name), diff against the previous
+// sample, rank by CPU delta and log the top 6. Threads that are iSH guest
+// tasks are mapped back to guest pid / comm / last syscall by sweeping the
+// pid table under a TRYLOCK of pids_lock — a diagnostic never blocks on a
+// kernel lock; a skipped sweep just prints the host thread name.
+//
+// Two numbers make the line self-explanatory in the two very different
+// hot-CPU regimes we have seen:
+//   live%  = CPU of threads that still exist, i.e. the ranked list. A hot
+//            long-lived thread (tsproxy, LoggingManager, the UI) shows here.
+//   churn% = proc% - live%: CPU spent by threads that already exited — a
+//            fork+exec storm, where each guest lives a few ms and the ranked
+//            list looks innocent. That regime is then explained by the
+//            forks/s and the path-cache counters on the same line (misses
+//            split by reason: slot / gen / ttl / flags).
+// Quiet below 25% of one core; a heartbeat every 60 s keeps idle visible.
+
+#define CPUTOP_INTERVAL_NS  (10ULL * 1000000000ULL)
+#define CPUTOP_TOP_N        6
+#define CPUTOP_MIN_PROC_PCT 25.0
+#define CPUTOP_MAX_THREADS  1024
+#define CPUTOP_HEARTBEAT    6   // ticks: one line per minute even when quiet
+
+typedef struct { mach_port_t port; uint64_t cpu_us; } cputop_prev_t;
+typedef struct { mach_port_t port; uint64_t delta_us; int run_state; char name[MAXTHREADNAMESIZE]; } cputop_hot_t;
+static dispatch_source_t g_cputop_timer;
+static cputop_prev_t g_cputop_prev[CPUTOP_MAX_THREADS];
+static int g_cputop_prev_n;
+static uint64_t g_cputop_last_ts, g_cputop_last_proc_ns, g_cputop_last_forks, g_cputop_last_pc[6], g_cputop_last_fr[3];
+static unsigned g_cputop_ticks;
+static mach_port_t g_cputop_main_port;
+
+static const char *cputop_syscall_name(unsigned nr) {
+    switch (nr) {
+        case 17: return "getcwd";   case 34: return "mkdirat";  case 35: return "unlinkat";
+        case 56: return "openat";   case 57: return "close";    case 63: return "read";
+        case 64: return "write";    case 73: return "ppoll";    case 78: return "readlinkat";
+        case 79: return "fstatat";  case 80: return "fstat";    case 93: return "exit";
+        case 94: return "exit_group"; case 98: return "futex";  case 101: return "nanosleep";
+        case 124: return "sched_yield"; case 172: return "getpid"; case 202: return "accept";
+        case 203: return "connect"; case 206: return "sendto";  case 207: return "recvfrom";
+        case 214: return "brk";     case 215: return "munmap";  case 220: return "clone";
+        case 221: return "execve";  case 222: return "mmap";    case 226: return "mprotect";
+        case 260: return "wait4";   default: return "sys";
+    }
+}
+
+static uint64_t cputop_prev_lookup(mach_port_t port) {
+    for (int i = 0; i < g_cputop_prev_n; i++)
+        if (g_cputop_prev[i].port == port) return g_cputop_prev[i].cpu_us;
+    return 0;
+}
+
+// Fill guest details for the hot threads. TRYLOCK only: skipping is free.
+static void cputop_describe_guests(cputop_hot_t *hot, int nhot, char out[][96]) {
+    for (int i = 0; i < nhot; i++) out[i][0] = '\0';
+    if (trylock(&pids_lock) != 0) return;
+    for (int i = 1; i < MAX_PID; i++) {
+        struct pid *p = pid_get(i);
+        if (p == NULL || p->task == NULL) continue;
+        struct task *t = p->task;
+        // An exited (zombie / leaked) task's pthread_t is no longer valid to
+        // query; only live tasks are mapped.
+        if (t->zombie || t->exiting || t->thread == 0) continue;
+        mach_port_t tp = pthread_mach_thread_np(t->thread);
+        for (int h = 0; h < nhot; h++) {
+            if (hot[h].port != tp) continue;
+            char comm[17]; memcpy(comm, t->comm, 16); comm[16] = '\0';
+            unsigned sysc = t->group ? atomic_load(&t->group->syscall_count) : 0;
+            snprintf(out[h], 96, " guest pid=%d comm=%s last=%s(%u) sys=%u blk=%d",
+                     t->pid, comm, cputop_syscall_name(t->syscall_restart_num),
+                     t->syscall_restart_num, sysc, t->blocking ? 1 : 0);
+        }
+    }
+    unlock(&pids_lock);
+}
+
+static void cputop_tick(void) {
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    uint64_t proc_ns = gov_process_cpu_ns();
+    uint64_t forks = atomic_load(&ish_guest_forks);
+    uint64_t pc[6]; path_cache_stats(pc);
+    uint64_t fr[3]; ish_fork_rate_stats(&fr[0], &fr[1], &fr[2]);   // [T-ish-fork-rate] throttled, bypassed, slept ns
+    g_cputop_ticks++;
+
+    thread_act_array_t threads = NULL; mach_msg_type_number_t nthreads = 0;
+    if (task_threads(mach_task_self(), &threads, &nthreads) != KERN_SUCCESS) return;
+
+    cputop_hot_t hot[CPUTOP_TOP_N]; int nhot = 0;
+    uint64_t live_us = 0;
+    cputop_prev_t next[CPUTOP_MAX_THREADS]; int next_n = 0;
+    for (mach_msg_type_number_t i = 0; i < nthreads; i++) {
+        thread_extended_info_data_t info; mach_msg_type_number_t cnt = THREAD_EXTENDED_INFO_COUNT;
+        if (thread_info(threads[i], THREAD_EXTENDED_INFO, (thread_info_t)&info, &cnt) == KERN_SUCCESS) {
+            // pth_user_time / pth_system_time are cumulative NANOSECONDS (uint64_t)
+            // in thread_extended_info, not time_value_t.
+            uint64_t cpu_us = (info.pth_user_time + info.pth_system_time) / 1000ULL;
+            uint64_t prev = cputop_prev_lookup(threads[i]);
+            uint64_t delta = cpu_us > prev ? cpu_us - prev : cpu_us;   // port names recycle: never negative
+            live_us += delta;
+            if (next_n < CPUTOP_MAX_THREADS) { next[next_n].port = threads[i]; next[next_n].cpu_us = cpu_us; next_n++; }
+            // keep the top N by delta (tiny insertion sort)
+            int pos = nhot;
+            while (pos > 0 && hot[pos - 1].delta_us < delta) pos--;
+            if (pos < CPUTOP_TOP_N) {
+                for (int k = (nhot < CPUTOP_TOP_N ? nhot : CPUTOP_TOP_N - 1); k > pos; k--) hot[k] = hot[k - 1];
+                hot[pos].port = threads[i]; hot[pos].delta_us = delta; hot[pos].run_state = info.pth_run_state;
+                strlcpy(hot[pos].name, info.pth_name[0] ? info.pth_name : (threads[i] == g_cputop_main_port ? "main" : "-"), sizeof hot[pos].name);
+                if (nhot < CPUTOP_TOP_N) nhot++;
+            }
+        }
+        // The ports are OURS to release (Mach port leak per fork otherwise).
+        mach_port_deallocate(mach_task_self(), threads[i]);
+    }
+    vm_deallocate(mach_task_self(), (vm_address_t)threads, nthreads * sizeof(thread_t));
+    memcpy(g_cputop_prev, next, next_n * sizeof(cputop_prev_t)); g_cputop_prev_n = next_n;
+
+    if (g_cputop_last_ts == 0) {   // first sample only seeds the baselines
+        g_cputop_last_ts = now; g_cputop_last_proc_ns = proc_ns; g_cputop_last_forks = forks;
+        memcpy(g_cputop_last_pc, pc, sizeof pc); memcpy(g_cputop_last_fr, fr, sizeof fr); return;
+    }
+    double ival = (double)(now - g_cputop_last_ts) / 1e9; if (ival <= 0) ival = 1;
+    double proc_pct = 100.0 * (double)(proc_ns > g_cputop_last_proc_ns ? proc_ns - g_cputop_last_proc_ns : 0) / 1e9 / ival;
+    double live_pct = 100.0 * (double)live_us / 1e6 / ival;
+    double churn_pct = proc_pct > live_pct ? proc_pct - live_pct : 0;
+    uint64_t dforks = forks - g_cputop_last_forks, dpc[6], dfr[3];
+    for (int k = 0; k < 6; k++) dpc[k] = pc[k] - g_cputop_last_pc[k];
+    for (int k = 0; k < 3; k++) dfr[k] = fr[k] - g_cputop_last_fr[k];
+    g_cputop_last_ts = now; g_cputop_last_proc_ns = proc_ns; g_cputop_last_forks = forks; memcpy(g_cputop_last_pc, pc, sizeof pc); memcpy(g_cputop_last_fr, fr, sizeof fr);
+
+    if (proc_pct < CPUTOP_MIN_PROC_PCT && (g_cputop_ticks % CPUTOP_HEARTBEAT) != 0) return;
+
+    char guest[CPUTOP_TOP_N][96]; cputop_describe_guests(hot, nhot, guest);
+    NSMutableString *line = [NSMutableString stringWithFormat:
+        @"ISHKernel: [CPUTop] proc=%.0f%% live=%.0f%% churn=%.0f%% threads=%u ival=%.1fs forks=+%llu (%.0f/s) forkrate thr=+%llu byp=+%llu slept=%.0fms pathcache hit=+%llu miss=+%llu[slot=%llu gen=%llu ttl=%llu flags=%llu] inval=+%llu",
+        proc_pct, live_pct, churn_pct, nthreads, ival, dforks, dforks / ival, dfr[0], dfr[1], (double)dfr[2] / 1e6,
+        dpc[0], dpc[1] + dpc[2] + dpc[3] + dpc[4], dpc[1], dpc[2], dpc[3], dpc[4], dpc[5]];
+    for (int h = 0; h < nhot; h++) {
+        if (hot[h].delta_us == 0) break;
+        [line appendFormat:@" | #%d %s %.1f%%%s%s", h + 1, hot[h].name, 100.0 * (double)hot[h].delta_us / 1e6 / ival,
+            hot[h].run_state == TH_STATE_RUNNING ? " R" : "", guest[h]];
+    }
+    NSLog(@"%@", line);
+}
+
+// [T-ish-fork-rate] Fork-rate governor, driven by thermal state.
+//
+// A 40-way fork+exec storm forks ~1200/s on an iPhone at ~4.2 ms CPU each
+// (§18.2): every core busy, thermal "serious" within a minute, and the agent's
+// own shell_execute / tsproxy crawl behind it (analysis §20, 2026-09-19). The
+// kernel-side token bucket (kernel/fork.c) delays heavy forkers to the limit
+// and lets light ones (a fresh tool-call shell) through; here the limit only
+// follows the device's thermal state. Nominal already caps a runaway storm at
+// roughly two cores' worth of exec work; serious/critical squeeze it harder
+// so the phone can cool down while staying responsive.
+static unsigned minis_fork_rate_for_thermal(NSProcessInfoThermalState st) {
+    switch (st) {
+        case NSProcessInfoThermalStateNominal:  return 400;
+        case NSProcessInfoThermalStateFair:     return 250;
+        case NSProcessInfoThermalStateSerious:  return 120;
+        case NSProcessInfoThermalStateCritical: return 60;
+    }
+    return 250;
+}
+
+static void minis_fork_rate_apply(const char *why) {
+    NSProcessInfoThermalState st = [NSProcessInfo processInfo].thermalState;
+    unsigned rate = minis_fork_rate_for_thermal(st);
+    ish_set_fork_rate_limit(rate, rate * 2);
+    NSLog(@"ISHKernel: [ForkRate] thermal=%ld -> limit %u/s burst %u (%s)", (long)st, rate, rate * 2, why);
+}
+
+void ish_fork_rate_governor_start(void) {
+    static BOOL started = NO;
+    if (started) return;
+    started = YES;
+    minis_fork_rate_apply("start");
+    [[NSNotificationCenter defaultCenter] addObserverForName:NSProcessInfoThermalStateDidChangeNotification
+                                                      object:nil queue:nil
+                                                  usingBlock:^(NSNotification *note) { minis_fork_rate_apply("thermal change"); }];
+}
+
+void ish_cpu_top_start(void) {
+    if (g_cputop_timer) return;
+    // pthread_main_thread_np() is not in the iOS SDK; the main queue always
+    // runs on the main thread, so capture its port from there.
+    dispatch_async(dispatch_get_main_queue(), ^{ g_cputop_main_port = pthread_mach_thread_np(pthread_self()); });
+    dispatch_queue_t q = dispatch_queue_create("com.openminis.ish.cputop",
+        dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    g_cputop_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(g_cputop_timer, dispatch_time(DISPATCH_TIME_NOW, CPUTOP_INTERVAL_NS),
+                              CPUTOP_INTERVAL_NS, 1ULL * 1000000000ULL /* 1s leeway */);
+    dispatch_source_set_event_handler(g_cputop_timer, ^{ cputop_tick(); });
+    dispatch_resume(g_cputop_timer);
+    NSLog(@"ISHKernel: [CPUTop] started interval=%llus topN=%d minProc=%.0f%%", CPUTOP_INTERVAL_NS / 1000000000ULL, CPUTOP_TOP_N, CPUTOP_MIN_PROC_PCT);
+}
 
 @implementation ISHKernel (PathReverse)
 

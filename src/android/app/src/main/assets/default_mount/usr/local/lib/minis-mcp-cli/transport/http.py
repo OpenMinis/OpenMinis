@@ -12,6 +12,7 @@ Errors are raised as `MCPError(code, message)`; main.py renders the unified
 """
 
 import json
+import sys
 import os
 import re
 
@@ -113,10 +114,45 @@ def _authorize_deeplink(server_name):
 
 
 def _load_oauth_tokens(server_name):
+    """Read the host-written OAuth bridge file for `server_name`.
+
+    [issue #380] The three ways this returns None are NOT equivalent, and
+    collapsing them is what made the bug invisible:
+
+      * FileNotFoundError - genuinely not authorized yet, or the host wrote into
+        an App Group this sandbox cannot see because /var/minis/mcp-servers is a
+        local placeholder directory shadowing the symlink. Identical from here,
+        so the absolute path is logged: an empty real directory at that path is
+        the tell.
+      * OSError - permission/IO. The file is there and unreadable, which is a
+        very different problem from "not authorized" and used to look the same.
+      * ValueError - present but corrupt (a truncated or partial write).
+
+    Diagnostics go to stderr, never stdout: stdout carries the JSON the agent
+    parses.
+    """
+    path = _oauth_token_path(server_name)
     try:
-        with open(_oauth_token_path(server_name), "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        sys.stderr.write(
+            "[minis-mcp-cli] no OAuth token for %r at %s "
+            "(not authorized yet, or the host directory is not reachable from the sandbox)\n"
+            % (server_name, path)
+        )
+        return None
+    except OSError as exc:
+        sys.stderr.write(
+            "[minis-mcp-cli] OAuth token for %r at %s is unreadable: %s\n"
+            % (server_name, path, exc)
+        )
+        return None
+    except ValueError as exc:
+        sys.stderr.write(
+            "[minis-mcp-cli] OAuth token for %r at %s is corrupt: %s\n"
+            % (server_name, path, exc)
+        )
         return None
 
 

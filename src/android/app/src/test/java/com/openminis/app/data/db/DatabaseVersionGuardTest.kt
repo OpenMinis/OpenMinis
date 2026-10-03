@@ -52,7 +52,8 @@ class DatabaseVersionGuardTest {
             ?: return  // covered by the test above; nothing to compare against
         assertEquals(
             "DatabaseVersionGuard.CODE_DB_VERSION must be bumped together with " +
-                "@Database(version=...) — see the schema-change checklist in CLAUDE.md",
+                "@Database(version=...) in AppDatabase — bump both, add a Migration for the new " +
+                "version and commit the regenerated schema JSON",
             latest,
             DatabaseVersionGuard.CODE_DB_VERSION,
         )

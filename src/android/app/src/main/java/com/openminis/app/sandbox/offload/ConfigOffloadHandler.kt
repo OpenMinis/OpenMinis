@@ -25,7 +25,7 @@ import java.io.File
  *     → ModelsCollection.remove(); rejected for non-custom entries.
  *
  * Future: per-entry hide via the existing
- *   set models.<entryId>.isHidden true
+ *   set models.<entry_id>.isHidden true   (entry_id verbatim, dots included)
  * path. Already supported by ModelsCollection.isHiddenField; nothing
  * else needs to change in this handler when the agent picks it up.
  *
@@ -54,6 +54,11 @@ class ConfigOffloadHandler : NativeOffloadHandler {
                 "DISCOVERY:\n" +
                 "  list-topics                  Show all configurable topics.\n" +
                 "  topic-help <topic>           Show fields under one topic.\n" +
+                "\n" +
+                "PATHS:\n" +
+                "  <topic>.<field> or <topic>.<entry_id>.<field>. Use entry_id exactly as\n" +
+                "  `get <topic>` prints it — dots and slashes are fine, no escaping, e.g.\n" +
+                "    get models.<uuid>/glm-5.1.contextWindow\n" +
                 "\n" +
                 "FIELD I/O:\n" +
                 "  get <path> [--filter <kw>] [--page N] [--page-size N]\n" +
@@ -184,6 +189,8 @@ class ConfigOffloadHandler : NativeOffloadHandler {
             put("data", JSONObject().apply {
                 put("topic", topic)
                 put("fields", ConfigBridge.fieldsForTopic(topic))
+                // [T-config-path-dotted-id] Collections say how to spell a child path.
+                ConfigBridge.pathNoteForTopic(topic)?.let { put("path_note", it) }
             })
         }
         return envelopeResult(args, out)

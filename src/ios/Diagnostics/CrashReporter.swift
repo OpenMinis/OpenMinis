@@ -929,6 +929,11 @@ final class CrashReporter: NSObject, MXMetricManagerSubscriber {
                 report += "\nActive sessions:  \(sessions)"
             }
             report += "\nShell running:    \(runningShellCommand ? "yes" : "no")"
+            // [T-resource-diag] Port/thread-churn accounting. The 2026-09-15
+            // PORT_SPACE kills left no in-app trace at all: footprint was 18MB
+            // and pressure normal, so every existing field said "healthy".
+            // These are the numbers that would have named the cause.
+            report += ResourceDiagnostics.crashReportLines()
             // [T-ios-bgkeepalive-diag] Keep the INTENT and the real OS
             // grant on separate lines — the single old "BG task active" line
             // reported the intent flag and read as the grant.

@@ -80,7 +80,8 @@ object OpenRouterOAuthManager {
                     .appendQueryParameter("code_challenge_method", "S256")
                     .appendQueryParameter("_nc", System.currentTimeMillis().toString()) // cache-bust
                     .build()
-                Log.d(TAG, "Auth URL: $authUrl")
+                // [T-android-oauth-log-redact] code_challenge masked.
+                Log.d(TAG, "Auth URL: ${OAuthLogRedaction.url(authUrl.toString())}")
 
                 // Open in Chrome Custom Tab (in-app browser, like iOS SFSafariViewController)
                 val customTabsIntent = CustomTabsIntent.Builder()
@@ -96,6 +97,11 @@ object OpenRouterOAuthManager {
             Log.i(TAG, "Callback received — code length: ${code.length}")
 
             // Exchange code for permanent API key
+            // [T-android-oauth-foreground-exchange] The callback lands while the
+            // user is still in the Custom Tab, i.e. with Minis in the background,
+            // where the OS blocks this app's network (DNS answers "no address").
+            // Exchange only once the user is back.
+            OAuthForegroundGate.awaitForeground(TAG)
             exchangeCode(code, verifier)
         }
 
@@ -123,8 +129,9 @@ object OpenRouterOAuthManager {
         val hash = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.UTF_8))
         val challenge = standardBase64ToUrlSafe(hash)
 
-        Log.d(TAG, "PKCE verifier (${verifier.length} chars): ${verifier.take(20)}...")
-        Log.d(TAG, "PKCE challenge (${challenge.length} chars): $challenge")
+        // [T-android-oauth-log-redact] Length + first 4 chars only.
+        Log.d(TAG, "PKCE verifier ${OAuthLogRedaction.secret(verifier)}")
+        Log.d(TAG, "PKCE challenge ${OAuthLogRedaction.secret(challenge)}")
 
         return verifier to challenge
     }
@@ -151,9 +158,9 @@ object OpenRouterOAuthManager {
         body.put("code_verifier", verifier)
         body.put("code_challenge_method", "S256")
 
-        Log.d(TAG, "Exchange request body: ${body.toString()}")
-        Log.d(TAG, "Code: $code")
-        Log.d(TAG, "Verifier (${verifier.length} chars): ${verifier.take(20)}...${verifier.takeLast(10)}")
+        // [T-android-oauth-log-redact] The request body holds the authorization
+        // code and the PKCE verifier — log only redacted forms of each.
+        Log.d(TAG, "Exchange request: code=${OAuthLogRedaction.secret(code)} verifier=${OAuthLogRedaction.secret(verifier)}")
 
         val request = Request.Builder()
             .url(KEYS_URL)

@@ -116,4 +116,17 @@ object CorrectionContextBudget {
     /** Cost guards, not prompt-size guards: bound the work a single build does. */
     const val MAX_MESSAGES_SCANNED = 12
     const val PER_MESSAGE_SCAN_CAP = 2000
+
+    // [T-android-voice-viewport-context] The on-screen blocks (ScreenContextBuilder).
+    // Separate from the history budgets above: the two sources coexist and
+    // neither eats the other's room.
+
+    /** Viewport block: text around the screen's centre, separators included. */
+    const val SCREEN_VIEWPORT = 2000
+
+    /** The newest assistant reply, on screen or not. */
+    const val SCREEN_LATEST_REPLY = 2000
+
+    /** How far past each viewport edge the window reaches, in screen-heights. */
+    const val SCREEN_EXTENSION_SCREENS = 0.5
 }

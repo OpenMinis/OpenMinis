@@ -6,6 +6,10 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Log
+import android.webkit.MimeTypeMap
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -318,12 +322,10 @@ fun FullscreenImageViewer(
                         label = stringResource(R.string.image_action_save),
                         onClick = {
                             scope.launch {
-                                val bmp = loadBitmap(context, model)
-                                if (bmp != null) {
-                                    val saved = saveToGallery(context, bmp)
-                                    val msg = if (saved) savedToAlbumMsg else saveFailedMsg
-                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                }
+                                // [T-image-save-original] The original file, not a decode.
+                                val saved = saveImageToGallery(context, model)
+                                val msg = if (saved) savedToAlbumMsg else saveFailedMsg
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                             }
                         },
                     )
@@ -372,7 +374,15 @@ internal suspend fun loadBitmap(context: Context, model: Any): Bitmap? =
     withContext(Dispatchers.IO) {
         try {
             val loader = ImageLoader(context)
-            val req = ImageRequest.Builder(context).data(model).allowHardware(false).build()
+            // [T-image-save-original] Size.ORIGINAL: a request with no target
+            // otherwise falls back to DisplaySizeResolver (Coil 2.7) and is
+            // decoded at about screen size — a 2560×7488 image came back near
+            // 1280×3744. This bitmap is only used to EXPORT (copy / share /
+            // save) when the original bytes can't be read, so it must be full size.
+            val req = ImageRequest.Builder(context).data(model)
+                .size(coil.size.Size.ORIGINAL)
+                .allowHardware(false)
+                .build()
             val result = loader.execute(req)
             (result as? SuccessResult)?.drawable?.toBitmap()
         } catch (e: Exception) {
@@ -403,15 +413,13 @@ internal fun copyBitmapToClipboard(
 ) {
     scope.launch(Dispatchers.IO) {
         try {
-            val bitmap = loadBitmap(context, model)
-                ?: error("decode failed")
             // T207: write under cache/share/ so FileProvider's <cache-path
             // name="share"> root matches. Files in cacheDir root aren't
             // covered by any declared root and would throw
             // IllegalArgumentException at getUriForFile.
-            val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
-            val file = File(shareDir, "clipboard_img_${System.currentTimeMillis()}.png")
-            file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            // [T-image-save-original] The original bytes when readable.
+            val file = writeShareFile(context, model, "clipboard_img")
+                ?: error("decode failed")
             val uri = androidx.core.content.FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -443,25 +451,24 @@ internal suspend fun shareImage(context: Context, model: Any) {
     // (Dialog inside an inner ContextWrapper). Toast on every failure path,
     // and stamp NEW_TASK on both the inner intent and the chooser.
     try {
-        val bmp = loadBitmap(context, model) ?: run {
+        // T207: see clipboard path above — must live under cache/share/
+        // for FileProvider to resolve the URI.
+        // [T-image-save-original] The original bytes when readable.
+        val file = writeShareFile(context, model, "share_img") ?: run {
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, context.getString(R.string.image_load_failed_toast), Toast.LENGTH_SHORT).show()
             }
             return
         }
         withContext(Dispatchers.IO) {
-            // T207: see clipboard path above — must live under cache/share/
-            // for FileProvider to resolve the URI.
-            val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
-            val file = File(shareDir, "share_img_${System.currentTimeMillis()}.png")
-            file.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
             val uri = androidx.core.content.FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 file,
             )
+            val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "image/png"
             val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "image/png"
+                type = mime
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -479,6 +486,117 @@ internal suspend fun shareImage(context: Context, model: Any) {
         }
     }
 }
+
+// ── Export from the original file [T-image-save-original] ──────────────────────
+//
+// Copy / Share / Save used to decode the image through Coil and re-encode the
+// bitmap as PNG. Coil gives a target-less request the DISPLAY size, so the
+// export was downsampled (same report as iOS: a 2560×7488 long image saved at a
+// fraction of its resolution), and a JPEG/GIF became a larger PNG without its
+// metadata or animation. Now each action reads the original bytes; only when
+// those are unavailable does it fall back to a full-size (Size.ORIGINAL) decode.
+
+private const val EXPORT_TAG = "ImageExport"
+
+internal class OriginalImage(val bytes: ByteArray, val mime: String, val extension: String)
+
+/** The original bytes behind a gallery/viewer model, or null if unreadable. */
+internal suspend fun loadOriginalImage(context: Context, model: Any): OriginalImage? =
+    withContext(Dispatchers.IO) {
+        try {
+            val bytes: ByteArray = when (model) {
+                is File -> model.takeIf { it.isFile }?.readBytes()
+                is Uri -> readUri(context, model)
+                is String -> when {
+                    model.startsWith("http://") || model.startsWith("https://") ->
+                        java.net.URL(model).openStream().use { it.readBytes() }
+                    model.startsWith("content://") || model.startsWith("file://") ->
+                        readUri(context, Uri.parse(model))
+                    model.startsWith("/") -> File(model).takeIf { it.isFile }?.readBytes()
+                    else -> null
+                }
+                else -> null
+            } ?: return@withContext null
+            // Header-only probe: confirms it is an image and gives its real type.
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+            val mime = opts.outMimeType ?: return@withContext null
+            val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "png"
+            Log.i(EXPORT_TAG, "original ${opts.outWidth}x${opts.outHeight} $mime ${bytes.size} bytes")
+            OriginalImage(bytes, mime, ext)
+        } catch (e: Exception) {
+            Log.w(EXPORT_TAG, "original unreadable: ${e.message}")
+            null
+        } catch (e: OutOfMemoryError) {
+            Log.w(EXPORT_TAG, "original too large to read into memory")
+            null
+        }
+    }
+
+private fun readUri(context: Context, uri: Uri): ByteArray? =
+    if (uri.scheme == "file") uri.path?.let { File(it) }?.takeIf { it.isFile }?.readBytes()
+    else context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+
+/** A file under cache/share/ holding the original bytes, else a full-size PNG. */
+private suspend fun writeShareFile(context: Context, model: Any, prefix: String): File? {
+    val shareDir = File(context.cacheDir, "share").apply { mkdirs() }
+    val stamp = System.currentTimeMillis()
+    loadOriginalImage(context, model)?.let { original ->
+        return withContext(Dispatchers.IO) {
+            File(shareDir, "${prefix}_$stamp.${original.extension}").also { it.writeBytes(original.bytes) }
+        }
+    }
+    val bmp = loadBitmap(context, model) ?: return null
+    return withContext(Dispatchers.IO) {
+        File(shareDir, "${prefix}_$stamp.png").also { f ->
+            f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+    }
+}
+
+/**
+ * Save the image behind [model] to the gallery: its original bytes (same
+ * pixels, format and metadata) when readable, else a full-size PNG.
+ */
+internal suspend fun saveImageToGallery(context: Context, model: Any): Boolean {
+    val original = loadOriginalImage(context, model)
+    if (original != null) return saveBytesToGallery(context, original)
+    val bmp = loadBitmap(context, model) ?: return false
+    Log.w(EXPORT_TAG, "original unavailable — saving full-size decode ${bmp.width}x${bmp.height} as PNG")
+    return saveToGallery(context, bmp)
+}
+
+private suspend fun saveBytesToGallery(context: Context, original: OriginalImage): Boolean =
+    withContext(Dispatchers.IO) {
+        try {
+            val filename = "minis_${System.currentTimeMillis()}.${original.extension}"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                    put(MediaStore.Images.Media.MIME_TYPE, original.mime)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Minis")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: return@withContext false
+                context.contentResolver.openOutputStream(uri)?.use { it.write(original.bytes) }
+                    ?: return@withContext false
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                context.contentResolver.update(uri, values, null, null)
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val minisDir = File(dir, "Minis").also { it.mkdirs() }
+                File(minisDir, filename).writeBytes(original.bytes)
+            }
+            Log.i(EXPORT_TAG, "saved ORIGINAL ${original.mime} ${original.bytes.size} bytes as $filename")
+            true
+        } catch (e: Exception) {
+            Log.w(EXPORT_TAG, "save original failed: ${e.message}")
+            false
+        }
+    }
 
 internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
     withContext(Dispatchers.IO) {

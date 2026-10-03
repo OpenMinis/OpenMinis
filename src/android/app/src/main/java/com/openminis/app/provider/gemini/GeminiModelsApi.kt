@@ -77,7 +77,7 @@ object GeminiModelsApi {
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 val name = obj.getString("name").removePrefix("models/")
-                val displayName = obj.optString("displayName", name)
+                val displayName = obj.optString("displayName", "").ifBlank { LLMModel.modelDisplayName(name) }
                 // Filter to chat-capable models (matching iOS).
                 val supportsGen = obj.optJSONArray("supportedGenerationMethods")
                     ?.let { methods ->

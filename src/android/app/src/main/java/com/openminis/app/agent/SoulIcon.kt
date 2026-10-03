@@ -33,6 +33,27 @@ object SoulIcon {
     fun isDataUri(value: String): Boolean = value.startsWith(DATA_URI_PREFIX)
 
     /**
+     * [T-android-soul-icon-sidecar] The PNG sidecar's filename, stored in the
+     * `icon:` frontmatter key in place of the bytes. Byte-identical to iOS's
+     * `SoulIconImage.sidecarName` — SOUL.md is a cross-device file, so the two
+     * platforms must agree on what the key contains.
+     */
+    const val SIDECAR_NAME = "SOUL.icon.png"
+
+    /** True when a stored `icon:` value NAMES the sidecar rather than holding bytes. */
+    fun isSidecarRef(value: String): Boolean = value.trim() == SIDECAR_NAME
+
+    /** The raw PNG bytes behind a `data:image/png;base64,…` URI, or null. */
+    fun pngBytes(dataUri: String): ByteArray? {
+        if (!isDataUri(dataUri)) return null
+        return decodeBase64(dataUri.removePrefix(DATA_URI_PREFIX))
+    }
+
+    /** The data URI for raw PNG bytes — the in-memory form every consumer reads. */
+    fun dataUri(png: ByteArray): String =
+        DATA_URI_PREFIX + Base64.encodeToString(png, Base64.NO_WRAP)
+
+    /**
      * Corner radius as a fraction of the icon's edge, matching iOS.
      *
      * Rounded, deliberately NOT a circle: at 18dp in the chat header a circle

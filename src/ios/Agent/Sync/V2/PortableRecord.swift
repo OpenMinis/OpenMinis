@@ -151,6 +151,19 @@ struct SyncInboundBatch {
     /// Origin device id when known (for SyncDevice records, audit trails).
     /// `nil` for records the transport can't attribute to a specific source.
     let sourceDeviceId: String?
+    /// [T-icloud-sync-tier1-cursor-after-apply] Invoked once SyncCore has
+    /// finished applying (or skipping) every record in this batch. The
+    /// transport uses it to advance its fetch cursor only AFTER the data is
+    /// on disk, so a kill mid-apply re-fetches instead of losing the batch.
+    /// Optional so other transports and older call sites are untouched.
+    var onApplied: (() -> Void)? = nil
+
+    init(records: [PortableRecord], deletes: [SyncRecordID], sourceDeviceId: String?, onApplied: (() -> Void)? = nil) {
+        self.records = records
+        self.deletes = deletes
+        self.sourceDeviceId = sourceDeviceId
+        self.onApplied = onApplied
+    }
 }
 
 /// Outcome of sending a single record. `transientFailure` means the caller

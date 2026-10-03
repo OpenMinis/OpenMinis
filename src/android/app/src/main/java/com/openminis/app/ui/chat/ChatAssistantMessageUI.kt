@@ -32,11 +32,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -92,6 +88,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -274,6 +272,10 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
+import com.openminis.app.ui.components.DecorativeSpinner
+import com.openminis.app.ui.components.rememberDecorativeTick
+import com.openminis.app.ui.components.decorativePhase
+import androidx.compose.ui.draw.drawWithCache
 
 @Composable
 internal fun AssistantHeader() {
@@ -321,8 +323,120 @@ internal fun AssistantHeader() {
     }
 }
 
+/**
+ * [T-android-usage-capsule-time] Token usage for a finished assistant turn,
+ * plus the wall-clock time it finished — "ctx:57k in:2 out:408 cache:57k 22:30".
+ *
+ * Port of iOS `usageCapsule` / `usageSummary` (ChatMessageViews.swift:688,718):
+ * same field order, same k-abbreviation, same rule that ctx / cache /
+ * +cache appear only when non-zero. The time is the Android-side addition and
+ * is appended last, in the same monospaced style, so the line reads as one
+ * unit rather than a separate badge.
+ *
+ * Renders nothing without usage, which also covers a still-streaming turn and
+ * any user message.
+ */
 @Composable
-internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? = null) {
+internal fun UsageCapsule(usage: ChatTokenUsage?, completedAt: Long?) {
+    if (usage == null) return
+    // Counts only. The time is a separate Text so it can be pushed to the far
+    // edge; concatenating it made the whole line read as one run of digits.
+    val summary = remember(usage) {
+        buildString {
+            if (usage.latestContextTokens > 0) append("ctx:${formatTokenCount(usage.latestContextTokens)} ")
+            append("in:${formatTokenCount(usage.inputTokens)}")
+            append(" out:${formatTokenCount(usage.outputTokens)}")
+            if (usage.cacheReadTokens > 0) append(" cache:${formatTokenCount(usage.cacheReadTokens)}")
+            if (usage.cacheCreationTokens > 0) append(" +cache:${formatTokenCount(usage.cacheCreationTokens)}")
+        }
+    }
+    // 24-hour HH:mm, no seconds. Locale.US pins the pattern's digits while the
+    // DEFAULT time zone keeps it the user's local clock — a locale-formatted
+    // time could render 12-hour with AM/PM.
+    val clock = remember(completedAt) {
+        completedAt?.let {
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(it))
+        }
+    }
+    val ink = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = Modifier
+            .padding(top = 2.dp, bottom = 2.dp)
+            // Capsule: pill shape, 8dp / 3dp padding.
+            //
+            // [T-android-usage-capsule-tint] The fill is derived from the
+            // user-bubble colour but NOT `userBubble.copy(alpha = 0.6f)`, which
+            // is what a literal reading of the iOS line produces and what this
+            // used to do. iOS's `userBubble` is `tertiarySystemFill`, already a
+            // translucent grey in both appearances, so 60% of it lands soft.
+            // Android's dark value is `0xFF2F3A5C` — fully OPAQUE — so the same
+            // arithmetic produced a solid blue-grey slab that read as a filled
+            // component rather than an incidental footnote, and clashed with
+            // the surrounding chat.
+            //
+            // Taking the colour at a low alpha over the surface keeps it a
+            // tint in both themes: it settles onto whatever is behind it
+            // instead of asserting its own block of colour. 0.22 was still
+            // reading as a distinct chip against the light chat background;
+            // 0.10 leaves the shape legible without the capsule announcing
+            // itself, which is what a hidden-by-default easter egg wants.
+            .clip(RoundedCornerShape(50))
+            .background(ChatColors.userBubble.copy(alpha = 0.10f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        // iOS uses the `speedometer` SF Symbol; Speed is the same idea in
+        // Material's set.
+        Icon(
+            Icons.Default.Speed,
+            contentDescription = null,
+            tint = ink,
+            modifier = Modifier.size(11.dp),
+        )
+        Text(
+            text = summary,
+            fontSize = 10.sp,
+            lineHeight = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = ink,
+            maxLines = 1,
+        )
+        clock?.let {
+            // Pushed to the trailing edge so the finish time reads as its own
+            // fact rather than another number in the counts.
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = it,
+                fontSize = 10.sp,
+                lineHeight = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = ink,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/**
+ * 1234 -> "1.2k", 57000 -> "57k". Mirrors iOS `formatTokenCount`: a whole
+ * multiple of 1000 drops the decimal, anything else keeps one place.
+ */
+private fun formatTokenCount(count: Int): String {
+    if (count < 1000) return count.toString()
+    val k = count / 1000.0
+    return if (k % 1.0 == 0.0) "${k.toInt()}k" else String.format(java.util.Locale.US, "%.1fk", k)
+}
+
+@Composable
+internal fun AssistantMessageView(
+    message: ChatMessage,
+    onRetry: (() -> Unit)? = null,
+    // [T-android-usage-capsule-style] Whether this message's usage capsule is
+    // currently revealed. Owned by the ViewModel so the flat renderer — which
+    // emits the capsule as a separate list item — can share the same state.
+    revealed: Boolean = false,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -421,6 +535,25 @@ internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? =
         // Inline error banner (iOS: red exclamation + error text + Retry button)
         if (message.error != null) {
             InlineErrorBanner(error = message.error, onRetry = onRetry)
+        }
+
+        // [T-android-usage-capsule-time] Last line of the turn, after the error
+        // banner: the usage belongs to the run as a whole, including a run that
+        // ended badly.
+        // Same !isStreaming gate the flat path applies, so both renderers
+        // reveal the capsule at the same moment.
+        //
+        // [T-android-usage-capsule-style] Revealed only while the user has
+        // toggled this message on. The tap that sets it lives in the flat
+        // renderer, which is the path that actually runs; this legacy view
+        // honours the same state so a future revival cannot regress to the
+        // always-visible footer.
+        AnimatedVisibility(
+            visible = !message.isStreaming && revealed,
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            UsageCapsule(message.tokenUsage, message.completedAt)
         }
     }
 }
@@ -599,6 +732,14 @@ internal fun formatToolDetailsForClipboard(block: AssistantBlock): String {
         if (resultText.isNotEmpty()) append(resultText)
     }
 }
+/**
+ * [T-android-decorative-anim-perf] One full left-to-right shimmer sweep.
+ * Stepping happens on the shared decorative clock (~30 fps); see
+ * DecorativeAnimation.kt for why a 2.8 s decorative sweep does not earn the
+ * panel's full refresh rate.
+ */
+private const val SHIMMER_PERIOD_MS = 2800
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -640,7 +781,21 @@ internal fun ToolCallPill(
     val isCancelled = block.toolStatus == ToolBlockStatus.CANCELLED
 
     val toolAccent = toolAccentColor(block.toolName)
-    val toolIcon = toolIconFor(block.toolName)
+    // [T-android-subagent-control-capsule] A status / steer / cancel / resume
+    // call is the model operating on its own sub agents — a tool call like any
+    // other, so it renders in this shared capsule rather than a bespoke row.
+    //
+    // Android's first cut (ported from iOS's) was a centred grey line: it read
+    // as a section divider rather than an action, said nothing about WHAT was
+    // sent, could not be opened, and its own padding made it taller than the
+    // capsules around it. The shared capsule fixes all four at once — the same
+    // 36dp metrics as every other tool, a tappable detail sheet, and the sub
+    // agent accent (toolAccentColor already maps subagent_task to the violet)
+    // so it still reads as agent work.
+    val controlSummary = helperControlSummary(block).takeIf {
+        com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(block.toolName)
+    }
+    val toolIcon = if (controlSummary != null) Icons.Default.Tune else toolIconFor(block.toolName)
 
     // Icon color: tool color when running/done, error/cancel colors on failure
     val iconTint = when {
@@ -667,17 +822,13 @@ internal fun ToolCallPill(
     // next to the iOS counterpart. The bottom FloatingToolStatusBar
     // still shows a CircularProgressIndicator (that is the running-tool
     // status surface, where a spinner reads correctly).
-    val shimmerTranslate = if (isRunning) {
-        val transition = rememberInfiniteTransition(label = "toolPillShimmer")
-        transition.animateFloat(
-            initialValue = -1f,
-            targetValue = 2f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(durationMillis = 2800, easing = LinearEasing),
-            ),
-            label = "toolPillShimmerTranslate",
-        )
-    } else null
+    // [T-android-decorative-anim-perf] The running shimmer is driven by the
+    // shared ~30 fps decorative clock and drawn as a SIBLING layer over the
+    // pill (see the overlay after the pill Row below), not as a draw modifier
+    // wrapping it. Wrapping meant every tick re-recorded the pill's icon and
+    // title text just to slide a translucent band; a sibling layer moves only
+    // itself. The clock is held only while the tool is RUNNING.
+    val shimmerTick = if (isRunning) rememberDecorativeTick() else null
 
     // [T-android-tool-bubble-longpress-menu] Long-press menu state, scoped
     // to this pill. The DropdownMenu is anchored to the pill via the Box
@@ -697,27 +848,6 @@ internal fun ToolCallPill(
                 )
                 .border(0.5.dp, ChatColors.toolBorder, CircleShape)
                 .clip(CircleShape)
-                .then(
-                    if (shimmerTranslate != null) {
-                        Modifier.drawWithContent {
-                            drawContent()
-                            val w = size.width
-                            val band = w * 0.6f
-                            val x = shimmerTranslate.value * w
-                            drawRect(
-                                brush = Brush.linearGradient(
-                                    colors = listOf(
-                                        Color.White.copy(alpha = 0f),
-                                        Color.White.copy(alpha = 0.18f),
-                                        Color.White.copy(alpha = 0f),
-                                    ),
-                                    start = Offset(x, 0f),
-                                    end = Offset(x + band, 0f),
-                                ),
-                            )
-                        }
-                    } else Modifier,
-                )
                 .combinedClickable(
                     onClick = { onOpenDetail(block.id) },
                     onLongClick = if (onRerunFromHere != null || onCopyDetails != null) {
@@ -755,7 +885,12 @@ internal fun ToolCallPill(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = block.toolTitle.ifEmpty { block.toolName },
+                    // [T-android-subagent-control-capsule] Prefer the
+                    // operation description for a control call. `tool_title`
+                    // names the RUN it acted on, so using it would label a
+                    // status check, a steer and a resume on the same sub agent
+                    // identically.
+                    text = controlSummary ?: block.toolTitle.ifEmpty { block.toolName },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -792,6 +927,37 @@ internal fun ToolCallPill(
                 Spacer(modifier = Modifier.width(8.dp))
                 ToolStopButton(onStop = onStop)
             }
+        }
+        // [T-android-decorative-anim-perf] Shimmer overlay: its own layer, so
+        // the per-tick translation invalidates nothing but this band. The outer
+        // clip pins the sweep to the pill's capsule; the gradient is built once
+        // per size in drawWithCache — the frame path writes one float.
+        if (shimmerTick != null) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(CircleShape)
+                    .graphicsLayer {
+                        val phase = decorativePhase(shimmerTick.value, SHIMMER_PERIOD_MS)
+                        // Same -1f..2f sweep, in pill widths, the old tween produced.
+                        translationX = (-1f + phase * 3f) * size.width
+                    }
+                    .drawWithCache {
+                        val band = size.width * 0.6f
+                        val brush = Brush.linearGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0f),
+                                Color.White.copy(alpha = 0.18f),
+                                Color.White.copy(alpha = 0f),
+                            ),
+                            start = Offset(0f, 0f),
+                            end = Offset(band, 0f),
+                        )
+                        onDrawBehind {
+                            drawRect(brush = brush, size = androidx.compose.ui.geometry.Size(band, size.height))
+                        }
+                    },
+            )
         }
         // [T-android-tool-bubble-longpress-menu] Long-press menu anchored to
         // the pill. Items mirror the user-bubble menu's style (MinisMenu +
@@ -844,6 +1010,27 @@ internal fun ToolCallPill(
 
 // ─── Thinking Block (iOS: collapsible "Deep Thinking" section, blue tint) ────
 
+/**
+ * [T-android-thinking-collapse-latch] Should a thinking block collapse itself
+ * now that streaming has ended?
+ *
+ * Extracted from [ThinkingBlock] so the rule is testable: the composable needs
+ * a live composition, but this is the whole user-visible behaviour — "it folds
+ * itself away when the model stops thinking, unless you deliberately held it
+ * open."
+ *
+ * @param isStreaming whether THIS block is still the streaming trailing block.
+ * @param userIntent the user's last explicit toggle on this block: true =
+ *   they expanded it, false = they collapsed it, null = never touched.
+ */
+internal fun shouldAutoCollapseThinking(isStreaming: Boolean, userIntent: Boolean?): Boolean {
+    if (isStreaming) return false
+    // An explicit collapse is already collapsed; re-collapsing is a no-op, but
+    // returning false keeps the intent explicit. Everything else — untouched,
+    // or expanded-while-streaming — folds away at stream end.
+    return userIntent != false
+}
+
 @Composable
 internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: Boolean = true) {
     // Per-block expand state, keyed by block.id so the user's manual toggle on
@@ -855,18 +1042,35 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     // [T-thinking-auto-expand-toggle] The initial auto-expand of a new
     // streaming block is gated on the Appearance setting (default ON =
     // historical behavior). When the user turned it off, a new streaming block
-    // starts collapsed; a manual header tap still expands it (setting
-    // userTouched, so neither the stream-end auto-collapse nor anything else
-    // fights the user). Read once at mount — mirrors iOS ThinkingBlockView,
+    // starts collapsed; a manual header tap still expands it (recording the
+    // user's intent below, so nothing fights them). Read once at mount —
+    // mirrors iOS ThinkingBlockView,
     // where the same UserDefaults gate sits at the one-shot auto-expand site.
     val context = LocalContext.current
     val autoExpandThinking = remember { autoExpandThinkingEnabled(context) }
     var expanded by remember(block.id) { mutableStateOf(autoExpandThinking && isLast && isStreaming) }
-    var userTouched by remember(block.id) { mutableStateOf(false) }
+    // [T-android-thinking-collapse-latch] What the user last chose, or null if
+    // they have not touched THIS block. Deliberately tri-state rather than the
+    // old `userTouched: Boolean`.
+    //
+    // The bug that flag caused: the block auto-expands while streaming, the
+    // user taps once to collapse it and again to re-open and keep reading —
+    // and `userTouched` is now latched true forever, so the stream-end
+    // auto-collapse below never fires and the block stays open for the rest of
+    // the conversation. Reported as "thinking blocks don't collapse again once
+    // you've expanded them".
+    //
+    // "Never fight the user" is still the rule; the flag simply could not tell
+    // WHICH way the user had pushed. A user who collapsed a block means "keep
+    // it shut" and auto-collapse must not reopen it (it never would) — but a
+    // user who EXPANDED it was asking to read it *while it streamed*, which is
+    // the same thing the auto-expand does, and there is nothing to defend once
+    // the stream ends. So only an explicit collapse suppresses the auto-
+    // collapse; an explicit expand lets it run.
+    var userIntent by remember(block.id) { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(block.id, isStreaming) {
-        // One-shot auto-collapse when streaming for this block ends, but only
-        // if the user hasn't taken control of its state yet.
-        if (!isStreaming && !userTouched) expanded = false
+        // One-shot auto-collapse when streaming for this block ends.
+        if (shouldAutoCollapseThinking(isStreaming, userIntent)) expanded = false
     }
     val thinkingBlue = Color(0xFF007AFF)
     val charCount = block.content.length
@@ -906,7 +1110,11 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable {
-                    userTouched = true
+                    // [T-android-thinking-collapse-latch] Record the direction,
+                    // not merely that a tap happened. `overHardCap` opens the
+                    // native viewer instead of toggling, so it expresses no
+                    // expand/collapse intent and must not touch this.
+                    if (!overHardCap) userIntent = !expanded
                     // [T-thinking-render-perf-android] Over the hard cap the
                     // inline scroller is bypassed entirely; tapping the header
                     // opens the native full-content viewer instead of toggling
@@ -917,9 +1125,10 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         ) {
             if (isStreaming && block.toolStatus != ToolBlockStatus.SUCCESS) {
                 // iOS: ProgressView().controlSize(.mini) while streaming
-                CircularProgressIndicator(
-                    modifier = Modifier.size(13.dp),
+                // [T-android-decorative-anim-perf] See DecorativeAnimation.kt.
+                DecorativeSpinner(
                     color = thinkingBlue,
+                    modifier = Modifier.size(13.dp),
                     strokeWidth = 1.5.dp,
                 )
                 Spacer(modifier = Modifier.width(6.dp))

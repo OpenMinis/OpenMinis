@@ -64,6 +64,16 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
         let onMac = ProcessInfo.processInfo.isiOSAppOnMac
         FPSyncTraceLog.log("init domain=\(domain.identifier.rawValue) ver=\(ver)(\(build)) exec=\(execStamp) mac=\(onMac) providerRoot=\(root.path) resolved=\(resolvedRoot) [\(rootSummaries.joined(separator: " "))]")
 
+        // [T-ios-fp-mac-bootcrash] Liveness heartbeat for the main app's
+        // circuit breaker. Reaching this line means the appex bootstrapped —
+        // dyld bound the entry stub and our code is running, which is exactly
+        // what the pre-main SIGILL launches never achieve. The breaker in
+        // MinisApp arms a pending marker when it registers the domain and
+        // clears it when it sees this heartbeat; registrations that never get
+        // one are what trip it. Written for the CURRENT executable generation
+        // so a new build always starts from a clean slate.
+        FileProviderBootHealth.recordSuccessfulBoot(generation: execStamp)
+
         Self.recoverFakeTrashDirIfNeeded(root: root)
         Self.cleanupLegacyLogsDirIfNeeded(root: root)
         Self.cleanupLegacyMountedFoldersIfNeeded(root: root)

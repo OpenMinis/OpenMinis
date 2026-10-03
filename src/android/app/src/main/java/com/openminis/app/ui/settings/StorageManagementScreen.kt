@@ -4,7 +4,22 @@ import com.openminis.app.R
 import com.openminis.app.ui.components.MinisTextButton
 
 import android.content.Context
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.res.pluralStringResource
+import com.openminis.app.ui.components.MinisAlertDialog
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -45,118 +60,438 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.ChatSessionEntity
+import com.openminis.app.data.session.SessionStorage
+import com.openminis.app.data.session.SessionTree
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private data class SessionStorageInfo(
-    val id: String,
-    val title: String?,
-    val minisSize: Long,
-    val mediaSize: Long,
-) {
-    val totalSize: Long get() = minisSize + mediaSize
+/**
+ * [T-android-child-session-delete-storage] Size every session, then fold
+ * hidden child sessions onto their root parent. Rows are ROOTS only; a child's
+ * bytes appear exactly once, under its parent — so the overview total and the
+ * list agree, and the user never sees a `Helper · …` session as a separate
+ * thing to manage. Pure (given the entity list + a storage) so it is testable.
+ */
+internal fun aggregateSessionStorage(
+    sessions: List<ChatSessionEntity>,
+    storage: SessionStorage,
+): List<Triple<ChatSessionEntity, Long, Long>> {
+    val parentOf: Map<String, String?> = sessions.associate { it.id to it.parentSessionId }
+    val minis = sessions.associate { it.id to storage.minisSize(it.id) }
+    val media = storage.mediaSizesBySession(sessions.map { it.id }.toSet())
+    val minisByRoot = SessionTree.aggregateToRoots(parentOf, minis)
+    val mediaByRoot = SessionTree.aggregateToRoots(parentOf, media)
+    return sessions
+        .filter { SessionTree.rootOf(it.id, parentOf) == it.id }
+        .map { Triple(it, minisByRoot[it.id] ?: 0L, mediaByRoot[it.id] ?: 0L) }
 }
 
+/**
+ * Settings › Storage. [T-android-storage-usage-cache] Everything shown comes
+ * from [StorageUsageViewModel], scoped to this destination's back-stack entry:
+ * measured once per visit, then updated incrementally. Returning from a
+ * session's detail page no longer re-measures anything.
+ *
+ * Multi-select (like a mail list): the "Select" action in the top bar, or a
+ * long-press on a session row, enters it; rows then toggle on tap, the top
+ * bar offers Cancel / Select All, and a bottom bar offers Clear Files and
+ * Delete for the selection, each behind a confirmation.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun StorageManagementScreen(
-    chatDao: ChatDao,
+internal fun StorageManagementScreen(
+    vm: StorageUsageViewModel,
     onBack: () -> Unit,
     onRootfsClick: () -> Unit,
     onSessionClick: (sessionId: String) -> Unit = {},
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val state by vm.state.collectAsState()
+    val result by vm.result.collectAsState()
+    var showClearLogsDialog by remember { mutableStateOf(false) }
+    var showBatchClearDialog by remember { mutableStateOf(false) }
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
 
-    var isLoading by remember { mutableStateOf(true) }
-    var shellSize by remember { mutableLongStateOf(0L) }
-    var dbSize by remember { mutableLongStateOf(0L) }
-    var sessions by remember { mutableStateOf<List<SessionStorageInfo>>(emptyList()) }
+    // Runs each time the list comes back on screen; a no-op unless the rootfs
+    // screen was opened in between.
+    LaunchedEffect(Unit) { vm.onListShown() }
 
-    fun reload() {
-        scope.launch {
-            isLoading = true
-            withContext(Dispatchers.IO) {
-                shellSize = directorySize(File(context.filesDir, "alpine-rootfs"))
-                dbSize = databaseSize(context)
+    // System back leaves selection first, like the home list.
+    BackHandler(enabled = state.selecting) { vm.stopSelecting() }
 
-                val allSessions = chatDao.listSessions()
-                val sessionsDir = File(context.filesDir, "minis-sessions")
-                val mediaDir = File(context.filesDir, "media")
-
-                val mediaSizes = mediaSizesBySession(mediaDir, allSessions.map { it.id }.toSet())
-
-                sessions = allSessions.map { session ->
-                    val minisDir = File(sessionsDir, session.id)
-                    SessionStorageInfo(
-                        id = session.id,
-                        title = session.title,
-                        minisSize = directorySize(minisDir),
-                        mediaSize = mediaSizes[session.id] ?: 0L,
-                    )
-                }.sortedByDescending { it.totalSize }
+    LaunchedEffect(result) {
+        val r = result ?: return@LaunchedEffect
+        val res = context.resources
+        val message = when (r) {
+            is StorageUsageViewModel.BatchResult.Cleared -> {
+                val base = res.getQuantityString(
+                    R.plurals.storage_batch_clear_result, r.sessions, r.sessions,
+                    Formatter.formatFileSize(context, r.freed),
+                )
+                if (r.failedPaths.isEmpty()) base
+                else base + "\n" + context.getString(
+                    R.string.storage_clear_partial_failure, r.failedPaths.size, r.failedPaths.first(),
+                )
             }
-            isLoading = false
+            is StorageUsageViewModel.BatchResult.Deleted -> res.getQuantityString(
+                R.plurals.storage_batch_delete_result, r.sessions, r.sessions,
+                Formatter.formatFileSize(context, r.freed),
+            )
+        }
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        vm.consumeResult()
+    }
+
+    val allSelected = state.rows.isNotEmpty() && state.selectedIds.containsAll(state.rows.map { it.id })
+
+    SettingsScaffold(
+        title = when {
+            !state.selecting -> stringResource(R.string.storage_title)
+            state.selectedIds.isEmpty() -> stringResource(R.string.sessionlist_select_title)
+            else -> stringResource(R.string.sessionlist_n_selected, state.selectedIds.size)
+        },
+        onBack = onBack,
+        navigation = if (state.selecting) {
+            { MinisTextButton(onClick = { vm.stopSelecting() }) { Text(stringResource(R.string.cancel)) } }
+        } else null,
+        actions = {
+            if (state.selecting) {
+                MinisTextButton(onClick = { vm.toggleSelectAll() }) {
+                    Text(
+                        stringResource(
+                            if (allSelected) R.string.sessionlist_deselect_all else R.string.sessionlist_select_all,
+                        ),
+                    )
+                }
+            } else if (!state.isLoading && state.rows.isNotEmpty()) {
+                MinisTextButton(onClick = { vm.startSelecting() }) {
+                    Text(stringResource(R.string.sessionlist_select_action))
+                }
+            }
+        },
+        bottomBar = if (state.selecting) {
+            {
+                StorageSelectionBar(
+                    busy = state.batchBusy,
+                    hasSelection = state.selectedIds.isNotEmpty(),
+                    canClear = state.selectedSize > 0,
+                    onClear = { showBatchClearDialog = true },
+                    onDelete = { showBatchDeleteDialog = true },
+                )
+            }
+        } else null,
+        // [T-android-storage-usage-cache] The session list can hold thousands
+        // of rows (2382 on the test device). As children of the scaffold's
+        // scrolling Column they were ALL composed at once: one 7 s frame
+        // (Choreographer skipped 418 frames) every time the list appeared,
+        // including on the way back from a detail page. A LazyColumn composes
+        // only what is on screen, and keyed items make a re-sort a move.
+        scrollable = false,
+    ) {
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            item(key = "overview") {
+                SettingsSection(header = stringResource(R.string.storage_section_overview)) {
+                    StorageOverviewRow(
+                        color = Color(0xFF8E8E93),
+                        label = stringResource(R.string.storage_overview_shell),
+                        value = Formatter.formatFileSize(context, state.shellSize),
+                        onClick = {
+                            vm.onRootfsOpened()
+                            onRootfsClick()
+                        },
+                        showDivider = true,
+                    )
+                    StorageOverviewRow(
+                        color = Color(0xFF007AFF),
+                        label = stringResource(R.string.storage_overview_database),
+                        value = Formatter.formatFileSize(context, state.dbSize),
+                        showDivider = true,
+                    )
+                    StorageOverviewRow(
+                        color = Color(0xFF5856D6),
+                        label = stringResource(R.string.storage_overview_sessions),
+                        value = Formatter.formatFileSize(context, state.totalSessionSize),
+                        showDivider = true,
+                    )
+                    StorageOverviewRow(
+                        color = Color(0xFFFF9500),
+                        label = stringResource(R.string.storage_overview_logs_caches),
+                        value = Formatter.formatFileSize(context, state.logsCachesSize),
+                        showDivider = false,
+                    )
+                }
+
+            }
+            item(key = "logs") {
+                // [T-storage-clear-logs-caches]
+                SettingsSection(footer = stringResource(R.string.storage_clear_logs_caches_footer)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !state.isClearingLogs) { showClearLogsDialog = true }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (state.isClearingLogs) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                stringResource(R.string.storage_clearing_status),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        } else {
+                            Text(
+                                stringResource(R.string.storage_clear_logs_caches_button),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+
+            }
+            item(key = "sessions-header") {
+                SettingsSection(header = stringResource(R.string.storage_section_sessions)) {
+                    when {
+                        state.isLoading -> Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        }
+                        state.rows.isEmpty() -> Text(
+                            stringResource(R.string.storage_no_sessions),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(16.dp),
+                        )
+                        // Rows follow as their own lazy items; the card is drawn
+                        // per row (rounded at the first and last) so it still reads
+                        // as one grouped section.
+                        else -> Unit
+                    }
+                }
+            }
+            if (!state.isLoading) {
+                itemsIndexed(state.rows, key = { _, row -> row.id }) { index, session ->
+                    val last = state.rows.size - 1
+                    val shape = RoundedCornerShape(
+                        topStart = if (index == 0) 14.dp else 0.dp,
+                        topEnd = if (index == 0) 14.dp else 0.dp,
+                        bottomStart = if (index == last) 14.dp else 0.dp,
+                        bottomEnd = if (index == last) 14.dp else 0.dp,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .animateItem()
+                            .padding(horizontal = 16.dp)
+                            .clip(shape)
+                            .background(MaterialTheme.colorScheme.surfaceContainerLow),
+                    ) {
+                        StorageSessionRow(
+                            title = session.title ?: "Untitled",
+                            size = Formatter.formatFileSize(context, session.totalSize),
+                            selecting = state.selecting,
+                            selected = session.id in state.selectedIds,
+                            onClick = {
+                                if (state.selecting) vm.toggle(session.id) else onSessionClick(session.id)
+                            },
+                            onLongClick = {
+                                if (state.selecting) vm.toggle(session.id) else vm.startSelecting(session.id)
+                            },
+                            showDivider = index < last,
+                        )
+                    }
+                }
+            }
+            item(key = "bottom") { Spacer(Modifier.height(24.dp)) }
         }
     }
 
-    LaunchedEffect(Unit) { reload() }
+    if (showClearLogsDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearLogsDialog = false },
+            title = { Text(stringResource(R.string.storage_clear_logs_caches_confirm_title)) },
+            text = { Text(stringResource(R.string.storage_clear_logs_caches_confirm_message)) },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    showClearLogsDialog = false
+                    // Only logs & caches change, so only they are re-measured.
+                    vm.clearLogsAndCaches()
+                }) { Text(stringResource(R.string.storage_clear_logs_caches_confirm)) }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { showClearLogsDialog = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
+    }
 
-    val totalSessionSize = sessions.sumOf { it.totalSize }
+    if (showBatchClearDialog) {
+        val n = state.selectedIds.size
+        val size = Formatter.formatFileSize(context, state.selectedSize)
+        MinisAlertDialog(
+            onDismissRequest = { showBatchClearDialog = false },
+            title = pluralStringResource(R.plurals.storage_batch_clear_title, n, n),
+            text = stringResource(R.string.storage_batch_clear_message, size),
+            confirmText = stringResource(R.string.storage_clear_confirm_button, size),
+            isDestructive = true,
+            onConfirm = {
+                showBatchClearDialog = false
+                vm.clearSelectedFiles()
+            },
+        )
+    }
 
-    SettingsScaffold(title = stringResource(R.string.storage_title), onBack = onBack) {
-        SettingsSection(header = stringResource(R.string.storage_section_overview)) {
-            StorageOverviewRow(
-                color = Color(0xFF8E8E93),
-                label = stringResource(R.string.storage_overview_shell),
-                value = Formatter.formatFileSize(context, shellSize),
-                onClick = onRootfsClick,
-                showDivider = true,
+    if (showBatchDeleteDialog) {
+        val n = state.selectedIds.size
+        MinisAlertDialog(
+            onDismissRequest = { showBatchDeleteDialog = false },
+            title = stringResource(R.string.sessionlist_delete_n_title, n),
+            text = stringResource(
+                R.string.storage_batch_delete_message,
+                Formatter.formatFileSize(context, state.selectedSize),
+            ),
+            confirmText = stringResource(R.string.delete),
+            isDestructive = true,
+            onConfirm = {
+                showBatchDeleteDialog = false
+                vm.deleteSelected()
+            },
+        )
+    }
+}
+
+/**
+ * A session row in the storage list. Outside selection it is the usual value
+ * row with a chevron; in selection a leading check mark shows the state and
+ * the chevron goes, since tapping toggles instead of navigating.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun StorageSessionRow(
+    title: String,
+    size: String,
+    selecting: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    showDivider: Boolean,
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selecting) {
+                Icon(
+                    if (selected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                    contentDescription = null,
+                    tint = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.width(12.dp))
+            }
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
-            StorageOverviewRow(
-                color = Color(0xFF007AFF),
-                label = stringResource(R.string.storage_overview_database),
-                value = Formatter.formatFileSize(context, dbSize),
-                showDivider = true,
+            Spacer(Modifier.width(8.dp))
+            Text(
+                size,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
             )
-            StorageOverviewRow(
-                color = Color(0xFF5856D6),
-                label = stringResource(R.string.storage_overview_sessions),
-                value = Formatter.formatFileSize(context, totalSessionSize),
-                showDivider = false,
+            if (!selecting) {
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        if (showDivider) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = if (selecting) 50.dp else 16.dp)
+                    .height(0.5.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
             )
         }
+    }
+}
 
-        SettingsSection(header = stringResource(R.string.storage_section_sessions)) {
-            when {
-                isLoading -> Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
+/** Bottom bar of the selection mode: Clear Files and Delete for the selection. */
+@Composable
+private fun StorageSelectionBar(
+    busy: Boolean,
+    hasSelection: Boolean,
+    canClear: Boolean,
+    onClear: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 3.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (busy) {
+                Row(
+                    modifier = Modifier.weight(1f).padding(12.dp),
                     horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(stringResource(R.string.storage_clearing_status))
                 }
-                sessions.isEmpty() -> Text(
-                    stringResource(R.string.storage_no_sessions),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(16.dp),
-                )
-                else -> sessions.forEachIndexed { index, session ->
-                    SettingsValueRow(
-                        title = session.title ?: "Untitled",
-                        value = Formatter.formatFileSize(context, session.totalSize),
-                        onClick = { onSessionClick(session.id) },
-                        showDivider = index < sessions.size - 1,
+            } else {
+                MinisTextButton(
+                    onClick = onClear,
+                    enabled = hasSelection && canClear,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        stringResource(R.string.storage_batch_clear_button),
+                        color = if (hasSelection && canClear) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    )
+                }
+                MinisTextButton(
+                    onClick = onDelete,
+                    enabled = hasSelection,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(
+                        stringResource(R.string.delete),
+                        color = if (hasSelection) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                     )
                 }
             }
         }
-
-        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -167,6 +502,10 @@ fun SessionStorageDetailScreen(
     chatDao: ChatDao,
     onBack: () -> Unit,
     onBrowseFiles: (rootPath: String) -> Unit = {},
+    // [T-android-storage-usage-cache] Every measurement this page makes is
+    // also the list row's value; handing it back keeps the list current
+    // (after a clear, or files deleted in the browser) with no second scan.
+    onMeasured: (sessionId: String, minisSize: Long, mediaSize: Long) -> Unit = { _, _, _ -> },
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -176,18 +515,24 @@ fun SessionStorageDetailScreen(
     var mediaSize by remember { mutableLongStateOf(0L) }
     var isClearing by remember { mutableStateOf(false) }
     var showClearDialog by remember { mutableStateOf(false) }
+    // [T-android-child-session-delete-storage] This session plus every hidden
+    // child under it: sizes are the subtree's, and "clear" clears them all.
+    var memberIds by remember { mutableStateOf(listOf(sessionId)) }
 
-    val sessionsDir = File(context.filesDir, "minis-sessions")
-    val mediaDir = File(context.filesDir, "media")
+    val storage = remember { SessionStorage(context.filesDir) }
+    val sessionsDir = storage.sessionsRoot
 
     fun reload() {
         scope.launch {
             withContext(Dispatchers.IO) {
                 session = chatDao.getSession(sessionId)
-                minisSize = directorySize(File(sessionsDir, sessionId))
-                val mediaSizes = mediaSizesBySession(mediaDir, setOf(sessionId))
-                mediaSize = mediaSizes[sessionId] ?: 0L
+                val parentOf = chatDao.listSessions().associate { it.id to it.parentSessionId }
+                val members = SessionTree.membersOf(sessionId, parentOf).ifEmpty { listOf(sessionId) }
+                memberIds = members
+                minisSize = members.sumOf { storage.minisSize(it) }
+                mediaSize = storage.mediaSizesBySession(members.toSet()).values.sum()
             }
+            onMeasured(sessionId, minisSize, mediaSize)
         }
     }
 
@@ -287,13 +632,34 @@ fun SessionStorageDetailScreen(
                     showClearDialog = false
                     isClearing = true
                     scope.launch {
-                        withContext(Dispatchers.IO) {
-                            File(sessionsDir, sessionId).deleteRecursively()
-                            deleteSessionMedia(mediaDir, sessionId)
+                        // [T-android-storage-delete-feedback] openminis/openminis#375:
+                        // this used to discard the result and zero the sizes
+                        // unconditionally, so a delete that removed nothing
+                        // still looked like it worked. Report what survived,
+                        // and re-measure rather than assuming zero.
+                        val failed = withContext(Dispatchers.IO) {
+                            // Cascade: the root's files and every child's.
+                            memberIds.flatMap { storage.deleteFilesDetailed(it).failedPaths }
                         }
-                        minisSize = 0L
-                        mediaSize = 0L
+                        val remaining = withContext(Dispatchers.IO) {
+                            memberIds.sumOf { storage.minisSize(it) } to
+                                memberIds.sumOf { storage.mediaSize(it) }
+                        }
+                        minisSize = remaining.first
+                        mediaSize = remaining.second
+                        onMeasured(sessionId, remaining.first, remaining.second)
                         isClearing = false
+                        if (failed.isNotEmpty()) {
+                            Toast.makeText(
+                                context,
+                                context.getString(
+                                    R.string.storage_clear_partial_failure,
+                                    failed.size,
+                                    failed.first(),
+                                ),
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
                     }
                 }) {
                     Text(
@@ -357,45 +723,50 @@ private fun StorageOverviewRow(
     }
 }
 
-private fun directorySize(dir: File): Long {
-    if (!dir.exists()) return 0L
-    var total = 0L
-    dir.walkTopDown().forEach { file ->
-        if (file.isFile) total += file.length()
-    }
-    return total
-}
+private fun directorySize(dir: File): Long = SessionStorage.directorySize(dir)
 
-private fun databaseSize(context: Context): Long {
-    val dbFile = context.getDatabasePath("minis.db")
-    var size = if (dbFile.exists()) dbFile.length() else 0L
-    val wal = File(dbFile.path + "-wal")
-    val shm = File(dbFile.path + "-shm")
-    if (wal.exists()) size += wal.length()
-    if (shm.exists()) size += shm.length()
-    return size
-}
+/**
+ * [T-storage-clear-logs-caches] What "Logs & Caches" counts and clears.
+ *
+ * NOT all of cacheDir: this app keeps live state there that must survive —
+ * `proot-tmp` (the running shell's /tmp), `pasted_text` (unsent drafts),
+ * `share_inbound`, restore/import work dirs, the rootfs backup, rclone config.
+ * So the set is an allowlist:
+ *   * every log file (daily, crash, exit-info) via AppLogger.clearLogs(),
+ *     which also drops the open writer so logging continues;
+ *   * regenerable caches, refetched on demand (model lists, models.dev);
+ *   * outbound share/export scratch, only entries untouched for an hour, so a
+ *     share another app is still reading is not pulled out from under it.
+ * The size shown is exactly what clear() removes.
+ */
+internal object LogsAndCachesCleaner {
+    private val REGENERABLE = listOf("models-cache", "models-dev-cache")
+    private val TRANSIENT = listOf("share", "shared", "export-staging", "large-messages")
+    private const val TRANSIENT_MIN_AGE_MS = 60 * 60 * 1000L
 
-private fun mediaSizesBySession(mediaDir: File, sessionIds: Set<String>): Map<String, Long> {
-    if (!mediaDir.exists()) return emptyMap()
-    val sizes = mutableMapOf<String, Long>()
-    mediaDir.walkTopDown().forEach { file ->
-        if (file.isFile) {
-            val parent = file.parentFile ?: return@forEach
-            val sid = parent.name
-            if (sessionIds.contains(sid)) {
-                sizes[sid] = (sizes[sid] ?: 0L) + file.length()
-            }
+    private fun transientEntries(cacheDir: File, now: Long): List<File> {
+        val cutoff = now - TRANSIENT_MIN_AGE_MS
+        return TRANSIENT.flatMap { name ->
+            File(cacheDir, name).listFiles()?.filter { it.lastModified() < cutoff } ?: emptyList()
         }
     }
-    return sizes
-}
 
-private fun deleteSessionMedia(mediaDir: File, sessionId: String) {
-    if (!mediaDir.exists()) return
-    mediaDir.walkTopDown().forEach { dir ->
-        if (dir.isDirectory && dir.name == sessionId) {
-            dir.deleteRecursively()
-        }
+    /** Clearable cache bytes under [cacheDir] (logs excluded). */
+    fun cachesSize(cacheDir: File, now: Long = System.currentTimeMillis()): Long =
+        REGENERABLE.sumOf { directorySize(File(cacheDir, it)) } +
+            transientEntries(cacheDir, now).sumOf { if (it.isDirectory) directorySize(it) else it.length() }
+
+    /** Delete the clearable caches under [cacheDir] (logs excluded). */
+    fun clearCaches(cacheDir: File, now: Long = System.currentTimeMillis()) {
+        REGENERABLE.forEach { File(cacheDir, it).deleteRecursively() }
+        transientEntries(cacheDir, now).forEach { it.deleteRecursively() }
+    }
+
+    fun size(context: Context): Long =
+        com.openminis.app.logging.AppLogger.totalSize() + cachesSize(context.cacheDir)
+
+    fun clear(context: Context) {
+        com.openminis.app.logging.AppLogger.clearLogs()
+        clearCaches(context.cacheDir)
     }
 }

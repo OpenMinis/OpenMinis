@@ -181,7 +181,7 @@ final class CodexOAuthManager: NSObject, ObservableObject {
                 error: error,
                 isFatal: { [weak self] in self?.isRefreshTokenInvalid($0) ?? false },
                 loadCurrent: { ProviderKeychainHelper.loadOAuthToken(instanceId: instanceId, as: CodexTokenStorage.self) },
-                deleteCredentials: { ProviderKeychainHelper.deleteOAuthToken(instanceId: instanceId) },
+                markNeedsReauth: { ProviderKeychainHelper.markOAuthNeedsReauth(instanceId: instanceId) },
                 log: { logger.info($0) }
             )
         }

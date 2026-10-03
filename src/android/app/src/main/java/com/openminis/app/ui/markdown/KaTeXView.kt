@@ -51,6 +51,15 @@ private const val MAX_BITMAP_EDGE_PX = 2048
 private const val MAX_BITMAP_PIXELS = 4_000_000
 
 /**
+ * [T-android-katex-webview-release] Marker set on the offscreen WebView in
+ * `AndroidView.onRelease` so a capture runnable that was already queued when
+ * the composable left (navigation mid-render) can tell the view is destroyed
+ * and skip — drawing a destroyed WebView yields a blank bitmap, and caching
+ * that under the formula's key would show an empty formula until eviction.
+ */
+private const val KATEX_WEBVIEW_RELEASED_TAG = "katex-webview-released"
+
+/**
  * Renders a LaTeX string using KaTeX in an offscreen WebView, capturing the result as a bitmap.
  * Uses an LRU cache to avoid re-rendering identical expressions.
  */
@@ -248,6 +257,7 @@ fun KaTeXRenderView(
                                 layoutParams = ViewGroup.LayoutParams(bitmapW, bitmapH)
                                 requestLayout()
                                 postDelayed({
+                                    if (tag == KATEX_WEBVIEW_RELEASED_TAG) return@postDelayed
                                     // [GH#206] Clamp the captured bitmap. bitmapW/H
                                     // were previously unbounded, so a wide display
                                     // formula allocated multi-MB of NATIVE heap.
@@ -308,6 +318,20 @@ fun KaTeXRenderView(
                     }, "AndroidBridge")
 
                     webViewClient = object : WebViewClient() {
+                        // [T-android-webview-render-process-gone] (GH#341) The
+                        // AndroidView factory rebuilds this on the next
+                        // recomposition, and `onRelease` still stamps
+                        // KATEX_WEBVIEW_RELEASED_TAG on the old instance, so a
+                        // queued capture runnable will not touch it.
+                        override fun onRenderProcessGone(
+                            view: WebView?,
+                            detail: android.webkit.RenderProcessGoneDetail?,
+                        ): Boolean {
+                            runCatching { view?.tag = KATEX_WEBVIEW_RELEASED_TAG }
+                            return com.openminis.app.ui.webview.WebViewRenderProcess
+                                .handle("KaTeXView", detail)
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             val escapedLatex = latex
@@ -324,6 +348,17 @@ fun KaTeXRenderView(
 
                     loadUrl("file:///android_asset/katex/katex-render.html")
                 }
+            },
+            // [T-android-katex-webview-release] This composable creates ONE
+            // WebView PER FORMULA and used to pass only `factory`, so leaving
+            // composition dropped the Java reference but never called
+            // `destroy()`. A WebView's renderer state is native memory that is
+            // reclaimed only on destroy() (or, eventually, finalization), so a
+            // formula-dense document leaked a full KaTeX page per formula.
+            onRelease = { wv ->
+                wv.tag = KATEX_WEBVIEW_RELEASED_TAG
+                runCatching { wv.stopLoading() }
+                runCatching { wv.destroy() }
             },
             modifier = Modifier.height(0.dp), // Hidden
         )

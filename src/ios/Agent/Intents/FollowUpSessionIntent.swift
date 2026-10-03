@@ -54,6 +54,7 @@ struct FollowUpSessionIntent: AppIntent {
         let pendingId = ShortcutRunTracker.markPending(
             intent: "FollowUpSessionIntent",
             sessionId: session.id,
+            waitForResult: waitForResult,
             eagerKeepAliveArmed: eagerResult.armed,
             eagerKeepAliveSkippedReason: eagerResult.skipReason
         )
@@ -62,6 +63,27 @@ struct FollowUpSessionIntent: AppIntent {
         // [T-shortcut-duplicate-completion-notification] See SendPromptIntent.
         // Deliberately not `sessionSource = "shortcut"` — see RetryRunIntent.
         vm.suppressGeneralCompletionNotification = true
+        // [T-headless-mount-activation] Resolve external folder mounts and
+        // WAIT for them before any agent work (issue #335).
+        //
+        // `activateAll()` runs from the root view's `.onAppear`, which a headless
+        // intent (`openAppWhenRun = false`) never builds — so on a cold or
+        // force-quit launch nothing acquired the security scopes, `activeURLs`
+        // stayed empty, and the external-mount snapshot the agent reads was
+        // empty too. `/var/minis/mounts/<name>` was simply absent until the user
+        // opened the app once.
+        //
+        // Bounded so a slow FileProvider cannot stall the Shortcut: on expiry the
+        // pass keeps running and publishes late (the mount becomes usable
+        // mid-run) instead of being abandoned. 12s because a cold iCloud
+        // FileProvider takes ~5s per bookmark on device and the resolves run
+        // concurrently, so this clears a realistic mount set with headroom
+        // without ever being the thing that hangs a Shortcut.
+        //
+        // Placed OUTSIDE the branch below: the VM may already be cached (isNew
+        // false) while this process still never activated mounts, which is exactly
+        // the force-quit case this fixes.
+        await MountedFoldersManager.shared.ensureActivated(timeout: 12)
         if isNew {
             await vm.loadSession()
         }
@@ -85,8 +107,11 @@ struct FollowUpSessionIntent: AppIntent {
         }
         logger.info("📎 FollowUp vm.attachments after add: \(vm.attachments.count)")
 
-        vm.inputText = prompt
-        vm.send()
+        // [T-programmatic-prompt-no-composer] Carry the prompt as an
+        // argument: this is the user's live session vm, and assigning
+        // `inputText` would overwrite (then clear) a draft they are in the
+        // middle of typing.
+        vm.send(overrideText: prompt)
         logger.info("📎 FollowUp send() called, isProcessing=\(vm.isProcessing)")
 
         let sid = vm.sessionId ?? session.id

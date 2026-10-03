@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import kotlinx.coroutines.channels.Channel
 
 /**
  * [T-android-stream-fade] Word-level fade-in for streamed markdown text.
@@ -31,8 +32,18 @@ import androidx.compose.ui.text.buildAnnotatedString
  *    a (startTimeNanos, staggerOffsetMs) pair.
  *  - A single `withFrameNanos` loop in the composable advances animation
  *    progress and writes the current alpha to a snapshot-state map. The
- *    MdText reads that map when composing its AnnotatedString overlay, so
- *    only this one MdText recomposes per frame — sibling blocks are inert.
+ *    MdText reads that map ONLY from a draw lambda ([forEachActive]) that
+ *    paints a background-coloured mask over each fading word inside its own
+ *    graphics layer. Composition never reads it, so a frame costs a few
+ *    small paths — not a recomposition, not a paragraph re-layout.
+ *
+ *    [T-android-stream-fade-relayout] It used to be consumed in composition:
+ *    `overlay()` rebuilt the whole AnnotatedString with per-word alpha spans
+ *    every frame, which made `Text` re-lay-out and re-record the ENTIRE live
+ *    paragraph per vsync. Measured on a Pixel 4a: record(draw) 8→18 ms as the
+ *    live block grew from 2k to 8k chars, ~93 % of frames over budget for the
+ *    whole stream — the fade (350 ms + 300 ms stagger) never went idle between
+ *    500 ms publishes, so this was the steady state, not a burst.
  *  - When all ranges reach α=1 the loop suspends until a new append
  *    arrives, keeping idle cost at zero.
  *  - A guard caps the in-flight word count: bursts beyond [MAX_FADE_WORDS]
@@ -42,6 +53,94 @@ import androidx.compose.ui.text.buildAnnotatedString
  */
 
 internal val LocalAppendOnlyFade = compositionLocalOf { false }
+
+/**
+ * [T-android-stream-fade-reentry] How a streaming text node's fade starts
+ * when its [FadeController] is created WITH fade on.
+ *
+ * Being created with fade on used to mean "this paragraph just appeared",
+ * so all of its first text faded in. It does not always mean that. The node
+ * is created from scratch whenever its composition is: re-entering a chat
+ * whose reply is still streaming, or scrolling the streaming message out of
+ * the list and back. Its text was on screen before, and fading it from
+ * alpha 0 replays the animation over text the user had already read.
+ * [FadeShownText] remembers what each node has shown, outside composition,
+ * so a recreated node can tell the two apart.
+ */
+internal sealed class FadeBirth {
+    /** Genuinely new paragraph: fade all of it. */
+    object FadeAll : FadeBirth()
+
+    /** All of it was on screen already: adopt it, fade nothing. */
+    object SeedAll : FadeBirth()
+
+    /** [shown] was on screen; only what follows it is new and fades. */
+    data class SeedPrefix(val shown: String) : FadeBirth()
+}
+
+/**
+ * [T-android-stream-fade-reentry] Decide how a new controller starts.
+ *
+ * @param fadeFromBirth fade was on at this node's first composition.
+ * @param shown texts [FadeShownText] recorded as on screen for this node's
+ *   fragment (most recent first).
+ * @param text the text it is being created with.
+ */
+internal fun fadeBirthPlan(fadeFromBirth: Boolean, shown: List<String>, text: String): FadeBirth {
+    // Flag flipped on later (the existing T-android-stream-fade-seed case):
+    // the node rendered this text opaque before it had a controller.
+    if (!fadeFromBirth) return FadeBirth.SeedAll
+    // The longest recorded text this one extends: that much was on screen, so
+    // only what follows it is new. A node recreated mid-stream finds its own
+    // earlier text here; a genuinely new paragraph matches nothing.
+    val prior = shown.filter { it.isNotEmpty() && text.startsWith(it) }.maxByOrNull { it.length }
+        ?: return FadeBirth.FadeAll
+    return if (prior.length == text.length) FadeBirth.SeedAll else FadeBirth.SeedPrefix(prior)
+}
+
+/**
+ * [T-android-stream-fade-reentry] What the fading text nodes of each
+ * streaming fragment have put on screen, keyed by "messageId/baseShardId"
+ * (the fragment's selection shard id). Deliberately NOT the per-node shard
+ * id: that carries a sub-index handed out in composition order, which can
+ * change when the fragment is rebuilt — exactly when this is needed. A few
+ * recent texts are kept per fragment; a recreated node finds its own earlier
+ * text among them by prefix. Process-wide so it outlives the composition;
+ * LRU-bounded like [TableHScrollStates]. Pure Kotlin (not
+ * android.util.LruCache) so it is unit-testable.
+ */
+internal object FadeShownText {
+    private const val MAX_FRAGMENTS = 64
+    private const val TEXTS_PER_FRAGMENT = 6
+
+    private val shown = object : LinkedHashMap<String, ArrayDeque<String>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ArrayDeque<String>>): Boolean =
+            size > MAX_FRAGMENTS
+    }
+
+    /** Recorded texts for [key], most recent first. */
+    fun get(key: String): List<String> = synchronized(shown) { shown[key]?.toList() ?: emptyList() }
+
+    /**
+     * Record [text] as on screen. A text that extends the most recent entry
+     * replaces it (the same paragraph growing); anything else is a new entry.
+     */
+    fun put(key: String, text: String) {
+        if (text.isEmpty()) return
+        synchronized(shown) {
+            val q = shown.getOrPut(key) { ArrayDeque() }
+            val head = q.firstOrNull()
+            if (head != null && (text.startsWith(head) || head.startsWith(text))) {
+                if (text.length >= head.length) q[0] = text
+            } else {
+                q.addFirst(text)
+                while (q.size > TEXTS_PER_FRAGMENT) q.removeLast()
+            }
+        }
+    }
+
+    internal fun clearForTests() = synchronized(shown) { shown.clear() }
+}
 
 // [T-android-streaming-incremental-inline] True only for the LIVE streaming tail
 // block. When set, RenderBlock's Paragraph branch routes inline/math through
@@ -74,6 +173,17 @@ internal class FadeController {
     var lastPlainText: String = ""
         private set
 
+    /**
+     * [T-android-stream-fade-seed] Whether this controller has ever been
+     * handed text. Lets the caller tell a controller's FIRST text apart from
+     * an append, which the prefix-diff in [ingest] cannot do on its own: a
+     * fresh controller's `lastPlainText` is "", every string starts with "",
+     * so the whole initial text would be sliced into fade ranges and drawn
+     * at alpha 0 — erasing text the user was already reading.
+     */
+    var hasSeenText: Boolean = false
+        private set
+
     /** Active animating ranges. Frozen at α=1 ranges are removed each tick. */
     private val rangesState: SnapshotStateList<FadeRange> = mutableListOf<FadeRange>().toMutableStateList()
 
@@ -83,10 +193,39 @@ internal class FadeController {
     /** Per-range current alpha, updated each frame; read in [overlay]. */
     val alphas: SnapshotStateMap<Int, Float> = SnapshotStateMap()
 
-    /** True when at least one range is still under α=1. Drives the frame loop. */
+    /** True when at least one range is still under α=1. */
     val hasActiveRanges: Boolean get() = rangesState.isNotEmpty()
 
+    /**
+     * [T-android-stream-fade-lost-wake] Signalled whenever [ingest] adds fade
+     * ranges; [runTicks] waits on it while idle. Conflated, so a signal sent
+     * while the ticker is still busy is kept for its next wait instead of
+     * lost. See [runTicks].
+     */
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+
+    /**
+     * [T-android-stream-fade-seed] Adopt [plainText] as already-visible
+     * content: record it as the prefix and create NO fade ranges. For a
+     * controller created after its block was rendered opaque — a list that
+     * only became the live tail once its second item arrived, or any block
+     * whose fade flag flipped on later — the text it is handed at birth was
+     * on screen before the controller existed. Fading it would paint the
+     * background over it.
+     *
+     * Subsequent [ingest] calls diff against this prefix normally, so words
+     * appended AFTER seeding still fade in.
+     */
+    fun seed(plainText: String) {
+        hasSeenText = true
+        rangesState.clear()
+        rangeStartNanos.clear()
+        alphas.clear()
+        lastPlainText = plainText
+    }
+
     fun ingest(newPlainText: String) {
+        hasSeenText = true
         if (newPlainText == lastPlainText) return
         // On a hard reset (text shrank or diverged from prefix), drop all
         // in-flight ranges — the caller is rendering a brand-new block.
@@ -143,6 +282,39 @@ internal class FadeController {
             rangesState.add(FadeRange(absStart, absEnd, staggerMs))
             rangeStartNanos.addLast(System.nanoTime())
         }
+        wake.trySend(Unit)
+    }
+
+    /**
+     * [T-android-stream-fade-lost-wake] The per-frame loop: tick until every
+     * range is opaque, wait for [ingest] to add more, repeat. Never returns.
+     *
+     * Reported on a Pixel 4a: a reply showed only its first character above
+     * a running tool. The accessibility tree held the whole 27-character
+     * paragraph, two lines tall, so the text was laid out — every character
+     * after the first sat under a fully opaque mask, permanently.
+     *
+     * The old driver was `LaunchedEffect(hasActiveRanges)` whose loop broke
+     * once [tick] emptied the ranges. A frame runs animation callbacks (the
+     * tick) BEFORE recomposition, so when the last range finished in the same
+     * frame whose recomposition ingested more text, the loop had already
+     * exited while `hasActiveRanges` read true both before and after: the
+     * effect key never changed, nothing relaunched it, and the new ranges
+     * were never ticked. [forEachActive] reports an unticked range at α=0, so
+     * their mask stayed at full strength. The window is one frame; a heavy
+     * recomposition — a tool call landing right after text — widens it.
+     *
+     * Waiting on [wake] instead of on a composition key closes it: an ingest
+     * during a busy loop leaves a token, so the next wait returns at once.
+     *
+     * @param awaitFrame runs one frame callback and returns its result;
+     *   `withFrameNanos` in production, a fake clock in tests.
+     */
+    suspend fun runTicks(awaitFrame: suspend (onFrame: (Long) -> Boolean) -> Boolean): Nothing {
+        while (true) {
+            while (awaitFrame(::tick)) Unit
+            wake.receive()
+        }
     }
 
     /**
@@ -177,25 +349,12 @@ internal class FadeController {
     }
 
     /**
-     * Build an AnnotatedString that re-colours each active range to apply
-     * its current alpha. Inactive (α=1) ranges drop out automatically as
-     * [tick] removes them; the surrounding text and original spans are
-     * preserved.
+     * Visit every range still fading, with its current alpha. Call this from a
+     * DRAW scope only: the snapshot reads here are what schedule the next
+     * redraw, and keeping them out of composition is the whole point.
      */
-    fun overlay(base: AnnotatedString, baseColor: Color): AnnotatedString {
-        if (rangesState.isEmpty()) return base
-        return buildAnnotatedString {
-            append(base)
-            for (r in rangesState) {
-                val a = alphas[r.start] ?: 0f
-                if (r.end > base.length) continue
-                addStyle(
-                    SpanStyle(color = baseColor.copy(alpha = a)),
-                    r.start,
-                    r.end,
-                )
-            }
-        }
+    fun forEachActive(block: (start: Int, end: Int, alpha: Float) -> Unit) {
+        for (r in rangesState) block(r.start, r.end, alphas[r.start] ?: 0f)
     }
 }
 
@@ -205,20 +364,18 @@ internal fun rememberFadeController(): FadeController =
 
 /**
  * Drives the per-frame tick for [controller]. Suspends when nothing is
- * animating; resumes whenever [controller.hasActiveRanges] flips back to
- * true. Single instance per MdText so each animating block runs independently.
+ * animating and wakes when [FadeController.ingest] adds ranges. Single
+ * instance per MdText so each animating block runs independently.
+ *
+ * [T-android-stream-fade-lost-wake] Keyed on the controller, not on
+ * `hasActiveRanges`: a composition key cannot see a range set that emptied
+ * and refilled within one frame, which left new text masked forever. See
+ * [FadeController.runTicks].
  */
 @Composable
 internal fun FadeFrameDriver(controller: FadeController) {
-    // ticker is read inside withFrameNanos so the body re-suspends when no
-    // ranges are active; a state read on hasActiveRanges restarts it.
-    val active = controller.hasActiveRanges
-    LaunchedEffect(active) {
-        if (!active) return@LaunchedEffect
-        while (true) {
-            val anyActive = withFrameNanos { now -> controller.tick(now) }
-            if (!anyActive) break
-        }
+    LaunchedEffect(controller) {
+        controller.runTicks { onFrame -> withFrameNanos(onFrame) }
     }
 }
 

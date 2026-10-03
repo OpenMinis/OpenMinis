@@ -1,0 +1,20 @@
+/* Info.plist permission strings — Hrvatski */
+
+"NSLocationWhenInUseUsageDescription" = "Minis koristi tvoju lokaciju kako bi u povijesti sesija zabilježio gdje su agentske sesije pokrenute.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Minis koristi lokaciju u pozadini kako bi agentski zadaci nastavili raditi dok je aplikacija u pozadini. Podaci o lokaciji koriste se isključivo za bilježenje povijesti sesija.";
+"NSCalendarsUsageDescription" = "Minis koristi pristup Kalendaru kako bi AI agent mogao provjeriti tvoj raspored i dostupnost te u tvoje ime stvarati događaje.";
+"NSCalendarsFullAccessUsageDescription" = "Minis koristi pristup Kalendaru kako bi AI agent mogao provjeriti tvoj raspored i dostupnost te u tvoje ime stvarati događaje.";
+"NSRemindersUsageDescription" = "Minis koristi pristup Podsjetnicima kako bi AI agent mogao pretraživati i u tvoje ime stvarati podsjetnike.";
+"NSRemindersFullAccessUsageDescription" = "Minis koristi pristup Podsjetnicima kako bi AI agent mogao pretraživati i u tvoje ime stvarati podsjetnike.";
+"NSCameraUsageDescription" = "Minisu je potreban pristup kameri za snimanje fotografija koje se koriste u razgovorima s AI-jem.";
+"NSPhotoLibraryUsageDescription" = "Minisu je potreban pristup fototeci za dodavanje slika u razgovore s AI-jem.";
+"NSPhotoLibraryAddUsageDescription" = "Minisu je potrebno dopuštenje za spremanje videozapisa i slika u tvoju fototeku.";
+"NSHealthShareUsageDescription" = "Minis koristi pristup HealthKitu kako bi AI agent mogao u tvoje ime čitati zdravstvene podatke poput koraka, pulsa, sna i treninga.";
+"NSHealthUpdateUsageDescription" = "Minis koristi pristup pisanju u HealthKit kako bi AI agent mogao u tvoje ime bilježiti zdravstvene podatke poput koraka, težine i unosa vode.";
+"NSContactsUsageDescription" = "Minis koristi pristup Kontaktima kako bi AI agent mogao u tvoje ime pretraživati, prikazivati i upravljati tvojim kontaktima.";
+"NSAppleMusicUsageDescription" = "Minis koristi pristup medijskoj biblioteci kako bi AI agent mogao pretraživati tvoju glazbenu biblioteku i upravljati reprodukcijom u tvoje ime.";
+"NSMicrophoneUsageDescription" = "Minisu je potreban pristup mikrofonu za glasovni unos teksta u razgovoru.";
+"NSSpeechRecognitionUsageDescription" = "Minis koristi prepoznavanje govora za pretvaranje tvog glasa u tekstualne poruke.";
+"NSHomeKitUsageDescription" = "Minis koristi pristup HomeKitu kako bi AI agent mogao u tvoje ime provjeravati i upravljati tvojim pametnim kućnim uređajima.";
+"NSAlarmKitUsageDescription" = "Minis koristi AlarmKit kako bi AI agent mogao u tvoje ime postavljati alarme i mjerače vremena.";
+"NSLocalNetworkUsageDescription" = "Virtualni stroj treba pristup mreži za SLIRP umrežavanje.";

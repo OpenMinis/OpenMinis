@@ -36,7 +36,25 @@ class WebViewHolder(
     var pageTitle by mutableStateOf("")
         private set
     var currentUrl by mutableStateOf(initialUrl)
+
+    /**
+     * [T-android-webview-render-process-gone] (GH#341) True once this holder's
+     * renderer died and [destroy] ran, so the WebView inside is a dead object.
+     *
+     * [webView] is a `val` created at construction and there is no way to swap
+     * a fresh one in, so the holder cannot heal itself — the OWNER has to build
+     * a new holder. Exposing the state (rather than making `webView` a `var`
+     * and rebuilding in place) is the smaller change: every consumer already
+     * re-creates the holder when `currentUrl` no longer matches, so they only
+     * need one more condition on that same check, and no existing reference to
+     * `holder.webView` can go stale underneath a composition.
+     *
+     * Compose state, so a screen currently showing this holder recomposes and
+     * can react rather than sitting on a blank view.
+     */
+    var isDead by mutableStateOf(false)
         private set
+
     var isLoading by mutableStateOf(true)
         private set
     var desktopMode by mutableStateOf(false)
@@ -96,6 +114,23 @@ class WebViewHolder(
             setAcceptThirdPartyCookies(wv, true)
         }
         webViewClient = object : WebViewClient() {
+            // [T-android-webview-render-process-gone] (GH#341) Route to this
+            // holder's own destroy(), which detaches, stops loading and blanks
+            // the page before destroying, and is documented safe to call twice
+            // — so the later teardown from the owner is still fine. Then flag
+            // the holder dead so the owner rebuilds instead of reusing a
+            // destroyed WebView (it cannot be swapped in place: `webView` is a
+            // val).
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: android.webkit.RenderProcessGoneDetail?,
+            ): Boolean {
+                runCatching { destroy() }
+                isDead = true
+                return com.openminis.app.ui.webview.WebViewRenderProcess
+                    .handle("WebViewHolder", detail)
+            }
+
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: android.webkit.WebResourceRequest,
@@ -433,5 +468,16 @@ class WebViewHolder(
 @Composable
 fun rememberWebViewHolder(url: String): WebViewHolder {
     val context = androidx.compose.ui.platform.LocalContext.current
-    return remember(url) { WebViewHolder(context.applicationContext, url) }
+    var holder by androidx.compose.runtime.remember(url) {
+        androidx.compose.runtime.mutableStateOf(WebViewHolder(context.applicationContext, url))
+    }
+    // [T-android-webview-render-process-gone] (GH#341) `remember(url)` alone
+    // hands back the same holder for the life of the composition, so a holder
+    // whose renderer died would stay wired to a destroyed WebView and render
+    // blank forever. `isDead` is Compose state, so this recomposes when it
+    // flips and swaps in a fresh holder pointed at the same URL.
+    if (holder.isDead) {
+        holder = WebViewHolder(context.applicationContext, url)
+    }
+    return holder
 }

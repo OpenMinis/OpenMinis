@@ -296,6 +296,19 @@ final class VoiceInputViewModel: ObservableObject {
 
     @objc private func appWillEnterForeground() {
         backgroundTimer?.invalidate(); backgroundTimer = nil
+        // [T-voice-interrupt-cannot-restart] Returning from a call is the moment
+        // to notice that capture died while we were away. iOS does not deliver
+        // `AVAudioSession.interruptionNotification .ended` to a suspended app,
+        // and the 15s background auto-stop timer above does not fire while
+        // suspended either — so a FaceTime call answered mid-dictation could
+        // leave the panel showing "Listening" over a dead engine, with no event
+        // that would ever correct it. Reconcile against what the engine is
+        // really doing.
+        guard vad.isRunning, !vad.isCapturing else { return }
+        VoiceLog.log("foreground: capture died while backgrounded (interrupted) — resetting to idle")
+        stopListening()
+        startError = AppLocalized("Recording was interrupted — tap the mic to resume",
+                                  comment: "Voice capture interrupted")
     }
 
     // MARK: - Control
@@ -393,7 +406,14 @@ final class VoiceInputViewModel: ObservableObject {
     /// capture keeps running, so we never stop it just to transcribe.
     func handleMainButtonTap() {
         VoiceLog.log("[VoiceInputDebug] handleMainButtonTap called, state=\(state), vad.isRunning=\(vad.isRunning), isSpeaking=\(vad.isSpeaking), runningDuration=\(String(format: "%.1f", vad.runningDuration))s, ttsPlaying=\(VoiceOutputPlayer.shared.isPlaying), micPerm=\(VoiceActivityDetector.microphonePermission)")
-        if vad.isRunning {
+        // [T-voice-interrupt-cannot-restart] `isCapturing`, not `isRunning`: an
+        // interruption that never delivered its `.ended` (answering a FaceTime
+        // call backgrounds us, and iOS does not post `.ended` to a suspended
+        // app) leaves `isRunning == true` with the engine dead. Branching on the
+        // raw flag sent this tap down the PAUSE path — flushing and "stopping" a
+        // capture that was already gone — so the button did nothing visible and
+        // the user had to tap twice to get the mic back.
+        if vad.isCapturing {
             let wasSpeaking = vad.isSpeaking
             let duration = vad.runningDuration
             // Pausing: flush any in-progress speech to recognition first (so the

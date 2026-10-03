@@ -20,6 +20,11 @@
          policy, not an OS runtime check, and Minis ships as a sideload.
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- [T-android-backup-fgs] BackupForegroundService is a dataSync service:
+         required on Android 14+ to call startForeground with that type. Unlike
+         the agent service (moved to mediaPlayback over the 6h/24h cap), a
+         backup is finite, and the service handles onTimeout by stopping. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- T50: PARTIAL_WAKE_LOCK held by AgentForegroundService while sessions
          are streaming so Doze + OEM CPU throttling don't stall long shell
          tools after screen-off. -->
@@ -149,6 +154,16 @@
             <action android:name="android.intent.action.SENDTO" />
             <data android:scheme="mailto" />
         </intent>
+        <!-- [T-android-tts-engine-visibility] TTS engines. Under Android 11+
+             package visibility (targetSdk 35) a user-installed engine
+             (Sogou, iFlytek, RHVoice…) is INVISIBLE without this: getEngines()
+             returns [] and TextToSpeech cannot bind it, so android-speak and
+             read-aloud's system fallback go silent. Google TTS works without
+             it only because it is force-queryable on GMS devices, which is why
+             our own test phones never showed the bug (OPPO PEHM00 report). -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <!-- [T-android-tablet-split] enableOnBackInvokedCallback (on <application>):
@@ -183,10 +198,19 @@
 
              Safe here because the UI is Compose: layout is driven by
              currentWindowAdaptiveInfo(), which recomposes on configuration
-             change, so nothing depends on the recreate to re-read resources. -->
+             change, so nothing depends on the recreate to re-read resources.
+
+             [T-android-orientation-user] (OpenMinis#401) screenOrientation="user":
+             follow the user's system rotation setting explicitly. Left
+             unspecified, OnePlus / ColorOS on Android 16 rotated the screen
+             against a portrait lock when a shell_execute run started (the
+             window-flag update that comes with it made the system re-evaluate
+             rotation). "user" is not a restriction: with auto-rotate on, the
+             app still rotates, and large screens are unaffected. -->
         <activity
             android:name=".MainActivity"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation"
+            android:screenOrientation="user"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
@@ -342,7 +366,7 @@
                  user taps a file in Files / Photos / any document viewer.
                  The T142 filters above only fire for BROWSABLE intents
                  (web links, deep-links) and never list Minis in the OEM
-                 file manager's chooser. Termux's working pattern is
+                 file manager's chooser. The pattern that works is
                  scheme=file + scheme=content + mimeType=*/* without
                  BROWSABLE — file managers don't tag intents BROWSABLE.
                  ShareReceiverActivity.handleView already routes the
@@ -360,7 +384,7 @@
         <!-- T-pwa-1 (renamed Pwa → WebApp): WebApp shortcut host.
              Reachable only via explicit Intent from a pinned launcher
              shortcut (ACTION_OPEN_WEBAPP + extras). Old ACTION_OPEN_PWA
-             intent-filter intentionally removed: per user direction,
+             intent-filter intentionally removed:
              home-screen icons pinned before the rename are not preserved
              and will return "intent not found" on tap; the user has to
              re-add them from inside the app. -->
@@ -460,12 +484,29 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
-        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED for re-scheduling) -->
+        <!-- [T-android-backup-fgs] Keeps a running backup alive in the
+             background (progress notification + wake lock). Started by
+             BackupRunController, stops itself when the run ends. -->
+        <service
+            android:name=".service.BackupForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED and
+             MY_PACKAGE_REPLACED for re-scheduling). [T-android-alarm-reschedule-on-restart]
+             AlarmManager drops pending alarms on reboot AND whenever the app is
+             force-stopped or replaced; an app update is the second case, and it
+             sends MY_PACKAGE_REPLACED rather than BOOT_COMPLETED. Without this
+             filter every update silently stopped the user's scheduled tasks
+             until the next reboot. -->
         <receiver
             android:name=".offload.AlarmReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- Delivered to THIS app only, when its own package is
+                     replaced; no data filter needed. -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

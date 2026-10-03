@@ -37,12 +37,256 @@ enum OpenAIModelsAPI {
         return models
     }
 
-    /// OAuth mode: return built-in Codex model list enriched with models.dev data.
-    /// OAuth tokens cannot call /v1/models, so we use the static list.
-    static func fetchModelsOAuth() -> [LLMModel] {
+    // MARK: - [T-codex-model-discovery] Codex OAuth model discovery (issue #319)
+
+    /// Codex OAuth model discovery, with the same three-tier degradation the
+    /// other providers use:
+    ///
+    ///   1. the Codex backend's own model endpoint — authoritative, reflects
+    ///      what THIS account may actually use;
+    ///   2. models.dev, for the ids we know of but could not fetch;
+    ///   3. the compiled-in `allOpenAICodexOAuth` list, so an offline first run
+    ///      still shows something usable.
+    ///
+    /// The old behaviour was tier 3 only, with a comment saying OAuth "cannot
+    /// call /v1/models". That is true of `/v1/models`, but Codex publishes a
+    /// separate endpoint that does work with an OAuth token — so a model the
+    /// account gained (or lost) was invisible until someone edited the list.
+    ///
+    /// - Parameters:
+    ///   - instanceId: provider instance, used to fetch a fresh token + account id.
+    ///   - forceRefresh: a manual "Refresh" must really re-fetch, so it bypasses
+    ///     the cache rather than returning what is already on screen.
+    static func fetchModelsOAuth(instanceId: String, forceRefresh: Bool = false) async throws -> [LLMModel] {
+        // Resolved once so the catch blocks can build the same cache key
+        // without another main-actor hop (and without it being nil there).
+        var resolvedAccountId: String?
+
+        // Tier 1 — the authoritative endpoint.
+        do {
+            let token = try await CodexOAuthManager.shared.validAccessToken(instanceId: instanceId)
+            let accountId = await MainActor.run { CodexOAuthManager.shared.accountId(instanceId: instanceId) }
+            resolvedAccountId = accountId
+            // Cache is keyed on token + account + client version: switching
+            // accounts must not reuse the other account's catalog, and a client
+            // version bump can change what the backend offers.
+            let cacheKey = "codex-oauth|\(accountId ?? "-")|\(OpenAIProvider.codexClientVersion)|\(token)"
+
+            if !forceRefresh, let cached = OpenAIModelsCache.load(credential: cacheKey) {
+                logger.info("Codex discovery: returning \(cached.count) cached models")
+                return cached
+            }
+
+            let fresh = try await fetchCodexBackendModels(token: token, accountId: accountId)
+            if !fresh.isEmpty {
+                // Fill only the gaps the endpoint left. `ModelsDevAPI.enrichModels`
+                // treats models.dev as the source of truth and OVERWRITES
+                // modality / context / output / reasoning — correct when the
+                // input is our static list, wrong here, where the endpoint is
+                // the authority and models.dev may be months stale about a model
+                // that only appeared today. So enrich a copy and keep whichever
+                // fields the endpoint actually stated.
+                let discovered = mergeKeepingAuthoritative(fresh: fresh,
+                                                           enriched: ModelsDevAPI.enrichModels(fresh))
+                // [T-codex-image-models-survive-discovery] Re-append the image
+                // generators. `/backend-api/codex/models` lists CHAT models
+                // only — the image models reach the same account over a
+                // different path entirely (the `image_generation` tool on
+                // `/codex/responses`, see ModelUseOffloadBridge's
+                // `isCodexImage` branch), so the endpoint has no reason to
+                // mention them and does not.
+                //
+                // Without this, a successful tier-1 refresh REPLACED the list
+                // and silently dropped gpt-image-2 and the 2.5 variants from
+                // the picker — verified on device: an instance refreshed this
+                // way came back with 11 chat models and no image model at all.
+                // Tiers 2 and 3 were never affected, since they are built from
+                // `allOpenAICodexOAuth`, which contains them.
+                let models = appendBuiltInImageModels(to: discovered)
+                OpenAIModelsCache.save(models, credential: cacheKey)
+                // Second copy under a token-independent key so an offline
+                // refresh can still serve this catalog after the token rotates.
+                OpenAIModelsCache.save(models, credential: lastKnownGoodKey(instanceId: instanceId, accountId: resolvedAccountId))
+                logger.info("Codex discovery: \(models.count) models from backend")
+                return models
+            }
+            // 200 with nothing usable — fall through rather than show an empty
+            // picker, but do NOT treat it as an auth problem.
+            logger.warning("Codex discovery: endpoint returned no usable models — falling back")
+        } catch let error as LLMError {
+            // [T-codex-model-discovery] An auth failure is reported as one.
+            // Silently degrading to a stale/built-in list here would show the
+            // user a healthy-looking catalog for an account that can no longer
+            // call anything — the failure has to surface at refresh time.
+            if case .invalidAPIKey = error { throw error }
+            logger.warning("Codex discovery failed (\(error.localizedDescription)) — falling back")
+            if let cached = OpenAIModelsCache.load(credential: lastKnownGoodKey(instanceId: instanceId, accountId: resolvedAccountId)) {
+                logger.info("Codex discovery: serving \(cached.count) previously cached models")
+                return cached
+            }
+        } catch {
+            logger.warning("Codex discovery failed (\(error.localizedDescription)) — falling back")
+            if let cached = OpenAIModelsCache.load(credential: lastKnownGoodKey(instanceId: instanceId, accountId: resolvedAccountId)) {
+                logger.info("Codex discovery: serving \(cached.count) previously cached models")
+                return cached
+            }
+        }
+
+        // Tiers 2 + 3 — models.dev metadata over the built-in ids. `enrichModels`
+        // is exactly tier 2: it fills each built-in id from the models.dev
+        // registry and leaves it as-is when there is no match.
         let enriched = ModelsDevAPI.enrichModels(LLMModel.allOpenAICodexOAuth)
-        logger.info("Using built-in Codex OAuth model list (\(enriched.count) models, enriched)")
+        logger.info("Codex discovery: using built-in list (\(enriched.count) models, models.dev enriched)")
         return enriched
+    }
+
+    /// Combine endpoint truth with models.dev metadata.
+    ///
+    /// Field-by-field: a value the ENDPOINT stated wins; everything it left nil
+    /// is taken from the enriched copy. This is the "do not let stale
+    /// enrichment overwrite fresh authoritative metadata" rule from the issue,
+    /// and it is why we cannot simply return `enrichModels(fresh)`.
+    private static func mergeKeepingAuthoritative(fresh: [LLMModel], enriched: [LLMModel]) -> [LLMModel] {
+        let byId = Dictionary(enriched.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return fresh.map { authoritative in
+            guard var merged = byId[authoritative.id] else { return authoritative }
+            if authoritative.contextWindow != nil { merged.contextWindow = authoritative.contextWindow }
+            if authoritative.maxOutputTokens != nil { merged.maxOutputTokens = authoritative.maxOutputTokens }
+            if authoritative.supportsReasoning != nil { merged.supportsReasoning = authoritative.supportsReasoning }
+            if authoritative.modalityOverride != nil { merged.modalityOverride = authoritative.modalityOverride }
+            // Mutate in place rather than rebuilding: `LLMModel` also carries
+            // effort-tier fields that only models.dev knows about, and a
+            // re-`init` with the arguments we happen to remember would silently
+            // drop them. `displayName` needs no handling — `enrichModels` never
+            // replaces it, so `merged` already carries the endpoint's own name.
+            return merged
+        }
+    }
+
+    /// [T-codex-image-models-survive-discovery] Add the built-in Codex image
+    /// generators to a discovered list, unless the endpoint already named one.
+    ///
+    /// Kept as an explicit, named step rather than folded into the merge: these
+    /// models are not "metadata the endpoint forgot", they are a different
+    /// capability that travels a different route, and a future reader needs to
+    /// see that they are deliberately union'd in rather than wonder why the
+    /// authoritative list is being topped up.
+    ///
+    /// The `contains` guard means that if Codex ever does start listing them,
+    /// the endpoint's own entry wins and nothing is duplicated.
+    private static func appendBuiltInImageModels(to discovered: [LLMModel]) -> [LLMModel] {
+        let known = Set(discovered.map(\.id))
+        let images = ModelsDevAPI.enrichModels(
+            LLMModel.allOpenAICodexOAuth.filter {
+                LLMModel.allCodexOAuthImageModelIDs.contains($0.id) && !known.contains($0.id)
+            })
+        guard !images.isEmpty else { return discovered }
+        logger.info("Codex discovery: re-appended \(images.count) built-in image model(s)")
+        return discovered + images
+    }
+
+    /// Stable per-instance key for the "last successful fetch" copy, so an
+    /// offline refresh can still serve the previous catalog after the access
+    /// token has rotated (the token is part of the primary key and therefore
+    /// changes on every refresh).
+    private static func lastKnownGoodKey(instanceId: String, accountId: String?) -> String {
+        "codex-oauth-last|\(instanceId)|\(accountId ?? "-")"
+    }
+
+    /// GET the Codex backend's model catalogue.
+    ///
+    /// Headers mirror `OpenAIProvider`'s Codex request path EXACTLY — same
+    /// `Version`, same `codex_cli_rs` originator and User-Agent. The reporter's
+    /// probe used `originator: omp`, which is that tool's identity, not ours;
+    /// sending a different fingerprint for discovery than for inference would
+    /// be both dishonest and a good way to have the two disagree about which
+    /// models are allowed.
+    private static func fetchCodexBackendModels(token: String, accountId: String?) async throws -> [LLMModel] {
+        let version = OpenAIProvider.codexClientVersion
+        guard let url = URL(string: "https://chatgpt.com/backend-api/codex/models?client_version=\(version)") else {
+            throw LLMError.providerError(message: "Invalid Codex models URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(version, forHTTPHeaderField: "Version")
+        request.setValue("responses=experimental", forHTTPHeaderField: "Openai-Beta")
+        request.setValue("codex_cli_rs/\(version) (iOS; arm64)", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex_cli_rs", forHTTPHeaderField: "Originator")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let accountId { request.setValue(accountId, forHTTPHeaderField: "Chatgpt-Account-Id") }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200..<300).contains(status) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            if status == 401 || status == 403 {
+                throw LLMError.invalidAPIKey(
+                    detail: "Codex models HTTP \(status): \(String(body.prefix(200)))")
+            }
+            throw LLMError.providerError(
+                message: "Codex model discovery failed (HTTP \(status)): \(body.prefix(300))")
+        }
+        return parseCodexModels(data)
+    }
+
+    /// Map the Codex catalogue onto `LLMModel`.
+    ///
+    /// Tolerant of shape: the payload has been seen as a bare array and as an
+    /// object wrapping `models`/`data`, and this endpoint is undocumented, so a
+    /// key appearing or moving must degrade to "fewer fields", never to a throw.
+    static func parseCodexModels(_ data: Data) -> [LLMModel] {
+        let root = try? JSONSerialization.jsonObject(with: data)
+        let items: [[String: Any]]
+        if let arr = root as? [[String: Any]] {
+            items = arr
+        } else if let obj = root as? [String: Any] {
+            items = (obj["models"] as? [[String: Any]])
+                ?? (obj["data"] as? [[String: Any]])
+                ?? []
+        } else {
+            items = []
+        }
+
+        return items.compactMap { item -> LLMModel? in
+            guard let id = (item["id"] as? String) ?? (item["slug"] as? String) ?? (item["model"] as? String),
+                  !id.isEmpty else { return nil }
+
+            // Respect visibility: a model the backend marks hidden/unavailable
+            // stays out of the picker rather than becoming a 400 the user only
+            // discovers by sending a message.
+            if let visibility = (item["visibility"] as? String)?.lowercased(),
+               visibility == "hidden" || visibility == "internal" || visibility == "none" {
+                return nil
+            }
+            for flag in ["is_visible", "visible", "enabled", "available"] {
+                if let v = item[flag] as? Bool, v == false { return nil }
+            }
+
+            let display = (item["display_name"] as? String)
+                ?? (item["displayName"] as? String)
+                ?? (item["name"] as? String)
+                ?? id
+            var model = LLMModel(id: id, displayName: display, provider: "OpenAI")
+
+            // Only the fields the endpoint actually states. Anything absent is
+            // left nil so the models.dev pass below can supply it.
+            if let ctx = (item["context_window"] as? Int)
+                ?? (item["contextWindow"] as? Int)
+                ?? ((item["limit"] as? [String: Any])?["context"] as? Int) {
+                model.contextWindow = ctx
+            }
+            if let out = (item["max_output_tokens"] as? Int)
+                ?? (item["maxOutputTokens"] as? Int)
+                ?? ((item["limit"] as? [String: Any])?["output"] as? Int) {
+                model.maxOutputTokens = out
+            }
+            if let reasoning = (item["supports_reasoning"] as? Bool)
+                ?? (item["reasoning"] as? Bool) {
+                model.supportsReasoning = reasoning
+            }
+            return model
+        }
     }
 
     private static func performFetch(_ request: URLRequest, filterOpenAIOnly: Bool = true) async throws -> [LLMModel] {

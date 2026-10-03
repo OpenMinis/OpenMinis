@@ -62,8 +62,9 @@ class BackupBlobStoreTest {
     }
 
     /**
-     * The design doc pins this boundary: "恰好等于阈值的文件必须纳入（边界取 `>`
-     * 而非 `>=`）". A `>=` here would drop a file that is exactly at the limit.
+     * The design doc pins this boundary: "a file exactly at the threshold must be
+     * included (the boundary is `>`, not `>=`)". A `>=` here would drop a file
+     * that is exactly at the limit.
      */
     @Test
     fun `a file exactly at the cap is included, one byte over is not`() {

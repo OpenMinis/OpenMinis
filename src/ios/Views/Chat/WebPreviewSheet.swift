@@ -79,6 +79,14 @@ final class WebViewHolder: NSObject, ObservableObject {
         // load failures into `loadError` for the error overlay.
         webView.navigationDelegate = self
 
+        // [T-ios-js-dialogs-256] Without a uiDelegate WebKit silently discards
+        // alert()/confirm()/prompt(): confirm() returns false and prompt()
+        // returns null with nothing shown. This is a user-driven preview, so
+        // the dialogs are presented for real and the page waits for the answer.
+        // (The agent browser deliberately does NOT do this — see
+        // BrowserUseManager's WKUIDelegate.)
+        webView.uiDelegate = self
+
         // Receive the window.print() bridge message. Weak proxy avoids a
         // retain cycle (controller → holder → webView → configuration → controller).
         config.userContentController.add(
@@ -388,6 +396,126 @@ extension WebViewHolder: WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         loadError = WebLoadError(error: error, failedURL: pendingURL)
+    }
+}
+
+// MARK: - JS dialogs (alert / confirm / prompt)
+
+/// [T-ios-js-dialogs-256] Presents real system dialogs for the page's
+/// `alert()` / `confirm()` / `prompt()`.
+///
+/// Two rules govern every method here, because breaking either is worse than
+/// the bug being fixed:
+///
+///  1. **The completion handler must be called exactly once.** WebKit traps on
+///     a second call, and never calling it leaves the page's JS suspended
+///     forever. Each handler is therefore wrapped in `DialogReply`, which
+///     collapses repeat calls — a real hazard, since a UIAlertController can
+///     be dismissed out from under us (sheet closing, scene backgrounding)
+///     while its actions are still live.
+///  2. **A dialog that cannot be presented must still answer.** If there is no
+///     view controller to present from, we reply with the same default the
+///     no-delegate behaviour used, rather than stranding the page.
+extension WebViewHolder: WKUIDelegate {
+    /// Single-shot wrapper around a WebKit completion handler.
+    private final class DialogReply<T> {
+        private let lock = NSLock()
+        private var handler: ((T) -> Void)?
+        init(_ handler: @escaping (T) -> Void) { self.handler = handler }
+        func send(_ value: T) {
+            lock.lock()
+            let h = handler
+            handler = nil
+            lock.unlock()
+            h?(value)
+        }
+    }
+
+    /// The controller to present from: the one actually hosting this webview,
+    /// walked up to its topmost presented descendant. Anchoring on the webview
+    /// (rather than the key window's root) keeps the dialog attached to the
+    /// preview that raised it, which matters while the preview is itself a
+    /// sheet presented over the chat.
+    private func dialogPresenter() -> UIViewController? {
+        var responder: UIResponder? = webView
+        var owner: UIViewController?
+        while let r = responder {
+            if let vc = r as? UIViewController { owner = vc; break }
+            responder = r.next
+        }
+        if owner == nil {
+            owner = UIApplication.shared.connectedScenes
+                .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+                .first?.rootViewController
+        }
+        guard var top = owner else { return nil }
+        while let presented = top.presentedViewController, !presented.isBeingDismissed {
+            top = presented
+        }
+        return top
+    }
+
+    /// Dialog title: the page title when there is one, else the host. Mirrors
+    /// what Safari shows, and tells the user which page is asking.
+    private var dialogTitle: String {
+        if !pageTitle.isEmpty { return pageTitle }
+        if let host = webView.url?.host, !host.isEmpty { return host }
+        return ""
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping () -> Void) {
+        let reply = DialogReply<Void> { completionHandler() }
+        guard let presenter = dialogPresenter() else { reply.send(()); return }
+
+        let alert = UIAlertController(title: dialogTitle, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { _ in
+            reply.send(())
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (Bool) -> Void) {
+        let reply = DialogReply<Bool>(completionHandler)
+        guard let presenter = dialogPresenter() else { reply.send(false); return }
+
+        let alert = UIAlertController(title: dialogTitle, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { _ in
+            reply.send(false)
+        })
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { _ in
+            reply.send(true)
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    func webView(_ webView: WKWebView,
+                 runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?,
+                 initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping (String?) -> Void) {
+        let reply = DialogReply<String?>(completionHandler)
+        guard let presenter = dialogPresenter() else { reply.send(nil); return }
+
+        let alert = UIAlertController(title: dialogTitle, message: prompt, preferredStyle: .alert)
+        alert.addTextField { field in
+            field.text = defaultText
+            field.clearButtonMode = .whileEditing
+        }
+        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { _ in
+            reply.send(nil)
+        })
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [weak alert] _ in
+            // JS distinguishes "" (user confirmed an empty box) from nil
+            // (cancelled), so an empty field must still come back as "".
+            reply.send(alert?.textFields?.first?.text ?? "")
+        })
+        presenter.present(alert, animated: true)
     }
 }
 

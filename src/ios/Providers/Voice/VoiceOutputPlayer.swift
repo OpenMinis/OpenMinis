@@ -97,8 +97,24 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
     struct Candidate {
         let key: String          // ModelEntry.id (stable identity for stickiness)
         let modelId: String?
+        /// [T-ios-tts-voice-never-sent] The voice to synthesize with — the SAME
+        /// `ModelEntry.model.id` as `modelId`, because model entries double as
+        /// voices in this architecture (see the note in `VoiceProviderTemplate`:
+        /// the Azure catalog is a list of voice names, not models).
+        ///
+        /// Carried as its own field so it can be handed to `VoiceOutputRequest`
+        /// as `voice:`. It used to travel only as `model:`, which meant every
+        /// vendor that reads `request.voice` FIRST — Azure (`?? default`),
+        /// Xunfei, Gemini, and the base-class OpenAI-compatible body — saw nil
+        /// and silently fell back to its default voice. Azure's default is
+        /// `zh-CN-XiaoxiaoNeural`, a female voice: exactly the reported
+        /// "every voice tests fine but playback is always the default woman".
+        let voiceId: String?
         let label: String
         let provider: any VoiceOutputCapable
+        /// The entry's model, so providers can route by its catalog voice role.
+        /// [T-openrouter-voice-catalog]
+        var resolvedModel: LLMModel? = nil
     }
     /// STICKY cursor: the ModelEntry.id we're currently synthesizing with. Persists
     /// across units (and the whole reply) until that model fails, then advances.
@@ -360,7 +376,9 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
             VoiceProviderResolver.resolvedOutputCandidates().compactMap { entry in
                 guard let p = VoiceProviderResolver.outputProvider(for: entry) else { return nil }
                 return Candidate(key: entry.id, modelId: entry.model.id,
-                                 label: entry.model.displayName, provider: p)
+                                 voiceId: entry.model.id,
+                                 label: entry.model.displayName, provider: p,
+                                 resolvedModel: entry.model)
             }
         guard !candidates.isEmpty else { return }
         // STICKY fail-over (mirrors the agent loop): once we've moved to a model,
@@ -442,7 +460,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
         for (i, c) in candidates.enumerated() {
             if Task.isCancelled { throw CancellationError() }
             do {
-                let data = try await synthWithRetry(text: text, model: c.modelId, provider: c.provider, seq: seq)
+                let data = try await synthWithRetry(text: text, model: c.modelId, voice: c.voiceId, resolvedModel: c.resolvedModel, provider: c.provider, seq: seq)
                 if i > 0 { VoiceLog.log("TTS #\(seq): succeeded on fail-over model \(i + 1)/\(candidates.count) (\(c.label))") }
                 return (data, c)
             } catch is CancellationError {
@@ -461,15 +479,22 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
     /// backoff; if it still fails, SPLIT the text into smaller sentence chunks and
     /// synthesize+concatenate those (a too-long / partially-rejected batch often
     /// succeeds in smaller pieces). Throws only if even the split fallback fails.
+    ///
+    /// [T-ios-tts-voice-never-sent] `voice` is passed through to every
+    /// `VoiceOutputRequest` built here. Both construction sites must set it —
+    /// the chunked fallback below is a real playback path, not a diagnostic
+    /// one, so omitting it there would keep the default-voice bug alive for any
+    /// reply long enough to be split.
     nonisolated private static func synthWithRetry(
-        text: String, model: String?, provider: any VoiceOutputCapable, seq: Int
+        text: String, model: String?, voice: String?, resolvedModel: LLMModel? = nil,
+        provider: any VoiceOutputCapable, seq: Int
     ) async throws -> Data {
         var lastError: Error?
         // Phase 1: retry the same text.
         for attempt in 0...synthRetriesSameText {
             if Task.isCancelled { throw CancellationError() }
             do {
-                return try await provider.synthesize(VoiceOutputRequest(input: text, model: model))
+                return try await provider.synthesize(VoiceOutputRequest(input: text, model: model, voice: voice, resolvedModel: resolvedModel))
             } catch {
                 lastError = error
                 VoiceLog.log("TTS synth retry #\(seq) attempt \(attempt + 1)/\(synthRetriesSameText + 1) failed: \(error.localizedDescription)")
@@ -487,7 +512,7 @@ final class VoiceOutputPlayer: NSObject, ObservableObject {
             var ok = false
             for attempt in 0...synthRetriesSameText {
                 do {
-                    let d = try await provider.synthesize(VoiceOutputRequest(input: chunk, model: model))
+                    let d = try await provider.synthesize(VoiceOutputRequest(input: chunk, model: model, voice: voice, resolvedModel: resolvedModel))
                     pieces.append(d); ok = true; break
                 } catch {
                     lastError = error

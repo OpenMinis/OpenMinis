@@ -20,6 +20,11 @@ struct SyncMigrationDetailView: View {
     @State private var zonesList: [ZoneRow] = []
     @State private var zonesLoading = false
     @State private var zonesLoadError: String? = nil
+    /// [T-icloud-zone-delete-resurrect] Delete failures are kept SEPARATE from
+    /// `zonesLoadError`, which `refreshZones()` clears on every entry. Sharing
+    /// one slot meant the refresh that follows a delete always erased the
+    /// reason the delete failed.
+    @State private var zoneDeleteError: String? = nil
     @State private var pendingZoneDelete: ZoneRow? = nil
     /// Second-stage confirmation. First dialog ("are you sure?") flips
     /// pendingZoneDelete → zoneSecondConfirm so the user has to
@@ -586,6 +591,21 @@ struct SyncMigrationDetailView: View {
                     zoneRowView(row)
                 }
             }
+            // [T-icloud-zone-delete-resurrect] A delete that failed says so,
+            // right under the list it failed to change. Previously the message
+            // was written into a slot the following refresh cleared, so the
+            // row silently stayed and the user was left retrying forever.
+            if let zoneDeleteError {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Text(zoneDeleteError)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
             Button {
                 Task { await refreshZones(force: true) }
             } label: {
@@ -788,14 +808,28 @@ struct SyncMigrationDetailView: View {
         guard #available(iOS 17.0, *) else { return }
         pendingZoneDelete = nil
         zoneDeleteInProgress = row.name
+        zoneDeleteError = nil
         Task {
+            var failure: String? = nil
             do {
-                try await V1FetcherShim.deleteOwnZone(zoneName: row.name)
+                // [T-icloud-zone-delete-resurrect] purgeZone (not
+                // deleteOwnZone) — it stops the engine that owns the zone,
+                // deletes, then reads the zone list back to confirm the zone
+                // is really gone instead of trusting the delete call.
+                try await V1FetcherShim.purgeZone(zoneName: row.name)
             } catch {
-                zonesLoadError = error.localizedDescription
+                failure = error.localizedDescription
             }
             zoneDeleteInProgress = nil
+            // Refresh FIRST, then publish the error. refreshZones() clears
+            // `zonesLoadError` on entry, so setting it before the refresh —
+            // as this did — wiped the message every time and made a failed
+            // delete look exactly like a successful one: no error, and a row
+            // that stubbornly stays put. That silence is why this shipped.
             await refreshZones(force: true)
+            if let failure {
+                zoneDeleteError = failure
+            }
         }
     }
 

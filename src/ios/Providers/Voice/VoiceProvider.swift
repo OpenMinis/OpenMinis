@@ -178,13 +178,21 @@ class VoiceProvider: VoiceInputCapable, VoiceOutputCapable {
         return base + p
     }
 
+    /// Whether an error response means the credential itself was rejected,
+    /// which surfaces as "check the API key". Default: any 401/403. Vendors
+    /// whose 401 also covers other failures override this so those keep
+    /// their own message ([T-openrouter-voice-catalog]).
+    func isAuthFailure(status: Int, body: Data?) -> Bool {
+        status == 401 || status == 403
+    }
+
     func executeRequest(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await Self.session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw VoiceProviderError.parseError("Non-HTTP response")
         }
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401 || http.statusCode == 403 {
+            if isAuthFailure(status: http.statusCode, body: data) {
                 logger.error("Voice auth failed: HTTP \(http.statusCode)")
                 throw VoiceProviderError.authError
             }

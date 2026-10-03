@@ -265,7 +265,9 @@ class VoiceCorrectionEngine(
     ): Triple<List<String>, List<CorrectionCandidate>, String> {
         val tokens = runCatching { segment(transcript) }.getOrElse { emptyList() }
         val candidates = retrieveCandidates(transcript, locale)
-        val prompt = LlmCorrectionStrategy.buildPrompt(transcript, candidates, context)
+        val prompt = LlmCorrectionStrategy.buildPrompt(
+            transcript, candidates, context, CorrectionLanguageProfile.resolve(locale, transcript),
+        )
         return Triple(tokens, candidates, prompt)
     }
 

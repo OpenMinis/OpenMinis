@@ -88,6 +88,9 @@ enum ProviderMigration {
             case .kimiCode:
                 // Kimi is a new provider; no legacy singleton tokens to migrate.
                 break
+            case .githubCopilot:
+                // [T-copilot-provider] Also new — never had a singleton token.
+                break
             case .unsupported:
                 break
             }
