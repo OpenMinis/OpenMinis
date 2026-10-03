@@ -49,14 +49,26 @@ enum ClaudeCLIMimicry {
         "Anthropic-Dangerous-Direct-Browser-Access": "true",
     ]
 
+    /// [T-anthropic-cli-version] What actually goes on the wire: `headers`
+    /// with the `User-Agent` version resolved at runtime by
+    /// `ClaudeCLIVersion`. The literal above stays the compiled-in floor (what
+    /// an offline fresh install sends; the resolver never goes below it), and
+    /// every other header passes through unchanged. Both `apply` overloads
+    /// read this, so the chat and token paths get a runtime bump together.
+    static func current() -> [String: String] {
+        var out = headers
+        out["User-Agent"] = ClaudeCLIVersion.userAgent()
+        return out
+    }
+
     /// Apply every mimicry header to `request`.
     static func apply(to request: NSMutableURLRequest) {
-        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        for (field, value) in current() { request.setValue(value, forHTTPHeaderField: field) }
     }
 
     /// Apply every mimicry header to `request`.
     static func apply(to request: inout URLRequest) {
-        for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
+        for (field, value) in current() { request.setValue(value, forHTTPHeaderField: field) }
     }
 }
 

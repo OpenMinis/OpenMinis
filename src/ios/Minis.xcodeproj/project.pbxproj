@@ -233,6 +233,7 @@
 		E5F100001 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F100011 /* NetworkMonitor.swift */; };
 		E5F100002 /* LLMSessionRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F100012 /* LLMSessionRegistry.swift */; };
 		E5F100003 /* MinisUserAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F100013 /* MinisUserAgent.swift */; };
+		E5F100004 /* ClaudeCLIVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F100014 /* ClaudeCLIVersion.swift */; };
 		E5F200001 /* MarkdownPrepRegex.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F200011 /* MarkdownPrepRegex.swift */; };
 		E5F200002 /* MinisMediaViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F200012 /* MinisMediaViews.swift */; };
 		E5F200003 /* AssistantBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5F200013 /* AssistantBlockView.swift */; };
@@ -919,6 +920,7 @@
 		E5F100011 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		E5F100012 /* LLMSessionRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMSessionRegistry.swift; sourceTree = "<group>"; };
 		E5F100013 /* MinisUserAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinisUserAgent.swift; sourceTree = "<group>"; };
+		E5F100014 /* ClaudeCLIVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeCLIVersion.swift; sourceTree = "<group>"; };
 		E5F200011 /* MarkdownPrepRegex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownPrepRegex.swift; sourceTree = "<group>"; };
 		E5F200012 /* MinisMediaViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinisMediaViews.swift; sourceTree = "<group>"; };
 		E5F200013 /* AssistantBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantBlockView.swift; sourceTree = "<group>"; };
@@ -1895,6 +1897,7 @@
 				E5F100011 /* NetworkMonitor.swift */,
 				E5F100012 /* LLMSessionRegistry.swift */,
 				E5F100013 /* MinisUserAgent.swift */,
+				E5F100014 /* ClaudeCLIVersion.swift */,
 				E5E000016 /* PendingShare.swift */,
 				E5E000019 /* ShareCoordinator.swift */,
 				E5E0000A2 /* ExternalFileImporter.swift */,
@@ -2954,6 +2957,7 @@
 				E5F100001 /* NetworkMonitor.swift in Sources */,
 				E5F100002 /* LLMSessionRegistry.swift in Sources */,
 				E5F100003 /* MinisUserAgent.swift in Sources */,
+				E5F100004 /* ClaudeCLIVersion.swift in Sources */,
 				E53000004 /* ChatStore.swift in Sources */,
 				E5SDS0001 /* SessionDeletionSupport.swift in Sources */,
 				E5FMI0001 /* FileMentionIndex.swift in Sources */,

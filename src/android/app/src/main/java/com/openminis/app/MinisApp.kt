@@ -302,6 +302,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Activity context.
         com.openminis.app.data.AutoCompactPrefs.prime(this)
 
+        // [T-anthropic-cli-version] Warm the claude-cli fingerprint used on
+        // the Anthropic OAuth path and refresh it in the background when the
+        // persisted value is older than a day. Never blocks: the provider
+        // reads a volatile cache, and a failed refresh keeps the last known
+        // version (falling back to the compiled-in floor on a fresh install).
+        com.openminis.app.provider.anthropic.ClaudeCliVersion.prime(this)
+
         // T283: install NDK signal handler for native crashes (SIGSEGV/
         // SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSYS). Writes a one-shot text
         // report to filesDir/logs/native-crash-<stamp>.log before re-raising

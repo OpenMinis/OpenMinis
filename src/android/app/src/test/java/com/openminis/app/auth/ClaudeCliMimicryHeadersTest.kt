@@ -1,6 +1,7 @@
 package com.openminis.app.auth
 
 import com.openminis.app.ProductionSources
+import com.openminis.app.provider.anthropic.ClaudeCliVersion
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MediaType.Companion.toMediaType
@@ -148,14 +149,58 @@ class ClaudeCliMimicryHeadersTest {
     @Test
     fun `fingerprint matches the chat path in AnthropicProvider`() {
         // The values are one registered client identity. A fingerprint that
-        // matches on chat but not on auth is the exact shape of OpenMinis#360,
-        // so this fails if either side is bumped alone.
+        // matches on chat but not on auth is the exact shape of OpenMinis#360.
+        // Since [T-anthropic-cli-version] the chat path no longer spells the
+        // values out: it must READ the shared list, and must not keep an
+        // inline copy that a later bump could leave behind.
         val chat = ProductionSources.read("provider/anthropic/AnthropicProvider.kt")
-        for ((name, value) in ClaudeCliMimicryHeaders.ALL) {
+        assertTrue(
+            "AnthropicProvider must apply ClaudeCliMimicryHeaders.current()",
+            chat.contains("ClaudeCliMimicryHeaders.current()"),
+        )
+        for ((name, _) in ClaudeCliMimicryHeaders.ALL) {
             assertTrue(
-                "AnthropicProvider must still send $name: $value",
-                chat.contains("""builder.header("$name", "$value")"""),
+                "AnthropicProvider must not set $name inline any more",
+                !chat.contains("""builder.header("$name", """"),
             )
+        }
+    }
+
+    @Test
+    fun `a runtime-resolved version reaches the wire on the token path`() {
+        // The point of the runtime resolver: a newer CLI version must reach
+        // the token request without an app update, and every other header of
+        // the identity must stay exactly as declared.
+        try {
+            assertTrue(ClaudeCliVersion.accept("2.9.999"))
+            server.enqueue(MockResponse().setBody("{}"))
+            val request = okhttp3.Request.Builder()
+                .url(server.url("/v1/oauth/token"))
+                .applyClaudeCliMimicryHeaders()
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .build()
+            OkHttpClient().newCall(request).execute().close()
+            val recorded = server.takeRequest()
+            assertEquals("claude-cli/2.9.999 (external, cli)", recorded.getHeader("User-Agent"))
+            for ((name, value) in expected) {
+                if (name == "User-Agent") continue
+                assertEquals("header $name", value, recorded.getHeader(name))
+            }
+        } finally {
+            ClaudeCliVersion.resetForTest()
+        }
+    }
+
+    @Test
+    fun `current() never sends less than the compiled-in floor`() {
+        // A stale or downgraded registry answer must not walk the fingerprint
+        // below the literal in ALL, which is what the model gates are pinned to.
+        try {
+            assertTrue(!ClaudeCliVersion.accept("2.1.195"))
+            val ua = ClaudeCliMimicryHeaders.current().first { it.first == "User-Agent" }.second
+            assertEquals(expected.getValue("User-Agent"), ua)
+        } finally {
+            ClaudeCliVersion.resetForTest()
         }
     }
 }

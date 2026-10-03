@@ -1092,18 +1092,16 @@ class AnthropicProvider(
         // describe the SDK/runtime, not the CLI, and the backend pairs UA with
         // them as one registered client identity. Changing them speculatively
         // is how a working fingerprint gets broken.
+        // [T-anthropic-cli-version] The set itself lives in ONE place,
+        // ClaudeCliMimicryHeaders, shared with the token path (#360). Its
+        // `current()` swaps in the User-Agent resolved at runtime by
+        // ClaudeCliVersion; the literal there remains the compiled-in floor
+        // (2.1.280), so an offline fresh install sends exactly what this block
+        // used to spell out inline.
         if (isOAuth) {
-            builder.header("User-Agent", "claude-cli/2.1.280 (external, cli)")
-            builder.header("X-Stainless-Lang", "js")
-            builder.header("X-Stainless-Package-Version", "0.106.0")
-            builder.header("X-Stainless-OS", "Linux")
-            builder.header("X-Stainless-Arch", "arm64")
-            builder.header("X-Stainless-Runtime", "node")
-            builder.header("X-Stainless-Runtime-Version", "v24.18.0")
-            builder.header("X-Stainless-Retry-Count", "0")
-            builder.header("X-Stainless-Timeout", "600")
-            builder.header("X-App", "cli")
-            builder.header("Anthropic-Dangerous-Direct-Browser-Access", "true")
+            for ((name, value) in com.openminis.app.auth.ClaudeCliMimicryHeaders.current()) {
+                builder.header(name, value)
+            }
         }
 
         if (isOAuth) {
@@ -1123,7 +1121,7 @@ class AnthropicProvider(
         // [T-provider-custom-user-agent] Applied last so a non-blank override
         // wins over the OAuth claude-cli UA above. null/blank → fall back to
         // the branded Minis UA on the regular apiKey path, but on the OAuth
-        // path keep the claude-cli/2.1.280 fingerprint set above (the
+        // path keep the claude-cli fingerprint set above (the
         // Anthropic OAuth backend pairs UA + X-Stainless-* and rejects calls
         // whose UA doesn't match the registered client identity). T-android-
         // default-ua: pass defaultUserAgent=null on OAuth, branded default

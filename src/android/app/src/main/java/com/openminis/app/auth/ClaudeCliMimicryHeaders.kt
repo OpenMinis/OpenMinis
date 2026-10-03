@@ -1,5 +1,6 @@
 package com.openminis.app.auth
 
+import com.openminis.app.provider.anthropic.ClaudeCliVersion
 import okhttp3.Request
 
 /**
@@ -57,6 +58,22 @@ object ClaudeCliMimicryHeaders {
         "X-App" to "cli",
         "Anthropic-Dangerous-Direct-Browser-Access" to "true",
     )
+
+    /**
+     * [T-anthropic-cli-version] What actually goes on the wire: [ALL] with the
+     * `User-Agent` version resolved at runtime by [ClaudeCliVersion].
+     *
+     * The literal in [ALL] stays the compiled-in floor — it is what a fresh,
+     * offline install sends, and the resolver never goes below it. Every
+     * other header is passed through unchanged, so the client identity keeps
+     * its shape. Both the token path ([applyClaudeCliMimicryHeaders]) and the
+     * chat path (`AnthropicProvider.buildHeaders`) read this one list, so a
+     * runtime bump reaches both at once and the two cannot drift (#360).
+     */
+    fun current(): List<Pair<String, String>> {
+        val ua = ClaudeCliVersion.userAgent()
+        return ALL.map { (name, value) -> if (name == "User-Agent") name to ua else name to value }
+    }
 }
 
 /**
@@ -67,7 +84,7 @@ object ClaudeCliMimicryHeaders {
  * request challenged by Cloudflare instead of answered.
  */
 fun Request.Builder.applyClaudeCliMimicryHeaders(): Request.Builder {
-    for ((name, value) in ClaudeCliMimicryHeaders.ALL) {
+    for ((name, value) in ClaudeCliMimicryHeaders.current()) {
         header(name, value)
     }
     return this
