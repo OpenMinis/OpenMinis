@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">Bu sohbette çalışan bir görev var. Yeni bir sohbet başlatmak onu durdurur.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Durdur ve Yeni Sohbet</string>
     <string name="chat_menu_clear_chat">Sohbeti Temizle</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Terminali Aç</string>
     <string name="chat_menu_open_browser">Tarayıcıyı Aç</string>
     <string name="chat_menu_browse_chat_files">Sohbet Dosyalarına Göz At</string>

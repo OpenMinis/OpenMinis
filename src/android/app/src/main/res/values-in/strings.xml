@@ -1183,6 +1183,10 @@
     <string name="chat_new_chat_stop_dialog_body">Ada tugas yang sedang berjalan di obrolan ini. Memulai obrolan baru akan menghentikannya.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Hentikan &amp; Obrolan Baru</string>
     <string name="chat_menu_clear_chat">Bersihkan Obrolan</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Buka Terminal</string>
     <string name="chat_menu_open_browser">Buka Peramban</string>
     <string name="chat_menu_browse_chat_files">Jelajahi Berkas Obrolan</string>

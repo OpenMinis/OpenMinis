@@ -363,9 +363,12 @@ internal fun subAgentToolTitle(name: String, args: String): String {
         "file_read" -> "读取文件"
         "file_write" -> "写入文件"
         "file_edit", "multi_edit" -> "编辑文件"
-        "grep_source" -> "搜索代码"
-        "web_search" -> "搜索网页"
+        "grep_source", "grep" -> "搜索代码"
+        "web_search", "clientfn_web_search" -> "搜索网页"
+        "web_fetch" -> "抓取网页"
         "browser_use" -> "浏览器"
+        "memory_get", "memory_write" -> "记忆"
+        "spawn_agent", "dispatch_agents" -> "子代理"
         else -> name
     }
     val preview = if (args.isBlank()) "" else SubAgentRunner.previewToolArgs(args).take(42)

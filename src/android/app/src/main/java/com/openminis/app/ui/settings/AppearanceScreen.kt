@@ -289,7 +289,6 @@ fun AppearanceScreen(
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var highRefresh by remember { mutableStateOf(com.openminis.app.ui.HighRefreshRate.enabled(context)) }
-    var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
     var showFloatingToolBar by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_FLOATING_TOOL_BAR, true)) }
     var showCompletedToolCards by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
     var showSubAgentBar by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_SUBAGENT_BAR, DEFAULT_SHOW_SUB_AGENT_BAR)) }
@@ -505,18 +504,11 @@ fun AppearanceScreen(
                     prefs.edit().putBoolean(KEY_SHOW_FLOATING_TOOL_BAR, it).apply()
                 },
             )
-            SettingsSwitchRow(
-                icon = Icons.Outlined.Visibility,
-                iconColor = tileTeal,
-                title = stringResource(R.string.appearance_tool_preview_title),
-                subtitle = stringResource(R.string.appearance_tool_preview_footer),
-                checked = toolPreview,
-                onCheckedChange = {
-                    toolPreview = it
-                    prefs.edit().putBoolean(KEY_TOOL_PREVIEW, it).apply()
-                },
-                enabled = showFloatingToolBar,
-            )
+            // [P0-4] The "Tool Preview Window" switch used to live here. The
+            // floating surface is now the single-line ToolActivityPill, which
+            // has no preview thumbnail, so the switch controlled nothing and
+            // was removed. KEY_TOOL_PREVIEW stays defined above so persisted
+            // values from older builds are simply ignored.
             SettingsSwitchRow(
                 icon = Icons.Outlined.ViewAgenda,
                 iconColor = tileTeal,

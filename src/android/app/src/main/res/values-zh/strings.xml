@@ -1532,6 +1532,10 @@
     <string name="chat_new_chat_stop_dialog_body">当前对话有任务正在运行，新建对话将停止它。</string>
     <string name="chat_new_chat_stop_dialog_confirm">停止并新建</string>
     <string name="chat_menu_clear_chat">清空对话</string>
+    <string name="chat_menu_section_quick">快捷</string>
+    <string name="chat_menu_section_session">会话</string>
+    <string name="chat_menu_section_tools">工具</string>
+    <string name="chat_menu_section_settings">设置</string>
     <string name="chat_menu_open_terminal">打开终端</string>
     <string name="chat_menu_git_panel">Git 面板</string>
     <string name="git_panel_changes">变更</string>

@@ -501,6 +501,13 @@ fun SessionListScreen(
      * prepends the same placeholder in split mode.
      */
     draftPlaceholderId: String? = null,
+    /**
+     * [P1-6] Render the list WITHOUT its own top bar, for embedding inside
+     * the compact-width session drawer (ChatSplitScaffold owns the drawer
+     * chrome and the close affordance). Default false keeps the full-screen
+     * and two-pane-sidebar renderings byte-identical.
+     */
+    embedded: Boolean = false,
 ) {
     val context = LocalContext.current
     // T46: hoist VM ownership to the NavBackStackEntry's ViewModelStore so
@@ -778,7 +785,7 @@ fun SessionListScreen(
 
     Scaffold(
         topBar = {
-            MinisCenterTopBar(
+            if (!embedded) MinisCenterTopBar(
                 title = {
                     Text(
                             stringResource(R.string.app_name),

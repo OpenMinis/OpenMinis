@@ -14,6 +14,12 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -246,4 +252,28 @@ object MinisMenuDefaults {
         leadingIconColor = MaterialTheme.colorScheme.error,
         trailingIconColor = MaterialTheme.colorScheme.error,
     )
+}
+
+/**
+ * [P0-6] Small group label for a [MinisMenu] section. The chat top-bar menu
+ * used to be one flat 16+ item list; sections (快捷 / 会话 / 工具 / 设置)
+ * are what make it scannable. A header rather than another divider: a
+ * divider only says "break", a label says why.
+ */
+@Composable
+fun MinisMenuSectionHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }

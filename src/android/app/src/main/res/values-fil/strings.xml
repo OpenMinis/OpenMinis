@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">May tumatakbong gawain sa chat na ito. Ihihinto ito kapag nagsimula ka ng bagong chat.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Ihinto at Magbagong Chat</string>
     <string name="chat_menu_clear_chat">I-clear ang Chat</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Buksan ang Terminal</string>
     <string name="chat_menu_open_browser">Buksan ang Browser</string>
     <string name="chat_menu_browse_chat_files">Tingnan ang Mga File ng Chat</string>

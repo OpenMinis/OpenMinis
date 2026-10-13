@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">このチャットではタスクが実行中です。新しいチャットを開始すると停止します。</string>
     <string name="chat_new_chat_stop_dialog_confirm">停止して新規チャット</string>
     <string name="chat_menu_clear_chat">チャットをクリア</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">ターミナルを開く</string>
     <string name="chat_menu_open_browser">ブラウザを開く</string>
     <string name="chat_menu_browse_chat_files">チャットファイルを閲覧</string>

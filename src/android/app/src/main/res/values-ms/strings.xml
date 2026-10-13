@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">Ada tugasan yang sedang berjalan dalam sembang ini. Memulakan sembang baharu akan menghentikannya.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Hentikan &amp; Sembang Baharu</string>
     <string name="chat_menu_clear_chat">Kosongkan Sembang</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Buka Terminal</string>
     <string name="chat_menu_open_browser">Buka Pelayar</string>
     <string name="chat_menu_browse_chat_files">Layari Fail Sembang</string>

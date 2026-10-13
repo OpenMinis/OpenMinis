@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">In diesem Chat läuft gerade eine Aufgabe. Ein neuer Chat wird sie stoppen.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Stoppen &amp; neuer Chat</string>
     <string name="chat_menu_clear_chat">Chat leeren</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Terminal öffnen</string>
     <string name="chat_menu_open_browser">Browser öffnen</string>
     <string name="chat_menu_browse_chat_files">Chat-Dateien durchsuchen</string>
