@@ -954,7 +954,12 @@ internal fun buildFlatChatItems(
                     // The card's own key, so collapsing one card never
                     // touches the next one — manual collapse suppresses
                     // auto-expand for THIS card only.
-                    val cardKey = "${round.key}#${segment.firstBlockId}"
+                    // [T-flatkeys-invariants] FlatKeys.of rejects '#'/':' in
+                    // messageId, so the segment discriminator joins with '-'
+                    // instead. Consumers (ChatScreen toggle, runningCardKeys)
+                    // read item.messageId verbatim, so the separator is
+                    // internal to this key.
+                    val cardKey = "${round.key}--${segment.firstBlockId}"
                     out.add(dedupe(FlatChatItem.AssistantProcessSummary(
                         messageId = cardKey,
                         thinkingCount = segment.thinkingCount,
