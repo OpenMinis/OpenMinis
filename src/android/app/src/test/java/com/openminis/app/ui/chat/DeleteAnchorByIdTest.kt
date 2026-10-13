@@ -131,6 +131,6 @@ class DeleteAnchorByIdTest {
                 .map { messages[it] }
                 .firstOrNull { it.role == "user" && it.content.isNotBlank() }
         }
-        return anchorMessage?.let { listOf(it.id) + it.sourceDbIds }.firstOrNull()
+        return anchorMessage?.let { listOf(it.id) + it.sourceDbIds }?.firstOrNull()
     }
 }
