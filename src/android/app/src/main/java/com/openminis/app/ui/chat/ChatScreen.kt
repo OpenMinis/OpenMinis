@@ -3012,12 +3012,16 @@ fun ChatScreen(
                 // turn is expanded, otherwise the layout keeps 65dp of empty
                 // space for a bar that no longer renders.
                 var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
-                val hasFloatingTools = remember(messages, streamingById, foldAiProcess, expandedProcessIds) {
+                // [T-android-round-collapse] With folding on, the round model
+                // renders every step in-list (single channel), so the overlay
+                // only exists in fold-OFF mode — expansion state is no longer
+                // part of the decision.
+                val hasFloatingTools = remember(messages, streamingById, foldAiProcess) {
                     val merged = if (streamingById.isEmpty()) messages
                                  else mergeStreamingOverlay(messages, streamingById)
                     merged.any { msg ->
                         msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            isFloatingProcessTool(tb, foldAiProcess, msg.id in expandedProcessIds)
+                            isFloatingProcessTool(tb, foldAiProcess)
                         }
                     }
                 }
@@ -3397,7 +3401,7 @@ fun ChatScreen(
                     //
                     // Row-for-row equivalence with the old full build holds by
                     // construction: buildFlatChatItems' neighbor lookbacks
-                    // (precededByUser / isResumeContinuation) only ever read
+                    // (isResumeContinuation) only ever read
                     // EARLIER messages, the live suffix is built against the
                     // full merged list with fromIndex (lookbacks cross the
                     // boundary), and dedupe continuity is preserved via
@@ -3853,16 +3857,13 @@ fun ChatScreen(
                     // bottomReserve when the toolbar is present.
                     // Tuned so the visible gap to the composer's outer edge is ~18dp.
                     //
-                    // [T-android-chat-first-message-top-padding] top reduced
-                    // 12dp → 4dp. Under reverseLayout this top padding sits at
-                    // the VISUAL top, so the first message's gap below the model
-                    // title bar was top(12) + the first bubble's own top(4) =
-                    // 16dp (≈44px @ 440dpi) — looser than needed. 4dp here +
-                    // the bubble's 4dp = 8dp (≈22px), tighter but still a clear
-                    // breath under the title bar. Bottom padding and inter-
-                    // message spacing are untouched.
+                    // [T-android-chat-first-message-top-padding][P1-3] top is
+                    // 8dp: the first row's rhythm gap is 0 (no older
+                    // neighbour) and rows no longer self-pad, so the full
+                    // breath under the model title bar comes from here.
+                    // Bottom padding is the composer-side breathing room.
                     contentPadding = PaddingValues(
-                        top = 4.dp,
+                        top = 8.dp,
                         bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
                     ),
                     modifier = Modifier
@@ -3938,7 +3939,11 @@ fun ChatScreen(
                     // hits ~1300 px while listState still reports
                     // firstVisible=0, firstOffset=0 (logged as the "tool on
                     // screen but not pushed into view" repro on Pixel 4a).
-                    verticalArrangement = Arrangement.spacedBy(2.dp, Alignment.Bottom),
+                    // [P1-3] Inter-row gaps come from the row rhythm
+                    // (flatItemTopGap in ChatFlatItems), applied as top
+                    // padding on each row below. spacedBy(0) only keeps the
+                    // bottom alignment for the not-yet-filled viewport.
+                    verticalArrangement = Arrangement.spacedBy(0.dp, Alignment.Bottom),
                     overscrollEffect = sharedEffect,
                 ) {
                     // T13 Resume banner — placed BEFORE items() so reverseLayout
@@ -3987,11 +3992,20 @@ fun ChatScreen(
                             })
                         }
                     }
-                    items(
+                    itemsIndexed(
                         items = flatItems.asReversed(),
-                        key = { it.key },
-                        contentType = { it.contentType },
-                    ) { item ->
+                        key = { _, item -> item.key },
+                        contentType = { _, item -> item.contentType },
+                    ) { index, item ->
+                        // [P1-3] Row rhythm: this row's top gap comes from its
+                        // OLDER neighbour in flatItems (flatItems is
+                        // oldest-first, rendered reversed under reverseLayout,
+                        // so the older neighbour sits directly above this
+                        // row). Applied as top padding on the row's Box.
+                        val rhythmGap = flatItemTopGap(
+                            flatItems.getOrNull(flatItems.size - 2 - index),
+                            item,
+                        )
                         // [Perf][LongCtx] T-android-long-ctx-reentry-perf:
                         // the newest message (index 0 in reverseLayout) is
                         // the first row painted in the viewport — its
@@ -4072,6 +4086,7 @@ fun ChatScreen(
                         )
                         Box(
                             modifier = Modifier
+                                .padding(top = rhythmGap)
                                 .alpha(rowAlpha)
                                 .then(
                                     if (searchFocusAlpha > 0.01f) {
@@ -4139,10 +4154,6 @@ fun ChatScreen(
                                 // selection, matching iOS UX.
                                 UserMessageBubble(
                                 message = item.message,
-                                // [T-android-candidate-bubble-gap] extra top
-                                // gap when this bubble directly follows another
-                                // user bubble (back-to-back candidate sends).
-                                precededByUser = item.precededByUser,
                                 onCopy = {
                                     val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                     clipboard.setPrimaryClip(android.content.ClipData.newPlainText("message", item.message.content))
@@ -4570,7 +4581,7 @@ fun ChatScreen(
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 var detailToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
-                LaunchedEffect(messages, foldAiProcess, showSubAgentBar, expandedProcessIds) {
+                LaunchedEffect(messages, foldAiProcess, showSubAgentBar) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
@@ -4581,16 +4592,12 @@ fun ChatScreen(
                         // reply, not to every tool in the session. Keep the
                         // complete list separately for historical details.
                         val latestReply = merged.lastOrNull { it.role == "assistant" }
-                        // [T-android-fold-expanded-duplicate] An expanded turn
-                        // already renders this tool in the list at its own
-                        // position, so the viewport-pinned strip would be a
-                        // second copy of the same card in a place that does not
-                        // correspond to the turn.
-                        val latestExpanded = latestReply?.id
-                            ?.let { id -> id in expandedProcessIds } == true
+                        // [T-android-round-collapse] Single channel: with
+                        // folding on the running round shows every step
+                        // in-list, so nothing floats (see isFloatingProcessTool).
                         val overlay = latestReply?.toolBlocks.orEmpty()
                             .filter {
-                                isFloatingProcessTool(it, foldAiProcess, processExpanded = latestExpanded)
+                                isFloatingProcessTool(it, foldAiProcess)
                             }
                             .filterNot {
                                 showSubAgentBar && isSubAgentTranscriptCard(it) &&

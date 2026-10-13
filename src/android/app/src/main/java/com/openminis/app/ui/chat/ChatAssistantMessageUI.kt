@@ -111,12 +111,11 @@ internal fun AssistantHeader(speakerName: String? = null, speakerVendor: String?
     val displayName = namedSpeaker ?: soulMeta.name.ifBlank { com.openminis.app.agent.SoulMetadata.DEFAULT.name }
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            // [T-android-user-assistant-spacing-16] top=10 so the
-            // User→Assistant boundary reads ~16dp: user-bubble bottom(4) +
-            // LazyColumn spacedBy(2) + this top(10) = 16. The header→body gap
-            // inside the turn is unaffected (that's this row's bottom=2).
-            .padding(top = 10.dp, bottom = 2.dp),
+        modifier = Modifier,
+        // [P1-3] Inter-row gaps are owned by the row rhythm
+        // (flatItemTopGap): 16dp above this header after a user bubble, 4dp
+        // from header to the turn's first content row. No self-padding —
+        // stacking paddings would double the rhythm gap.
     ) {
         val sparkleGradient = Brush.linearGradient(
             colors = listOf(SparkleColor1, SparkleColor2),
@@ -514,7 +513,9 @@ internal fun ToolCallPill(
     // Pill stretches up to the full row width so long titles can ellipsize
     // without pushing the duration out of view. Title takes the remaining
     // space via weight(1f), duration stays fixed-width (softWrap=false).
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+      // [P1-3] vertical self-padding removed: the row rhythm owns
+      // inter-row gaps (2.5dp between consecutive process rows).
       Box(modifier = Modifier.weight(1f, fill = false)) {
         Row(
             modifier = Modifier
@@ -718,7 +719,8 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
+            // [P1-3] vertical self-padding removed: the row rhythm owns
+            // inter-row gaps (2.5dp between consecutive process rows).
             .background(thinkingBlue.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
             .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(12.dp))
@@ -930,47 +932,58 @@ internal fun ProcessSummaryBar(
     totalMs: Long = 0L,
     onToggle: () -> Unit,
 ) {
-    val accent = if (hasFailure) Color(0xFFFF3B30) else Color(0xFF007AFF)
+    // [T-android-round-collapse] Quiet divider-style fold bar (taixu
+    // RoundCollapseButton pattern): a centred label between two hairlines in
+    // onSurfaceVariant, replacing the old accent-filled card that competed
+    // with the reply text for attention. Copy is unchanged
+    // (chat_process_summary_title / _meta); failure tints the status icon
+    // with the theme error colour instead of switching the whole bar red.
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else labelColor
+    val durationSuffix = formatProcessDuration(totalMs)?.let { " · $it" } ?: ""
     Row(
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .background(accent.copy(alpha = 0.06f), RoundedCornerShape(12.dp))
-            .border(0.5.dp, accent.copy(alpha = 0.15f), RoundedCornerShape(12.dp))
-            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onToggle)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
+        androidx.compose.material3.HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            thickness = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+        )
         Icon(
             imageVector = Icons.Default.Psychology,
             contentDescription = null,
-            tint = accent,
+            tint = iconTint,
             modifier = Modifier.size(14.dp),
         )
-        Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = stringResource(R.string.chat_process_summary_title),
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = accent,
+            color = labelColor,
         )
-        Spacer(modifier = Modifier.weight(1f))
-        val durationSuffix = formatProcessDuration(totalMs)?.let { " · $it" } ?: ""
         Text(
-            text = stringResource(R.string.chat_process_summary_meta, thinkingCount, toolCount, durationSuffix ?: ""),
+            text = stringResource(R.string.chat_process_summary_meta, thinkingCount, toolCount, durationSuffix),
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
             fontFamily = FontFamily.Monospace,
-            color = accent.copy(alpha = 0.6f),
+            color = labelColor.copy(alpha = 0.75f),
             maxLines = 1,
         )
-        Spacer(modifier = Modifier.width(4.dp))
         Icon(
             imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
             contentDescription = if (expanded) "Collapse" else "Expand",
-            tint = accent.copy(alpha = 0.5f),
-            modifier = Modifier.size(14.dp),
+            tint = labelColor.copy(alpha = 0.75f),
+            modifier = Modifier.size(16.dp),
+        )
+        androidx.compose.material3.HorizontalDivider(
+            modifier = Modifier.weight(1f),
+            thickness = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
         )
     }
 }

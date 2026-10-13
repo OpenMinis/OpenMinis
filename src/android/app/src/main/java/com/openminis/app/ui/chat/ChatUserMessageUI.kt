@@ -87,12 +87,6 @@ import com.openminis.app.ui.theme.ChatColors
 @OptIn(ExperimentalFoundationApi::class)
 internal fun UserMessageBubble(
     message: ChatMessage,
-    // [T-android-candidate-bubble-gap] When true, this bubble directly
-    // follows another user bubble (no AssistantHeader between them), so add
-    // extra top padding to keep the two visually separated. Default false
-    // preserves the original 4dp symmetric spacing for the normal
-    // user→assistant→user cadence.
-    precededByUser: Boolean = false,
     onCopy: () -> Unit = {},
     onRetry: (() -> Unit)? = {},
     onEdit: (() -> Unit)? = null,
@@ -109,15 +103,11 @@ internal fun UserMessageBubble(
 
     BoxWithConstraints(
         modifier = Modifier
-            .fillMaxWidth()
-            // [T-android-user-assistant-spacing-16] 14dp top when stacked on
-            // another user bubble (User→User, left intentionally larger to
-            // separate distinct user messages — unchanged). When preceded by an
-            // ASSISTANT turn, 10dp so the Assistant→User boundary reads ~16dp
-            // together with the assistant trailing-block bottom + LazyColumn
-            // spacedBy(2). Bottom stays 4dp: the User→Assistant boundary is
-            // user.bottom(4) + spacedBy(2) + AssistantHeader.top(10) = 16.
-            .padding(top = if (precededByUser) 14.dp else 10.dp, bottom = 4.dp),
+            .fillMaxWidth(),
+        // [P1-3] Inter-row gaps are owned by the row rhythm (flatItemTopGap
+        // in ChatFlatItems) applied as top padding on every list row; this
+        // bubble no longer pads itself — stacking paddings here would double
+        // the rhythm gap.
     ) {
         // Cap the bubble at 80% of the LazyColumn's available width (mirrors iOS
         // proportional sizing; prevents single-line messages from spanning the

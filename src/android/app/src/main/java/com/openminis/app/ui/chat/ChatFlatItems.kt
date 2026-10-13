@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.mikepenz.markdown.m3.Markdown
 import com.openminis.app.data.model.ThinkingLevel
@@ -37,31 +38,21 @@ internal sealed class FlatChatItem {
      * entire FlatChatItem list, and LazyColumn calls equals to decide skip.
      * Compare by id + reference identity of the wrapped ChatMessage.
      */
-    /**
-     * [T-android-candidate-bubble-gap] `precededByUser` is true when the
-     * immediately-preceding flat item is also a user bubble (e.g. two
-     * candidate / queued messages sent back to back). Consecutive user
-     * bubbles have no intervening AssistantHeader row to create visual
-     * separation, and the LazyColumn's `spacedBy(2.dp)` alone is too tight
-     * — the two bubbles read as one. When set, UserMessageBubble adds extra
-     * top padding so the pair is clearly two distinct messages.
-     */
     class UserBubble(
         val message: ChatMessage,
-        val precededByUser: Boolean = false,
         private val keySuffix: String = "",
     ) : FlatChatItem() {
         override val key = FlatKeys.of(FlatKeys.KIND_USER, message.id) + keySuffix
         override val contentType = "user"
-        override fun withKeySuffix(suffix: String): FlatChatItem = UserBubble(message, precededByUser, suffix)
+        override fun withKeySuffix(suffix: String): FlatChatItem = UserBubble(message, suffix)
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is UserBubble) return false
             // ChatMessage is a data class; reuse its equals (cheap for user
             // bubbles which carry short content and small attachment lists).
-            return message == other.message && precededByUser == other.precededByUser
+            return message == other.message
         }
-        override fun hashCode(): Int = message.hashCode() * 31 + precededByUser.hashCode()
+        override fun hashCode(): Int = message.hashCode()
     }
 
     data class AssistantHeader(
@@ -359,6 +350,161 @@ internal fun mergeStreamingOverlay(
     }
 }
 
+// ── [T-android-round-collapse] Round model ──────────────────────────────
+//
+// A round = one user message + every assistant/system message after it up to
+// the next user message. The fold unit is the ROUND, not the assistant
+// message: the user's mental model is "我问一句 → AI 干活 → 回复", so a
+// resume continuation or a group-chat reply that lands inside the same round
+// must not sprout its own fold bar — one round, one bar, round-wide totals.
+//
+// Fold rules (taixu RoundCollapse projection + OmniBot one-expression state):
+//  1. foldable steps ≤ 2 → never fold (a bar summarising two rows is noise);
+//  2. a RUNNING round is always fully open — effectiveExpanded =
+//     isRunning || expanded — so completion auto-collapses with no trigger
+//     of its own: the round simply stops forcing itself open;
+//  3. a collapsed round keeps its LATEST 2 steps visible (the "刚才在干什
+//     么" tail) and folds the rest into the summary bar;
+//  4. the bar is owned by the round's LAST assistant message (messageId ==
+//     that message's id, which is also the expansion key), emitted after its
+//     blocks — visually below the round's reply under reverseLayout
+//     (T-android-fold-bar-order).
+private class ChatRound(
+    val key: String,
+    val lastAssistantIdx: Int,
+    val isRunning: Boolean,
+    val foldableSteps: Int,
+    val keepVisibleIds: Set<String>,
+    val thinkingCount: Int,
+    val toolCount: Int,
+    val hasFailure: Boolean,
+    val totalMs: Long,
+    val processTools: List<ProcessToolRef>,
+)
+
+/** Rounds with fewer foldable steps than this never fold (rule 1). */
+private const val ROUND_MIN_FOLDABLE_STEPS = 3
+
+/** Steps kept visible in a collapsed round (rule 3). */
+private const val ROUND_KEEP_TAIL_STEPS = 2
+
+/**
+ * [message]'s blocks after the speaker / sub-agent visibility filters.
+ * Shared by the round pre-pass and the row loop so the summary bar's counts
+ * can never drift from what the rows actually render.
+ */
+private fun effectiveBlocks(message: ChatMessage, activeSubAgentToolIds: Set<String>): List<AssistantBlock> {
+    // Finished group utterances drop their tool cards. A live speaker still
+    // shows the current thinking block or tool card.
+    val hideSpeakerTools = !message.speakerName.isNullOrBlank() &&
+        !message.isStreaming && !message.isAwaitingModelResponse
+    if (!hideSpeakerTools && activeSubAgentToolIds.isEmpty()) return message.toolBlocks
+    // A sub-agent transcript card is hidden only while its run is still
+    // live in the top bar — the bar and the card would otherwise show the
+    // same run twice. Once the run finishes the bar drops it, so the card
+    // must come back here: with the old "hide whenever the bar is on" rule a
+    // completed sub-agent left no trace anywhere on the session page.
+    fun hiddenSubAgent(block: AssistantBlock): Boolean =
+        isSubAgentTranscriptCard(block) &&
+            (block.id in activeSubAgentToolIds ||
+                block.id.substringBefore("#sub-") in activeSubAgentToolIds)
+    return message.toolBlocks.filterNot { block ->
+        hiddenSubAgent(block) || (hideSpeakerTools && block.kind == "tool_use")
+    }
+}
+
+private class RoundSplit(val rounds: List<ChatRound>, private val roundOfIdx: IntArray) {
+    fun roundAt(idx: Int): ChatRound? = rounds.getOrNull(roundOfIdx[idx])
+}
+
+/**
+ * Pure projection of the message list onto rounds. Runs over whatever list
+ * the caller supplies: the frozen prefix build passes a truncated list and
+ * therefore folds "the round as far as it goes" (self-consistent — the live
+ * streaming message is never part of the frozen prefix), while the live
+ * suffix build passes the full merged list and sees complete rounds.
+ */
+private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<String>): RoundSplit {
+    val roundOfIdx = IntArray(messages.size) { -1 }
+    val rounds = mutableListOf<ChatRound>()
+    var start = 0
+    var lastAssistantIdx = -1
+    var running = false
+    var thinkingCount = 0
+    var toolCount = 0
+    var hasFailure = false
+    var totalMs = 0L
+    val foldableIds = mutableListOf<String>()
+    val processTools = mutableListOf<ProcessToolRef>()
+
+    fun closeRound(endExclusive: Int) {
+        if (lastAssistantIdx < 0) return // no assistant payload: nothing to fold
+        val round = ChatRound(
+            key = messages[lastAssistantIdx].id,
+            lastAssistantIdx = lastAssistantIdx,
+            isRunning = running,
+            foldableSteps = foldableIds.size,
+            keepVisibleIds = foldableIds.takeLast(ROUND_KEEP_TAIL_STEPS).toSet(),
+            thinkingCount = thinkingCount,
+            toolCount = toolCount,
+            hasFailure = hasFailure,
+            totalMs = totalMs,
+            processTools = processTools.toList(),
+        )
+        val roundIdx = rounds.size
+        rounds.add(round)
+        for (i in start until endExclusive) roundOfIdx[i] = roundIdx
+    }
+
+    fun resetRound(newStart: Int) {
+        start = newStart
+        lastAssistantIdx = -1
+        running = false
+        thinkingCount = 0
+        toolCount = 0
+        hasFailure = false
+        totalMs = 0L
+        foldableIds.clear()
+        processTools.clear()
+    }
+
+    messages.forEachIndexed { idx, raw ->
+        if (raw.role == "user") {
+            closeRound(idx)
+            resetRound(idx)
+        }
+        if (raw.role == "assistant") {
+            lastAssistantIdx = idx
+            if (raw.isStreaming || raw.isAwaitingModelResponse) running = true
+            val blocks = effectiveBlocks(raw, activeSubAgentToolIds)
+            processTools += processToolRefs(blocks)
+            for (block in blocks) {
+                when (block.kind) {
+                    "thinking" -> {
+                        thinkingCount++
+                        foldableIds += block.id
+                        totalMs += block.durationMs
+                    }
+                    "tool_use" -> {
+                        toolCount++
+                        totalMs += block.durationMs
+                        if (block.toolStatus == ToolBlockStatus.FAILED) hasFailure = true
+                        // ask_user_question is always visible and an in-flight
+                        // tool can never be folded away — neither counts as a
+                        // foldable step.
+                        if (!isAlwaysVisibleProcessTool(block) && !isInFlightProcessTool(block)) {
+                            foldableIds += block.id
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
+    closeRound(messages.size)
+    return RoundSplit(rounds, roundOfIdx)
+}
+
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
@@ -367,10 +513,13 @@ internal fun buildFlatChatItems(
     // hot per-token streaming rebuild path stays log-free.
     sessionId: String? = null,
     // [T-android-stream-pipeline-incremental] Build rows only for
-    // messages[fromIndex, size). Neighbor lookbacks (precededByUser /
-    // isResumeContinuation) still read the FULL list, so a suffix built with
-    // fromIndex > 0 is row-for-row identical to the same span of a full
-    // build — rows never depend on later messages, only earlier ones.
+    // messages[fromIndex, size). Neighbor lookbacks (isResumeContinuation)
+    // still read the FULL list, so a suffix built with fromIndex > 0 is
+    // row-for-row identical to the same span of a full build — rows never
+    // depend on later messages, only earlier ones. (Round fold state is the
+    // one deliberate exception on the LIVE side: a running round keeps its
+    // earlier messages open too, and the frozen prefix rebuild that fires
+    // whenever the canonical list changes re-syncs them.)
     fromIndex: Int = 0,
     // Dedupe continuity for split builds: pass the key set of the frozen
     // prefix so the defensive key-collision suffixing behaves exactly as a
@@ -378,11 +527,15 @@ internal fun buildFlatChatItems(
     seedKeys: Set<String> = emptySet(),
     showCompletedToolCards: Boolean = true,
     foldAiProcess: Boolean = false,
+    // [T-android-round-collapse] Round keys — the id of each round's LAST
+    // assistant message (the message that owns the fold bar). The toggle in
+    // ChatScreen adds/removes bar.messageId, which IS the round key.
     expandedProcessIds: Set<String> = emptySet(),
     activeSubAgentToolIds: Set<String> = emptySet(),
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
+    val roundSplit = if (foldAiProcess) splitRounds(messages, activeSubAgentToolIds) else null
     fun dedupe(item: FlatChatItem): FlatChatItem {
         // Defensive: duplicated keys crash LazyColumn. If any slip through, suffix
         // a counter until unique. This should never fire if upstream dedup is
@@ -396,32 +549,12 @@ internal fun buildFlatChatItems(
     }
     for (idx in fromIndex until messages.size) {
         val rawMessage = messages[idx]
-        // Finished group utterances drop their tool cards. A live speaker still
-        // shows the current thinking block or tool card.
-        val hideSpeakerTools = !rawMessage.speakerName.isNullOrBlank() &&
-            !rawMessage.isStreaming && !rawMessage.isAwaitingModelResponse
-        // A sub-agent transcript card is hidden only while its run is still
-        // live in the top bar — the bar and the card would otherwise show the
-        // same run twice. Once the run finishes the bar drops it, so the card
-        // must come back here: with the old "hide whenever the bar is on"
-        // rule a completed sub-agent left no trace anywhere on the session
-        // page and the user could not tell it had finished at all.
-        fun hiddenSubAgent(block: AssistantBlock): Boolean =
-            activeSubAgentToolIds.isNotEmpty() &&
-                isSubAgentTranscriptCard(block) &&
-                (block.id in activeSubAgentToolIds ||
-                    block.id.substringBefore("#sub-") in activeSubAgentToolIds)
-        val message = if (
-            rawMessage.toolBlocks.none(::hiddenSubAgent) &&
-            !hideSpeakerTools
-        ) {
-            rawMessage
-        } else {
-            rawMessage.copy(toolBlocks = rawMessage.toolBlocks.filterNot { block ->
-                hiddenSubAgent(block) ||
-                    (hideSpeakerTools && block.kind == "tool_use")
-            })
-        }
+        // Speaker / sub-agent visibility filters live in [effectiveBlocks] so
+        // the round pre-pass and this row loop can never disagree about what
+        // counts as a foldable step (the bar's totals must match the rows).
+        val effBlocks = effectiveBlocks(rawMessage, activeSubAgentToolIds)
+        val message = if (effBlocks.size == rawMessage.toolBlocks.size) rawMessage
+        else rawMessage.copy(toolBlocks = effBlocks)
         // [T-android-perf-logging] Per-100-message progress breadcrumb.
         // `out.size` is the running row count, so a sudden jump between two
         // progress lines localizes the heavy batch. Only fires on the
@@ -438,8 +571,7 @@ internal fun buildFlatChatItems(
             // is also a user message so the bubble can add a separating top
             // gap — back-to-back candidate / queued sends otherwise have no
             // AssistantHeader between them and visually merge.
-            val prevIsUser = idx > 0 && messages[idx - 1].role == "user"
-            out.add(dedupe(FlatChatItem.UserBubble(message, precededByUser = prevIsUser)))
+            out.add(dedupe(FlatChatItem.UserBubble(message)))
             continue
         }
         // System messages (slash-command notices, compact divider, etc.) render
@@ -486,23 +618,17 @@ internal fun buildFlatChatItems(
         // Only the last cancelled tool_use in the message gets the Retry button —
         // retryLast() re-runs the whole turn, so one button is enough.
         val lastCancelledToolId = blocks.lastOrNull { it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.CANCELLED }?.id
-        val thinkingCount = blocks.count { it.kind == "thinking" }
-        val toolCount = blocks.count { it.kind == "tool_use" }
-        val processExpanded = message.id in expandedProcessIds
-        // Fold completed thinking/tools as soon as they finish — even while
-        // the turn is still live. Only the currently streaming thinking
-        // block (last block overall) and in-flight tools stay expanded.
-        // Waiting for the whole turn / tool-loop to end was the old gate.
-        val liveThinkingId = liveThinkingBlockId(message.isStreaming, blocks)
-        val hasFoldableProcess = blocks.any { block ->
-            when (block.kind) {
-                "thinking" -> block.id != liveThinkingId
-                "tool_use" -> !isAlwaysVisibleProcessTool(block) &&
-                    !isInFlightProcessTool(block)
-                else -> false
-            }
-        }
-        val showProcessSummary = foldAiProcess && !isSystem && hasFoldableProcess
+        // [T-android-round-collapse] One expression replaces the old
+        // per-message fold state (hasFoldableProcess + liveThinkingId +
+        // processExpanded): a running round is always open (effectiveExpanded
+        // = isRunning || expanded), a finished round folds unless the user
+        // expanded it, and rounds with ≤ 2 foldable steps never fold at all.
+        // roundSplit is null when folding is off, so roundFolded is false.
+        val round = roundSplit?.roundAt(idx)
+        val roundFolded = round != null && !isSystem &&
+            round.foldableSteps >= ROUND_MIN_FOLDABLE_STEPS &&
+            !round.isRunning && round.key !in expandedProcessIds
+        val keepVisibleIds = round?.keepVisibleIds.orEmpty()
         val replyText = AssistantReplyText.joined(blocks)
         // [T-android-fold-toolonly-blank] A turn whose entire visible payload
         // is completed thinking/tool cards collapses into the process summary.
@@ -514,17 +640,18 @@ internal fun buildFlatChatItems(
             when (block.kind) {
                 "text" -> block.content.isNotEmpty()
                 "info" -> true
-                "thinking" -> !showProcessSummary || processExpanded || block.id == liveThinkingId
+                "thinking" -> !roundFolded || block.id in keepVisibleIds
                 "tool_use" -> shouldShowProcessToolRow(
                     block,
                     showCompletedToolCards = showCompletedToolCards,
-                    showProcessSummary = showProcessSummary,
-                    processExpanded = processExpanded,
+                    foldAiProcess = foldAiProcess,
+                    roundFolded = roundFolded,
+                    keepVisibleIds = keepVisibleIds,
                 )
                 else -> false
             }
         }
-        val headerHiddenByFold = showProcessSummary && !headerVisibleInBlocks &&
+        val headerHiddenByFold = roundFolded && !headerVisibleInBlocks &&
             message.content.isBlank() && message.error == null
         if (!isSystem && !isResumeContinuation && !headerHiddenByFold) {
             out.add(dedupe(FlatChatItem.AssistantHeader(
@@ -603,9 +730,9 @@ internal fun buildFlatChatItems(
                                 messageIsStreaming = message.isStreaming && isLastText,
                                 messageMarkdown = joinedMarkdown,
                                 showTranslate = !message.isStreaming && block.content.isNotBlank() &&
-                                    (!showProcessSummary || isLastText),
-                                segmentText = if (showProcessSummary && isLastText) replyText else block.content,
-                                translateWholeReply = showProcessSummary && isLastText &&
+                                    (!roundFolded || isLastText),
+                                segmentText = if (roundFolded && isLastText) replyText else block.content,
+                                translateWholeReply = roundFolded && isLastText &&
                                     !message.isStreaming && block.content.isNotBlank(),
                             )))
                         } else {
@@ -620,10 +747,10 @@ internal fun buildFlatChatItems(
                                     messageIsStreaming = message.isStreaming && isLastText,
                                     messageMarkdown = joinedMarkdown,
                                     showTranslate = isLastFragOfText && !message.isStreaming && block.content.isNotBlank() &&
-                                        (!showProcessSummary || isLastText),
-                                    segmentText = if (showProcessSummary && isLastText && isLastFragOfText) replyText
+                                        (!roundFolded || isLastText),
+                                    segmentText = if (roundFolded && isLastText && isLastFragOfText) replyText
                                         else if (isLastFragOfText) block.content else "",
-                                    translateWholeReply = showProcessSummary && isLastText && isLastFragOfText &&
+                                    translateWholeReply = roundFolded && isLastText && isLastFragOfText &&
                                         !message.isStreaming && block.content.isNotBlank(),
                                 )))
                             }
@@ -631,7 +758,7 @@ internal fun buildFlatChatItems(
                     }
                 }
                 "thinking" -> {
-                    if (!showProcessSummary || processExpanded || block.id == liveThinkingId) {
+                    if (!roundFolded || block.id in keepVisibleIds) {
                         out.add(dedupe(FlatChatItem.AssistantThinking(
                             messageId = message.id,
                             block = block,
@@ -649,8 +776,9 @@ internal fun buildFlatChatItems(
                 else -> if (shouldShowProcessToolRow(
                         block,
                         showCompletedToolCards = showCompletedToolCards,
-                        showProcessSummary = showProcessSummary,
-                        processExpanded = processExpanded,
+                        foldAiProcess = foldAiProcess,
+                        roundFolded = roundFolded,
+                        keepVisibleIds = keepVisibleIds,
                     )
                 ) {
                     out.add(dedupe(FlatChatItem.AssistantToolUse(
@@ -671,17 +799,25 @@ internal fun buildFlatChatItems(
         // text; a long reply then scrolled it straight out of the viewport with
         // no way to reach the fold bar. Appending it here puts it visually
         // BELOW the reply, next to the content it summarises.
-        if (showProcessSummary) {
+        //
+        // [T-android-round-collapse] One bar per round, owned by the round's
+        // LAST assistant message (round.key == message.id here). Emitted for
+        // every non-running fold-eligible round — collapsed OR user-expanded
+        // (the bar doubles as the collapse toggle) — never while running: a
+        // running round is fully open, and the bar appears the moment the
+        // round finishes, which IS the auto-collapse.
+        if (round != null && idx == round.lastAssistantIdx &&
+            !isSystem && round.foldableSteps >= ROUND_MIN_FOLDABLE_STEPS &&
+            !round.isRunning
+        ) {
             out.add(dedupe(FlatChatItem.AssistantProcessSummary(
-                messageId = message.id,
-                thinkingCount = thinkingCount,
-                toolCount = toolCount,
-                expanded = processExpanded,
-                hasFailure = blocks.any {
-                    it.kind == "tool_use" && it.toolStatus == ToolBlockStatus.FAILED
-                },
-                processTools = processToolRefs(blocks),
-                totalMs = blocks.sumOf { it.durationMs },
+                messageId = round.key,
+                thinkingCount = round.thinkingCount,
+                toolCount = round.toolCount,
+                expanded = round.key in expandedProcessIds,
+                hasFailure = round.hasFailure,
+                processTools = round.processTools,
+                totalMs = round.totalMs,
             )))
         }
 
@@ -759,18 +895,18 @@ internal fun isAlwaysVisibleProcessTool(block: AssistantBlock): Boolean =
 internal fun shouldShowProcessToolRow(
     block: AssistantBlock,
     showCompletedToolCards: Boolean,
-    showProcessSummary: Boolean,
-    processExpanded: Boolean,
+    foldAiProcess: Boolean,
+    roundFolded: Boolean,
+    keepVisibleIds: Set<String>,
 ): Boolean {
     if (isAlwaysVisibleProcessTool(block)) return true
-    if (showProcessSummary) {
-        // Expanded process lists thinking + tools in-thread. The fold bar no
-        // longer carries tool chips, so hiding completed tools here would
-        // make them unreachable.
-        if (processExpanded) return true
-        // Keep the in-progress tool visible; completed ones live in the summary.
-        return isInFlightProcessTool(block)
-    }
+    if (isInFlightProcessTool(block)) return true
+    if (roundFolded) return block.id in keepVisibleIds
+    // Fold mode owns visibility: a running or user-expanded round shows every
+    // step in-thread (the fold bar no longer carries tool chips, so hiding
+    // completed tools here would make them unreachable). The
+    // showCompletedToolCards setting only governs the fold-OFF mode.
+    if (foldAiProcess) return true
     return shouldShowToolUseRow(block, showCompletedToolCards)
 }
 
@@ -782,12 +918,6 @@ private val IN_FLIGHT_PROCESS_TOOL_STATUSES = setOf(
 
 internal fun isInFlightProcessTool(block: AssistantBlock): Boolean =
     block.kind == "tool_use" && block.toolStatus in IN_FLIGHT_PROCESS_TOOL_STATUSES
-
-internal fun liveThinkingBlockId(isStreaming: Boolean, blocks: List<AssistantBlock>): String? {
-    if (!isStreaming) return null
-    val last = blocks.lastOrNull() ?: return null
-    return if (last.kind == "thinking") last.id else null
-}
 
 /** Compact identity for a folded process-summary chip. */
 internal data class ProcessToolRef(
@@ -821,28 +951,63 @@ internal fun assistantToolUseBlocks(messages: List<ChatMessage>): List<Assistant
 
 /**
  * Whether [block] belongs on the floating tool overlay. When
- * [foldAiProcess] is on, completed tools fold into the in-list summary
- * and must not linger as a second "computer" strip — that was why the
- * Appearance switch looked like a no-op.
+ * [foldAiProcess] is on, the round model owns process display — a running
+ * round renders every step in-list, so a viewport-pinned copy would
+ * duplicate rows that are already visible at their own positions. The
+ * overlay therefore only serves the fold-OFF mode.
  *
  * The overlay subset is *not* the source of truth for ToolDetailSheet:
  * completed tools must remain openable after they leave the overlay.
- *
- * [T-android-fold-expanded-duplicate] [processExpanded] is the fold bar for
- * this block's turn being open. The overlay exists to surface process activity
- * that the in-list rows are currently HIDING; once the turn is expanded those
- * rows are back in the list at their own chronological positions, so pinning a
- * second copy of the same running tool to the viewport bottom shows one card in
- * two places that do not correspond to each other. The list wins — it is the
- * one that is positionally anchored to the turn.
  */
 internal fun isFloatingProcessTool(
     block: AssistantBlock,
     foldAiProcess: Boolean,
-    processExpanded: Boolean = false,
 ): Boolean {
     if (!isDetailProcessTool(block)) return false
-    if (foldAiProcess && processExpanded) return false
-    if (foldAiProcess && block.toolStatus !in IN_FLIGHT_PROCESS_TOOL_STATUSES) return false
+    if (foldAiProcess) return false
     return true
+}
+
+// ── [P1-3] Row rhythm ───────────────────────────────────────────────────
+//
+// Vertical spacing between list rows, replacing the flat LazyColumn
+// spacedBy(2.dp) plus per-row ad-hoc paddings. flatItems is oldest-first and
+// rendered via asReversed() under reverseLayout, so the row at index p-1
+// renders directly ABOVE the row at index p — the "top gap" of row p is the
+// visual gap between p-1 and p, and it is applied as top padding on row p.
+//
+// Rhythm (taixu ChatMessageList-derived, adapted to our row kinds):
+//  - above a user bubble: 12dp turn boundary (16dp between back-to-back
+//    user bubbles — candidate/queued pairs, T-android-candidate-bubble-gap);
+//  - above an assistant header: 16dp after a user bubble
+//    (T-android-user-assistant-spacing-16), else 12dp;
+//  - process row → process row: 2.5dp (dense activity cluster);
+//  - process row → reply text: 4dp (process hands off to the answer);
+//  - header → first row of its turn: 4dp;
+//  - md fragment → md fragment of the SAME message: 2dp (paragraph flow);
+//  - everything else: 8dp (default breath).
+
+internal val ChatRowDefaultGap: Dp = 8.dp
+
+internal fun isProcessRow(item: FlatChatItem): Boolean =
+    item is FlatChatItem.AssistantThinking ||
+        item is FlatChatItem.AssistantToolUse ||
+        item is FlatChatItem.AssistantProcessSummary
+
+private fun isTextRow(item: FlatChatItem): Boolean =
+    item is FlatChatItem.AssistantMarkdownBlock || item is FlatChatItem.AssistantText
+
+internal fun flatItemTopGap(prev: FlatChatItem?, cur: FlatChatItem): Dp = when {
+    cur is FlatChatItem.UserBubble ->
+        if (prev is FlatChatItem.UserBubble) 16.dp else 12.dp
+    cur is FlatChatItem.AssistantHeader ->
+        if (prev is FlatChatItem.UserBubble) 16.dp else 12.dp
+    prev == null -> 0.dp
+    isTextRow(cur) && isTextRow(prev) &&
+        (prev as? FlatChatItem.AssistantMarkdownBlock)?.messageId ==
+        (cur as? FlatChatItem.AssistantMarkdownBlock)?.messageId -> 2.dp
+    isProcessRow(prev) && isProcessRow(cur) -> 2.5.dp
+    isProcessRow(prev) && isTextRow(cur) -> 4.dp
+    prev is FlatChatItem.AssistantHeader -> 4.dp
+    else -> ChatRowDefaultGap
 }
