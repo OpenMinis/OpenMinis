@@ -48,10 +48,53 @@ class KernelContractTest {
     }
 
     @Test
-    fun callerTimeoutIsNotAnInput() {
+    fun callerTimeoutShortensButNeverExtends() {
+        // Extension is still blocked: the class ceiling stays the authority
+        // (the old maxOf(requested, minimum) bug).
         assertEquals(60_000L, BudgetClassifier.armMs("ls /tmp", 10_000_000L))
-        assertEquals(1_200_000L, BudgetClassifier.armMs("apt-get install curl", 1_000L))
+        // [T-timeout-honored] Shortening is honored: a 1s request no longer
+        // rides the full 1200s BATCH wall while the log says "ignored".
+        assertEquals(1_000L, BudgetClassifier.armMs("apt-get install curl", 1_000L))
+        // No request → the class wall.
+        assertEquals(1_200_000L, BudgetClassifier.armMs("apt-get install curl"))
+        // Zero/negative request → the class wall (not a zero-second kill).
+        assertEquals(1_200_000L, BudgetClassifier.armMs("apt-get install curl", 0L))
+        // The setup floor survives a short request: a killed
+        // minis-dev-setup-full leaves a broken rootfs.
+        assertEquals(
+            ShellTimeoutPolicy.LONG_RUNNING_TIMEOUT_MS,
+            BudgetClassifier.armMs("minis-dev-setup-full", 60_000L),
+        )
         assertEquals(WorkClass.BATCH, BudgetClassifier.classify("apt-get install curl").workClass)
+    }
+
+    /**
+     * [T-cd-readonly] The exact field-report shape: `cd repo && grep …` hung
+     * the full 1200s BATCH wall because `cd` failed the read-only check →
+     // isHeavy escalated it to forced BATCH, and the caller's 60s request was ignored.
+     */
+    @Test
+    fun cdPrefixedReadPipelineIsInteractiveAndNotHeavy() {
+        val reported = "cd /var/minis/workspace/OpenMinis-Linux && " +
+            "grep -rn \"fun LargeContentGuard\" --include=\"*.kt\" src/ | head"
+        assertEquals(WorkClass.INTERACTIVE, BudgetClassifier.classify(reported).workClass)
+        assertEquals(60_000L, BudgetClassifier.classify(reported).wallMs)
+        assertFalse(SandboxResourceGate.isHeavy(reported))
+        // …and a caller asking for even less gets it.
+        assertEquals(30_000L, BudgetClassifier.armMs(reported, 30_000L))
+    }
+
+    /**
+     * [T-quote-aware-split] A `|` inside quotes must not create a phantom
+     * segment: `grep -n "a\|b" file` is one INTERACTIVE command, not a
+     * garbage-segmented NORMAL one.
+     */
+    @Test
+    fun quotedPipeDoesNotCreatePhantomSegments() {
+        assertEquals(WorkClass.INTERACTIVE, BudgetClassifier.classify("grep -n \"a\\|b\" file").workClass)
+        assertEquals(WorkClass.INTERACTIVE, BudgetClassifier.classify("echo \"a && b\"").workClass)
+        // Real pipes still segment — the max rank wins.
+        assertEquals(WorkClass.NORMAL, BudgetClassifier.classify("grep -n \"a\\|b\" file | sort").workClass)
     }
 
     @Test

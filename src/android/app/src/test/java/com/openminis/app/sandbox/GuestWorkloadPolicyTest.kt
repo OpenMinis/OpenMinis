@@ -67,9 +67,15 @@ class GuestWorkloadPolicyTest {
     }
 
     @Test
-    fun findIsNormalAndACallerTimeoutDoesNotChangeIt() {
-        assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /var/minis/workspace -name '*.kt'", 60_000L))
-        assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /data -name '*.db'", 30_000L))
+    fun findIsNormalAndACallerMayShortenIt() {
+        // Class ceiling: a broad find walk is NORMAL (600s), not INTERACTIVE
+        // — slowness is handled by the wall clock, not by refusing reads.
+        assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /var/minis/workspace -name '*.kt'", 0L))
+        // [T-timeout-honored] a caller may now SHORTEN that wall…
+        assertEquals(60_000L, ShellTimeoutPolicy.effectiveMs("find /var/minis/workspace -name '*.kt'", 60_000L))
+        assertEquals(30_000L, ShellTimeoutPolicy.effectiveMs("find /data -name '*.db'", 30_000L))
+        // …but never extend past it.
+        assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /data -name '*.db'", 10_000_000L))
         // A broad walk is slow, not irreversible. It is no longer refused
         // outright — refusing a read-only command in every mode made it
         // unavailable. The wall clock, output rate and resident window brake
@@ -124,6 +130,38 @@ class GuestWorkloadPolicyTest {
         assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cat a >> /tmp/out 2>/dev/null"))
         assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cat a 1>/dev/null; tee /tmp/x"))
         assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("echo \"2>/dev/null\""))
+    }
+
+    /**
+     * [T-cd-readonly] `cd` is pure navigation — it writes nothing. Its
+     * absence from READ_ONLY_TOKENS made every `cd repo && grep …` classify
+     * as heavy work and arm the 1200s BATCH wall (the field report).
+     * [T-quote-aware-split] A `|` inside quotes must not create a phantom
+     * segment either: `grep -n "a\|b"` stayed read-only in truth but failed
+     * the whitelist on its garbage split half.
+     */
+    @Test
+    fun cdPrefixedAndQuotedPipePipelinesAreReadOnly() {
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("cd /var/minis/workspace/repo && grep -rn foo src/ | head"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("cd /tmp && ls -la"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("grep -n \"a\\|b\" file"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("echo \"a ; b\""))
+        // Real writes inside quotes stay writes (hasWriteSyntax already
+        // stripped quotes); real pipes still segment.
+        assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cd /tmp && rm -rf x"))
+        assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("echo \"x\" > /tmp/out"))
+        // The split helper itself: quoted spans blanked, no phantom halves.
+        // Whitespace is collapsed for the assertion — the replacement leaves
+        // the surrounding spaces, which is irrelevant to token extraction.
+        assertEquals(
+            listOf("grep -n file"),
+            GuestWorkloadPolicy.splitCommandSegments("grep -n \"a\\|b\" file")
+                .map { it.replace(Regex("\\s+"), " ") },
+        )
+        assertEquals(
+            listOf("cd /x", "ls"),
+            GuestWorkloadPolicy.splitCommandSegments("cd /x && ls"),
+        )
     }
 
     /**

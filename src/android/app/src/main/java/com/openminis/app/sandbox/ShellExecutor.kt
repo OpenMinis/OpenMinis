@@ -40,8 +40,11 @@ object ShellExecutor {
      *
      * @param context Android context for resolving PROOT_TMP_DIR
      * @param command Shell command string to execute
-     * @param timeout Timeout in milliseconds (default 10 minutes). IGNORED —
-     *   the armed wall clock comes from [BudgetClassifier].
+     * @param timeout Timeout in milliseconds (default 10 minutes). May
+     *   SHORTEN the armed wall clock, never extend it: armed =
+     *   min(timeout, class wall). [T-timeout-honored] The old code ignored
+     *   this parameter outright and logged "caller timeout ignored" — a
+     *   60s request then rode the full 1200s BATCH wall.
      * @param environment Additional environment variables
      * @param lineCallback Called for each line of output (on IO dispatcher)
      * @param resourceClass Caller's `resource_class`. [T-resource-class-threaded]
@@ -62,9 +65,11 @@ object ShellExecutor {
         check(PRootKernel.isBooted) { "PRootKernel must be booted before executing commands" }
 
         val budget = BudgetClassifier.classify(command, resourceClass)
-        val armed = budget.wallMs
-        if (timeout != armed) {
-            Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
+        // [T-timeout-honored] The caller may shorten the class wall but never
+        // extend it, and the setup floor survives.
+        val armed = BudgetClassifier.armMs(budget, command, timeout)
+        if (timeout > 0L && armed < budget.wallMs) {
+            Log.i(TAG, "caller timeout ${timeout}ms shortens class ${budget.workClass} wall ${budget.wallMs}ms → ${armed}ms")
         }
         val first = runOnce(
             context, command, armed, environment, lineCallback, noSeccomp = false,

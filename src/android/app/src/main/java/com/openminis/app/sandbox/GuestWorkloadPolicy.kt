@@ -117,7 +117,7 @@ internal object GuestWorkloadPolicy {
      */
     fun isDiskRelief(command: String): Boolean {
         if (hasWriteSyntax(command)) return false
-        val segments = command.split(Regex("""&&|\|\||[;|]""")).map { it.trim() }.filter { it.isNotEmpty() }
+        val segments = splitCommandSegments(command)
         if (segments.isEmpty()) return false
         return segments.all { segment ->
             val token = commandToken(segment) ?: return@all false
@@ -192,7 +192,7 @@ internal object GuestWorkloadPolicy {
     fun isObviouslyReadOnly(command: String): Boolean {
         if (command.isBlank()) return true
         if (hasWriteSyntax(command)) return false
-        val segments = command.split(Regex("""&&|\|\||[;|]""")).map { it.trim() }.filter { it.isNotEmpty() }
+        val segments = splitCommandSegments(command)
         if (segments.isEmpty()) return true
         return segments.all { segment ->
             val token = commandToken(segment) ?: return@all false
@@ -201,6 +201,23 @@ internal object GuestWorkloadPolicy {
                 else -> token in READ_ONLY_TOKENS
             }
         }
+    }
+
+    /**
+     * [T-quote-aware-split] Split a compound command into segments WITHOUT
+     * letting quoted spans create phantom segments. `grep -n "a\|b" file`
+     * contains a `|` inside quotes: the old raw split cut it into `grep -n "a\`
+     * and `b" file`, whose garbage leading token failed the read-only
+     * whitelist — so a plainly read-only pipeline classified as heavy work,
+     * escalated to BATCH and armed a 20-minute wall clock (the field report:
+     * every `cd repo && grep …` hung the full 1200s). Quoted spans are
+     * blanked first, exactly like [hasWriteSyntax] already does; only the
+     * leading token of each segment is inspected, so losing the quoted text
+     * costs nothing.
+     */
+    internal fun splitCommandSegments(command: String): List<String> {
+        val stripped = command.replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+        return stripped.split(Regex("""&&|\|\||[;|]""")).map { it.trim() }.filter { it.isNotEmpty() }
     }
 
     /**
@@ -319,6 +336,10 @@ internal object GuestWorkloadPolicy {
     // when the disk IS the constraint — it was missing while `df` was
     // present. The rest are pure reporters with no write mode, added for
     // the same reason: they diagnose a stressed system without growing it.
+    // [T-cd-readonly] `cd`/`pushd`/`popd` are pure navigation builtins: they
+    // write nothing to disk, yet their absence made every
+    // `cd repo && grep …` fail the read-only check → isHeavy → forced BATCH
+    // → the 1200s wall clock the field report hit on every repo command.
     private val READ_ONLY_TOKENS = setOf(
         "ls", "cat", "head", "tail", "pwd", "echo", "printf", "df", "du", "stat", "file",
         "wc", "true", "false", "whoami", "id", "uname", "date", "env", "printenv",
@@ -327,6 +348,7 @@ internal object GuestWorkloadPolicy {
         "nl", "od", "hexdump", "fold", "grep", "egrep", "fgrep", "tree",
         "free", "lsblk", "findmnt", "vmstat", "iostat", "uptime", "ps", "nproc",
         "arch", "lscpu", "lsof", "groups", "hostname", "tty",
+        "cd", "pushd", "popd",
     )
 
     fun clampHostTimeout(requestedMs: Long): Long =

@@ -65,10 +65,15 @@ object ShellTimeoutPolicy {
     }
 
     /**
-     * Class wall clock. [requestedMs] is ignored. The live callers are
-     * [com.openminis.app.sandbox.ExecutionCoordinator.execute] and
-     * [com.openminis.app.sandbox.ShellExecutor.execute], which call
-     * [com.openminis.app.sandbox.kernel.BudgetClassifier.classify] themselves.
+     * Armed wall clock. [requestedMs] may SHORTEN the class wall, never
+     * extend it ([T-timeout-honored]): the class ceiling stays the authority
+     * — the old `maxOf(requested, minimumMs)` path is how a 10-minute
+     * default outlived the table — while a caller that asks for 60s gets
+     * 60s instead of riding the full 20-minute BATCH wall. The live callers
+     * ([com.openminis.app.sandbox.ExecutionCoordinator.execute],
+     * [com.openminis.app.sandbox.ShellExecutor.execute],
+     * [com.openminis.app.sandbox.PersistentShell.executeCommand]) apply the
+     * same min() themselves.
      */
     fun effectiveMs(command: String, requestedMs: Long): Long =
         com.openminis.app.sandbox.kernel.BudgetClassifier.armMs(command, requestedMs)

@@ -258,7 +258,7 @@ background=true detaches the wave: this call returns a dispatch_id at once inste
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Install Python data analysis packages', 'List files in home directory'). Use the same language as the user."),
             "command" to AgentToolParam("string", "The shell command to execute. Supports multi-line commands directly — no special escaping needed. Keep under 1000 chars; for longer scripts, write to a file with file_write first, then run it."),
-            "timeout" to AgentToolParam("integer", "Timeout in seconds (default: 900). Use a larger value for long-running commands like package installs."),
+            "timeout" to AgentToolParam("integer", "Timeout in seconds (default: 900). Caps the wall clock: a slow command is killed at this deadline or the command-class ceiling, whichever comes FIRST. A larger value cannot extend past the class ceiling (installs/builds get up to 10/20 min regardless); a smaller value bounds slow commands early instead of letting them hang."),
             "resource_class" to AgentToolParam("string", "Use heavy for memory-intensive work, including scripts that run decompilers, compilers, JVMs or large data processing. Heavy tasks share one process-wide memory budget. Omit or use auto for other commands."),
             "delay" to AgentToolParam("integer", "Delay in seconds before execution begins. The tool blocks the agent flow during this wait WITHOUT occupying the shell, so other concurrent tasks can use it. Use this instead of sleep commands to avoid resource contention."),
         ),

@@ -31,7 +31,13 @@ object BudgetClassifier {
         // command. Otherwise `sleep 100 &` becomes NORMAL and inherits a
         // CPU limit a daemon must not have.
         val background = isBackground(text)
-        val segments = text.split(Regex("""&&|\|\||[;&|]|\$\(|`"""))
+        // [T-quote-aware-split] Blank quoted spans BEFORE splitting: a `|`
+        // inside quotes (`grep -n "a\|b" file`) used to cut a phantom
+        // segment whose garbage token classified as NORMAL, inflating the
+        // wall clock for a quick utility. Only each segment's leading token
+        // is inspected, so losing the quoted text costs nothing.
+        val stripped = text.replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+        val segments = stripped.split(Regex("""&&|\|\||[;&|]|\$\(|`"""))
             .map { it.trim() }
             .filter { it.isNotEmpty() }
         val detected = if (segments.isEmpty()) interactive()
@@ -54,10 +60,34 @@ object BudgetClassifier {
         return Regex("""(?<![&])&(?![&])""").containsMatchIn(stripped)
     }
 
-    /** Armed wall clock. [requestedMs] is ignored on purpose. */
-    fun armMs(command: String, requestedMs: Long = 0L): Long {
-        if (requestedMs < 0L) return classify(command).wallMs
-        return classify(command).wallMs
+    /**
+     * Armed wall clock. [requestedMs] may SHORTEN the class wall but never
+     * extend it: the class ceiling stays the authority (the old
+     * `maxOf(requested, minimumMs)` path is how a 10-minute default
+     * outlived the table), while a caller that knows it wants 60s gets 60s
+     * instead of riding the full 20-minute BATCH wall — the field report
+     * was a `grep` hanging 1200s with a 60s request logged as "ignored".
+     * [T-timeout-honored]
+     */
+    fun armMs(command: String, requestedMs: Long = 0L): Long =
+        armMs(classify(command), command, requestedMs)
+
+    /**
+     * [T-timeout-honored] The effective wall for an ALREADY-classified
+     * budget: the class ceiling capped by the caller's request, but never
+     * below the setup floor — a `minis-dev-setup-full` killed by a short
+     * request leaves a broken rootfs, which is exactly what
+     * `setupFloorSurvivesAShortRequest` pins. The live execution paths
+     * ([com.openminis.app.sandbox.ExecutionCoordinator],
+     * [com.openminis.app.sandbox.PersistentShell],
+     * [com.openminis.app.sandbox.ShellExecutor]) call this with the budget
+     * they classified (including `resource_class`), so HEAVY escalation
+     * and the floor compose in one place.
+     */
+    fun armMs(budget: ProcessBudget, command: String, requestedMs: Long): Long {
+        val floor = com.openminis.app.sandbox.ShellTimeoutPolicy.minimumMs(command)
+        if (requestedMs <= 0L) return maxOf(floor, budget.wallMs)
+        return maxOf(floor, minOf(requestedMs, budget.wallMs))
     }
 
     private fun classifySegment(segment: String): ProcessBudget {
@@ -162,5 +192,8 @@ object BudgetClassifier {
         "ls", "cat", "head", "tail", "wc", "grep", "rg", "egrep", "fgrep",
         "echo", "printf", "pwd", "which", "whoami", "id", "true", "false",
         "basename", "dirname", "stat", "df",
+        // [T-cd-readonly] Pure navigation builtins: `cd repo && grep …` must
+        // classify exactly like `grep …` alone — INTERACTIVE, fail fast.
+        "cd", "pushd", "popd",
     )
 }

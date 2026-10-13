@@ -119,7 +119,9 @@ object ExecutionCoordinator {
     suspend fun execute(
         sessionId: String,
         command: String,
-        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
+        // [T-timeout-honored] May SHORTEN the armed wall clock, never
+        // extend it: armed = min(timeout, class wall). The class ceiling
+        // stays the authority; the caller gets to bound its own wait.
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null,
         resourceClass: SandboxResourceGate.ResourceClass = SandboxResourceGate.ResourceClass.AUTO,
@@ -174,11 +176,17 @@ object ExecutionCoordinator {
             onWaiting = { lineCallback?.invoke(it) },
         ) {
             val budget = BudgetClassifier.classify(command, resourceClass)
-            val armed = budget.wallMs
-            if (timeout != armed) {
-                Log.w(
+            // [T-timeout-honored] The caller may shorten the class wall but
+            // never extend it, and the setup floor always survives (a killed
+            // minis-dev-setup-full leaves a broken rootfs). The old code
+            // logged "caller timeout ignored" — a 60s request then rode the
+            // full 1200s BATCH wall while the user watched the shell "hang".
+            val armed = BudgetClassifier.armMs(budget, command, timeout)
+            if (timeout > 0L && armed < budget.wallMs) {
+                Log.i(
                     TAG,
-                    "[$sessionId] caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}",
+                    "[$sessionId] caller timeout ${timeout}ms shortens class " +
+                        "${budget.workClass} wall ${budget.wallMs}ms → ${armed}ms",
                 )
             }
             val startTime = System.currentTimeMillis()

@@ -544,8 +544,9 @@ class PersistentShell(
 
     suspend fun executeCommand(
         command: String,
-        // Ignored. Armed timeout comes from [callerBudget] (or, when absent,
-        // from BudgetClassifier.classify(command)).
+        // [T-timeout-honored] May SHORTEN the armed wall clock, never
+        // extend it: armed = min(timeout, class wall). The class ceiling
+        // stays the authority; the caller gets to bound its own wait.
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null,
         // [T-resource-class-threaded] The budget the CALLER already computed,
@@ -580,9 +581,13 @@ class PersistentShell(
         }
 
         val budget = callerBudget ?: BudgetClassifier.classify(command)
-        val armed = budget.wallMs
-        if (timeout != armed) {
-            Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
+        // [T-timeout-honored] The caller may shorten the class wall but never
+        // extend it, and the setup floor survives. The guest watchdog below
+        // gets the SAME effective wall so the in-guest `sleep` and the host
+        // withTimeoutOrNull agree on when to fire.
+        val armed = BudgetClassifier.armMs(budget, command, timeout)
+        if (timeout > 0L && armed < budget.wallMs) {
+            Log.i(TAG, "caller timeout ${timeout}ms shortens class ${budget.workClass} wall ${budget.wallMs}ms → ${armed}ms")
         }
         val marker = UUID.randomUUID().toString().take(8)
         // [T-android-ghost-cwd] Heal the shell's cwd before handing control back
@@ -610,7 +615,7 @@ class PersistentShell(
             append("echo \"__MINIS_GO_${marker}__\"\n")
             // Supervisor re-arm. Not a subshell around the command, not a trap,
             // not a second ulimit. On expiry `kill -TERM -$$` kills the group.
-            append(GuardianScript.persistentCommand(command, budget.wallSeconds))
+            append(GuardianScript.persistentCommand(command, (armed / 1000L).toInt().coerceAtLeast(1)))
             append("__minis_rc=\$?\n")
             append("kill -KILL \${__minis_cmd_wd:-} 2>/dev/null\n")
             append("if [ ! -d \"\$PWD\" ]; then cd /var/minis/workspace 2>/dev/null || cd / ; fi\n")

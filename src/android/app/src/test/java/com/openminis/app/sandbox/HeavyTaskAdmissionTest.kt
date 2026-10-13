@@ -18,6 +18,11 @@ class HeavyTaskAdmissionTest {
         assertFalse(SandboxResourceGate.isHeavy("cat report.txt"))
         assertFalse(SandboxResourceGate.isHeavy("./gradlew --stop"))
         assertFalse(SandboxResourceGate.isHeavy("pkill java"))
+        // [T-cd-readonly] the field-report shape: a cd-prefixed read pipeline
+        // must not consume the heavy budget — it used to, arming the 1200s
+        // BATCH wall for a plain grep.
+        assertFalse(SandboxResourceGate.isHeavy("cd /var/minis/workspace/repo && grep -rn foo src/ | head -5"))
+        assertFalse(SandboxResourceGate.isHeavy("grep -n \"a\\|b\" file"))
     }
 
     @Test fun differentHeavyToolsShareOneBudgetAndCancellationReleasesIt() = runTest {
