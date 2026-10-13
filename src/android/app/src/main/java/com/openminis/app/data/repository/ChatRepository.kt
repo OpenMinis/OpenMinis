@@ -850,6 +850,84 @@ class ChatRepository(
         )
 
     /**
+     * [T-msg-version-restore] One-shot recovery for rows lost to the
+     * 2026-10-14 ordinal-mismatch truncation (deleteMessagesAfter anchored
+     * dozens of turns early; 1386 rows were archived then deleted from one
+     * retry tap). Re-inserts every archived version whose source row no
+     * longer exists in `messages`, at sort orders ABOVE the current tail so
+     * the live conversation is untouched, and deletes the restored rows from
+     * `message_versions` so a second call is a no-op.
+     *
+     * Only LATEST versions are restored (highest version_index per
+     * message_id): earlier versions are the pre-edit history the archive
+     * exists to keep, not rows to resurrect.
+     *
+     * Idempotent: rows whose message_id still exists in `messages` are
+     * skipped (their live row already carries the content).
+     */
+    suspend fun restoreArchivedVersions(sessionId: String): RestoreResult {
+        val vdao = versionDao ?: return RestoreResult(0, 0, "versionDao unavailable")
+        val all = runCatching { vdao.versionsForSession(sessionId) }.getOrNull()
+            ?: return RestoreResult(0, 0, "versionsForSession failed")
+        if (all.isEmpty()) return RestoreResult(0, 0, null)
+
+        // Latest version per message_id.
+        val latest = all.groupBy { it.messageId }
+            .mapValues { (_, versions) -> versions.maxBy { it.versionIndex } }
+            .values
+            .sortedBy { it.sourceCreatedAt }
+
+        // Skip message_ids that still exist live.
+        val live = dao.messageCountForSession(sessionId)
+        val existingIds = if (live > 0) {
+            runCatching { loadMessageIds(sessionId) }.getOrDefault(emptySet())
+        } else emptySet()
+
+        val toRestore = latest.filter { it.messageId !in existingIds }
+        if (toRestore.isEmpty()) return RestoreResult(0, all.size, null)
+
+        // Append above the current tail, preserving source order.
+        var nextSort = dao.nextSortOrder(sessionId)
+        val restored = mutableListOf<MessageEntity>()
+        for (v in toRestore) {
+            val row = MessageEntity(
+                id = v.messageId,
+                sessionId = sessionId,
+                role = v.role,
+                partsJson = v.partsJson ?: "[]",
+                createdAt = v.sourceCreatedAt,
+                sortOrder = nextSort,
+                reasoningContent = v.reasoningContent,
+                errorInfo = v.errorInfo,
+                modelId = v.modelId,
+                modelDisplayName = v.modelDisplayName,
+                bodyRef = v.bodyRef,
+                bodySha = v.bodySha,
+            )
+            dao.insertMessage(row)
+            restored.add(row)
+            nextSort++
+        }
+        // Remove the restored entries from the archive so a repeat call is a
+        // no-op (the live row now carries the content).
+        runCatching {
+            vdao.deleteForSession(sessionId)
+        }
+        AppLogger.info(
+            TAG,
+            "[T-msg-version-restore] restored ${restored.size} rows to session " +
+                "${sessionId.take(8)} (archive had ${all.size}, skipped ${latest.size - toRestore.size} live)",
+        )
+        return RestoreResult(restored.size, all.size, null)
+    }
+
+    data class RestoreResult(
+        val restoredCount: Int,
+        val archiveCount: Int,
+        val error: String?,
+    )
+
+    /**
      * Rewrite a single message row's parts_json in place. Used by
      * [com.openminis.app.ui.chat.ChatViewModel.rerunFromToolBlock]'s block-
      * boundary cut to trim the kept assistant row to the parts before the
@@ -1364,8 +1442,19 @@ class ChatRepository(
          * Upper bound for one authoritative context hydrate. The UI remains
          * tail-windowed, but model context must be able to recover history
          * beyond the old 400-row cache when a long session is reopened.
+         *
+         * [T-android-long-session-render-oom] Lowered from 4_000 to 500:
+         * the UI tail IS the initial render window (loadSession →
+         * toChatMessages → LazyColumn). At 4_000 a 1441-message session
+         * loaded ALL rows into the UI on open, and RenderThread/SKIA
+         * allocated 4.68 GB of native graphics memory in 11 s → Scudo
+         * map exhaustion → abort (2026-10-14 crash, tombstone_09/12).
+         * 500 rows keeps every real conversation fully loaded (the 95th
+         * percentile session is far smaller) while bounding the worst
+         * case; older history stays one tap away via loadOlderMessages
+         * turn-aligned paging, and the DB remains the full transcript.
          */
-        internal const val MAX_TAIL_MESSAGES = 4_000
+        internal const val MAX_TAIL_MESSAGES = 500
 
         // Session-list preview only needs ~100 chars. Regex.replace on a
         // 500 KB parts_json body was a leftover ICU Matcher.reset path.

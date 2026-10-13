@@ -633,6 +633,19 @@ interface ChatDao {
     @Query("SELECT substr(COALESCE(preview, parts_json), 1, 65536) FROM messages WHERE id = :id")
     suspend fun messagePartsJson(id: String): String?
 
+    /**
+     * [T-delete-anchor-by-id] Direct row-id → sort_order lookup. The ordinal
+     * walk in visibleUserCutoff counted a DIFFERENT set of user rows than the
+     * UI list (UI counts every user-role ChatMessage; the DB walk skips
+     * toolResult-only user rows), so the resolved anchor could land dozens
+     * of turns early and deleteMessagesAfter wiped the session tail
+     * (incident 2026-10-14: 1386 rows archived at 01:16:12 from one retry).
+     * Anchoring by the message id the user actually tapped removes the
+     * two-counter mismatch entirely: the UI ChatMessage.id IS the DB row id.
+     */
+    @Query("SELECT sort_order FROM messages WHERE id = :id")
+    suspend fun sortOrderForMessageId(id: String): Int?
+
     // [T-error-persist-android] Write/clear the terminal error sticker on a
     // specific message row by id. Used when the persisted DB id is known
     // (clear-on-retry via sourceDbIds).

@@ -35,13 +35,25 @@ internal suspend fun ChatViewModel.truncateBeforeEdit(messageId: String) {
     revokeMemoryWritesInDeletedMessages(deletedMessages)
 
     val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
-    // Visible-user index of the *edited* message — count user turns
-    // strictly before `index`, which is the 0-based ordinal of the
-    // edited turn itself.
-    val visibleUserIndex = messages.subList(0, index).count { it.role == "user" }
-    val cutoffSortOrder = visibleUserCutoff(sid, visibleUserIndex)?.sortOrder ?: -1
+    // [T-delete-anchor-by-id] Anchor the truncation by the edited message's
+    // DB row id, NOT by visible-user ordinal. The old ordinal walk counted a
+    // different set of user rows than the UI list (UI counts every user-role
+    // ChatMessage; the DB walk skips toolResult-only user rows), so the cut
+    // could land dozens of turns early and deleteMessagesAfter wiped the
+    // session tail (2026-10-14 incident). ChatMessage.id IS the DB row id.
+    val edited = messages[index]
+    val anchorIds = listOf(edited.id) + edited.sourceDbIds
+    val cutoffSortOrder = anchorIds.firstNotNullOfOrNull { anchorId ->
+        runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }.getOrNull()
+    } ?: -1
     if (cutoffSortOrder >= 0) {
         chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
+    } else {
+        AppLogger.warning(
+            ChatViewModel.TAG_STREAM,
+            "✏️ truncateBeforeEdit: anchor row ${edited.id.take(8)} not found in DB — " +
+                "skipping DB truncation (UI already truncated)",
+        )
     }
     val remaining = awaitBoundedHistoryRebuild(sid)
     AppLogger.info(
