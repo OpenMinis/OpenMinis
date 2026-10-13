@@ -183,8 +183,14 @@ class ModelListFetchRetryTest {
 
         // A budget already spent on arrival: the first attempt runs, the loop
         // then returns that response instead of consuming the enqueued rest.
+        // [T-budget-flake] 0L, not 1L: with 1L the property only holds when
+        // the first localhost round trip takes >= 1 ms — elapsed is measured
+        // in whole milliseconds, so a sub-millisecond MockWebServer response
+        // leaves remaining = 1 > 0 and the loop retries, failing the
+        // requestCount assertion on fast machines. 0L is spent on arrival on
+        // every machine, fast or slow.
         val response = ModelListFetchRetry.execute(
-            client, request(), "TestModels", totalBudgetMillis = 1L,
+            client, request(), "TestModels", totalBudgetMillis = 0L,
         )
 
         response.use { assertEquals(503, it.code) }
