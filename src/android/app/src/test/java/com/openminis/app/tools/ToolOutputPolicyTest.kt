@@ -1,11 +1,33 @@
 package com.openminis.app.tools
 
 import org.junit.Assert.assertEquals
+import org.junit.After
+import org.junit.Before
 import org.junit.Test
 
 class ToolOutputPolicyTest {
 
     private val sensitive = listOf("sk-Ab12Cd34Ef56Gh78")
+
+    /**
+     * [T-spill-hermetic] The spill path writes to
+     * `workspaceRoot/tool_outputs/`. The production default
+     * `/var/minis/workspace` exists on the phone but NOT on a CI runner,
+     * where the write fails and apply() falls back to returning the full
+     * text — the omission-marker assertions then fail for the wrong
+     * reason. Redirect to a temp dir so the test exercises the spill path
+     * everywhere, and restore the default afterwards.
+     */
+    @Before
+    fun redirectSpillToTempDir() {
+        ToolOutputPolicy.workspaceRoot =
+            java.nio.file.Files.createTempDirectory("tool-output-policy-").toFile().absolutePath
+    }
+
+    @After
+    fun restoreWorkspaceRoot() {
+        ToolOutputPolicy.workspaceRoot = "/var/minis/workspace"
+    }
 
     @Test
     fun plainTextReplace() {

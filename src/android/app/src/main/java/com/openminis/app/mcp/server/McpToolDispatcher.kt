@@ -125,7 +125,15 @@ class McpToolDispatcher(
                 when {
                     seg.isEmpty() || seg == "." -> Unit
                     seg == ".." -> {
-                        if (segments.isNotEmpty() && segments.last() != "..") segments.removeLast()
+                        // [T-removelast-jdk21] NOT removeLast(): Kotlin 2.1
+                        // resolving against a JDK 21+ classpath binds
+                        // MutableList.removeLast() to the SequencedCollection
+                        // member, which does not exist on JDK 17 runtimes —
+                        // CI's test JVM died with NoSuchMethodError here —
+                        // nor in Android's java.util. removeAt(index) is
+                        // ArrayList.remove(int): present everywhere, on
+                        // every JDK and on ART.
+                        if (segments.isNotEmpty() && segments.last() != "..") segments.removeAt(segments.size - 1)
                         else if (segments.isEmpty()) return "" // escaping above root
                     }
                     else -> segments.add(seg)
