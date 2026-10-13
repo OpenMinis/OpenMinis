@@ -54,7 +54,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
-import com.openminis.app.sandbox.PRootKernel
+import coil.compose.AsyncImagePainter
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
+import coil.request.ImageRequest
+import com.openminis.app.ui.DisplayBitmapLimits.limitDisplaySize
+import com.openminis.app.ui.chat.BrokenImagePlaceholder
+import com.openminis.app.ui.chat.LocalMarkdownSessionId
+import com.openminis.app.ui.chat.resolveMdMediaFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -734,38 +741,19 @@ private fun parseInline(
 
 // ─── Media blocks (inline image / video / audio) ────────────────────────────
 
-/**
- * Resolve a URL used in Markdown (`minis://...` or a plain path) to a host
- * File, suitable for MediaPlayer, MediaMetadataRetriever, or file share
- * intents. Returns null when the path can't be resolved or the file is
- * missing. Mirrors MinisImageFetcher's resolution logic so inline media
- * tracks the same rules as inline images.
- */
-private fun resolveMediaFile(url: String): File? {
-    if (url.isBlank()) return null
-    // Strip a real query string, but NOT `#`: attachment filenames can
-    // contain '#' (e.g. `foo #China.mp4`). `minis://` URLs don't use
-    // fragments, so truncating at '#' would lose part of the filename.
-    val stripped = url.substringBefore('?')
-    val hostFile: File? = when {
-        stripped.startsWith("minis://") -> {
-            val decoded = java.net.URLDecoder.decode(stripped.removePrefix("minis://"), "UTF-8")
-            PRootKernel.resolveHostPath("/var/minis/$decoded")
-        }
-        stripped.startsWith("file://") -> File(Uri.parse(stripped).path ?: return null)
-        stripped.startsWith("/") -> File(stripped)
-        else -> null
-    }
-    val ok = hostFile?.let { it.exists() && it.isFile } == true
-    return hostFile?.takeIf { ok }
-}
+// [T-minis-decode-unify] The old local resolver (resolveMediaFile) used the
+// GLOBAL bindMounts map (last-writer-wins across sessions) plus URLDecoder
+// ('+' → space, no double-decode tolerance). The image/video/audio blocks
+// below now share the session-aware resolveMdMediaFile with the streaming
+// renderer, so every surface resolves a minis:// URL the same way a link
+// TAP does.
 
 private fun filenameFromUrl(url: String): String {
     val stripped = url.substringBefore('?')
     val last = stripped.substringAfterLast('/')
-    return try {
-        java.net.URLDecoder.decode(last, "UTF-8")
-    } catch (_: Throwable) { last }
+    // [T-minis-decode-unify] same decode as resolution: URLDecoder would
+    // turn a literal '+' in the filename into a space in the DISPLAYED name.
+    return com.openminis.app.ui.chat.ChatLinkResolver.minisPathCandidates(last).first()
 }
 
 /**
@@ -801,8 +789,30 @@ private fun openMediaExternally(context: Context, file: File, mime: String) {
 private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
     val surfaceBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-    AsyncImage(
-        model = block.url,
+    val context = LocalContext.current
+    // [T-minis-decode-unify] Resolve through the SAME session-aware resolver
+    // the streaming renderer uses (StreamingMarkdownRenderBlock). Raw
+    // AsyncImage(model = url) routes through MinisImageFetcher → the GLOBAL
+    // bindMounts map, which is last-writer-wins across sessions: on a
+    // multi-session device an old message's image resolves against whichever
+    // session booted its shell most recently and renders broken until the
+    // user re-enters this chat. LocalMarkdownSessionId is provided by
+    // ChatScreen; outside chat it is null and the global resolver answers
+    // (previous behavior, e.g. the skills screen).
+    val sessionId = LocalMarkdownSessionId.current
+    val file = remember(block.url, sessionId) { resolveMdMediaFile(context, block.url, sessionId) }
+    // [T-android-canvas-large-bitmap-crash] Cap the DECODE size like the
+    // streaming path: without an explicit request size Coil decodes at the
+    // image's intrinsic size, and a very tall PNG (215 MB bitmap in the
+    // field report) crashes RecordingCanvas from ThreadedRenderer.draw.
+    val imageRequest = remember(file, block.url) {
+        ImageRequest.Builder(context)
+            .data(file ?: block.url)
+            .limitDisplaySize()
+            .build()
+    }
+    SubcomposeAsyncImage(
+        model = imageRequest,
         contentDescription = block.alt.ifEmpty { filenameFromUrl(block.url) },
         contentScale = ContentScale.Fit,
         modifier = Modifier
@@ -812,7 +822,14 @@ private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
             .background(surfaceBg)
             .border(0.5.dp, borderColor, RoundedCornerShape(8.dp))
             .padding(vertical = 4.dp),
-    )
+    ) {
+        when (painter.state) {
+            // T148 parity with the streaming renderer: a gone/broken file
+            // shows a placeholder instead of a silent blank gap.
+            is AsyncImagePainter.State.Error -> BrokenImagePlaceholder(alt = block.alt)
+            else -> SubcomposeAsyncImageContent()
+        }
+    }
 }
 
 // -- Video block (thumbnail card + tap to open system player) --
@@ -820,7 +837,11 @@ private fun MinisImageBlock(block: MarkdownParser.Block.Image) {
 @Composable
 private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
     val context = LocalContext.current
-    val file = remember(block.url) { resolveMediaFile(block.url) }
+    // [T-minis-decode-unify] session-aware resolution, same as the image
+    // block — the old local resolveMediaFile used the global bindMounts
+    // resolver plus URLDecoder ('+' → space).
+    val sessionId = LocalMarkdownSessionId.current
+    val file = remember(block.url, sessionId) { resolveMdMediaFile(context, block.url, sessionId) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
     val surfaceBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
@@ -907,7 +928,10 @@ private fun MinisVideoBlock(block: MarkdownParser.Block.Video) {
 
 @Composable
 private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
-    val file = remember(block.url) { resolveMediaFile(block.url) }
+    val context = LocalContext.current
+    // [T-minis-decode-unify] session-aware resolution, same as the image block.
+    val sessionId = LocalMarkdownSessionId.current
+    val file = remember(block.url, sessionId) { resolveMdMediaFile(context, block.url, sessionId) }
     val filename = remember(block.url) { filenameFromUrl(block.url) }
 
     // Dedicated MediaPlayer per card. Released on DisposableEffect dispose.
@@ -946,7 +970,6 @@ private fun MinisAudioBlock(block: MarkdownParser.Block.Audio) {
     val subtle = MaterialTheme.colorScheme.onSurfaceVariant
     val cardBg = MaterialTheme.colorScheme.surfaceVariant
     val borderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-    val context = LocalContext.current
 
     Row(
         modifier = Modifier

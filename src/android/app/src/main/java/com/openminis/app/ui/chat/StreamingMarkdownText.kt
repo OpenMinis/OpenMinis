@@ -1051,15 +1051,31 @@ internal fun resolveMdMediaFile(context: Context, url: String, sessionId: String
     val stripped = url.substringBefore('?')
     val primary: File? = when {
         stripped.startsWith("minis://") -> {
-            val decoded = java.net.URLDecoder.decode(stripped.removePrefix("minis://"), "UTF-8")
-            val linuxPath = "/var/minis/$decoded"
-            // Prefer the session-scoped resolver when the caller supplied a
-            // sessionId: the global `bindMounts` map is overwritten every time
-            // another session boots its shell, so without sessionId we'd route
-            // this chat's attachment lookup to whichever session happened to
-            // boot last.
-            if (sessionId != null) PRootKernel.resolveSessionHostPath(sessionId, linuxPath, context)
-            else PRootKernel.resolveHostPath(linuxPath)
+            // [T-minis-decode-unify] NOT URLDecoder: it implements
+            // application/x-www-form-urlencoded, where '+' means SPACE — a
+            // real filename character — and a single pass cannot recover a
+            // double-encoded URL. ChatLinkResolver already solved this for
+            // link TAPS (hand-rolled %XX decode + a second, double-decode
+            // candidate, disambiguated by disk existence); inline media must
+            // resolve exactly like a tap on the same URL, or the image breaks
+            // while the link next to it works.
+            val pathPart = stripped.removePrefix("minis://")
+            resolveMinisCandidates(pathPart) { linuxPath ->
+                // Prefer the session-scoped resolver when the caller supplied a
+                // sessionId: the global `bindMounts` map is overwritten every time
+                // another session boots its shell, so without sessionId we'd route
+                // this chat's attachment lookup to whichever session happened to
+                // boot last.
+                if (sessionId != null) PRootKernel.resolveSessionHostPath(sessionId, linuxPath, context)
+                else PRootKernel.resolveHostPath(linuxPath)
+            } ?: ChatLinkResolver.minisPathCandidates(pathPart).first().let { first ->
+                // Nothing existed — hand back the primary candidate's resolution
+                // so the caller's diagnostics report the path the user actually
+                // meant (same contract as ChatLinkResolver).
+                val linuxPath = if (first.startsWith("/")) first else "/var/minis/$first"
+                if (sessionId != null) PRootKernel.resolveSessionHostPath(sessionId, linuxPath, context)
+                else PRootKernel.resolveHostPath(linuxPath)
+            }
         }
         stripped.startsWith("file://") -> File(Uri.parse(stripped).path ?: return null)
         stripped.startsWith("/") -> File(stripped)
@@ -1074,20 +1090,49 @@ internal fun resolveMdMediaFile(context: Context, url: String, sessionId: String
     if (!stripped.startsWith("minis://") || sessionId.isNullOrBlank()) {
         return null
     }
-    val decoded = java.net.URLDecoder.decode(stripped.removePrefix("minis://"), "UTF-8")
-    val basename = decoded.substringAfterLast('/')
-    val subdir = decoded.substringBefore('/', missingDelimiterValue = "").takeIf { it.isNotEmpty() } ?: "attachments"
-    val own = File(com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, subdir), basename)
-    if (own.isFile) return own
-    val owner = com.openminis.app.sandbox.SessionWorkspace.ownerSessionId(sessionId)
-    val privateCopy = File(com.openminis.app.sandbox.SessionWorkspace.base(context.filesDir, owner), "$subdir/$basename")
-    if (privateCopy.isFile) return privateCopy
-    // Also probe `minis-global/<subdir>` for shared/memory/skills buckets.
-    val globalCandidate = File(context.filesDir, "minis-global/$subdir/$basename")
-    if (globalCandidate.exists() && globalCandidate.isFile) {
-        return globalCandidate
-    }
+    val fallback = resolveMdMediaFallback(context.filesDir, stripped.removePrefix("minis://"), sessionId)
+    if (fallback != null) return fallback
     android.util.Log.w("MdStream", "resolveMdMediaFile url=$url -> NOT FOUND (primary=${primary?.absolutePath})")
+    return null
+}
+
+/**
+ * [T-minis-decode-unify] Walk the decode candidates for a `minis://` path part
+ * and return the first [lookup] hit that is an existing file. Pure (the caller
+ * injects the resolver), so the candidate/disk-existence interplay is
+ * unit-tested without PRootKernel or a Context.
+ */
+internal fun resolveMinisCandidates(pathPart: String, lookup: (linuxPath: String) -> File?): File? {
+    for (candidate in ChatLinkResolver.minisPathCandidates(pathPart)) {
+        val linuxPath = if (candidate.startsWith("/")) candidate else "/var/minis/$candidate"
+        val f = lookup(linuxPath)
+        if (f != null && f.isFile) return f
+    }
+    return null
+}
+
+/**
+ * [T-minis-decode-unify] Basename fallback for a `minis://` path whose primary
+ * resolution missed: the own-session dir, the owner's private copy, and the
+ * global bind bucket. Pure File math over [filesDir], unit-testable directly.
+ */
+internal fun resolveMdMediaFallback(filesDir: File, pathPart: String, sessionId: String): File? {
+    for (decoded in ChatLinkResolver.minisPathCandidates(pathPart)) {
+        val basename = decoded.substringAfterLast('/')
+        if (basename.isEmpty()) continue
+        val subdir = decoded.substringBefore('/', missingDelimiterValue = "")
+            .takeIf { it.isNotEmpty() } ?: "attachments"
+        val own = File(com.openminis.app.sandbox.SessionWorkspace.hostDir(filesDir, sessionId, subdir), basename)
+        if (own.isFile) return own
+        val owner = com.openminis.app.sandbox.SessionWorkspace.ownerSessionId(sessionId)
+        val privateCopy = File(com.openminis.app.sandbox.SessionWorkspace.base(filesDir, owner), "$subdir/$basename")
+        if (privateCopy.isFile) return privateCopy
+        // Also probe `minis-global/<subdir>` for shared/memory/skills buckets.
+        val globalCandidate = File(filesDir, "minis-global/$subdir/$basename")
+        if (globalCandidate.exists() && globalCandidate.isFile) {
+            return globalCandidate
+        }
+    }
     return null
 }
 
@@ -1095,7 +1140,9 @@ internal fun filenameFromMdUrl(url: String): String {
     // Keep '#' — it's a legitimate character in attachment filenames.
     val stripped = url.substringBefore('?')
     val last = stripped.substringAfterLast('/')
-    return try { java.net.URLDecoder.decode(last, "UTF-8") } catch (_: Throwable) { last }
+    // [T-minis-decode-unify] same decode as resolution: URLDecoder would turn
+    // a literal '+' in the filename into a space in the DISPLAYED caption.
+    return ChatLinkResolver.minisPathCandidates(last).first()
 }
 
 internal fun openMdMediaExternally(context: Context, file: File, mime: String) {
