@@ -1768,4 +1768,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra kann die ↩︎-Taste auf Senden oder Zeilenumbruch stellen</string>
     <string name="compact_progress">Wird verdichtet… %1$d s vergangen</string>
     <string name="compact_progress_split">Wird verdichtet… %1$d s · Zusammenfassung in Segmenten (%2$d/%3$d)</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

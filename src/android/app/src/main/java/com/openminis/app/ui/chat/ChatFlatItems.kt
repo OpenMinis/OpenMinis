@@ -218,6 +218,15 @@ internal sealed class FlatChatItem {
         /** [T-process-summary-duration] Summed block durations (tool + thinking) for the fold-bar
          *  "· 47s" suffix. 0 when no block carried a duration — the bar then omits the suffix. */
         val totalMs: Long = 0L,
+        /** [P-process-card] The run's steps, rendered INSIDE the card when expanded. */
+        val steps: List<ProcessStepRef> = emptyList(),
+        /** True while the run still has a step in flight. */
+        val running: Boolean = false,
+        /** "thinking" / "tool" / "" — the live header's current state. */
+        val activity: String = "",
+        val activityTitle: String = "",
+        /** Epoch ms the run's first step started; 0 when unknown. */
+        val startedAtMs: Long = 0L,
         private val keySuffix: String = "",
     ) : FlatChatItem() {
         override val key = FlatKeys.of(FlatKeys.KIND_PROCESS, messageId) + keySuffix
@@ -374,19 +383,68 @@ private class ChatRound(
     val lastAssistantIdx: Int,
     val isRunning: Boolean,
     val foldableSteps: Int,
-    val keepVisibleIds: Set<String>,
     val thinkingCount: Int,
     val toolCount: Int,
     val hasFailure: Boolean,
     val totalMs: Long,
     val processTools: List<ProcessToolRef>,
+    /**
+     * [P-process-card] Contiguous process runs inside the round, split by
+     * visible reply text. One card per run (the reference layout: a capsule
+     * "已调用 N 个工具" between paragraphs), not one bar per round. The bar
+     * is emitted after the run's last block, so under reverseLayout it sits
+     * visually ABOVE the reply that follows it.
+     */
+    val segments: List<ProcessSegment>,
+)
+
+/**
+ * One stretch of process blocks between reply texts. [lastBlockId] is the
+ * block the card is emitted after; [firstBlockId] anchors the expanded
+ * card's step rows so they render inside the card instead of in the list.
+ */
+private class ProcessSegment(
+    val messageIdx: Int,
+    val firstBlockId: String,
+    val lastBlockId: String,
+    val blockIds: Set<String>,
+    val thinkingCount: Int,
+    val toolCount: Int,
+    val hasFailure: Boolean,
+    val totalMs: Long,
+    val steps: List<ProcessStepRef>,
+    val running: Boolean,
+    /**
+     * [P-process-card] What the card is doing right now, for the live header:
+     * "thinking" while reasoning streams, "tool" while a tool runs, "" once
+     * the run has settled. "输出中" was dropped — reply text ends the card
+     * immediately, so that state would flash for a single frame.
+     */
+    val activity: String,
+    /** Title of the tool currently running, empty otherwise. */
+    val activityTitle: String,
+    /** Start of the run's earliest still-open step; the card ticks from it. */
+    val startedAtMs: Long,
+)
+
+/**
+ * One row of an expanded process card: a thinking block or a tool block,
+ * in the order it happened. Pure data — the composable decides icons.
+ */
+internal data class ProcessStepRef(
+    val id: String,
+    val kind: String,
+    val title: String,
+    val status: ToolBlockStatus?,
+    val durationMs: Long,
+    val running: Boolean,
 )
 
 /** Rounds with fewer foldable steps than this never fold (rule 1). */
 private const val ROUND_MIN_FOLDABLE_STEPS = 3
 
-/** Steps kept visible in a collapsed round (rule 3). */
-private const val ROUND_KEEP_TAIL_STEPS = 2
+/** A process run shorter than this stays inline (a card for one row is noise). */
+private const val SEGMENT_MIN_STEPS = 2
 
 /**
  * [message]'s blocks after the speaker / sub-agent visibility filters.
@@ -436,20 +494,69 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
     var totalMs = 0L
     val foldableIds = mutableListOf<String>()
     val processTools = mutableListOf<ProcessToolRef>()
+    val segments = mutableListOf<ProcessSegment>()
+    // The open process run: blocks accumulated since the last reply text.
+    var segMessageIdx = -1
+    var segFirstId = ""
+    var segLastId = ""
+    val segIds = mutableSetOf<String>()
+    val segSteps = mutableListOf<ProcessStepRef>()
+    var segThinking = 0
+    var segTools = 0
+    var segFailure = false
+    var segMs = 0L
+    var segRunning = false
+    var segActivity = ""
+    var segActivityTitle = ""
+    var segStartedAt = 0L
+
+    fun flushSegment() {
+        if (segSteps.size >= SEGMENT_MIN_STEPS && segMessageIdx >= 0) {
+            segments.add(ProcessSegment(
+                messageIdx = segMessageIdx,
+                firstBlockId = segFirstId,
+                lastBlockId = segLastId,
+                blockIds = segIds.toSet(),
+                thinkingCount = segThinking,
+                toolCount = segTools,
+                hasFailure = segFailure,
+                totalMs = segMs,
+                steps = segSteps.toList(),
+                running = segRunning,
+                activity = segActivity,
+                activityTitle = segActivityTitle,
+                startedAtMs = segStartedAt,
+            ))
+        }
+        segMessageIdx = -1
+        segFirstId = ""
+        segLastId = ""
+        segIds.clear()
+        segSteps.clear()
+        segThinking = 0
+        segTools = 0
+        segFailure = false
+        segMs = 0L
+        segRunning = false
+        segActivity = ""
+        segActivityTitle = ""
+        segStartedAt = 0L
+    }
 
     fun closeRound(endExclusive: Int) {
+        flushSegment()
         if (lastAssistantIdx < 0) return // no assistant payload: nothing to fold
         val round = ChatRound(
             key = messages[lastAssistantIdx].id,
             lastAssistantIdx = lastAssistantIdx,
             isRunning = running,
             foldableSteps = foldableIds.size,
-            keepVisibleIds = foldableIds.takeLast(ROUND_KEEP_TAIL_STEPS).toSet(),
             thinkingCount = thinkingCount,
             toolCount = toolCount,
             hasFailure = hasFailure,
             totalMs = totalMs,
             processTools = processTools.toList(),
+            segments = segments.toList(),
         )
         val roundIdx = rounds.size
         rounds.add(round)
@@ -466,6 +573,7 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
         totalMs = 0L
         foldableIds.clear()
         processTools.clear()
+        segments.clear()
     }
 
     messages.forEachIndexed { idx, raw ->
@@ -479,25 +587,63 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
             val blocks = effectiveBlocks(raw, activeSubAgentToolIds)
             processTools += processToolRefs(blocks)
             for (block in blocks) {
+                val isProcess = block.kind == "thinking" ||
+                    (block.kind == "tool_use" &&
+                        !isAlwaysVisibleProcessTool(block) &&
+                        !isInFlightProcessTool(block))
+                // Reply text (or an always-visible tool) ends the current
+                // process run: the card summarises what happened BEFORE the
+                // text, which is where the reference puts it.
+                if (!isProcess && block.kind == "text" && block.content.isNotEmpty()) {
+                    flushSegment()
+                }
+                if (!isProcess) continue
+                if (segMessageIdx < 0) {
+                    segMessageIdx = idx
+                    segFirstId = block.id
+                }
+                segLastId = block.id
+                segIds += block.id
+                segMs += block.durationMs
+                if (segStartedAt == 0L && block.startTimeMs > 0L) segStartedAt = block.startTimeMs
+                val stepRunning = block.toolStatus in IN_FLIGHT_PROCESS_TOOL_STATUSES ||
+                    (block.kind == "thinking" && raw.isStreaming &&
+                        block.id == blocks.lastOrNull()?.id)
+                if (stepRunning) {
+                    segRunning = true
+                    // Latest running step wins: the header reports what is
+                    // happening NOW, not what happened first.
+                    segActivity = if (block.kind == "thinking") "thinking" else "tool"
+                    segActivityTitle = if (block.kind == "thinking") ""
+                        else block.toolTitle.ifEmpty { block.toolName }
+                }
                 when (block.kind) {
                     "thinking" -> {
                         thinkingCount++
+                        segThinking++
                         foldableIds += block.id
                         totalMs += block.durationMs
                     }
                     "tool_use" -> {
                         toolCount++
+                        segTools++
                         totalMs += block.durationMs
-                        if (block.toolStatus == ToolBlockStatus.FAILED) hasFailure = true
-                        // ask_user_question is always visible and an in-flight
-                        // tool can never be folded away — neither counts as a
-                        // foldable step.
-                        if (!isAlwaysVisibleProcessTool(block) && !isInFlightProcessTool(block)) {
-                            foldableIds += block.id
+                        if (block.toolStatus == ToolBlockStatus.FAILED) {
+                            hasFailure = true
+                            segFailure = true
                         }
+                        foldableIds += block.id
                     }
-                    else -> Unit
                 }
+                segSteps += ProcessStepRef(
+                    id = block.id,
+                    kind = block.kind,
+                    title = if (block.kind == "thinking") ""
+                        else block.toolTitle.ifEmpty { block.toolName }.ifEmpty { "tool" },
+                    status = block.toolStatus,
+                    durationMs = block.durationMs,
+                    running = stepRunning,
+                )
             }
         }
     }
@@ -625,10 +771,18 @@ internal fun buildFlatChatItems(
         // expanded it, and rounds with ≤ 2 foldable steps never fold at all.
         // roundSplit is null when folding is off, so roundFolded is false.
         val round = roundSplit?.roundAt(idx)
-        val roundFolded = round != null && !isSystem &&
-            round.foldableSteps >= ROUND_MIN_FOLDABLE_STEPS &&
-            !round.isRunning && round.key !in expandedProcessIds
-        val keepVisibleIds = round?.keepVisibleIds.orEmpty()
+        // [P-process-card] Every process run of ≥ 2 steps is a card, running
+        // ones included. Its steps leave the list for good — expanding the
+        // card renders them INSIDE the card. A card the user has not opened
+        // folds its steps; a card they opened (its own key, not the round's)
+        // keeps them in the card either way.
+        val foldedBlockIds: Set<String> = if (round == null || isSystem) {
+            emptySet()
+        } else {
+            round.segments.flatMapTo(mutableSetOf()) { it.blockIds }
+        }
+        val roundFolded = foldedBlockIds.isNotEmpty()
+        val keepVisibleIds = emptySet<String>()
         val replyText = AssistantReplyText.joined(blocks)
         // [T-android-fold-toolonly-blank] A turn whose entire visible payload
         // is completed thinking/tool cards collapses into the process summary.
@@ -640,8 +794,9 @@ internal fun buildFlatChatItems(
             when (block.kind) {
                 "text" -> block.content.isNotEmpty()
                 "info" -> true
-                "thinking" -> !roundFolded || block.id in keepVisibleIds
-                "tool_use" -> shouldShowProcessToolRow(
+                "thinking" -> block.id !in foldedBlockIds &&
+                    (!roundFolded || block.id in keepVisibleIds)
+                "tool_use" -> block.id !in foldedBlockIds && shouldShowProcessToolRow(
                     block,
                     showCompletedToolCards = showCompletedToolCards,
                     foldAiProcess = foldAiProcess,
@@ -758,7 +913,7 @@ internal fun buildFlatChatItems(
                     }
                 }
                 "thinking" -> {
-                    if (!roundFolded || block.id in keepVisibleIds) {
+                    if (block.id !in foldedBlockIds && (!roundFolded || block.id in keepVisibleIds)) {
                         out.add(dedupe(FlatChatItem.AssistantThinking(
                             messageId = message.id,
                             block = block,
@@ -773,7 +928,7 @@ internal fun buildFlatChatItems(
                     messageId = message.id,
                     block = block,
                 )))
-                else -> if (shouldShowProcessToolRow(
+                else -> if (block.id !in foldedBlockIds && shouldShowProcessToolRow(
                         block,
                         showCompletedToolCards = showCompletedToolCards,
                         foldAiProcess = foldAiProcess,
@@ -789,36 +944,33 @@ internal fun buildFlatChatItems(
                     )))
                 }
             }
-        }
-
-        // [T-android-fold-bar-order] The process summary (fold bar) is added
-        // AFTER the content blocks, not before them. The chat LazyColumn is
-        // `reverseLayout=true` — index 0 is the NEWEST item and rows render
-        // bottom-up — so list order and visual order are INVERTED. Adding the
-        // summary first put it at the visual TOP of the turn, above the reply
-        // text; a long reply then scrolled it straight out of the viewport with
-        // no way to reach the fold bar. Appending it here puts it visually
-        // BELOW the reply, next to the content it summarises.
-        //
-        // [T-android-round-collapse] One bar per round, owned by the round's
-        // LAST assistant message (round.key == message.id here). Emitted for
-        // every non-running fold-eligible round — collapsed OR user-expanded
-        // (the bar doubles as the collapse toggle) — never while running: a
-        // running round is fully open, and the bar appears the moment the
-        // round finishes, which IS the auto-collapse.
-        if (round != null && idx == round.lastAssistantIdx &&
-            !isSystem && round.foldableSteps >= ROUND_MIN_FOLDABLE_STEPS &&
-            !round.isRunning
-        ) {
-            out.add(dedupe(FlatChatItem.AssistantProcessSummary(
-                messageId = round.key,
-                thinkingCount = round.thinkingCount,
-                toolCount = round.toolCount,
-                expanded = round.key in expandedProcessIds,
-                hasFailure = round.hasFailure,
-                processTools = round.processTools,
-                totalMs = round.totalMs,
-            )))
+            // [P-process-card] The card follows the run's LAST block, so under
+            // reverseLayout it sits visually ABOVE the reply that comes next.
+            if (round != null && !isSystem) {
+                val segment = round.segments.firstOrNull {
+                    it.messageIdx == idx && it.lastBlockId == block.id
+                }
+                if (segment != null) {
+                    // The card's own key, so collapsing one card never
+                    // touches the next one — manual collapse suppresses
+                    // auto-expand for THIS card only.
+                    val cardKey = "${round.key}#${segment.firstBlockId}"
+                    out.add(dedupe(FlatChatItem.AssistantProcessSummary(
+                        messageId = cardKey,
+                        thinkingCount = segment.thinkingCount,
+                        toolCount = segment.toolCount,
+                        expanded = cardKey in expandedProcessIds,
+                        hasFailure = segment.hasFailure,
+                        processTools = round.processTools,
+                        totalMs = segment.totalMs,
+                        steps = segment.steps,
+                        running = segment.running,
+                        activity = segment.activity,
+                        activityTitle = segment.activityTitle,
+                        startedAtMs = segment.startedAtMs,
+                    )))
+                }
+            }
         }
 
         // Typing indicator: show while streaming and either (a) no visible

@@ -1857,4 +1857,5 @@
     <string name="db_quarantine_delete">刪除損毀副本</string>
     <string name="appearance_show_mic_button_title">顯示麥克風按鈕</string>
     <string name="appearance_show_mic_button_subtitle">輸入框的語音輸入按鈕。語音模式本身始終可從應用圖示進入。</string>
+    <string name="chat_process_step_view">查看</string>
 </resources>

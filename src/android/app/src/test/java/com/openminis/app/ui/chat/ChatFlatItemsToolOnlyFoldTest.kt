@@ -64,10 +64,8 @@ class ChatFlatItemsToolOnlyFoldTest {
 
     @Test
     fun `collapsed tool-only round renders summary without header`() {
-        // a1's three tools all fold (the round's keep-2 tail lands on a2's
-        // newest tools), so a1's header hides — the original blank-band repro
-        // at round scope. a2 is a resume continuation and never had its own
-        // header, so the round renders with zero headers.
+        // Both messages' tools are one contiguous run with no reply text, so
+        // the whole round is one card and neither message has a header left.
         val items = build(
             user(),
             assistant(id = "a1", blocks = listOf(tool("t1"), tool("t2"), tool("t3"))),
@@ -76,8 +74,9 @@ class ChatFlatItemsToolOnlyFoldTest {
         val k = kinds(items)
         assertTrue("summary expected, got $k", k.contains("summary"))
         assertFalse("headers must be hidden, got $k", k.contains("header"))
-        // keep-2: the round's newest two tools stay in the list.
-        assertEquals(2, k.count { it.startsWith("tool:") })
+        // Every tool of the run is inside the card.
+        assertEquals(0, k.count { it.startsWith("tool:") })
+        assertEquals(6, items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().toolCount)
     }
 
     @Test
@@ -88,9 +87,12 @@ class ChatFlatItemsToolOnlyFoldTest {
             expandedProcessIds = setOf("m1"),
         )
         val k = kinds(items)
-        assertTrue("header expected, got $k", k.contains("header"))
-        assertTrue("tool cards expected, got $k", k.any { it.startsWith("tool:") })
+        // Expanding keeps the steps inside the card, so the header stays
+        // hidden — the message still has nothing to render outside the card.
+        assertFalse("header stays hidden, got $k", k.contains("header"))
+        assertFalse("tools stay inside the card, got $k", k.any { it.startsWith("tool:") })
         assertTrue(k.contains("summary"))
+        assertTrue(items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().expanded)
     }
 
     @Test

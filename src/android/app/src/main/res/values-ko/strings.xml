@@ -1765,4 +1765,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra에서 ↩︎ 키를 전송 또는 줄바꿈으로 바꿀 수 있습니다</string>
     <string name="compact_progress">압축 중… %1$d초 경과</string>
     <string name="compact_progress_split">압축 중… %1$d초 · 분할 요약 중(%2$d/%3$d)</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

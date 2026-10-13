@@ -1768,4 +1768,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra puede hacer que la tecla ↩︎ envíe o inserte un salto de línea</string>
     <string name="compact_progress">Compactando… %1$d s transcurridos</string>
     <string name="compact_progress_split">Compactando… %1$d s · resumiendo por segmentos (%2$d/%3$d)</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

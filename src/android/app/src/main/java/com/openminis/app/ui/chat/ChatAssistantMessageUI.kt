@@ -13,7 +13,16 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -86,6 +95,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.CircularProgressIndicator
+import kotlinx.coroutines.delay
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.sp
@@ -692,9 +702,14 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     var expanded by remember(block.id) { mutableStateOf(autoExpandThinking && isLast && isStreaming) }
     var userTouched by remember(block.id) { mutableStateOf(false) }
     LaunchedEffect(block.id, isStreaming) {
-        // One-shot auto-collapse when streaming for this block ends, but only
-        // if the user hasn't taken control of its state yet.
-        if (!isStreaming && !userTouched) expanded = false
+        // [P-process-card] Collapse 500ms after this block finishes streaming,
+        // not on the same frame: the last tokens need a beat to be readable.
+        // A block the user collapsed by hand (userTouched) is never reopened
+        // and never auto-collapsed over their choice.
+        if (!isStreaming && !userTouched) {
+            delay(500)
+            expanded = false
+        }
     }
     val thinkingBlue = Color(0xFF007AFF)
     val charCount = block.content.length
@@ -923,6 +938,49 @@ internal fun formatProcessDuration(totalMs: Long): String? {
     }
 }
 
+/**
+ * [P-process-card] What the card is doing right now. Pure so the header
+ * copy is testable without composition.
+ *
+ *  - a settled run reads "✅ · 思考 N · 工具 M · 时长" — the check mark is
+ *    the "done" the reference shows, and the counts stay so a finished run
+ *    is still scannable;
+ *  - a running run, collapsed, leads with the current state
+ *    ("思考中" / "调用工具 ××") in place of "AI 过程", then the same
+ *    counts, with the duration ticking;
+ *  - a running run, expanded, drops the counts: the steps are on screen,
+ *    so the header is only the current state.
+ *
+ * "输出中" is deliberately absent. Reply text ends the card on arrival, so
+ * that state would render for a single frame and then vanish.
+ */
+internal fun processCardHeader(
+    thinkingCount: Int,
+    toolCount: Int,
+    running: Boolean,
+    expanded: Boolean,
+    activity: String,
+    activityTitle: String,
+    duration: String?,
+): String {
+    val counts = buildString {
+        append("思考 ").append(thinkingCount)
+        append(" · 工具 ").append(toolCount)
+        if (duration != null) append(" · ").append(duration)
+    }
+    val state = when (activity) {
+        "thinking" -> "思考中"
+        "tool" -> if (activityTitle.isBlank()) "调用工具" else "调用工具 $activityTitle"
+        else -> ""
+    }
+    return when {
+        !running -> "✅ · $counts"
+        expanded && state.isNotEmpty() -> state
+        state.isNotEmpty() -> "$state · $counts"
+        else -> "AI 过程 · $counts"
+    }
+}
+
 @Composable
 internal fun ProcessSummaryBar(
     thinkingCount: Int,
@@ -930,60 +988,153 @@ internal fun ProcessSummaryBar(
     expanded: Boolean,
     hasFailure: Boolean,
     totalMs: Long = 0L,
+    steps: List<ProcessStepRef> = emptyList(),
+    running: Boolean = false,
+    activity: String = "",
+    activityTitle: String = "",
+    startedAtMs: Long = 0L,
     onToggle: () -> Unit,
+    onOpenStep: (String) -> Unit = {},
 ) {
-    // [T-android-round-collapse] Quiet divider-style fold bar (taixu
-    // RoundCollapseButton pattern): a centred label between two hairlines in
-    // onSurfaceVariant, replacing the old accent-filled card that competed
-    // with the reply text for attention. Copy is unchanged
-    // (chat_process_summary_title / _meta); failure tints the status icon
-    // with the theme error colour instead of switching the whole bar red.
-    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else labelColor
-    val durationSuffix = formatProcessDuration(totalMs)?.let { " · $it" } ?: ""
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+    // [P-process-card] Outlined capsule (collapsed) that grows into a card
+    // listing every step (expanded). Replaces the centred hairline divider:
+    // the reference treats a process run as one tappable object sitting
+    // between reply paragraphs, not as a section rule.
+    val labelColor = MaterialTheme.colorScheme.onSurface
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    val shape = RoundedCornerShape(22.dp)
+    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else muted
+    // A running card ticks once a second so the duration walks. Bounded by
+    // the run: the moment it settles, running flips false and the loop ends.
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(running) {
+        if (!running) return@LaunchedEffect
+        while (true) {
+            delay(1000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    val duration = if (running && startedAtMs > 0L) {
+        formatProcessDuration((nowMs - startedAtMs).coerceAtLeast(0L))
+    } else {
+        formatProcessDuration(totalMs)
+    }
+    val header = processCardHeader(
+        thinkingCount, toolCount, running, expanded, activity, activityTitle, duration,
+    )
+    Column(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .clip(shape)
+            .border(1.dp, outline, shape)
             .clickable(onClick = onToggle)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 14.dp, vertical = 11.dp),
     ) {
-        androidx.compose.material3.HorizontalDivider(
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (running) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 1.5.dp,
+                    color = iconTint,
+                )
+            } else {
+                Icon(
+                    imageVector = if (hasFailure) Icons.Default.Error else Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = header,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                color = labelColor,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Default.KeyboardArrowDown
+                    else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = muted,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        if (expanded && steps.isNotEmpty()) {
+            HorizontalDivider(
+                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                thickness = 0.5.dp,
+                color = outline,
+            )
+            steps.forEach { step ->
+                ProcessStepRow(step = step, onOpen = { onOpenStep(step.id) })
+            }
+        }
+    }
+}
+
+/**
+ * One row inside an expanded process card. Thinking rows show their own
+ * state and duration ("思考完毕 (1.4秒)"); tool rows show the tool title
+ * with a "查看" affordance that opens the shared tool detail sheet.
+ */
+@Composable
+private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val isThinking = step.kind == "thinking"
+    val duration = formatProcessDuration(step.durationMs)
+    val title = when {
+        isThinking && step.running -> "正在思考中…"
+        isThinking && duration != null -> "思考完毕 ($duration)"
+        isThinking -> "思考完毕"
+        else -> step.title
+    }
+    val icon = when {
+        isThinking && step.running -> Icons.Default.Psychology
+        isThinking -> Icons.Default.Lightbulb
+        else -> Icons.Default.Search
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (isThinking) Modifier else Modifier.clickable(onClick = onOpen))
+            .padding(vertical = 7.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = muted, modifier = Modifier.size(16.dp))
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = title,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.weight(1f),
-            thickness = 1.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
-        )
-        Icon(
-            imageVector = Icons.Default.Psychology,
-            contentDescription = null,
-            tint = iconTint,
-            modifier = Modifier.size(14.dp),
-        )
-        Text(
-            text = stringResource(R.string.chat_process_summary_title),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = labelColor,
-        )
-        Text(
-            text = stringResource(R.string.chat_process_summary_meta, thinkingCount, toolCount, durationSuffix),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            color = labelColor.copy(alpha = 0.75f),
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
+        if (!isThinking) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .background(Color(0xFF34C759), CircleShape),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = stringResource(R.string.chat_process_step_view),
+                fontSize = 13.sp,
+                color = Color(0xFF8E8EFF),
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+        }
         Icon(
-            imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-            contentDescription = if (expanded) "Collapse" else "Expand",
-            tint = labelColor.copy(alpha = 0.75f),
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = muted,
             modifier = Modifier.size(16.dp),
-        )
-        androidx.compose.material3.HorizontalDivider(
-            modifier = Modifier.weight(1f),
-            thickness = 1.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
         )
     }
 }

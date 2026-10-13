@@ -1776,4 +1776,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra может назначить клавише ↩︎ отправку или перенос строки</string>
     <string name="compact_progress">Сжатие… прошло %1$d с</string>
     <string name="compact_progress_split">Сжатие… %1$d с · сводка по частям (%2$d/%3$d)</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

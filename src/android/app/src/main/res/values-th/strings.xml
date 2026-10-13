@@ -1766,4 +1766,5 @@
     <string name="selection_copy_as_rich_text">คัดลอกเป็นข้อความจัดรูปแบบ</string>
     <string name="selection_copy_as_plain_text">คัดลอกเป็นข้อความธรรมดา</string>
     <string name="chat_input_placeholder_hint_5">ตั้งปุ่ม Enter ให้ส่งหรือขึ้นบรรทัดใหม่ได้</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

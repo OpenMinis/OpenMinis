@@ -1770,4 +1770,5 @@
     <string name="selection_copy_as_rich_text">Copiază ca text formatat</string>
     <string name="selection_copy_as_plain_text">Copiază ca text simplu</string>
     <string name="chat_input_placeholder_hint_5">Enter poate trimite sau adăuga un rând</string>
+    <string name="chat_process_step_view">View</string>
 </resources>
