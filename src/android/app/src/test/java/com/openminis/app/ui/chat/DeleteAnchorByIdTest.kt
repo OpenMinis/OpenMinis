@@ -73,6 +73,7 @@ class DeleteAnchorByIdTest {
             userMsg("u1", "real text"), asstMsg("a1"),
             userMsg("u2", ""), asstMsg("a2"), // blank user row must be skipped
         )
+        assertEquals(5, messages.size)
         val target = messages[4] // "a2"
         val anchor = selectAnchor(messages, 4, target)
         assertEquals("u1", anchor)
