@@ -336,7 +336,7 @@ class ChatFlatItemsProcessFoldTest {
             listOf(
                 user(),
                 assistant(id = "a1", blocks = listOf(thinking(), tool(id = "a1t1"), text(id = "tx1", content = "part"))),
-                assistant(id = "a2", blocks = listOf(tool(id = "a2t1"), tool(id = "a2t2"), text(id = "tx2", content = "done")),
+                assistant(id = "a2", blocks = listOf(tool(id = "a2t1"), tool(id = "a2t2"), text(id = "tx2", content = "done"))),
             ),
             showCompletedToolCards = false,
             foldAiProcess = true,
