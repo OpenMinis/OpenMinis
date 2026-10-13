@@ -211,7 +211,7 @@ class McpToolDispatcher(
                     put("name", "file_read")
                     put(
                         "description",
-                        "Read a file from the Linux filesystem. Restricted to /var/minis/ and /sdcard/ prefixes.",
+                        "Read a file from the Linux filesystem. Restricted to /var/minis/ and /sdcard/ prefixes. Binary files return a type guess and a bounded hex preview instead of raw contents.",
                     )
                     put("inputSchema", JSONObject().apply {
                         put("type", "object")
@@ -759,18 +759,20 @@ class McpToolDispatcher(
 
         return runCatching {
             val size = file.length()
-            // Binary detection on the first 8192 bytes
-            val isBinary = file.inputStream().use { input ->
-                val buf = ByteArray(minOf(8192, size.toInt()))
-                val read = input.read(buf)
-                if (read > 0) buf.take(read).any { it == 0.toByte() } else false
-            }
+            // [T-binary-preview] shared with the agent-side file_read: a
+            // binary is a type guess plus a bounded hex preview, not a dead
+            // end; UTF-16 BOM text decodes instead of mislabelled binary.
+            val head = com.openminis.app.tools.FileReadTool.readHead(file, minOf(8192L, size).toInt())
+            val textCharset = com.openminis.app.tools.FileReadTool.utf16CharsetOrNull(head)
+            val isBinary = textCharset == null && head.any { it == 0.toByte() }
             if (isBinary) {
                 return McpServerCore.CallResult(
-                    JSONArray().put(text("[$normalized | $size bytes | binary file — cannot display]")),
+                    JSONArray().put(
+                        text(com.openminis.app.tools.FileReadTool.binaryPreview(normalized, size, head))
+                    ),
                 )
             }
-            val raw = file.readText()
+            val raw = file.readText(textCharset ?: Charsets.UTF_8)
             val content = if (raw.length > MAX_FILE_READ_CHARS) {
                 raw.take(MAX_FILE_READ_CHARS) + "\n... (truncated at $MAX_FILE_READ_CHARS chars)"
             } else {

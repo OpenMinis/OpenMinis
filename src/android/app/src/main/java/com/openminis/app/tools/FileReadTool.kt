@@ -6,6 +6,8 @@ import com.openminis.app.data.model.AgentToolParam
 import com.openminis.app.sandbox.PRootKernel
 import org.json.JSONObject
 import java.io.File
+import java.nio.charset.Charset
+import java.util.Locale
 
 object FileReadTool {
     const val NAME = "file_read"
@@ -23,10 +25,101 @@ object FileReadTool {
         return if (requested == null) cap else requested.coerceIn(1, cap)
     }
 
+    /** [T-binary-preview] Reads at most [limit] bytes fully (read() may return short). */
+    internal fun readHead(file: File, limit: Int): ByteArray {
+        if (limit <= 0) return ByteArray(0)
+        return file.inputStream().use { input ->
+            val buf = ByteArray(limit)
+            var read = 0
+            while (read < limit) {
+                val n = input.read(buf, read, limit - read)
+                if (n < 0) break
+                read += n
+            }
+            buf.copyOf(read)
+        }
+    }
+
+    /** UTF-16 BOM → the charset that decodes it; null when not UTF-16. */
+    internal fun utf16CharsetOrNull(head: ByteArray): Charset? = when {
+        head.size >= 2 && head[0] == 0xFF.toByte() && head[1] == 0xFE.toByte() -> Charsets.UTF_16LE
+        head.size >= 2 && head[0] == 0xFE.toByte() && head[1] == 0xFF.toByte() -> Charsets.UTF_16BE
+        else -> null
+    }
+
+    /** Magic-byte sniff for the preview header; null when unrecognized. */
+    internal fun guessBinaryType(head: ByteArray): String? {
+        fun at(offset: Int, vararg magic: Int): Boolean {
+            if (head.size < offset + magic.size) return false
+            for (i in magic.indices) if (head[offset + i] != magic[i].toByte()) return false
+            return true
+        }
+        return when {
+            at(0, 0x89, 0x50, 0x4E, 0x47) -> "PNG image"
+            at(0, 0xFF, 0xD8, 0xFF) -> "JPEG image"
+            at(0, 0x47, 0x49, 0x46, 0x38) -> "GIF image"
+            at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50) -> "WebP image"
+            at(0, 0x42, 0x4D) -> "BMP image"
+            at(0, 0x25, 0x50, 0x44, 0x46) -> "PDF document"
+            at(0, 0x50, 0x4B, 0x03, 0x04) -> "ZIP archive (docx/apk/jar…)"
+            at(0, 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C) -> "7-Zip archive"
+            at(0, 0x52, 0x61, 0x72, 0x21) -> "RAR archive"
+            at(0, 0x1F, 0x8B) -> "gzip archive"
+            at(0, 0x42, 0x5A, 0x68) -> "bzip2 archive"
+            at(0, 0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00) -> "xz archive"
+            at(0, 0x7F, 0x45, 0x4C, 0x46) -> "ELF executable"
+            at(0, 0x53, 0x51, 0x4C, 0x69, 0x74, 0x65) -> "SQLite database"
+            at(0, 0xCA, 0xFE, 0xBA, 0xBE) -> "Java class"
+            at(0, 0x00, 0x61, 0x73, 0x6D) -> "WebAssembly module"
+            at(0, 0x4F, 0x67, 0x67, 0x53) -> "Ogg media"
+            at(0, 0x66, 0x4C, 0x61, 0x43) -> "FLAC audio"
+            at(0, 0x49, 0x44, 0x33) -> "MP3 audio"
+            at(4, 0x66, 0x74, 0x79, 0x70) -> "MP4/ISO media"
+            at(257, 0x75, 0x73, 0x74, 0x61, 0x72) -> "tar archive"
+            else -> null
+        }
+    }
+
+    /** xxd-style preview: first [limit] bytes, 16 per line, bounded by construction. */
+    internal fun hexPreview(head: ByteArray, limit: Int = 256): String {
+        val n = minOf(head.size, limit)
+        val sb = StringBuilder()
+        var i = 0
+        while (i < n) {
+            val lineEnd = minOf(i + 16, n)
+            sb.append(String.format(Locale.ROOT, "%08x  ", i))
+            for (j in 0 until 16) {
+                if (i + j < lineEnd) sb.append(String.format(Locale.ROOT, "%02x ", head[i + j]))
+                else sb.append("   ")
+                if (j == 7) sb.append(' ')
+            }
+            sb.append('|')
+            for (j in i until lineEnd) {
+                val c = head[j].toInt() and 0xFF
+                sb.append(if (c in 32..126) c.toChar() else '.')
+            }
+            sb.append('|')
+            if (lineEnd < n) sb.append('\n')
+            i = lineEnd
+        }
+        return sb.toString()
+    }
+
+    /** [T-binary-preview] What a binary read returns instead of a dead end. */
+    internal fun binaryPreview(path: String, size: Long, head: ByteArray): String {
+        val type = guessBinaryType(head) ?: "unknown binary"
+        val shown = minOf(head.size, 256)
+        return "[$path | $size bytes | binary: $type]\n" +
+            "Hex preview (first $shown of $size bytes):\n" +
+            hexPreview(head) +
+            "\nBinary content is not inlined. Images: use the read_image tool. " +
+            "More bytes: shell_execute with xxd / file / strings."
+    }
+
 
     fun definition(): AgentToolDefinition = AgentToolDefinition(
         name = NAME,
-        description = "Read a file from the Linux filesystem. Faster than shell_execute for reading files — no shell overhead. Returns file content with metadata. Rejects binary files.",
+        description = "Read a file from the Linux filesystem. Faster than shell_execute for reading files — no shell overhead. Returns file content with metadata. Binary files return a type guess and a bounded hex preview instead of raw contents; UTF-16 text is decoded.",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Read Python script contents', 'Check system configuration file'). Use the same language as the user."),
             "path" to AgentToolParam("string", "Absolute Linux path to read (e.g. /var/minis/workspace/data.csv)"),
@@ -84,21 +177,26 @@ object FileReadTool {
 
             val size = file.length()
 
-            // Binary detection: check first 8192 bytes for null bytes
-            val isBinary = file.inputStream().use { input ->
-                val buf = ByteArray(minOf(8192, size.toInt()))
-                val read = input.read(buf)
-                if (read > 0) buf.take(read).any { it == 0.toByte() } else false
-            }
+            // [T-binary-preview] Binary files used to be a dead end: "binary
+            // file — cannot display contents". Now they return a magic-byte
+            // type guess plus a bounded xxd-style preview, so the agent can
+            // identify the file and pick the next tool (read_image for
+            // images, shell_execute xxd/strings for more bytes) instead of
+            // falling back to shell for every binary. UTF-16 text starts
+            // FF FE / FE FF and is full of NULs — it is TEXT, decoded with
+            // the right charset rather than mislabelled binary.
+            val head = readHead(file, minOf(8192L, size).toInt())
+            val textCharset = utf16CharsetOrNull(head)
+            val isBinary = textCharset == null && head.any { it == 0.toByte() }
 
             if (isBinary) {
                 return ToolExecutionResult(
-                    "[$path | $size bytes | binary file — cannot display contents]",
+                    binaryPreview(path, size, head),
                     true, toolTitle = toolTitle
                 )
             }
 
-            val allLines = file.readLines()
+            val allLines = file.readLines(textCharset ?: Charsets.UTF_8)
             val totalLines = allLines.size
 
             val requestedLines = resolveLineLimit(
