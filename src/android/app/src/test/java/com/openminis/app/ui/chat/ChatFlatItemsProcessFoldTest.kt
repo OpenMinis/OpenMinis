@@ -485,11 +485,9 @@ class ChatFlatItemsProcessFoldTest {
         // header names it, so nothing teleports when it finishes.
         val blocks = listOf(thinking(), tool(id = "t2", status = ToolBlockStatus.RUNNING), text())
         val running = buildFlatChatItems(
-            buildFlatChatItems(
-                listOf(assistant(streaming = true, blocks = blocks)),
-                showCompletedToolCards = false,
-                foldAiProcess = true,
-            ),
+            listOf(assistant(streaming = true, blocks = blocks)),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
         )
         val k = kinds(running)
         assertFalse("running tool must not duplicate in the list", k.contains("tool:bash"))
