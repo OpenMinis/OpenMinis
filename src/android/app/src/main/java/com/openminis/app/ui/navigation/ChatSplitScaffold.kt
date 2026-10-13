@@ -314,6 +314,13 @@ fun ChatSplitScaffold(
         onToggleSidebar: (() -> Unit)?,
         /** Whether the list is currently hidden — picks the icon direction. */
         sidebarCollapsed: Boolean,
+        /**
+         * [P1-6] Open the compact-width session drawer, or null in two-pane
+         * (the sidebar is already the list). The drawer state lives inside
+         * [ChatSplitScaffold], so the slot hands the opener to the detail
+         * pane instead of the pane reaching into scaffold internals.
+         */
+        onOpenSessionDrawer: (() -> Unit)?,
     ) -> Unit,
 ) {
     val twoPane = shouldUseTwoPane()
@@ -725,6 +732,9 @@ fun ChatSplitScaffold(
                             null
                         },
                         listCollapsed,
+                        // [P1-6] Drawer opener for compact width; null when
+                        // the sidebar already is the list.
+                        if (twoPane) null else openSessionDrawer,
                     )
                 }
                     }
@@ -981,7 +991,7 @@ fun ChatSplitScaffoldRoute(
             )
         },
         detailPane = { sessionId, onBackInPane, onNewChatInPane, onMoveToInPane,
-            onToggleSidebar, sidebarCollapsed ->
+            onToggleSidebar, sidebarCollapsed, onOpenSessionDrawer ->
             com.openminis.app.ui.chat.ChatScreen(
                 // The pane navigator's contentKey IS the session id, so a
                 // draft ("__new__…") flows through unchanged and ChatScreen's
@@ -1007,7 +1017,7 @@ fun ChatSplitScaffoldRoute(
                 sidebarCollapsed = sidebarCollapsed,
                 // [P1-6] Compact width only — the drawer is not composed in
                 // two-pane (the sidebar is already the list).
-                onOpenSessionDrawer = if (shouldUseTwoPane()) null else openSessionDrawer,
+                onOpenSessionDrawer = onOpenSessionDrawer,
                 // Draft handling: the pane navigator gets a fresh `__new__…`
                 // key, so the list keeps its scroll position and simply stops
                 // highlighting a row (no persisted id matches a draft) — the
