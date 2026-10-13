@@ -587,10 +587,19 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
             val blocks = effectiveBlocks(raw, activeSubAgentToolIds)
             processTools += processToolRefs(blocks)
             for (block in blocks) {
+                // [P-process-card] A tool that is still running IS part of
+                // the process run. The old exclusion kept in-flight tools in
+                // the list "so they stay visible", but the card is now the
+                // only copy of a run: stepRunning already records the live
+                // step and the row loop drops every id the segment owns.
+                // Leaving RUNNING/PENDING/STREAMING out shrank a live run of
+                // "thinking + the tool it just started" below SEGMENT_MIN_STEPS,
+                // so the card never formed and the steps leaked back into the
+                // list — the exact duplication the card exists to prevent.
+                // ask_user_question stays out: it is a user-facing prompt,
+                // not a process step, and must remain tappable while folded.
                 val isProcess = block.kind == "thinking" ||
-                    (block.kind == "tool_use" &&
-                        !isAlwaysVisibleProcessTool(block) &&
-                        !isInFlightProcessTool(block))
+                    (block.kind == "tool_use" && !isAlwaysVisibleProcessTool(block))
                 // Reply text (or an always-visible tool) ends the current
                 // process run: the card summarises what happened BEFORE the
                 // text, which is where the reference puts it.
@@ -772,10 +781,11 @@ internal fun buildFlatChatItems(
         // roundSplit is null when folding is off, so roundFolded is false.
         val round = roundSplit?.roundAt(idx)
         // [P-process-card] Every process run of ≥ 2 steps is a card, running
-        // ones included. Its steps leave the list for good — expanding the
-        // card renders them INSIDE the card. A card the user has not opened
-        // folds its steps; a card they opened (its own key, not the round's)
-        // keeps them in the card either way.
+        // ones included — an in-flight tool counts as a step of its run, it
+        // does not stay in the list beside the card. Its steps leave the
+        // list for good — expanding the card renders them INSIDE the card.
+        // A card the user has not opened folds its steps; a card they opened
+        // (its own key, not the round's) keeps them in the card either way.
         val foldedBlockIds: Set<String> = if (round == null || isSystem) {
             emptySet()
         } else {
@@ -1057,8 +1067,12 @@ internal fun shouldShowProcessToolRow(
     keepVisibleIds: Set<String>,
 ): Boolean {
     if (isAlwaysVisibleProcessTool(block)) return true
-    if (isInFlightProcessTool(block)) return true
+    // A tool the process card already owns never renders a second copy in
+    // the list, running or not — the card header names the live step.
+    // isInFlightProcessTool only decides the fold-OFF list, where there is
+    // no card to hold it.
     if (roundFolded) return block.id in keepVisibleIds
+    if (isInFlightProcessTool(block)) return true
     // Fold mode owns visibility: a running or user-expanded round shows every
     // step in-thread (the fold bar no longer carries tool chips, so hiding
     // completed tools here would make them unreachable). The
