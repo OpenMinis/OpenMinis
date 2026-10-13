@@ -567,7 +567,10 @@ fun ChatSplitScaffold(
                                 sessionDrawerState.close()
                             }
                         },
-                        embedded = true,
+                        // [P1-6] Drawer presentation — positional args: the
+                        // listPane slot is a function TYPE, whose call sites
+                        // cannot use named arguments.
+                        true,
                     )
                 }
             }
@@ -630,7 +633,9 @@ fun ChatSplitScaffold(
                         }
                     },
                     // Full screen / sidebar presentation — own top bar.
-                    embedded = false,
+                    // Positional: the listPane slot is a function TYPE, whose
+                    // call sites cannot use named arguments.
+                    false,
                 )
             }
         },
