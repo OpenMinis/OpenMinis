@@ -1663,6 +1663,10 @@
     <string name="chat_new_chat_stop_dialog_body">A task is running in this chat. Starting a new chat will stop it.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Stop &amp; New Chat</string>
     <string name="chat_menu_clear_chat">Clear Chat</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Open Terminal</string>
     <string name="chat_menu_git_panel">Git Panel</string>
     <string name="git_panel_changes">Changes</string>

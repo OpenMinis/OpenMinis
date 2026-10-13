@@ -155,6 +155,7 @@ import com.openminis.app.text.BoundedText
 import com.openminis.app.ui.components.MinisAlertDialog
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisMenuDivider
+import com.openminis.app.ui.components.MinisMenuSectionHeader
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -464,6 +465,12 @@ fun ChatScreen(
     onToggleSidebar: (() -> Unit)? = null,
     /** Whether the list is currently hidden — decides which way the icon points. */
     sidebarCollapsed: Boolean = false,
+    /** [P1-6] Compact-width only: opens the modal session drawer owned by
+     *  ChatSplitScaffold (the pane navigator swaps list/detail there, so
+     *  switching chats no longer requires popping back to the full list
+     *  screen). Null in two-pane — the sidebar toggle already owns this
+     *  slot. */
+    onOpenSessionDrawer: (() -> Unit)? = null,
     /** [T-new-chat-menu-entry] "New Chat" from the chat "..." menu: caller
      *  navigates to a fresh draft chat (same funnel as the session list's
      *  new-chat button), replacing this chat on the back stack. */
@@ -1925,7 +1932,6 @@ fun ChatScreen(
     val appearancePrefs = remember { com.openminis.app.ui.settings.getAppearancePrefs(context) }
     var messageFontLevel by remember { mutableStateOf(appearancePrefs.getInt(com.openminis.app.ui.settings.KEY_FONT_MESSAGE, 0)) }
     var chatInputLevel by remember { mutableStateOf(appearancePrefs.getInt(com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT, 0)) }
-    var toolPreviewEnabled by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, true)) }
     var showFloatingToolBar by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR, true)) }
     var showCompletedToolCards by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
     var foldAiProcess by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, com.openminis.app.ui.settings.DEFAULT_FOLD_AI_PROCESS)) }
@@ -1953,7 +1959,6 @@ fun ChatScreen(
         fun applyAppearancePrefs(sp: android.content.SharedPreferences) {
             messageFontLevel = sp.getInt(com.openminis.app.ui.settings.KEY_FONT_MESSAGE, 0)
             chatInputLevel = sp.getInt(com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT, 0)
-            toolPreviewEnabled = sp.getBoolean(com.openminis.app.ui.settings.KEY_TOOL_PREVIEW, true)
             showFloatingToolBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR, true)
             showCompletedToolCards = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)
             foldAiProcess = sp.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, com.openminis.app.ui.settings.DEFAULT_FOLD_AI_PROCESS)
@@ -1970,7 +1975,6 @@ fun ChatScreen(
                 when (key) {
                     com.openminis.app.ui.settings.KEY_FONT_MESSAGE -> messageFontLevel = sp.getInt(key, 0)
                     com.openminis.app.ui.settings.KEY_FONT_CHAT_INPUT -> chatInputLevel = sp.getInt(key, 0)
-                    com.openminis.app.ui.settings.KEY_TOOL_PREVIEW -> toolPreviewEnabled = sp.getBoolean(key, true)
                     com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR -> showFloatingToolBar = sp.getBoolean(key, true)
                     com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, com.openminis.app.ui.settings.DEFAULT_FOLD_AI_PROCESS)
@@ -2182,7 +2186,6 @@ fun ChatScreen(
     CompositionLocalProvider(
         LocalBrowserTabPool provides viewModel.browserTabPool,
         LocalMarkdownFontScale provides markdownFontScale,
-        LocalToolPreviewEnabled provides toolPreviewEnabled,
         LocalMarkdownUrlClickHandler provides urlClickHandler,
         LocalMarkdownImageTapHandler provides markdownImageTapHandler,
         // Route markdown media resolution through this chat's session so
@@ -2468,7 +2471,19 @@ fun ChatScreen(
                 },
                 navigationIcon = {
                     // [T-android-tablet-split] See `isTwoPane`.
-                    if (!isTwoPane) {
+                    // [P1-6] Compact width: the slot becomes the session-drawer
+                    // button — switching chats no longer requires popping back
+                    // to the full list screen. The back arrow survives only for
+                    // callers without a drawer; the system back gesture still
+                    // pops to the list either way.
+                    if (!isTwoPane && onOpenSessionDrawer != null) {
+                        IconButton(onClick = onOpenSessionDrawer) {
+                            Icon(
+                                Icons.Filled.Menu,
+                                contentDescription = stringResource(R.string.chat_show_sidebar),
+                            )
+                        }
+                    } else if (!isTwoPane) {
                         IconButton(onClick = onBack) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.cd_back))
                         }
@@ -2545,6 +2560,22 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    // [P0-6] High-frequency entries promoted out of the "..."
+                    // menu into direct icons when the bar has room (≥600dp —
+                    // below that the centered two-line title needs the width;
+                    // the menu's 快捷 section carries them on phones). Same
+                    // handlers as the menu items — one funnel per action.
+                    if (shouldShowTopBarQuickActions()) {
+                        IconButton(onClick = onOpenTerminal) {
+                            Icon(Icons.Default.Terminal, contentDescription = stringResource(R.string.chat_menu_open_terminal))
+                        }
+                        IconButton(onClick = { viewModel.toggleBrowserSheet() }) {
+                            Icon(Icons.Default.Language, contentDescription = stringResource(R.string.chat_menu_open_browser))
+                        }
+                        IconButton(onClick = onBrowseChatFiles) {
+                            Icon(Icons.Default.Description, contentDescription = stringResource(R.string.chat_menu_browse_chat_files))
+                        }
+                    }
                     // iOS: "..." circle button → dropdown menu
                     Box {
                         IconButton(onClick = { showChatMenu = true }) {
@@ -2563,6 +2594,44 @@ fun ChatScreen(
                             val menuMemoryEnabled by viewModel.memoryEnabled.collectAsState()
                             val sessionPerm by viewModel.permissionMode.collectAsState()
                             val yoyoOn = sessionPerm.isYoyo()
+                            // [P0-6] 快捷：三个高频入口置顶。宽窗口（≥600dp）它们
+                            // 已是顶栏直接图标（shouldShowTopBarQuickActions），
+                            // 菜单里不再重复；窄屏由本节承载。
+                            if (!shouldShowTopBarQuickActions()) {
+                                MinisMenuSectionHeader(stringResource(R.string.chat_menu_section_quick))
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.chat_menu_open_terminal)) },
+                                    onClick = {
+                                        showChatMenu = false
+                                        onOpenTerminal()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Terminal, contentDescription = null)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.chat_menu_open_browser)) },
+                                    onClick = {
+                                        showChatMenu = false
+                                        viewModel.toggleBrowserSheet()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Language, contentDescription = null)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.chat_menu_browse_chat_files)) },
+                                    onClick = {
+                                        showChatMenu = false
+                                        onBrowseChatFiles()
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Description, contentDescription = null)
+                                    },
+                                )
+                            }
+                            // [P0-6] 会话段：本会话的行为开关。
+                            MinisMenuSectionHeader(stringResource(R.string.chat_menu_section_session))
                             DropdownMenuItem(
                                 text = {
                                     Text(
@@ -2592,7 +2661,6 @@ fun ChatScreen(
                                     )
                                 },
                             )
-                            MinisMenuDivider()
                             val groupChatOn by viewModel.groupChatEnabled.collectAsState()
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.chat_menu_group_chat)) },
@@ -2617,18 +2685,18 @@ fun ChatScreen(
                                 },
                                 leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null) },
                             )
-                            MinisMenuDivider()
-                            // Open Terminal (iOS parity) — session-bound, starts in /var/minis
                             DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_open_terminal)) },
+                                text = { Text(stringResource(R.string.chat_menu_share_card)) },
                                 onClick = {
                                     showChatMenu = false
-                                    onOpenTerminal()
+                                    showCardShareDialog = true
                                 },
                                 leadingIcon = {
-                                    Icon(Icons.Default.Terminal, contentDescription = null)
+                                    Icon(Icons.Default.Share, contentDescription = null)
                                 },
                             )
+                            // [P0-6] 工具段：会话内的扩展面。
+                            MinisMenuSectionHeader(stringResource(R.string.chat_menu_section_tools))
                             // [P2-git-panel] Git panel — desktop-style git UI
                             // over the session workspace.
                             DropdownMenuItem(
@@ -2641,39 +2709,6 @@ fun ChatScreen(
                                     Icon(Icons.Default.MergeType, contentDescription = null)
                                 },
                             )
-                            // Open Browser (iOS parity)
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_open_browser)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    viewModel.toggleBrowserSheet()
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Language, contentDescription = null)
-                                },
-                            )
-                            // Browse Chat Files (iOS parity) — opens file browser at /var/minis
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_browse_chat_files)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    onBrowseChatFiles()
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Description, contentDescription = null)
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_share_card)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    showCardShareDialog = true
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Share, contentDescription = null)
-                                },
-                            )
-                            MinisMenuDivider()
                             // Session Skills (iOS parity)
                             if (skillRepository != null) {
                                 DropdownMenuItem(
@@ -2713,7 +2748,11 @@ fun ChatScreen(
                                     },
                                 )
                             }
-                            MinisMenuDivider()
+                            // [P0-6] 设置段：模型调用与会话开销类开关。增强缓存/
+                            // 极速模式保留在此而非移入系统设置页：它们的可见性
+                            // 由当前会话的模型/提供方决定（showFastModeToggle、
+                            // showEnhancedCacheToggle），设置页没有会话上下文。
+                            MinisMenuSectionHeader(stringResource(R.string.chat_menu_section_settings))
                             // Token Usage (iOS parity)
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.settings_token_usage)) },
@@ -2950,24 +2989,16 @@ fun ChatScreen(
                 val density = LocalDensity.current
                 val toolBarHeightDp = with(density) { toolBarHeightPx.toDp() }
                 // T166 / T170 / T173: bottomReserve must clear the visible
-                // top of the floating tool-status overlay. Layout primitives
-                // come from FloatingToolStatusBar:
-                //   - status bar height = 38 dp
-                //   - thumbnail floats over the bar with overhang = 27 dp
-                //   - thumbnail TOP = bar top - overhang = 65 dp above the
-                //     input bar's upper edge (which is also the LazyColumn
-                //     bottom edge under reverseLayout).
+                // top of the floating activity pill. Layout primitive comes
+                // from ToolActivityPill: capsule height 34dp, mounted with
+                // 6dp bottom padding above the composer, so its visual top
+                // sits 40dp above the input bar's upper edge (which is also
+                // the LazyColumn bottom edge under reverseLayout).
                 //
-                // `onGloballyPositioned` on the wrapper Box reports ~98 dp
-                // because it includes wrapper padding(bottom=6) + horizontal
-                // padding insets + shadow allowance — none of which are
-                // *visually occluding* the LazyColumn. Using the measured
-                // value + 8 dp left a ~25 dp gap above the thumbnail (red
-                // box in the user's report).
-                //
-                // Pin to the visual constant: thumbnail height (65 dp) + a
-                // visual buffer (18 dp) so the latest row's bottom has clear
-                // breathing room above the thumbnail top.
+                // A measured `onGloballyPositioned` value drifts with wrapper
+                // padding and shadow allowance, so the reserve pins to the
+                // visual constant instead — the same approach the old 65dp
+                // thumbnail reserve used (T166–T174).
                 //
                 // T174: an earlier version gated reserve on `toolBarHeightPx
                 // > 0`, but `onGloballyPositioned` fires asynchronously after
@@ -3009,44 +3040,53 @@ fun ChatScreen(
                 // `hasFloatingTools` — same composable scope, so this is a pure
                 // move, not a new state holder. The padding reservation and the
                 // overlay it reserves room for have to agree about whether the
-                // turn is expanded, otherwise the layout keeps 65dp of empty
-                // space for a bar that no longer renders.
+                // turn is expanded, otherwise the layout keeps empty space
+                // reserved for an overlay that no longer renders.
                 var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
-                // [T-android-round-collapse] With folding on, the round model
-                // renders every step in-list (single channel), so the overlay
-                // only exists in fold-OFF mode — expansion state is no longer
-                // part of the decision.
-                val hasFloatingTools = remember(messages, streamingById, foldAiProcess) {
-                    val merged = if (streamingById.isEmpty()) messages
-                                 else mergeStreamingOverlay(messages, streamingById)
-                    merged.any { msg ->
-                        msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            isFloatingProcessTool(tb, foldAiProcess)
-                        }
+                // [P0-4] The floating surface is the ToolActivityPill (34dp
+                // capsule). Its mount gate and this reserve predicate must be
+                // the SAME decision, so both route through
+                // floatingOverlayBlocks() on the latest assistant reply:
+                //   - fold-ON → empty (the round model owns process display;
+                //     single channel);
+                //   - showFloatingToolBar off / not streaming → no reserve
+                //     (the old predicate missed both, keeping a 79dp dead gap
+                //     below the list after a fold-OFF turn ended or while the
+                //     pref was disabled);
+                //   - latest-reply only: a stuck RUNNING block in an OLD
+                //     message used to trip `merged.any` forever even though the
+                //     overlay only ever read the latest reply.
+                // isStreaming is read here (declared at the top of the screen)
+                // so the reserve collapses on the same state flip that
+                // unmounts the pill.
+                val hasFloatingTools = remember(
+                    messages, streamingById, foldAiProcess,
+                    showFloatingToolBar, isStreaming, showSubAgentBar, activeSubAgentToolIds,
+                ) {
+                    if (!showFloatingToolBar || !isStreaming) {
+                        false
+                    } else {
+                        val merged = if (streamingById.isEmpty()) messages
+                                     else mergeStreamingOverlay(messages, streamingById)
+                        floatingOverlayBlocks(
+                            merged.lastOrNull { it.role == "assistant" },
+                            foldAiProcess,
+                            showSubAgentBar,
+                            activeSubAgentToolIds,
+                        ).isNotEmpty()
                     }
                 }
-                val visualOverlayHeight = 65.dp  // thumbnailHeight in FloatingToolStatusBar
-                // Halve the breathing room above the input bar in both
-                // states — felt too sparse before. The thumbnail's 65dp
-                // physical height is preserved (it has to clear the
-                // floating overlay).
-                //
-                // T245: buffer raised 9dp → 14dp so the gap between the
-                // last LazyColumn tool row and the floating thumbnail's
-                // top reads at least as loose as the inter-tool spacing
-                // (each ToolCallPill carries padding(vertical = 3.dp) +
-                // LazyColumn spacedBy(2.dp) = ~8dp inter-tool gap; the
-                // 9dp buffer combined with the floating bar's internal
-                // overhang was visually tighter than 8dp). 14dp also
-                // matches the no-tool branch — single visual constant
-                // for "row-bottom → bottom chrome" breathing room.
-                // [T-bottom-occluded 0a6d3c92] No-tools branch bumped from
-                // 14dp → 20dp to give the last message bubble a comfortable
-                // gap above the composer's top edge. With 14dp the trailing
-                // line sat too close to the composer shadow / rounded edge
-                // (user reported "the bottom of the text is slightly clipped"). The floating-tools branch
-                // already reserves visualOverlayHeight (65dp) + buffer and
-                // was not part of the report; keep its +14 buffer.
+                val visualOverlayHeight = 34.dp  // ToolActivityPill capsule height
+                // Breathing room above the input bar in both states. The
+                // pill's 34dp height + 6dp mount padding is what the reserve
+                // has to clear.
+                // Breathing room above the bottom chrome. 14dp is the same gap the
+                // old floating bar used between the last row and the overlay
+                // (T245); the no-tools branch stays 20dp (T-bottom-occluded:
+                // 14dp left the trailing line clipped against the composer).
+                // [P0-4] visualOverlayHeight dropped from the old thumbnail's
+                // 65dp to the pill's 34dp, so a streaming turn now reserves
+                // 48dp instead of 79dp.
                 val bottomReserve =
                     if (hasFloatingTools) visualOverlayHeight + 14.dp else 20.dp
                 // T174: when bottomReserve changes (toolbar appearing /
@@ -4592,58 +4632,46 @@ fun ChatScreen(
                         // reply, not to every tool in the session. Keep the
                         // complete list separately for historical details.
                         val latestReply = merged.lastOrNull { it.role == "assistant" }
-                        // [T-android-round-collapse] Single channel: with
-                        // folding on the running round shows every step
-                        // in-list, so nothing floats (see isFloatingProcessTool).
-                        val overlay = latestReply?.toolBlocks.orEmpty()
-                            .filter {
-                                isFloatingProcessTool(it, foldAiProcess)
-                            }
-                            .filterNot {
-                                showSubAgentBar && isSubAgentTranscriptCard(it) &&
-                                    (it.id in activeSubAgentToolIds ||
-                                        it.id.substringBefore("#sub-") in activeSubAgentToolIds)
-                            }
+                        // [P0-4] Same projection the mount gate uses, so the
+                        // pill's data and its bottomReserve cannot disagree.
+                        val overlay = floatingOverlayBlocks(
+                            latestReply,
+                            foldAiProcess,
+                            showSubAgentBar,
+                            activeSubAgentToolIds,
+                        )
                         all to overlay
                     }.collect { (all, overlay) ->
                         detailToolBlocks = all
                         lastToolBlocks = overlay
                     }
                 }
-                if (showFloatingToolBar && isStreaming && lastToolBlocks.isNotEmpty()) {
+                // [P0-4] The pill pins the LATEST tool of the streaming turn —
+                // completed OR in-flight. Staying mounted between consecutive
+                // tools keeps the bottomReserve stable (no collapse/expand
+                // jitter between tools); it unmounts with the stream, which is
+                // exactly when hasFloatingTools above drops the reserve.
+                val liveToolBlock = lastToolBlocks.lastOrNull()
+                if (showFloatingToolBar && isStreaming && liveToolBlock != null) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            // [T-android-chat-max-content-width] The tool status
-                            // bar is part of the conversation column, so it
-                            // takes the same cap as the message list and the
-                            // composer. Without it the bar alone spanned the
-                            // full pane while everything above and below it was
-                            // capped, so on a tablet it visibly overhung both.
-                            //
-                            // ORDER MATTERS: widthIn must come BEFORE
-                            // fillMaxWidth. fillMaxWidth pins the incoming
-                            // MIN width to the full pane as well as the max, so
-                            // a widthIn placed after it is raised back up by
-                            // that min and does nothing — which is exactly how
-                            // the first attempt at this failed. Declared first,
-                            // widthIn narrows the constraint and fillMaxWidth
-                            // then fills the already-narrowed one.
-                            //
-                            // BottomCenter on the parent centres the result, so
-                            // no extra alignment is needed.
+                            // [P0-4] The pill sizes to its content and centres;
+                            // the old bar filled the column. The content-width
+                            // cap still applies so a long tool title cannot
+                            // outgrow the conversation column on a tablet.
                             .widthIn(max = CHAT_MAX_CONTENT_WIDTH)
-                            .fillMaxWidth()
                             .onGloballyPositioned { toolBarHeightPx = it.size.height }
                             .padding(horizontal = 12.dp)
                             .padding(bottom = 6.dp),
                     ) {
-                        FloatingToolStatusBar(
-                            toolBlocks = lastToolBlocks,
-                            // T14: per-card stop on the floating bar — same
-                            // global cancel as the message-list pill button.
+                        // [P0-4] ToolActivityPill: single quiet capsule (see
+                        // its header for what replaced the old bar).
+                        ToolActivityPill(
+                            block = liveToolBlock,
+                            // T14 lineage: same global cancel as the in-list
+                            // pill's stop button.
                             onStop = { viewModel.cancelStream() },
-                            onOpenTerminalWithCommand = onOpenTerminalWithCommand,
                             // T261: route detail open through the same VM
                             // state as in-list pills so both surfaces share
                             // one always-mounted sheet instance.
@@ -4677,7 +4705,7 @@ fun ChatScreen(
                 val downFabVisible = messages.isNotEmpty() && (
                     hasNewerMessages || (scrollMode is ScrollMode.Reading && contentOverflows.value)
                     )
-                val fabBaseDp = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                val fabBaseDp = if (hasFloatingTools) 48.dp else 8.dp
                 val fabStackTopDp = when {
                     upFabVisible -> fabBaseDp + 46.dp + 36.dp
                     downFabVisible -> fabBaseDp + 36.dp
@@ -4776,7 +4804,7 @@ fun ChatScreen(
                 // spacing). Tapping walks BACK one user turn at a time rather
                 // than jumping to the oldest message.
                 if (messages.isNotEmpty() && !isNearBottom.value) {
-                    val upBaseBottom = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val upBaseBottom = if (hasFloatingTools) 48.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-scroll-policy] Land in Reading
@@ -4824,7 +4852,7 @@ fun ChatScreen(
                 }
 
                 if (downFabVisible) {
-                    val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
+                    val fabBottomPadding = if (hasFloatingTools) 48.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-scroll-fab-down-stuck] Pin the mode

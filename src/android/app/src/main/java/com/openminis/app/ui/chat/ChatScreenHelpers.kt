@@ -7,8 +7,31 @@ package com.openminis.app.ui.chat
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.File
+import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
+import androidx.window.core.layout.WindowSizeClass
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+
+/**
+ * [P0-6] Whether the chat top bar has room for the three high-frequency
+ * quick actions (terminal / browser / chat files) as direct icons beside
+ * the "..." menu. Width ≥ 600dp (MEDIUM) — below that the centered
+ * two-line title (session title + provider·model row) needs the horizontal
+ * budget, and the menu's 快捷 section carries the entries instead.
+ *
+ * Same window-size source as `shouldUseTwoPane()` in ChatSplitScaffold
+ * (currentWindowAdaptiveInfo, NOT LocalConfiguration.screenWidthDp — the
+ * latter measures the display, so in split-screen/freeform windows the
+ * predicate would answer for a window the app does not have).
+ */
+@OptIn(ExperimentalMaterial3AdaptiveApi::class)
+@Composable
+internal fun shouldShowTopBarQuickActions(): Boolean =
+    currentWindowAdaptiveInfo().windowSizeClass.isWidthAtLeastBreakpoint(
+        WindowSizeClass.WIDTH_DP_MEDIUM_LOWER_BOUND,
+    )
 
 /**
  * Create an empty JPEG file under filesDir/camera-photos/ and return a

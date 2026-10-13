@@ -968,6 +968,33 @@ internal fun isFloatingProcessTool(
     return true
 }
 
+/**
+ * [P0-4] The blocks the floating activity pill may pin, derived from the
+ * LATEST assistant reply. ONE pure projection shared by the pill's mount
+ * gate (hasFloatingTools in ChatScreen, synchronous) and its data pipeline
+ * (lastToolBlocks, coroutine-side) — previously two hand-maintained filters
+ * that could drift: the gate scanned ALL messages while the pipeline read
+ * only the latest reply, and neither knew about the showFloatingToolBar
+ * pref or the streaming state, which left a 79dp bottom reserve for an
+ * overlay that never rendered after a fold-OFF turn ended.
+ *
+ * Fold-ON returns empty (single channel: the running round renders every
+ * step in-list). Sub-agent transcript cards are dropped while the
+ * sub-agent bar owns their display.
+ */
+internal fun floatingOverlayBlocks(
+    latestReply: ChatMessage?,
+    foldAiProcess: Boolean,
+    showSubAgentBar: Boolean,
+    activeSubAgentToolIds: Set<String>,
+): List<AssistantBlock> = latestReply?.toolBlocks.orEmpty()
+    .filter { isFloatingProcessTool(it, foldAiProcess) }
+    .filterNot {
+        showSubAgentBar && isSubAgentTranscriptCard(it) &&
+            (it.id in activeSubAgentToolIds ||
+                it.id.substringBefore("#sub-") in activeSubAgentToolIds)
+    }
+
 // ── [P1-3] Row rhythm ───────────────────────────────────────────────────
 //
 // Vertical spacing between list rows, replacing the flat LazyColumn

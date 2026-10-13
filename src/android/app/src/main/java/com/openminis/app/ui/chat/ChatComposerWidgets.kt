@@ -1,17 +1,11 @@
 package com.openminis.app.ui.chat
 
-// [T-android-split-chat] Composer/input widgets + tool preview/status bar
-// extracted verbatim from ChatScreen.kt: AttachmentChip, InputCircleButton,
-// MicButton, ToolPreviewThumbnail, FloatingToolStatusBar, ThinkingLevelPicker.
+// [T-android-split-chat] Composer/input widgets + the floating tool
+// activity pill, extracted from ChatScreen.kt: AttachmentChip,
+// InputCircleButton, MicButton, ToolActivityPill, ThinkingLevelPicker.
 // Imports trimmed after ChatScreen.kt split; externally-called ones internal.
 
-import android.graphics.BitmapFactory
-import java.io.File
-import androidx.compose.foundation.Image
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -23,21 +17,19 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
@@ -45,7 +37,6 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -54,7 +45,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +54,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,6 +67,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.R
 import com.openminis.app.ui.theme.ChatColors
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -256,532 +248,140 @@ internal fun MicButton(
     }
 }
 
-// ─── Tool Preview Thumbnail (iOS: ToolPreviewThumbnail — tool-specific preview) ──
-
-@Composable
-private fun ToolPreviewThumbnail(
-    block: AssistantBlock,
-    toolAccent: Color,
-    onClick: () -> Unit,
-    // [T-android-browser-preview-thumb] For browser_use blocks whose action
-    // does not produce a screenshot (get_readable, get_text, fetch, etc.),
-    // fall back to the most-recent prior browser_use screenshot — same
-    // semantics the expanded detail sheet uses. Resolved at the call site
-    // because toolBlocks isn't in scope here.
-    fallbackImagePath: String? = null,
-) {
-    val args = remember(block.toolArgs) {
-        try { org.json.JSONObject(block.toolArgs) } catch (_: Exception) { org.json.JSONObject() }
-    }
-
-    // T141: shell_execute live HUD — CPU% + MEM ribbon at the thumbnail
-    // bottom while the tool is RUNNING/STREAMING/PENDING. Mirrors iOS
-    // ToolLiveSheet.swift:1926 small overlay (5pt monospace, white .8 on
-    // black .6).
-    val isShellTool = block.toolName == "shell_execute"
-    val isLive = block.toolStatus == ToolBlockStatus.RUNNING ||
-        block.toolStatus == ToolBlockStatus.STREAMING ||
-        block.toolStatus == ToolBlockStatus.PENDING
-    val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
-
-    val thumbnailShape = RoundedCornerShape(8.dp)
-    Box(
-        modifier = Modifier
-            .size(width = 100.dp, height = 65.dp)
-            .shadow(elevation = 10.dp, shape = thumbnailShape, ambientColor = Color.Black.copy(alpha = 0.15f), spotColor = Color.Black.copy(alpha = 0.25f))
-            .clip(thumbnailShape)
-            .background(
-                when (block.toolName) {
-                    "file_read", "file_write" -> ChatColors.secondaryBg
-                    "file_edit" -> Color(0xFF1A1A1E)
-                    else -> Color(0xFF1A1A1E)
-                }
-            )
-            .border(0.5.dp, ChatColors.thumbnailBorder, thumbnailShape)
-            .clickable(onClick = onClick),
-    ) {
-        when (block.toolName) {
-            "shell_execute" -> {
-                // iOS: command title + last 12 lines of output in green mono
-                val command = extractShellCommand(args, block)
-                Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)) {
-                    Text(
-                        text = "$ $command",
-                        fontSize = 7.sp,
-                        lineHeight = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = Color.White.copy(alpha = 0.6f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (block.content.isNotEmpty()) {
-                        Text(
-                            text = block.content.lines().takeLast(12).joinToString("\n"),
-                            fontSize = 5.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = toolAccent.copy(alpha = 0.85f),
-                            maxLines = 12,
-                            lineHeight = 6.5.sp,
-                        )
-                    }
-                }
-            }
-
-            "file_edit" -> {
-                // iOS: diff preview — old lines in red, new lines in green
-                val oldStr = args.optString("old_string", "")
-                    .ifEmpty { extractPartialJsonString("old_string", block.toolArgs) ?: "" }
-                val newStr = args.optString("new_string", "")
-                    .ifEmpty { extractPartialJsonString("new_string", block.toolArgs) ?: "" }
-                Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)) {
-                    if (oldStr.isNotEmpty()) {
-                        oldStr.lines().takeLast(5).forEach { line ->
-                            Text(
-                                text = "- $line",
-                                fontSize = 5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color(0xFFFF6B6B),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                lineHeight = 6.sp,
-                            )
-                        }
-                    }
-                    if (newStr.isNotEmpty()) {
-                        newStr.lines().takeLast(5).forEach { line ->
-                            Text(
-                                text = "+ $line",
-                                fontSize = 5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = Color(0xFF4ADE80),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                lineHeight = 6.sp,
-                            )
-                        }
-                    }
-                    if (oldStr.isEmpty() && newStr.isEmpty()) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(toolIconFor("file_edit"), contentDescription = null, tint = toolAccent.copy(alpha = 0.5f), modifier = Modifier.size(20.dp))
-                        }
-                    }
-                }
-            }
-
-            "file_read", "file_write" -> {
-                // iOS ToolPreviewThumbnail.textPreview: filename header + last N lines of
-                // content. For file_write during streaming, prefer partial `content` from
-                // toolArgs JSON (mirrors iOS block.streamingFileContent).
-                val path = args.optString("path", "")
-                    .ifEmpty { extractPartialJsonString("path", block.toolArgs) ?: "" }
-                val rawName = if (path.contains("/")) path.substringAfterLast("/") else path
-                val header = when {
-                    rawName.isNotEmpty() -> rawName
-                    block.toolName == "file_write" -> "Write file"
-                    else -> "Read file"
-                }
-                val displayText = if (block.toolName == "file_write") {
-                    args.optString("content", "")
-                        .ifEmpty { extractPartialJsonString("content", block.toolArgs) ?: "" }
-                        .ifEmpty { block.content }
-                } else {
-                    block.content
-                }
-                Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
-                    Text(
-                        text = header,
-                        fontSize = 7.sp,
-                        lineHeight = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = ChatColors.secondaryText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (displayText.isNotEmpty()) {
-                        val lines = displayText.lines()
-                        Text(
-                            text = lines.takeLast(12).joinToString("\n"),
-                            fontSize = 5.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = toolAccent.copy(alpha = 0.85f),
-                            maxLines = 12,
-                            lineHeight = 6.5.sp,
-                        )
-                    }
-                }
-            }
-
-            "memory_write", "memory_get" -> {
-                // iOS ToolPreviewThumbnail: header = action name, body = last
-                // lines of memory content. memory_write takes content from
-                // toolArgs (the text being saved); memory_get takes it from
-                // block.content (the search result), prefixed with the
-                // queried keywords. Mirrors ToolDetailSheet's resolution
-                // (ChatScreen.kt:4581) so the thumbnail isn't an empty pink
-                // icon while the rest of the UI shows real text.
-                val memContent = if (block.toolName == "memory_write") {
-                    args.optString("content", "")
-                        .ifEmpty { extractPartialJsonString("content", block.toolArgs) ?: "" }
-                        .ifEmpty { block.content }
-                } else {
-                    block.content
-                }
-                val keywords = args.optString("keywords", "")
-                    .ifEmpty { extractPartialJsonString("keywords", block.toolArgs) ?: "" }
-                val displayText = if (block.toolName == "memory_get" && keywords.isNotEmpty()) {
-                    "Keywords: $keywords\n$memContent"
-                } else memContent
-                Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)) {
-                    Text(
-                        text = block.toolName,
-                        fontSize = 7.sp,
-                        lineHeight = 8.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = ToolMemoryAccent.copy(alpha = 0.75f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (displayText.isNotEmpty()) {
-                        Text(
-                            text = displayText.lines().takeLast(12).joinToString("\n"),
-                            fontSize = 5.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = toolAccent.copy(alpha = 0.85f),
-                            maxLines = 12,
-                            lineHeight = 6.5.sp,
-                        )
-                    }
-                }
-            }
-
-            "read_image" -> {
-                // [T-android-read-image-preview] Show the read image as a
-                // thumbnail (parity with iOS ToolCapsuleView .readImageTool and
-                // with the browser_use case below). Pre-fix read_image fell into
-                // the generic `else` branch and rendered only its metadata text
-                // line ("[/var/.../x.png | WxH | N bytes]") with no thumbnail.
-                // Decode off the main thread (T285 rationale).
-                val bitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
-                    initialValue = null,
-                    block.imageFilePath,
-                ) {
-                    val path = block.imageFilePath
-                    value = if (path == null) null else withContext(Dispatchers.IO) {
-                        try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
-                    }
-                }
-                val bmp = bitmap
-                if (bmp != null) {
-                    Image(
-                        bitmap = bmp.asImageBitmap(),
-                        contentDescription = "Read image",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            toolIconFor(block.toolName),
-                            contentDescription = null,
-                            tint = toolAccent.copy(alpha = 0.6f),
-                            modifier = Modifier.size(24.dp),
-                        )
-                    }
-                }
-            }
-
-            "browser_use" -> {
-                // Prefer live WebView snapshot while the tool is running; fall back to
-                // any saved imageFilePath, then globe icon.
-                // T285: decode the saved screenshot off the main thread —
-                // BitmapFactory.decodeFile inside `remember {}` was running
-                // synchronously on the composition thread, blocking the
-                // chat-tap → preview navigation transition for ~150-350ms
-                // on multi-MB browser screenshots.
-                val liveBitmap = rememberBrowserLiveSnapshot(block)
-                val savedBitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
-                    initialValue = null,
-                    block.imageFilePath,
-                    fallbackImagePath,
-                ) {
-                    // Prefer this block's own screenshot; if absent (read-only
-                    // browser actions like get_readable/get_text/fetch/etc.),
-                    // borrow the most recent prior browser_use screenshot so
-                    // the thumb doesn't degrade to the globe placeholder.
-                    val path = block.imageFilePath ?: fallbackImagePath
-                    value = if (path == null) null else withContext(Dispatchers.IO) {
-                        try { android.graphics.BitmapFactory.decodeFile(path) } catch (_: Exception) { null }
-                    }
-                }
-                val bitmap = liveBitmap ?: savedBitmap
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Browser screenshot",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                } else {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Default.Language,
-                            contentDescription = null,
-                            tint = toolAccent.copy(alpha = 0.6f),
-                            modifier = Modifier.size(24.dp),
-                        )
-                    }
-                }
-            }
-
-            else -> {
-                // Generic: icon or content preview
-                if (block.content.isNotEmpty()) {
-                    Column(modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)) {
-                        Text(
-                            text = block.content.lines().takeLast(12).joinToString("\n"),
-                            fontSize = 5.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = toolAccent.copy(alpha = 0.85f),
-                            maxLines = 12,
-                            lineHeight = 6.5.sp,
-                        )
-                    }
-                } else {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(toolIconFor(block.toolName), contentDescription = null, tint = toolAccent.copy(alpha = 0.5f), modifier = Modifier.size(20.dp))
-                    }
-                }
-            }
-        }
-
-        // T141: live CPU/MEM HUD ribbon. Sits at the thumbnail's bottom edge,
-        // matching the iOS small-overlay parity (ToolLiveSheet.swift:1926):
-        // 5sp monospace, white at 80% alpha, on a black-60% background with
-        // bottom-rounded corners that line up with the parent thumbnailShape.
-        if (isShellTool && isLive) {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .heightIn(max = 10.dp)
-                    .clip(RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(vertical = 1.dp),
-                horizontalArrangement = Arrangement.Center,
-            ) {
-                Text(
-                    text = "${resourceMonitor.formattedCpu()}  ${resourceMonitor.formattedMem(compact = true)}",
-                    fontSize = 5.sp,
-                    lineHeight = 8.sp,
-                    fontWeight = FontWeight.Medium,
-                    fontFamily = FontFamily.Monospace,
-                    color = Color.White.copy(alpha = 0.8f),
-                )
-            }
-        }
-    }
-}
-
-// ─── Floating Tool Status Bar (iOS: thumbnail + status capsule + pagination) ─
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun FloatingToolStatusBar(
-    toolBlocks: List<AssistantBlock>,
-    onStop: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-    onOpenTerminalWithCommand: (String) -> Unit = {},
-    // T261: detail open routes through ChatViewModel state so this bar
-    // shares one always-mounted sheet with the in-list pills (no more
-    // dueling local-remember sheets, no LaunchedEffect(lastIndex) page
-    // jumps when a new tool starts mid-view).
-    onOpenDetail: (String) -> Unit = {},
-) {
-    var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
-    val lastIndex = toolBlocks.lastIndex
-    LaunchedEffect(lastIndex) {
-        val block = toolBlocks.getOrNull(currentIndex)
-        val isCurrentActive = block?.toolStatus == ToolBlockStatus.RUNNING ||
-            block?.toolStatus == ToolBlockStatus.STREAMING ||
-            block?.toolStatus == ToolBlockStatus.PENDING
-        if (!isCurrentActive) currentIndex = lastIndex.coerceAtLeast(0)
-    }
-    val block = toolBlocks.getOrNull(currentIndex) ?: return
-    // T261: sheet is hoisted to ChatScreen top-level; this bar only emits
-    // open events. The current-displayed block id is what we want shown
-    // when the user opens the sheet from this surface (not necessarily
-    // the latest tool — the user may have paged via the chevrons).
-    val onOpenCurrentDetail: () -> Unit = { onOpenDetail(block.id) }
-
-    val isDone = block.toolStatus == ToolBlockStatus.SUCCESS
-    val isFailed = block.toolStatus == ToolBlockStatus.FAILED ||
-        block.toolStatus == ToolBlockStatus.TIMEOUT
-    val isCancelled = block.toolStatus == ToolBlockStatus.CANCELLED
-    val isRunning = block.toolStatus == ToolBlockStatus.RUNNING ||
-        block.toolStatus == ToolBlockStatus.STREAMING ||
-        block.toolStatus == ToolBlockStatus.PENDING
-    val toolAccent = toolAccentColor(block.toolName)
-    val previewEnabled = LocalToolPreviewEnabled.current
-
-    // iOS layout: ZStack(alignment: .bottomLeading)
-    // Thumbnail (100×65dp) floats ABOVE the status bar (38dp tall)
-    val thumbnailWidth = 100.dp
-    val thumbnailHeight = 65.dp
-    val barHeight = 38.dp
-    val thumbnailOverhang = thumbnailHeight - barHeight  // 14dp above bar
-    val thumbnailInset = 10.dp
-    val barStartPadding = if (previewEnabled) thumbnailWidth + thumbnailInset + 8.dp else 12.dp
-
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(top = if (previewEnabled) thumbnailOverhang else 0.dp),  // reserve space for overhang
-    ) {
-        // Layer 1: Status bar (bottom layer, fills from bottom)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(barHeight)
-                .align(Alignment.BottomCenter)
-                .shadow(elevation = 8.dp, shape = RoundedCornerShape(10.dp), ambientColor = Color.Black.copy(alpha = 0.06f), spotColor = Color.Black.copy(alpha = 0.12f))
-                .background(ChatColors.inputBg, RoundedCornerShape(10.dp))
-                .border(0.5.dp, ChatColors.toolBorder, RoundedCornerShape(10.dp))
-                .padding(start = barStartPadding, end = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // Status icon
-            if (isRunning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(15.dp),
-                    color = toolAccent,
-                    strokeWidth = 1.5.dp,
-                )
-            } else {
-                val (icon, tint) = when {
-                    isDone -> Icons.Default.CheckCircle to ToolCheckColor
-                    isFailed -> Icons.Default.Error to ToolErrorColor
-                    isCancelled -> Icons.Default.Close to ToolCancelColor
-                    else -> Icons.Default.Build to MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
-            }
-
-            Spacer(modifier = Modifier.width(6.dp))
-
-            // [T-step-timestamp v2 aa8b1128] Inline HH:mm:ss prefix
-            // removed — see ToolDetailSheet header for the new
-            // "HH:mm:ss · 3s" display, surfaced only inside the
-            // tapped-open detail sheet so the always-visible status bar
-            // stays clean.
-
-            // Tool title
-            Text(
-                text = block.toolTitle.ifEmpty { block.toolName },
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-                color = ChatColors.primaryText,
-                maxLines = 1,
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                    ) { onOpenCurrentDetail() },
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            // Pagination
-            if (toolBlocks.size > 1) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(0.dp),
-                ) {
-                    Icon(
-                        Icons.Default.ChevronLeft,
-                        contentDescription = "上一个",
-                        tint = if (currentIndex > 0) MaterialTheme.colorScheme.onSurface
-                               else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clickable(
-                                enabled = currentIndex > 0,
-                                indication = null,
-                                interactionSource = remember { MutableInteractionSource() },
-                            ) { if (currentIndex > 0) currentIndex-- },
-                    )
-                    Text(
-                        "${currentIndex + 1}/${toolBlocks.size}",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        // [T-android-tool-pager-squished] Without a horizontal
-                        // floor the "6/6" counter squeezed to ~12px wide when
-                        // the tool title next to it was long — the pager was
-                        // unreadable and the chevrons collided with the digits.
-                        modifier = Modifier.padding(horizontal = 6.dp),
-                    )
-                    Icon(
-                        Icons.Default.ChevronRight,
-                        contentDescription = "下一个",
-                        tint = if (currentIndex < toolBlocks.lastIndex) MaterialTheme.colorScheme.onSurface
-                               else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
-                        modifier = Modifier
-                            .size(18.dp)
-                            .clickable(
-                                enabled = currentIndex < toolBlocks.lastIndex,
-                                indication = null,
-                                interactionSource = remember { MutableInteractionSource() },
-                            ) { if (currentIndex < toolBlocks.lastIndex) currentIndex++ },
-                    )
-                }
-            }
-            // T170: stop button removed from the floating bar — only the
-            // in-list ToolCallPill keeps the red square. Two stop affordances
-            // on the same active tool felt redundant on tight screens.
-        }
-
-        // Layer 2: Thumbnail floating above the bar (iOS: ZStack overlay)
-        if (previewEnabled) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = thumbnailInset),
-            ) {
-                // [T-android-browser-preview-thumb] Resolve the previous
-                // browser_use screenshot fallback here (toolBlocks is in
-                // scope); ToolPreviewThumbnail uses it for browser_use blocks
-                // whose action did not produce a screenshot.
-                val fallbackImagePath = remember(block.id, toolBlocks) {
-                    if (block.toolName != "browser_use" || block.imageFilePath != null) null
-                    else {
-                        val blockIdx = toolBlocks.indexOfFirst { it.id == block.id }
-                        if (blockIdx <= 0) null
-                        else (blockIdx - 1 downTo 0).firstNotNullOfOrNull { i ->
-                            val prev = toolBlocks[i]
-                            if (prev.toolName == "browser_use") prev.imageFilePath else null
-                        }
-                    }
-                }
-                ToolPreviewThumbnail(
-                    block = block,
-                    toolAccent = toolAccent,
-                    onClick = { onOpenCurrentDetail() },
-                    fallbackImagePath = fallbackImagePath,
-                )
-            }
-        }
-    }
-}
-
 /**
  * Inline 5-segment picker rendered on the right side of the `/thinking` row.
  * Mirrors iOS `thinkingLevelPicker`: the active level shows a filled pill;
  * the OFF pill uses a muted background, the others use the accent color.
  */
+// ─── Tool Activity Pill (taixu ToolActivityPill pattern) ───────────────────
+//
+// [P0-4] The floating overlay above the composer is ONE quiet capsule while
+// a turn streams in fold-OFF mode: status icon + tool title + elapsed +
+// stop. Tap opens the shared ToolDetailSheet. It replaces the old
+// FloatingToolStatusBar (38dp full-width bar + 100×65 preview thumbnail +
+// chevron paging between tools):
+//   - the thumbnail duplicated what the detail sheet shows one tap away,
+//     and its 65dp overhang forced a 79dp bottom reserve off the message
+//     list; the pill's 34dp caps that reserve at 48dp (see bottomReserve
+//     in ChatScreen);
+//   - paging was a workaround for pinning N tools at once — the pill pins
+//     only the LATEST block, the only one "currently happening";
+//   - the stop button returns (T170 removed it from the old bar because a
+//     38dp bar and the in-list pill both carried it; the pill is small
+//     enough that one trailing stop is not a second loud affordance, and
+//     it is the only stop visible when the user has scrolled up mid-run).
+// Fold-ON mode never mounts the pill at all (isFloatingProcessTool →
+// false): the running round renders every step in-list (single channel).
+@Composable
+internal fun ToolActivityPill(
+    block: AssistantBlock,
+    onStop: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+    // T261 lineage: detail open routes through ChatViewModel state so this
+    // surface shares one always-mounted sheet with the in-list pills.
+    onOpenDetail: (String) -> Unit = {},
+) {
+    val isRunning = isInFlightProcessTool(block)
+    val toolAccent = toolAccentColor(block.toolName)
+    // 1s elapsed ticker. The pill only mounts while a turn is streaming
+    // (mount gate in ChatScreen), so the loop is bounded by the turn's
+    // lifetime, not the screen's.
+    var nowMs by remember(block.id) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(block.id) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+    val elapsedText = toolActivityElapsedText(block, nowMs)
+    val pillShape = RoundedCornerShape(17.dp)
+
+    Row(
+        modifier = modifier
+            .shadow(
+                elevation = 4.dp,
+                shape = pillShape,
+                ambientColor = Color.Black.copy(alpha = 0.06f),
+                spotColor = Color.Black.copy(alpha = 0.12f),
+            )
+            .background(ChatColors.inputBg, pillShape)
+            .border(0.5.dp, ChatColors.toolBorder, pillShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { onOpenDetail(block.id) }
+            .heightIn(min = 34.dp)
+            .padding(
+                start = 10.dp,
+                end = if (isRunning && onStop != null) 2.dp else 10.dp,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (isRunning) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                color = toolAccent,
+                strokeWidth = 1.5.dp,
+            )
+        } else {
+            val (icon, tint) = when (block.toolStatus) {
+                ToolBlockStatus.SUCCESS -> Icons.Default.CheckCircle to ToolCheckColor
+                ToolBlockStatus.FAILED, ToolBlockStatus.TIMEOUT ->
+                    Icons.Default.Error to ToolErrorColor
+                ToolBlockStatus.CANCELLED -> Icons.Default.Close to ToolCancelColor
+                else -> Icons.Default.Build to MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(15.dp))
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = block.toolTitle.ifEmpty { block.toolName },
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = ChatColors.primaryText,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 180.dp),
+        )
+        if (elapsedText != null) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = elapsedText,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (isRunning && onStop != null) {
+            Icon(
+                Icons.Default.Stop,
+                contentDescription = stringResource(R.string.cd_stop),
+                tint = Color(0xFFFF3B30),
+                modifier = Modifier
+                    .size(24.dp)
+                    .clip(CircleShape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { onStop() },
+            )
+        }
+    }
+}
+
+/**
+ * Elapsed text for the activity pill: live ticking while the block is
+ * in-flight (now − startTimeMs), the recorded duration once it settled.
+ * Pure so the formatting is unit-testable without composition.
+ */
+internal fun toolActivityElapsedText(block: AssistantBlock, nowMs: Long): String? = when {
+    isInFlightProcessTool(block) && block.startTimeMs > 0L ->
+        formatToolDuration((nowMs - block.startTimeMs).coerceAtLeast(0L))
+    !isInFlightProcessTool(block) && block.durationMs > 0L ->
+        formatToolDuration(block.durationMs)
+    else -> null
+}
+
 @Composable
 internal fun ThinkingLevelPicker(
     current: ThinkingLevel,

@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">이 채팅에서 작업이 실행 중입니다. 새 채팅을 시작하면 중지됩니다.</string>
     <string name="chat_new_chat_stop_dialog_confirm">중지 후 새 채팅</string>
     <string name="chat_menu_clear_chat">채팅 지우기</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">터미널 열기</string>
     <string name="chat_menu_open_browser">브라우저 열기</string>
     <string name="chat_menu_browse_chat_files">채팅 파일 탐색</string>
