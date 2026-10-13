@@ -10,11 +10,10 @@ import org.junit.Test
  * consisting ONLY of tool calls (no reply text) rendered a large blank band —
  * the standalone AssistantHeader row above an otherwise empty collapsed turn.
  *
- * [T-android-round-collapse] Under the round model the blank band is
- * structurally impossible for single-message rounds (folding needs ≥ 3
- * foldable steps and always keeps the latest 2), so the header-hidden path
- * only fires for a message whose blocks all folded into a multi-message
- * round's bar — which is what these tests pin down.
+ * [P-process-card] A tool-only run of ≥ 2 steps is one card and the message
+ * has nothing left to render outside it, so the header hides. Expanding the
+ * card keeps the steps inside the card — the header stays hidden. That is
+ * the path these tests pin down.
  */
 class ChatFlatItemsToolOnlyFoldTest {
 
@@ -81,10 +80,14 @@ class ChatFlatItemsToolOnlyFoldTest {
 
     @Test
     fun `expanded round restores header and tool cards`() {
+        val cardKey = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(tool("t1"), tool("t2"), tool("t3")))),
+            foldAiProcess = true,
+        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().messageId
         val items = buildFlatChatItems(
             listOf(assistant(blocks = listOf(tool("t1"), tool("t2"), tool("t3")))),
             foldAiProcess = true,
-            expandedProcessIds = setOf("m1"),
+            expandedProcessIds = setOf(cardKey),
         )
         val k = kinds(items)
         // Expanding keeps the steps inside the card, so the header stays

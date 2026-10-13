@@ -7,16 +7,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [T-android-round-collapse] Fold contracts under the round model.
+ * [P-process-card] Fold contracts under the process-card model.
  *
  * A round = one user message + the assistant/system messages after it up to
- * the next user message. Fold rules:
- *  1. rounds with ≤ 2 foldable steps never fold (a bar for two rows is noise);
- *  2. a RUNNING round is always fully open (effectiveExpanded =
- *     isRunning || expanded) — completion auto-collapses with no trigger;
- *  3. a collapsed round keeps its LATEST 2 steps visible;
- *  4. one bar per round, owned by the round's LAST assistant message
- *     (messageId == that message's id, which is also the expansion key).
+ * the next user message. Inside a round, reply text splits the process into
+ * runs, and each run of ≥ 2 steps (thinking or tool, including a tool that
+ * is still running) becomes one card. A single step stays inline.
+ *
+ * Cards own their steps: collapsed or expanded, the steps render inside the
+ * card, never back in the list. The expansion key is the card's own key
+ * (`<round key>--<first step id>`), not the message id, so opening one card
+ * never opens another. A running card reports the live step; reply text ends
+ * the card immediately.
  */
 class ChatFlatItemsProcessFoldTest {
 
@@ -85,19 +87,29 @@ class ChatFlatItemsProcessFoldTest {
     }
 
     @Test
-    fun `round with at most two foldable steps never folds`() {
-        // Rule 1: a fold bar summarising two rows is noise — the round stays
-        // open even with folding enabled.
-        val items = buildFlatChatItems(
+    fun `a two step run becomes a card and a single step stays inline`() {
+        // [P-process-card] The card threshold is the RUN, not the round:
+        // two process steps are enough to card, one step is noise and stays
+        // inline. The old round rule (≤ 2 steps never fold) predates cards.
+        val carded = buildFlatChatItems(
             listOf(assistant(blocks = listOf(thinking(), tool(), text()))),
             showCompletedToolCards = false,
             foldAiProcess = true,
         )
-        val k = kinds(items)
-        assertFalse(k.contains("summary"))
-        assertTrue(k.contains("thinking"))
-        assertTrue(k.contains("tool:bash"))
-        assertTrue(k.contains("md"))
+        val k = kinds(carded)
+        assertEquals(listOf("header", "summary", "md"), k.filter { it in setOf("header", "summary", "md", "thinking", "tool:bash") })
+        assertFalse(k.contains("thinking"))
+        assertFalse(k.contains("tool:bash"))
+
+        val inline = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(thinking(), text()))),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val ik = kinds(inline)
+        assertFalse(ik.contains("summary"))
+        assertTrue(ik.contains("thinking"))
+        assertTrue(ik.contains("md"))
     }
 
     @Test
@@ -186,21 +198,23 @@ class ChatFlatItemsProcessFoldTest {
             foldAiProcess = true,
         )
         val k = kinds(items)
-        // A running run of ≥ 2 steps is already a card; its steps render
-        // inside the card, not in the list. The reply text stays outside.
+        // Reply text ends the card the moment it arrives, even while the
+        // message is still streaming — "输出中" was dropped because it would
+        // flash for one frame. The steps render inside the card.
         assertTrue(k.contains("summary"))
         assertFalse(k.contains("thinking"))
         assertFalse(k.contains("tool:bash"))
         assertTrue(k.contains("md"))
         val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
-        assertTrue(summary.running)
+        assertFalse(summary.running)
     }
 
     @Test
     fun `running round stays open and folds when it finishes`() {
-        // The auto-collapse needs no trigger of its own: the round simply
-        // stops forcing itself open the moment it stops running.
-        val blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2"), text())
+        // The card is live only while one of its own steps is still running.
+        // The moment the reply text arrives the card settles, whether or not
+        // the message itself is still streaming.
+        val blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2", status = ToolBlockStatus.RUNNING))
         val running = buildFlatChatItems(
             listOf(assistant(streaming = true, blocks = blocks)),
             showCompletedToolCards = false,
@@ -208,41 +222,50 @@ class ChatFlatItemsProcessFoldTest {
         )
         val rk = kinds(running)
         assertTrue(rk.contains("summary"))
+        assertFalse(rk.contains("thinking"))
         assertTrue(running.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().running)
 
         val finished = buildFlatChatItems(
-            listOf(assistant(streaming = false, blocks = blocks)),
+            listOf(assistant(streaming = true, blocks = blocks + text())),
             showCompletedToolCards = false,
             foldAiProcess = true,
         )
         val fk = kinds(finished)
         assertTrue(fk.contains("summary"))
         assertFalse(fk.contains("thinking"))
+        assertFalse(finished.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().running)
     }
 
     @Test
     fun `fold on awaiting keeps the running round open`() {
-        // Awaiting (between tool rounds) is still a running round.
+        // Awaiting is a running round, but a card closes when its reply text
+        // arrives. The steps are inside the card; the reply stays outside.
         val items = buildFlatChatItems(
             listOf(assistant(awaiting = true, blocks = listOf(thinking(), tool(), text()))),
             showCompletedToolCards = false,
             foldAiProcess = true,
         )
         val k = kinds(items)
-        // Awaiting is still a running round, so the card is live.
         assertTrue(k.contains("summary"))
-        assertTrue(items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().running)
+        assertFalse(items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().running)
         assertFalse(k.contains("thinking"))
         assertTrue(k.contains("md"))
     }
 
     @Test
     fun `tap expand restores thinking and completed tools`() {
+        // The toggle stores the card's own key (round key + first step),
+        // never the bare message id — one message can hold several cards.
+        val collapsed = buildFlatChatItems(
+            listOf(assistant(blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2"), text()))),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
         val items = buildFlatChatItems(
             listOf(assistant(blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2"), text()))),
             showCompletedToolCards = false,
             foldAiProcess = true,
-            expandedProcessIds = setOf("m1"),
+            expandedProcessIds = setOf(collapsed.messageId),
         )
         val k = kinds(items)
         // Expanding renders the steps INSIDE the card, never back in the list.
@@ -440,11 +463,16 @@ class ChatFlatItemsProcessFoldTest {
             tool(id = "tool2", name = "bash", status = ToolBlockStatus.SUCCESS),
             text(),
         )
+        val cardKey = buildFlatChatItems(
+            listOf(assistant(blocks = blocks)),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().messageId
         val expanded = buildFlatChatItems(
             listOf(assistant(blocks = blocks)),
             showCompletedToolCards = false,
             foldAiProcess = true,
-            expandedProcessIds = setOf("m1"),
+            expandedProcessIds = setOf(cardKey),
         )
         val k = kinds(expanded)
         val summary = expanded.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
