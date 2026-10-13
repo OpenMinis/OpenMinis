@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">Une tâche est en cours dans ce chat. Démarrer un nouveau chat l’arrêtera.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Arrêter et nouveau chat</string>
     <string name="chat_menu_clear_chat">Effacer le chat</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Ouvrir le terminal</string>
     <string name="chat_menu_open_browser">Ouvrir le navigateur</string>
     <string name="chat_menu_browse_chat_files">Parcourir les fichiers du chat</string>

@@ -1180,6 +1180,10 @@
     <string name="chat_new_chat_stop_dialog_body">В этом чате выполняется задача. Новый чат остановит её.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Остановить и создать чат</string>
     <string name="chat_menu_clear_chat">Очистить чат</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">Открыть Терминал</string>
     <string name="chat_menu_open_browser">Открыть браузер</string>
     <string name="chat_menu_browse_chat_files">Файлы чата</string>

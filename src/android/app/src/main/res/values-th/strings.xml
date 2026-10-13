@@ -1178,6 +1178,10 @@
     <string name="chat_new_chat_stop_dialog_body">มีงานกำลังทำงานอยู่ในแชทนี้ การเริ่มแชทใหม่จะหยุดงานนั้น</string>
     <string name="chat_new_chat_stop_dialog_confirm">หยุดแล้วเริ่มแชทใหม่</string>
     <string name="chat_menu_clear_chat">ล้างแชท</string>
+    <string name="chat_menu_section_quick">Quick</string>
+    <string name="chat_menu_section_session">Session</string>
+    <string name="chat_menu_section_tools">Tools</string>
+    <string name="chat_menu_section_settings">Settings</string>
     <string name="chat_menu_open_terminal">เปิดเทอร์มินัล</string>
     <string name="chat_menu_open_browser">เปิดเบราว์เซอร์</string>
     <string name="chat_menu_browse_chat_files">เรียกดูไฟล์ของแชท</string>
