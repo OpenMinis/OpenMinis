@@ -4532,13 +4532,29 @@ class ChatViewModel(
             try {
             val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
 
-            // Find the DB sort_order cutoff for this user message.
-            // UI visible user messages are the N-th user msg with actual text content.
-            // Count which visible user message this is (0-based).
-            val visibleUserIndex = messages.subList(0, index + 1).count { it.role == "user" } - 1
-            val cutoffSortOrder = visibleUserCutoff(sid, visibleUserIndex)?.let { it.sortOrder + 1 } ?: -1
-            if (cutoffSortOrder >= 0) {
-                chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
+            // [T-delete-anchor-by-id] Find the DB sort_order cutoff for this
+            // user message DIRECTLY by row id. The old ordinal walk
+            // (visibleUserIndex → visibleUserCutoff) counted a different set
+            // of user rows than the UI list — UI counts every user-role
+            // ChatMessage, the DB walk skips toolResult-only user rows — so
+            // the anchor could land dozens of turns early and
+            // deleteMessagesAfter wiped the whole session tail
+            // (2026-10-14 incident: 1386 rows lost from one retry tap).
+            // ChatMessage.id is the DB row id (toChatMessages maps
+            // entity.id 1:1), so this lookup is exact. sourceDbIds covers
+            // the merged-assistant case; a user message is never merged.
+            val anchorIds = listOf(message.id) + message.sourceDbIds
+            val anchorSortOrder = anchorIds.firstNotNullOfOrNull { anchorId ->
+                runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }.getOrNull()
+            }
+            if (anchorSortOrder != null) {
+                chatRepository.deleteMessagesAfter(sid, anchorSortOrder + 1)
+            } else {
+                AppLogger.warning(
+                    TAG,
+                    "retryFromMessage: anchor row ${message.id.take(8)} not found in DB — " +
+                        "skipping DB truncation (UI already truncated)",
+                )
             }
 
             awaitBoundedHistoryRebuild(sid)
@@ -4558,9 +4574,15 @@ class ChatViewModel(
      * [T-android-delete-from-here] Resolve the DB `sort_order` to cut at so
      * that [index] and everything after it is removed.
      *
-     * Anchoring is by visible-user-message ordinal rather than by row id
-     * because the UI list and the persisted rows are not 1:1 — see
-     * [deleteFromMessage]'s note on synthetic `<system-reminder>` rows.
+     * [T-delete-anchor-by-id] Anchoring is by the tapped message's DB row id,
+     * NOT by visible-user ordinal. The old ordinal walk (visibleUserIndex →
+     * visibleUserCutoff) counted a different set of user rows than the UI
+     * list — the UI counts every user-role ChatMessage while the DB walk
+     * skips toolResult-only user rows — so the anchor could land dozens of
+     * turns early and deleteMessagesAfter silently wiped the session tail
+     * (2026-10-14 incident: 1386 rows archived from one delete tap).
+     * ChatMessage.id is the DB row id, and sourceDbIds covers merged
+     * assistant bubbles, so the lookup is exact.
      *
      * When the target is an ASSISTANT message the cut is anchored to the user
      * turn it belongs to: we find the last visible user message at or before
@@ -4574,10 +4596,22 @@ class ChatViewModel(
         index: Int,
         target: ChatMessage,
     ): Int {
-        val visibleUserIndex = messages.subList(0, index + 1).count { it.role == "user" } - 1
-        if (visibleUserIndex < 0) return 0
-        val anchor = visibleUserCutoff(sid, visibleUserIndex) ?: return -1
-        return if (target.role == "user") anchor.sortOrder else anchor.sortOrder + 1
+        // [T-delete-anchor-by-id] Resolve the anchor row id first: the target
+        // itself for a user message, the preceding visible user message for
+        // an assistant target (its whole turn goes).
+        val anchorMessage: ChatMessage? = if (target.role == "user") {
+            target
+        } else {
+            (index downTo 0).asSequence()
+                .map { messages[it] }
+                .firstOrNull { it.role == "user" && it.content.isNotBlank() }
+        }
+        val anchor = anchorMessage ?: return -1
+        val anchorIds = listOf(anchor.id) + anchor.sourceDbIds
+        val anchorSortOrder = anchorIds.firstNotNullOfOrNull { anchorId ->
+            runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }.getOrNull()
+        } ?: return -1
+        return if (target.role == "user") anchorSortOrder else anchorSortOrder + 1
     }
 
 
@@ -5862,39 +5896,11 @@ class ChatViewModel(
     }
 
 
-    internal suspend fun visibleUserCutoff(
-        sid: String,
-        visibleUserIndex: Int,
-    ): com.openminis.app.data.db.MessageAnchorRow? {
-        if (visibleUserIndex < 0) return null
-        val total = chatRepository.dao.messageCountForSession(sid)
-        var offset = 0
-        var seen = 0
-        while (offset < total) {
-            val page = chatRepository.dao.loadMessageAnchorsPage(sid, offset, 100, 4_096)
-            if (page.isEmpty()) break
-            for (row in page) {
-                if (row.role != "user" || !anchorHeadHasVisibleUserText(row.headText.orEmpty())) continue
-                if (seen == visibleUserIndex) return row
-                seen++
-            }
-            offset += page.size
-        }
-        return null
-    }
-
-    private fun anchorHeadHasVisibleUserText(head: String): Boolean = try {
-        val arr = org.json.JSONArray(head)
-        (0 until arr.length()).any { i ->
-            val o = arr.optJSONObject(i) ?: return@any false
-            val value = o.optString("value", "")
-            o.optString("type") == "text" &&
-                stripAttachedFilesXml(value).isNotBlank() &&
-                !value.trimStart().startsWith("<system-reminder>")
-        }
-    } catch (_: Exception) {
-        true
-    }
+    // [T-delete-anchor-by-id] visibleUserCutoff / anchorHeadHasVisibleUserText
+    // were removed: the ordinal walk counted a different set of user rows
+    // than the UI list and caused the 2026-10-14 session-loss incident.
+    // Delete/retry/edit now anchor by DB row id via
+    // ChatDao.sortOrderForMessageId — see resolveDeleteCutoffSortOrder.
 
 
     /**
