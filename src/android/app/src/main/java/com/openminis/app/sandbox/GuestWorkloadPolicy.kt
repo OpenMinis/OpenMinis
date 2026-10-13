@@ -33,7 +33,6 @@ internal object GuestWorkloadPolicy {
 
     const val DISK_MIN_FREE_BYTES = 2L * 1024 * 1024 * 1024
     const val DISK_HARD_USED = 0.92
-    const val DISK_AMPLIFY_USED = 0.82
 
     const val HOST_SU_MAX_TIMEOUT_MS = 120_000L
 
@@ -84,18 +83,60 @@ internal object GuestWorkloadPolicy {
      * denylist of known tools: anything that is not an obvious read is
      * refused, including a binary we have never seen. Reads stay available
      * so the agent can still see why.
+     *
+     * [T-disk-percent-arm] The stress test used to have a second arm,
+     * `used >= 0.82`. A percentage says nothing about the room left: on a
+     * 477 GB volume, 82% used still leaves 86 GB free, and the gate refused
+     * every non-whitelisted command — including `du`, the one command that
+     * finds what to clean, and `rm` / `apt-get clean`, the commands the
+     * refusal message told the user to run. Stress is measured in ABSOLUTE
+     * free bytes only ([DISK_MIN_FREE_BYTES] — the honest signal that the
+     * volume is the constraint), and commands that FREE space
+     * ([isDiskRelief]) are admitted alongside reads so the advised cleanup
+     * is never blocked by the advice itself.
      */
     fun diskRefusal(availableBytes: Long, totalBytes: Long, command: String): String? {
         if (totalBytes <= 0L || availableBytes < 0L) return null
-        if (isObviouslyReadOnly(command)) return null
-        val used = 1.0 - availableBytes.toDouble() / totalBytes.toDouble()
-        val stressed = availableBytes < DISK_MIN_FREE_BYTES || used >= DISK_AMPLIFY_USED
-        if (!stressed) return null
+        if (isObviouslyReadOnly(command) || isDiskRelief(command)) return null
+        if (availableBytes >= DISK_MIN_FREE_BYTES) return null
         val freeMiB = availableBytes / (1024 * 1024)
-        val pct = (used * 100).toInt()
-        return "命令未启动（exit 126）：磁盘已用 $pct%，空闲 ${freeMiB} MiB。" +
-            "磁盘超过 ${(DISK_AMPLIFY_USED * 100).toInt()}% 或空闲不足 2GB 时，只放行明确的只读命令。" +
+        return "命令未启动（exit 126）：磁盘空闲不足 2GB（剩余 ${freeMiB} MiB）。" +
+            "此时只放行只读命令和释放空间的命令（如 rm、apt-get clean）。" +
             "先清理空间再重试。"
+    }
+
+    /**
+     * [T-disk-percent-arm] Commands whose effect is to FREE space. The old
+     * gate refused these under the same stress that made the refusal message
+     * say "先清理空间再重试" — the cleanup path was blocked by the very gate
+     * demanding it. Deletion SAFETY is not decided here: root deletion and
+     * block-device writes keep their own refusals and run BEFORE this gate
+     * (see [hostRefusal] in the executor), and the confirmation gates still
+     * apply. This only admits commands that reduce usage, so a stressed
+     * volume can be recovered from inside the app.
+     */
+    fun isDiskRelief(command: String): Boolean {
+        if (hasWriteSyntax(command)) return false
+        val segments = command.split(Regex("""&&|\|\||[;|]""")).map { it.trim() }.filter { it.isNotEmpty() }
+        if (segments.isEmpty()) return false
+        return segments.all { segment ->
+            val token = commandToken(segment) ?: return@all false
+            token in READ_ONLY_TOKENS || isReliefVerb(token, segment)
+        }
+    }
+
+    private fun isReliefVerb(token: String, segment: String): Boolean {
+        val body = segment.lowercase()
+        return when (token) {
+            "rm", "unlink" -> true
+            // `truncate -s 4G` GROWS a file; only the shrink-to-zero forms
+            // are relief.
+            "truncate" -> Regex("""(?:-s|--size)\s*=?\s*0\b""").containsMatchIn(body)
+            "apt", "apt-get" -> Regex("""\b(clean|autoclean|autoremove)\b""").containsMatchIn(body)
+            "pip", "pip3" -> body.contains("cache purge")
+            "npm", "yarn" -> body.contains("cache clean")
+            else -> false
+        }
     }
 
     /**
@@ -135,7 +176,12 @@ internal object GuestWorkloadPolicy {
     }
 
     private fun hasMemoryWriteSyntax(command: String): Boolean {
-        val stripped = command.replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+        val stripped = command
+            .replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+            // [T-devnull-redirect] same as hasWriteSyntax: a discarded
+            // stream is not a write to the memory bind. Reads must stay
+            // available at quota — including `cat … 2>/dev/null`.
+            .replace(Regex("""\s*\d?>>?\s*/dev/null\b"""), " ")
         if (Regex("""(^|[^>])>>?(?![>&])""").containsMatchIn(stripped)) return true
         val writeWords = setOf("tee", "rm", "mv", "truncate", "dd", "sed", "perl", "shred", "unlink")
         return stripped.split(Regex("""\s+""")).any { raw ->
@@ -269,12 +315,18 @@ internal object GuestWorkloadPolicy {
         blockDeviceRefusal(command)
             ?: if (allowRootDeletion) null else rootDeletionRefusal(command)
 
+    // [T-devnull-redirect] `du` is the one tool that finds what to clean
+    // when the disk IS the constraint — it was missing while `df` was
+    // present. The rest are pure reporters with no write mode, added for
+    // the same reason: they diagnose a stressed system without growing it.
     private val READ_ONLY_TOKENS = setOf(
-        "ls", "cat", "head", "tail", "pwd", "echo", "printf", "df", "stat", "file",
+        "ls", "cat", "head", "tail", "pwd", "echo", "printf", "df", "du", "stat", "file",
         "wc", "true", "false", "whoami", "id", "uname", "date", "env", "printenv",
         "which", "type", "basename", "dirname", "readlink", "realpath", "test", "[",
         "sha256sum", "sha1sum", "md5sum", "cmp", "diff", "cut", "tr", "sort", "uniq",
-        "nl", "od", "hexdump", "fold", "grep", "egrep", "fgrep",
+        "nl", "od", "hexdump", "fold", "grep", "egrep", "fgrep", "tree",
+        "free", "lsblk", "findmnt", "vmstat", "iostat", "uptime", "ps", "nproc",
+        "arch", "lscpu", "lsof", "groups", "hostname", "tty",
     )
 
     fun clampHostTimeout(requestedMs: Long): Long =
@@ -299,7 +351,15 @@ internal object GuestWorkloadPolicy {
     }
 
     private fun hasWriteSyntax(command: String): Boolean {
-        val stripped = command.replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+        // [T-devnull-redirect] `2>/dev/null` — and `>/dev/null`, `>>/dev/null`,
+        // `n>>/dev/null`, spaced or glued — DISCARDS a stream; it writes
+        // nothing. The old check treated any `>` as a write, so the most
+        // common noise-suppression idiom turned a read-only pipeline into a
+        // "write" and the disk gate refused it. The field report was
+        // `du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -30`.
+        val stripped = command
+            .replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+            .replace(Regex("""\s*\d?>>?\s*/dev/null\b"""), " ")
         if (Regex("""\btee\b""").containsMatchIn(stripped)) return true
         return Regex("""(^|[^>])>>?(?![>&])""").containsMatchIn(stripped)
     }

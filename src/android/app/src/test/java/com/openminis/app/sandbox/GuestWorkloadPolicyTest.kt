@@ -80,16 +80,77 @@ class GuestWorkloadPolicyTest {
     @Test
     fun diskPressureRefusesTheIncidentAndStillAllowsLs() {
         val total = 213L * 1024 * 1024 * 1024
-        val free = 35L * 1024 * 1024 * 1024
-        assertTrue(GuestWorkloadPolicy.diskRefusal(free, total, incident)!!.contains("exit 126"))
-        assertNull(GuestWorkloadPolicy.diskRefusal(free, total, "ls /tmp"))
+        // [T-disk-percent-arm] stress is ABSOLUTE free bytes now: 1 GiB free
+        // is stressed on any volume; 83% used with 35 GiB free is not.
+        val stressed = 1L * 1024 * 1024 * 1024
+        assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, incident)!!.contains("exit 126"))
+        assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, "ls /tmp"))
+        // The reported field case: ~90% used, tens of GB free — must run.
+        val ninetyPercentUsedFree20Gb = 20L * 1024 * 1024 * 1024
+        assertNull(
+            "90% used with 20 GiB free must not be refused",
+            GuestWorkloadPolicy.diskRefusal(ninetyPercentUsedFree20Gb, total, incident),
+        )
         val healthy = 100L * 1024 * 1024 * 1024
         assertNull(GuestWorkloadPolicy.diskRefusal(healthy, total, incident))
-        assertTrue(GuestWorkloadPolicy.diskRefusal(free, total, "./not-a-known-tool --bomb")!!.contains("exit 126"))
-        assertTrue(GuestWorkloadPolicy.diskRefusal(free, total, "echo hi > /tmp/x")!!.contains("exit 126"))
-        assertNull(GuestWorkloadPolicy.diskRefusal(free, total, "echo hi"))
-        assertNull(GuestWorkloadPolicy.diskRefusal(free, total, "git status"))
+        assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, "./not-a-known-tool --bomb")!!.contains("exit 126"))
+        assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, "echo hi > /tmp/x")!!.contains("exit 126"))
+        assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, "echo hi"))
+        assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, "git status"))
         assertEquals(300, GuestWorkloadPolicy.cpuSeconds("python3 -m http.server"))
+    }
+
+    /**
+     * [T-devnull-redirect] The exact command from the field report:
+     * `du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -30` was refused
+     * under disk stress twice over — `du` was missing from the read-only
+     * tokens, and `2>/dev/null` matched the write-redirect regex. A discarded
+     * stream is not a write, and `du` is the one tool that finds what to
+     * clean.
+     */
+    @Test
+    fun duPipelineWithDevNullRedirectIsReadOnly() {
+        val reported = "du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -30"
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly(reported))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("du -sh /var/minis"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("cat /etc/hosts 2>/dev/null"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("df -h 2>/dev/null | head -5"))
+        val total = 213L * 1024 * 1024 * 1024
+        val stressed = 1L * 1024 * 1024 * 1024
+        assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, reported))
+        // Redirects to REAL files are still writes, with or without a
+        // /dev/null arm in the same command line.
+        assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cat a > /tmp/out"))
+        assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cat a >> /tmp/out 2>/dev/null"))
+        assertFalse(GuestWorkloadPolicy.isObviouslyReadOnly("cat a 1>/dev/null; tee /tmp/x"))
+        assertTrue(GuestWorkloadPolicy.isObviouslyReadOnly("echo \"2>/dev/null\""))
+    }
+
+    /**
+     * [T-disk-percent-arm] The refusal message says "先清理空间再重试", but
+     * the gate used to refuse `rm` and `apt-get clean` under the same
+     * stress — the cleanup path was blocked by the very gate demanding it.
+     */
+    @Test
+    fun diskReliefCommandsRunUnderStress() {
+        val total = 213L * 1024 * 1024 * 1024
+        val stressed = 1L * 1024 * 1024 * 1024
+        for (cmd in listOf(
+            "rm -rf /var/minis/workspace/build",
+            "rm -rf /tmp/x; echo done",
+            "apt-get clean",
+            "apt-get autoremove -y",
+            "pip cache purge",
+            "npm cache clean --force",
+            "truncate -s 0 /var/log/big.log",
+        )) {
+            assertNull("cleanup must run under stress: $cmd", GuestWorkloadPolicy.diskRefusal(stressed, total, cmd))
+        }
+        // Growth is still refused under stress.
+        assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, "truncate -s 4G /tmp/big")!!.contains("exit 126"))
+        assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, "apt-get install -y curl")!!.contains("exit 126"))
+        // Root deletion stays refused by its OWN gate, ahead of the disk gate.
+        assertNotNull(GuestWorkloadPolicy.hostRefusal("rm -rf /"))
     }
 
     @Test
@@ -396,6 +457,13 @@ class GuestWorkloadPolicyTest {
         // Reads stay available so the agent can see why it was refused.
         assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("cat /var/minis/memory/today.md", max, max))
         assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("grep x /var/minis/memory/today.md", max, max))
+        // [T-devnull-redirect] a discarded stderr is not a write: reads with
+        // 2>/dev/null stay available at quota…
+        assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("cat /var/minis/memory/today.md 2>/dev/null", max, max))
+        // …while the real write arm still fires with the same redirect.
+        assertNotNull(
+            GuestWorkloadPolicy.memoryQuotaRefusal("echo x >> /var/minis/memory/today.md 2>/dev/null", max, max),
+        )
         // Unrelated paths are untouched.
         assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("echo x >> /var/minis/workspace/a.md", max, max))
     }
