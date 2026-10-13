@@ -26,6 +26,17 @@ interface MessageVersionDao {
     @Query("SELECT DISTINCT message_id FROM message_versions WHERE session_id = :sessionId")
     suspend fun messageIdsWithVersions(sessionId: String): List<String>
 
+    /**
+     * [T-msg-version-restore] All archived versions for a session ordered by
+     * source creation time (oldest first). Powers the one-shot restore that
+     * re-inserts rows lost to the 2026-10-14 ordinal-mismatch truncation.
+     */
+    @Query(
+        "SELECT * FROM message_versions WHERE session_id = :sessionId " +
+            "ORDER BY source_created_at ASC, version_index ASC"
+    )
+    suspend fun versionsForSession(sessionId: String): List<MessageVersionEntity>
+
     @Query("DELETE FROM message_versions WHERE session_id = :sessionId")
-    suspend fun deleteForSession(sessionId: String)
+    suspend fun deleteForSession(sessionId: String): Unit
 }
