@@ -4595,6 +4595,12 @@ class ChatViewModel(
             }
 
             awaitBoundedHistoryRebuild(sid)
+            // Retry truncates the conversation too, so the auto-trim digest
+            // goes stale the same way deleteFromMessage handles: drop it or
+            // the retried turn still carries summaries of deleted rows.
+            // _compactSummary (user-initiated) is preserved.
+            llmDigestLines.clear()
+            llmDigestOmitted = 0
 
             streamLaunched = runRerunStreamTail(provider, "retryFromMessage")
             } finally {
