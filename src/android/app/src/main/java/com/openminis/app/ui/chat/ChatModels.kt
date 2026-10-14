@@ -84,6 +84,22 @@ data class ChatMessage(
     val speakerVendor: String? = null,
 ) {
     /**
+     * [T-delete-anchor-by-id] Whether this row renders as a REAL user bubble:
+     * text, attachments, or both. A pure-image prompt has empty `content` but
+     * is a visible user turn — destructive rewinds must anchor to it rather
+     * than walk past it into the previous turn. Tool-result carriers and
+     * reminder-only rows render nothing and are filtered out before they ever
+     * reach the UI list.
+     */
+    val isRenderedUserBubble: Boolean
+        get() = role == "user" && (
+            content.isNotBlank() ||
+                imageUris.isNotEmpty() ||
+                attachmentUris.isNotEmpty() ||
+                attachmentNames.isNotEmpty()
+            )
+
+    /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the
      * internal role-alternation bridge that `injectQueuedPromptsAsNewTurn`
      * inserts into `agentHistory` (see ChatViewModel). It is an internal

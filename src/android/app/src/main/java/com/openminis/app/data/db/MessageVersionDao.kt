@@ -37,6 +37,22 @@ interface MessageVersionDao {
     )
     suspend fun versionsForSession(sessionId: String): List<MessageVersionEntity>
 
-    @Query("DELETE FROM message_versions WHERE session_id = :sessionId")
-    suspend fun deleteForSession(sessionId: String): Unit
+    /**
+     * Message ids whose every archived version has no live row left — the
+     * candidates a restore may put back. Counts DISTINCT message ids, not
+     * version rows: one message can carry several archived versions.
+     */
+    @Query(
+        "SELECT DISTINCT message_id FROM message_versions WHERE session_id = :sessionId " +
+            "AND message_id NOT IN (SELECT id FROM messages WHERE session_id = :sessionId)"
+    )
+    suspend fun restorableMessageIds(sessionId: String): List<String>
+
+    /**
+     * Retires specific archive rows after they were restored. NEVER delete by
+     * session: [message_versions] doubles as the pre-edit history of live
+     * rows, and wiping the session's archive destroyed exactly that history.
+     */
+    @Query("DELETE FROM message_versions WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>)
 }

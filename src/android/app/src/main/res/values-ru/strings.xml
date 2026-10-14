@@ -1180,6 +1180,12 @@
     <string name="chat_new_chat_stop_dialog_body">В этом чате выполняется задача. Новый чат остановит её.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Остановить и создать чат</string>
     <string name="chat_menu_clear_chat">Очистить чат</string>
+    <string name="chat_menu_restore_deleted">Восстановить удалённые сообщения</string>
+    <string name="chat_restore_deleted_confirm">Восстановить</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Вернуть %d удалённое сообщение из локального архива этого чата на прежнее место по времени, а не в конец.</item>
+        <item quantity="other">Вернуть %d удалённых сообщений из локального архива этого чата на прежнее место по времени, а не в конец.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

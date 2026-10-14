@@ -1183,6 +1183,12 @@
     <string name="chat_new_chat_stop_dialog_body">Ada tugas yang sedang berjalan di obrolan ini. Memulai obrolan baru akan menghentikannya.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Hentikan &amp; Obrolan Baru</string>
     <string name="chat_menu_clear_chat">Bersihkan Obrolan</string>
+    <string name="chat_menu_restore_deleted">Pulihkan pesan yang dihapus</string>
+    <string name="chat_restore_deleted_confirm">Pulihkan</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Kembalikan %d pesan yang dihapus dari arsip lokal obrolan ini ke posisinya menurut waktu, bukan ke akhir.</item>
+        <item quantity="other">Kembalikan %d pesan yang dihapus dari arsip lokal obrolan ini ke posisinya menurut waktu, bukan ke akhir.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

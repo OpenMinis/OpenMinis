@@ -80,6 +80,21 @@ class DeleteAnchorByIdTest {
     }
 
     @Test
+    fun `assistant target anchors on an image-only user prompt`() {
+        // An image-only prompt renders a bubble with empty content. Walking
+        // past it because content is blank deleted the previous turn too.
+        val imageOnly = userMsg("u2", "").copy(
+            imageUris = listOf(android.net.Uri.parse("file:///tmp/shot.png")),
+        )
+        val messages = listOf(
+            userMsg("u1", "earlier"), asstMsg("a1"),
+            imageOnly, asstMsg("a2"),
+        )
+        val anchor = selectAnchor(messages, 3, messages[3])
+        assertEquals("u2", anchor)
+    }
+
+    @Test
     fun `assistant target with no preceding user message resolves no anchor`() {
         val messages = listOf(asstMsg("a1"), asstMsg("a2"))
         val target = messages[1]
@@ -130,7 +145,7 @@ class DeleteAnchorByIdTest {
         } else {
             (index downTo 0).asSequence()
                 .map { messages[it] }
-                .firstOrNull { it.role == "user" && it.content.isNotBlank() }
+                .firstOrNull { it.isRenderedUserBubble }
         }
         return anchorMessage?.let { listOf(it.id) + it.sourceDbIds }?.firstOrNull()
     }

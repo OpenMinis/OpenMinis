@@ -1045,8 +1045,11 @@ class ChatViewModel(
                 val loadStart = if (start != null && start < before) {
                     start
                 } else {
-                    // Turn alignment failed. Load everything from session start
-                    // to the current window boundary.
+                    // Turn alignment failed. Do NOT walk all the way to the
+                    // session start: that is how one tap re-materialised the
+                    // whole transcript the 500-row cold-open cap exists to
+                    // keep out of the render window. Take one capped page;
+                    // another tap continues from its new edge.
                     val remaining = withContext(Dispatchers.IO) {
                         chatRepository.dao.countMessagesBeforeSort(sessionId, before)
                     }
@@ -1054,21 +1057,17 @@ class ChatViewModel(
                         refreshHistoryEdges(scheduleTail = false)
                         return@withLock
                     }
-                    // Walk back to the very first message that still exists.
-                    // Using sort_order 0 isn't safe after compact, so probe.
-                    var fallback: Int? = null
-                    var probeCursor: Int = before
-                    while (true) {
-                        val anchors = withContext(Dispatchers.IO) {
-                            chatRepository.dao.loadOlderSortAnchors(sessionId, probeCursor, 200)
-                        }
-                        if (anchors.isEmpty()) break
-                        fallback = anchors.last().sortOrder
-                        if (anchors.size < 200) break
-                        if (anchors.last().sortOrder >= probeCursor) break
-                        probeCursor = anchors.last().sortOrder
+                    // One probe of the cold-open cap, newest first. The oldest
+                    // anchor in it is the page start; rows before it stay
+                    // behind the pill.
+                    val anchors = withContext(Dispatchers.IO) {
+                        chatRepository.dao.loadOlderSortAnchors(
+                            sessionId,
+                            before,
+                            com.openminis.app.data.repository.ChatRepository.MAX_TAIL_MESSAGES,
+                        )
                     }
-                    fallback
+                    anchors.lastOrNull()?.sortOrder
                 }
                 if (loadStart == null || loadStart >= before) {
                     // Fallback exhausted every probe but the earlier count
@@ -4106,6 +4105,44 @@ class ChatViewModel(
      *
      * Cancels any in-flight stream first so the UI doesn't race the wipe.
      */
+    /**
+     * Messages the local archive can still put back: archived versions whose
+     * live row is gone. Zero when this build has no archive, or nothing was
+     * truncated. The menu shows the restore action only when this is > 0.
+     */
+    suspend fun restorableArchivedMessageCount(): Int {
+        val sid = realSessionId.takeIf { it.isNotEmpty() } ?: return 0
+        return chatRepository.restorableArchivedMessageCount(sid)
+    }
+
+    /**
+     * Put archived-but-deleted messages back, then reload the window from the
+     * database. The repository rebuilds chronology and retires only the rows
+     * it restored; this just refreshes what the screen paints.
+     */
+    fun restoreArchivedMessages() {
+        if (_isStreaming.value) return
+        val sid = realSessionId.takeIf { it.isNotEmpty() } ?: return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                chatRepository.restoreArchivedVersions(sid)
+            }
+            if (result.restoredCount <= 0) return@launch
+            // Reload the window from the renumbered rows. loadSession() is
+            // not re-callable: its launch races the one still running from
+            // init and both write _messages. This path only swaps the list.
+            val tail = withContext(Dispatchers.IO) {
+                val loaded = chatRepository.loadSessionTail(sid)
+                chatRepository.hydrateDisplayRows(loaded.messages)
+            }
+            val painted = tail.toChatMessages()
+            _messages.value = painted
+            timeline.reset()
+            timeline.noteBounds(tail)
+            refreshHistoryEdges(scheduleTail = false)
+        }
+    }
+
     fun clearChat() {
         if (_isStreaming.value) cancelStream()
         val sid = activeSessionId
@@ -4602,9 +4639,13 @@ class ChatViewModel(
         val anchorMessage: ChatMessage? = if (target.role == "user") {
             target
         } else {
+            // A visible user turn, not merely one with text. An image-only
+            // prompt has empty content but is the turn the assistant belongs
+            // to; skipping it anchored the cut on the PREVIOUS turn and
+            // deleted that one too.
             (index downTo 0).asSequence()
                 .map { messages[it] }
-                .firstOrNull { it.role == "user" && it.content.isNotBlank() }
+                .firstOrNull { it.isRenderedUserBubble }
         }
         val anchor = anchorMessage ?: return -1
         val anchorIds = listOf(anchor.id) + anchor.sourceDbIds

@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">May tumatakbong gawain sa chat na ito. Ihihinto ito kapag nagsimula ka ng bagong chat.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Ihinto at Magbagong Chat</string>
     <string name="chat_menu_clear_chat">I-clear ang Chat</string>
+    <string name="chat_menu_restore_deleted">Ibalik ang mga tinanggal na mensahe</string>
+    <string name="chat_restore_deleted_confirm">Ibalik</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Ibabalik ang %d tinanggal na mensahe mula sa lokal na archive ng chat na ito sa dating puwesto nito sa oras, hindi sa dulo.</item>
+        <item quantity="other">Ibabalik ang %d tinanggal na mensahe mula sa lokal na archive ng chat na ito sa dating puwesto nito sa oras, hindi sa dulo.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

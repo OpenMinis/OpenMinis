@@ -87,7 +87,20 @@ internal suspend fun ChatViewModel.loadSplitTurnPrefix(beforeSortOrder: Int): Li
     // Complete the cut turn before painting the cold-open tail. The probe
     // reads only role + sort_order, so a long tool turn does not parse bodies
     // merely to find its boundary.
-    val start = olderTurnStart(beforeSortOrder, turnCount = 1) ?: return emptyList()
+    //
+    // The prefix is capped at the same ceiling as the cold-open tail. A tool
+    // turn can itself be thousands of rows; completing it unbounded would
+    // undo the render-window cap the moment a page boundary lands inside one.
+    // What does not fit stays above the window and comes back through
+    // loadOlderMessages.
+    val rawStart = olderTurnStart(beforeSortOrder, turnCount = 1) ?: return emptyList()
+    if (rawStart >= beforeSortOrder) return emptyList()
+    val capped = chatRepository.dao.loadOlderSortAnchors(
+        sessionId,
+        beforeSortOrder,
+        com.openminis.app.data.repository.ChatRepository.MAX_TAIL_MESSAGES,
+    ).lastOrNull()?.sortOrder ?: return emptyList()
+    val start = maxOf(rawStart, capped)
     if (start >= beforeSortOrder) return emptyList()
     return loadSortRange(SortRange(start, beforeSortOrder))
 }

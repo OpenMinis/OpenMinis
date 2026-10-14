@@ -66,6 +66,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.openminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.R
 import com.openminis.app.ui.theme.ChatColors
@@ -104,7 +106,10 @@ internal fun AttachmentChip(
         ) {
             if (attachment.isImage) {
                 AsyncImage(
-                    model = attachment.uri,
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(attachment.uri)
+                        .limitDisplaySize()
+                        .build(),
                     contentDescription = attachment.fileName,
                     modifier = Modifier
                         .matchParentSize()

@@ -67,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,6 +80,8 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import com.openminis.app.ui.DisplayBitmapLimits.limitDisplaySize
 import com.openminis.app.ui.theme.ChatColors
 
 // ─── User Message (right-aligned, iOS: tertiarySystemFill bubble, 18dp radius) ─
@@ -372,7 +375,10 @@ internal fun UserAttachmentList(
     ) {
         imageUris.forEachIndexed { idx, uri ->
             AsyncImage(
-                model = uri,
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(uri)
+                    .limitDisplaySize()
+                    .build(),
                 contentDescription = "Image attachment",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -501,7 +507,10 @@ private fun ImageGalleryDialog(
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 AsyncImage(
-                    model = uris[page],
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(uris[page])
+                        .limitDisplaySize()
+                        .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize(),

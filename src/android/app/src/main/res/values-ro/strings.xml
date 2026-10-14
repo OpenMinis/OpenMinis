@@ -1179,6 +1179,12 @@
     <string name="chat_new_chat_stop_dialog_body">În această conversație rulează o sarcină. Pornirea unei conversații noi o va opri.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Oprește și începe o conversație nouă</string>
     <string name="chat_menu_clear_chat">Golește conversația</string>
+    <string name="chat_menu_restore_deleted">Restaurează mesajele șterse</string>
+    <string name="chat_restore_deleted_confirm">Restaurează</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Pune înapoi %d mesaj șters din arhiva locală a acestui chat la poziția lui în timp, nu la sfârșit.</item>
+        <item quantity="other">Pune înapoi %d mesaje șterse din arhiva locală a acestui chat la poziția lor în timp, nu la sfârșit.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

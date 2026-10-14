@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">Há uma tarefa em execução nesta conversa. Começar uma nova conversa vai interrompê-la.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Parar e começar nova conversa</string>
     <string name="chat_menu_clear_chat">Limpar conversa</string>
+    <string name="chat_menu_restore_deleted">Restaurar mensagens excluídas</string>
+    <string name="chat_restore_deleted_confirm">Restaurar</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Devolve %d mensagem excluída do arquivo local deste chat à posição original no tempo, não ao final.</item>
+        <item quantity="other">Devolve %d mensagens excluídas do arquivo local deste chat à posição original no tempo, não ao final.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

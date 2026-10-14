@@ -1256,6 +1256,12 @@
     <string name="chat_new_chat_stop_dialog_body">目前對話有任務正在執行，新建對話將停止它。</string>
     <string name="chat_new_chat_stop_dialog_confirm">停止並新建</string>
     <string name="chat_menu_clear_chat">清空對話</string>
+    <string name="chat_menu_restore_deleted">恢復已刪除的訊息</string>
+    <string name="chat_restore_deleted_confirm">恢復</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">把這個對話本地封存裡的 %d 則已刪除訊息放回原本的時間位置，不會加到結尾。</item>
+        <item quantity="other">把這個對話本地封存裡的 %d 則已刪除訊息放回原本的時間位置，不會加到結尾。</item>
+    </plurals>
     <string name="chat_menu_section_quick">快捷</string>
     <string name="chat_menu_section_session">工作階段</string>
     <string name="chat_menu_section_tools">工具</string>

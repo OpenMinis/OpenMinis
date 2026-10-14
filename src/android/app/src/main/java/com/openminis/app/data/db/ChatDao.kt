@@ -83,6 +83,13 @@ data class MessageSortAnchor(
     val role: String,
 )
 
+/** (id, created_at, sort_order) — the meta archive restore reorders by. */
+data class MessageSortMetaRow(
+    val id: String,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "sort_order") val sortOrder: Int,
+)
+
 data class MessagePreviewRow(
     val role: String,
     val preview: String?,
@@ -645,6 +652,17 @@ interface ChatDao {
      */
     @Query("SELECT sort_order FROM messages WHERE id = :id")
     suspend fun sortOrderForMessageId(id: String): Int?
+
+    /** Meta-only projection for [ChatRepository.restoreArchivedVersions]. */
+    @Query(
+        "SELECT id, created_at, sort_order FROM messages " +
+            "WHERE session_id = :sessionId ORDER BY sort_order ASC"
+    )
+    suspend fun sortMetaForSession(sessionId: String): List<MessageSortMetaRow>
+
+    /** Rewrites one row's sequence slot. Used by the restore re-insertion. */
+    @Query("UPDATE messages SET sort_order = :sortOrder WHERE id = :id")
+    suspend fun updateSortOrder(id: String, sortOrder: Int)
 
     // [T-error-persist-android] Write/clear the terminal error sticker on a
     // specific message row by id. Used when the persisted DB id is known

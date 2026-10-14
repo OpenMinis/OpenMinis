@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">In diesem Chat läuft gerade eine Aufgabe. Ein neuer Chat wird sie stoppen.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Stoppen &amp; neuer Chat</string>
     <string name="chat_menu_clear_chat">Chat leeren</string>
+    <string name="chat_menu_restore_deleted">Gelöschte Nachrichten wiederherstellen</string>
+    <string name="chat_restore_deleted_confirm">Wiederherstellen</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">%d gelöschte Nachricht aus dem lokalen Archiv dieses Chats an ihre ursprüngliche Zeitposition zurücksetzen, nicht ans Ende.</item>
+        <item quantity="other">%d gelöschte Nachrichten aus dem lokalen Archiv dieses Chats an ihre ursprüngliche Zeitposition zurücksetzen, nicht ans Ende.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

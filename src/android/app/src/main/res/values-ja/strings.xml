@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">このチャットではタスクが実行中です。新しいチャットを開始すると停止します。</string>
     <string name="chat_new_chat_stop_dialog_confirm">停止して新規チャット</string>
     <string name="chat_menu_clear_chat">チャットをクリア</string>
+    <string name="chat_menu_restore_deleted">削除したメッセージを復元</string>
+    <string name="chat_restore_deleted_confirm">復元</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">このチャットのローカル履歴から、削除された %d 件のメッセージを元の時刻の位置に戻します。末尾には追加しません。</item>
+        <item quantity="other">このチャットのローカル履歴から、削除された %d 件のメッセージを元の時刻の位置に戻します。末尾には追加しません。</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

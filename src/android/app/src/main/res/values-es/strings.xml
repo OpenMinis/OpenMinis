@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">Hay una tarea en ejecución en este chat. Iniciar un chat nuevo la detendrá.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Detener &amp; nuevo chat</string>
     <string name="chat_menu_clear_chat">Borrar chat</string>
+    <string name="chat_menu_restore_deleted">Restaurar mensajes eliminados</string>
+    <string name="chat_restore_deleted_confirm">Restaurar</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Devuelve %d mensaje eliminado del archivo local de este chat a su posición en el tiempo, no al final.</item>
+        <item quantity="other">Devuelve %d mensajes eliminados del archivo local de este chat a su posición en el tiempo, no al final.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

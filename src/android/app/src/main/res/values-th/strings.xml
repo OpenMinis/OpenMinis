@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">มีงานกำลังทำงานอยู่ในแชทนี้ การเริ่มแชทใหม่จะหยุดงานนั้น</string>
     <string name="chat_new_chat_stop_dialog_confirm">หยุดแล้วเริ่มแชทใหม่</string>
     <string name="chat_menu_clear_chat">ล้างแชท</string>
+    <string name="chat_menu_restore_deleted">กู้คืนข้อความที่ลบ</string>
+    <string name="chat_restore_deleted_confirm">กู้คืน</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">นำข้อความที่ลบไปแล้ว %d ข้อความจากคลังในเครื่องของแชทนี้กลับไปที่ตำแหน่งตามเวลาเดิม ไม่ใช่ต่อท้าย</item>
+        <item quantity="other">นำข้อความที่ลบไปแล้ว %d ข้อความจากคลังในเครื่องของแชทนี้กลับไปที่ตำแหน่งตามเวลาเดิม ไม่ใช่ต่อท้าย</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

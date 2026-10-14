@@ -850,20 +850,39 @@ class ChatRepository(
         )
 
     /**
-     * [T-msg-version-restore] One-shot recovery for rows lost to the
-     * 2026-10-14 ordinal-mismatch truncation (deleteMessagesAfter anchored
-     * dozens of turns early; 1386 rows were archived then deleted from one
-     * retry tap). Re-inserts every archived version whose source row no
-     * longer exists in `messages`, at sort orders ABOVE the current tail so
-     * the live conversation is untouched, and deletes the restored rows from
-     * `message_versions` so a second call is a no-op.
+     * How many deleted messages the local archive could still put back
+     * (messages with archived versions and no live row). Powers the manual
+     * restore confirmation.
+     */
+    suspend fun restorableArchivedMessageCount(sessionId: String): Int {
+        val vdao = versionDao ?: return 0
+        return runCatching { vdao.restorableMessageIds(sessionId).size }.getOrDefault(0)
+    }
+
+    /**
+     * [T-msg-version-restore] Recovery for rows lost to a truncation whose
+     * cutoff landed too early (the 2026-10-14 ordinal-mismatch incident:
+     * 1386 rows archived then deleted from one retry tap). Re-inserts every
+     * archived version whose source row no longer exists in `messages`.
+     *
+     * Contract:
+     *  - CHRONOLOGY is rebuilt, not appended: restored rows slot back where
+     *    their created_at places them (see [chronologicalRestoreOrder]), so
+     *    old messages never land after messages the user typed since.
+     *  - Only the RESTORED archive rows are retired afterwards. The session's
+     *    other versions are the pre-edit history of LIVE rows — the reason
+     *    the archive exists — and deleting the whole session archive here
+     *    (the old behaviour) destroyed exactly that history.
+     *  - INVOKED EXPLICITLY by the user ("restore deleted messages"), never
+     *    automatically on session load: a truncation is also how a retry or
+     *    an intentional delete discards content, and silently resurrecting it
+     *    would overrule the user. The confirmation dialog states what the
+     *    archive still holds.
      *
      * Only LATEST versions are restored (highest version_index per
-     * message_id): earlier versions are the pre-edit history the archive
-     * exists to keep, not rows to resurrect.
-     *
-     * Idempotent: rows whose message_id still exists in `messages` are
-     * skipped (their live row already carries the content).
+     * message_id): earlier versions are pre-edit history, not rows to
+     * resurrect. Rows whose message_id still exists live are skipped, so a
+     * repeat call after the first restore is a no-op.
      */
     suspend fun restoreArchivedVersions(sessionId: String): RestoreResult {
         val vdao = versionDao ?: return RestoreResult(0, 0, "versionDao unavailable")
@@ -886,33 +905,59 @@ class ChatRepository(
         val toRestore = latest.filter { it.messageId !in existingIds }
         if (toRestore.isEmpty()) return RestoreResult(0, all.size, null)
 
-        // Append above the current tail, preserving source order.
-        var nextSort = dao.nextSortOrder(sessionId)
-        val restored = mutableListOf<MessageEntity>()
-        for (v in toRestore) {
-            val row = MessageEntity(
-                id = v.messageId,
-                sessionId = sessionId,
-                role = v.role,
-                partsJson = v.partsJson ?: "[]",
-                createdAt = v.sourceCreatedAt,
-                sortOrder = nextSort,
-                reasoningContent = v.reasoningContent,
-                errorInfo = v.errorInfo,
-                modelId = v.modelId,
-                modelDisplayName = v.modelDisplayName,
-                bodyRef = v.bodyRef,
-                bodySha = v.bodySha,
+        // [T-msg-version-restore] Re-insert by CHRONOLOGY, not at the tail.
+        // A truncation removes a span from the middle; appending restored rows
+        // after everything the user typed since reads as old messages arriving
+        // after new ones. Rebuild the sequence from (created_at, live-first)
+        // order and renumber in one transaction: two passes over the live rows
+        // (first to a scratch range, then into the final slot) so the unique
+        // (session_id, sort_order) index never sees two rows claiming the same
+        // slot mid-flight.
+        val restoredById = toRestore.associateBy { it.messageId }
+        val restoredArchiveIds = toRestore.map { it.id }
+        val apply: suspend () -> List<MessageEntity> = {
+            val meta = dao.sortMetaForSession(sessionId)
+            val order = chronologicalRestoreOrder(
+                existing = meta.map { SortEntry(it.id, it.createdAt) },
+                restored = toRestore.map {
+                    SortEntry(it.messageId, it.sourceCreatedAt, restored = true)
+                },
             )
-            dao.insertMessage(row)
-            restored.add(row)
-            nextSort++
+            val scratchBase = order.size + 1_000_000
+            meta.forEachIndexed { index, row ->
+                dao.updateSortOrder(row.id, scratchBase + index)
+            }
+            val restoredRows = mutableListOf<MessageEntity>()
+            order.forEachIndexed { index, entry ->
+                if (entry.restored) {
+                    val v = restoredById.getValue(entry.id)
+                    val row = MessageEntity(
+                        id = v.messageId,
+                        sessionId = sessionId,
+                        role = v.role,
+                        partsJson = v.partsJson ?: "[]",
+                        createdAt = v.sourceCreatedAt,
+                        sortOrder = index,
+                        reasoningContent = v.reasoningContent,
+                        errorInfo = v.errorInfo,
+                        modelId = v.modelId,
+                        modelDisplayName = v.modelDisplayName,
+                        bodyRef = v.bodyRef,
+                        bodySha = v.bodySha,
+                    )
+                    dao.insertMessage(row)
+                    restoredRows.add(row)
+                } else {
+                    dao.updateSortOrder(entry.id, index)
+                }
+            }
+            // Retire ONLY the restored archive rows — the session's remaining
+            // versions are live pre-edit history and must survive.
+            vdao.deleteByIds(restoredArchiveIds)
+            restoredRows
         }
-        // Remove the restored entries from the archive so a repeat call is a
-        // no-op (the live row now carries the content).
-        runCatching {
-            vdao.deleteForSession(sessionId)
-        }
+        val dbRef = db
+        val restored = if (dbRef != null) dbRef.withTransaction { apply() } else apply()
         AppLogger.info(
             TAG,
             "[T-msg-version-restore] restored ${restored.size} rows to session " +
@@ -925,6 +970,16 @@ class ChatRepository(
         val restoredCount: Int,
         val archiveCount: Int,
         val error: String?,
+    )
+
+    /**
+     * One slot in a restored transcript. [restored] rows come from the
+     * archive; the rest are live rows being renumbered around them.
+     */
+    internal data class SortEntry(
+        val id: String,
+        val createdAt: Long,
+        val restored: Boolean = false,
     )
 
     /**
@@ -1437,6 +1492,22 @@ class ChatRepository(
 
     companion object {
         private const val TAG = "ChatRepository"
+
+        /**
+         * Merge live rows and restored rows back into one timeline.
+         *
+         * Order is created_at ascending. A restored row and a live row that
+         * share a timestamp keep the LIVE row first: a retry that re-persists
+         * the same user turn gets a new id and a later-or-equal created_at,
+         * and the restored predecessor must not jump ahead of the turn the
+         * user actually kept.
+         */
+        internal fun chronologicalRestoreOrder(
+            existing: List<SortEntry>,
+            restored: List<SortEntry>,
+        ): List<SortEntry> = (existing + restored).sortedWith(
+            compareBy<SortEntry> { it.createdAt }.thenBy { it.restored },
+        )
 
         /**
          * Upper bound for one authoritative context hydrate. The UI remains

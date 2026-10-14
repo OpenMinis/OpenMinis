@@ -1180,6 +1180,12 @@
     <string name="chat_new_chat_stop_dialog_body">W tym czacie działa zadanie. Rozpoczęcie nowego czatu je zatrzyma.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Zatrzymaj i nowy czat</string>
     <string name="chat_menu_clear_chat">Wyczyść czat</string>
+    <string name="chat_menu_restore_deleted">Przywróć usunięte wiadomości</string>
+    <string name="chat_restore_deleted_confirm">Przywróć</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Przywróć %d usuniętą wiadomość z lokalnego archiwum tego czatu na jej miejsce w czasie, nie na koniec.</item>
+        <item quantity="other">Przywróć %d usuniętych wiadomości z lokalnego archiwum tego czatu na ich miejsce w czasie, nie na koniec.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

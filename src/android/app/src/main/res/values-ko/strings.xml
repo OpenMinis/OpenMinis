@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">이 채팅에서 작업이 실행 중입니다. 새 채팅을 시작하면 중지됩니다.</string>
     <string name="chat_new_chat_stop_dialog_confirm">중지 후 새 채팅</string>
     <string name="chat_menu_clear_chat">채팅 지우기</string>
+    <string name="chat_menu_restore_deleted">삭제한 메시지 복원</string>
+    <string name="chat_restore_deleted_confirm">복원</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">이 대화의 로컬 보관에서 삭제된 메시지 %d개를 끝 이 아니라 원래 시간 위치로 되돌립니다.</item>
+        <item quantity="other">이 대화의 로컬 보관에서 삭제된 메시지 %d개를 끝 이 아니라 원래 시간 위치로 되돌립니다.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>

@@ -1178,6 +1178,12 @@
     <string name="chat_new_chat_stop_dialog_body">Ada tugasan yang sedang berjalan dalam sembang ini. Memulakan sembang baharu akan menghentikannya.</string>
     <string name="chat_new_chat_stop_dialog_confirm">Hentikan &amp; Sembang Baharu</string>
     <string name="chat_menu_clear_chat">Kosongkan Sembang</string>
+    <string name="chat_menu_restore_deleted">Pulihkan mesej yang dipadam</string>
+    <string name="chat_restore_deleted_confirm">Pulihkan</string>
+    <plurals name="chat_restore_deleted_dialog_body">
+        <item quantity="one">Kembalikan %d mesej yang dipadam daripada arkib tempatan sembang ini ke kedudukan asalnya mengikut masa, bukan ke hujung.</item>
+        <item quantity="other">Kembalikan %d mesej yang dipadam daripada arkib tempatan sembang ini ke kedudukan asalnya mengikut masa, bukan ke hujung.</item>
+    </plurals>
     <string name="chat_menu_section_quick">Quick</string>
     <string name="chat_menu_section_session">Session</string>
     <string name="chat_menu_section_tools">Tools</string>
