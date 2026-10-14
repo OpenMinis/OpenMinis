@@ -5139,11 +5139,18 @@ class ChatViewModel(
                     val desc = meta?.toolTitle ?: ""
                     val pageURL = meta?.browserURL ?: ""
                     val imgPath = meta?.imageFilePath ?: ""
+                    // [P-process-card] Persist per-block timing so restored
+                    // sessions can rebuild it. Without these columns every
+                    // restored block had durationMs=0, so process cards
+                    // (which sum block durations) showed no duration at all
+                    // after a reload while live runs showed one.
+                    val durMs = meta?.durationMs ?: 0L
+                    val startMs = meta?.startTimeMs ?: 0L
                     // [T-android-gemini3-thoughtsig / #179] Persist the captured
                     // signature (null-literal when absent) so it survives a session
                     // reload and can be replayed on the historical functionCall.
                     val sigJson = part.thoughtSignature?.let { escapeJson(it) } ?: "null"
-                    append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":$sigJson}}""")
+                    append("""{"type":"toolUse","value":{"toolUseId":${escapeJson(part.id)},"name":${escapeJson(name)},"input":${escapeJson(inputStr)},"description":${escapeJson(desc)},"pageURL":${escapeJson(pageURL)},"imageFilePath":${escapeJson(imgPath)},"thoughtSignature":$sigJson,"durationMs":$durMs,"startTimeMs":$startMs}}""")
                 }
                 else -> { /* tool_result is persisted via persistToolResultMessage */ }
             }
@@ -5739,6 +5746,13 @@ class ChatViewModel(
                                 },
                                 browserURL = pageURL,
                                 imageFilePath = imgPath,
+                                // [P-process-card] Restore the persisted
+                                // per-block timing (written by
+                                // buildAssistantPartsJson since the process
+                                // cards landed). Rows written before the
+                                // field existed parse as 0 — same as before.
+                                durationMs = value.optLong("durationMs", 0L),
+                                startTimeMs = value.optLong("startTimeMs", 0L),
                                 // [T-android-gemini3-thoughtsig / #179] Restore the
                                 // persisted signature onto the rebuilt block.
                                 thoughtSignature = value.optString("thoughtSignature", "").ifEmpty { null },

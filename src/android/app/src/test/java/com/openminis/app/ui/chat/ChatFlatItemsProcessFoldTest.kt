@@ -87,6 +87,36 @@ class ChatFlatItemsProcessFoldTest {
     }
 
     @Test
+    fun `blank text between thinking and tool does not split the run`() {
+        // [P-process-card] Regression: providers emit a bare "\n\n" before a
+        // tool call; restored sessions turn it into a text block. The old
+        // isNotEmpty() check treated it as reply text, flushed the segment
+        // while it held only the thinking block (below the 2-step card
+        // threshold) and dropped it — every card read "思考 0". Blank text is
+        // not reply text and must not close a card.
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    blocks = listOf(
+                        thinking(id = "th1"),
+                        text(id = "tx1", content = "\n\n"),
+                        tool(id = "t1"),
+                        thinking(id = "th2"),
+                        text(id = "tx2", content = " \n "),
+                        tool(id = "t2"),
+                        text(id = "tx3", content = "done"),
+                    ),
+                ),
+            ),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
+        assertEquals(2, summary.thinkingCount)
+        assertEquals(2, summary.toolCount)
+    }
+
+    @Test
     fun `a two step run becomes a card and a single step stays inline`() {
         // [P-process-card] The card threshold is the RUN, not the round:
         // two process steps are enough to card, one step is noise and stays

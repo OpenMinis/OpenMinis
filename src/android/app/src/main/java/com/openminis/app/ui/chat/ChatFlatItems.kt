@@ -439,11 +439,14 @@ internal data class ProcessStepRef(
     val durationMs: Long,
     val running: Boolean,
     /**
-     * [P-process-card] Thinking rows carry their reasoning text so the
-     * expanded card can unfold them inline (the folded card swallowed it).
-     * Empty for tool rows — they open the shared detail sheet instead.
+     * [P-process-card] The block itself. The expanded card renders steps
+     * with the SAME components as the unfolded list — ThinkingBlock for
+     * reasoning, ToolCallPill for tool calls — so icons, colors, duration
+     * chips and status styling stay in sync by construction instead of by
+     * imitation. The flat fields above stay for the header's counts and
+     * tests.
      */
-    val content: String = "",
+    val block: AssistantBlock,
 )
 
 /** Rounds with fewer foldable steps than this never fold (rule 1). */
@@ -620,7 +623,15 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
                 // Reply text (or an always-visible tool) ends the current
                 // process run: the card summarises what happened BEFORE the
                 // text, which is where the reference puts it.
-                if (!isProcess && block.kind == "text" && block.content.isNotEmpty()) {
+                // [P-process-card] BLANK text is not reply text. Providers
+                // routinely emit a bare "\n\n" before a tool call; restored
+                // sessions turn that into a text block, and an
+                // isNotEmpty() check here flushed the segment while it held
+                // only the restored thinking block — below
+                // SEGMENT_MIN_STEPS, so the thinking was dropped and every
+                // card read "思考 0". Only text the user can actually read
+                // closes a card.
+                if (!isProcess && block.kind == "text" && block.content.isNotBlank()) {
                     flushSegment(closedByReplyText = true)
                 }
                 if (!isProcess) continue
@@ -667,7 +678,7 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
                     status = block.toolStatus,
                     durationMs = block.durationMs,
                     running = stepRunning,
-                    content = if (block.kind == "thinking") block.content else "",
+                    block = block,
                 )
             }
         }

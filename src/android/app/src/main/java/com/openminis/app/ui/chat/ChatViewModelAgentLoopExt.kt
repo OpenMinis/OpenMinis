@@ -658,6 +658,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             kind = "thinking",
                             content = turnThinking.toString(),
                             toolTitle = "Thinking",
+                            // [P-process-card] Record when thinking STARTED so
+                            // the block can carry a duration when it settles
+                            // (process cards sum block durations; without this
+                            // thinking contributed 0 to the card's 时长).
+                            startTimeMs = System.currentTimeMillis(),
                         ))
                     } else {
                         allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
@@ -681,7 +686,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // Mark thinking block as done when text starts flowing
                     val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
                     if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
-                        allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
+                        // [P-process-card] Settle the thinking duration here:
+                        // first text after reasoning is the end of the thinking
+                        // phase, so now - startTimeMs is what the block ran for.
+                        allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(
+                            toolStatus = ToolBlockStatus.SUCCESS,
+                            durationMs = settleThinkingDurationMs(allToolBlocks[thinkIdx]),
+                        )
                     }
                     // [T-stall-echo-strip] Route the delta through the echo
                     // suppressor when the previous attempt stalled mid-stream:
@@ -801,7 +812,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // Mark thinking block as done when tool use starts
                     val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
                     if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
-                        allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(toolStatus = ToolBlockStatus.SUCCESS)
+                        // [P-process-card] Same settle as the text path: a tool
+                        // call after reasoning also ends the thinking phase.
+                        allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(
+                            toolStatus = ToolBlockStatus.SUCCESS,
+                            durationMs = settleThinkingDurationMs(allToolBlocks[thinkIdx]),
+                        )
                     }
                     // T154: when the last few text deltas landed inside the 50ms throttle
                     // window, the UI hadn't yet been pushed with the trailing text — and
@@ -2292,4 +2308,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
         com.openminis.app.speech.VoiceAnnouncementCoordinator(sink)
             .onScene(context, com.openminis.app.speech.AnnouncementScene.IDLE_AGENT_DONE)
     }
+}
+
+/**
+ * [P-process-card] Duration a thinking block ran for, measured from its
+ * recorded start to the moment reasoning ended (first text or tool call).
+ * Returns 0 when the start was never recorded (restored blocks) so the
+ * caller keeps whatever duration the block already carries.
+ */
+internal fun settleThinkingDurationMs(block: AssistantBlock): Long {
+    val start = block.startTimeMs
+    if (start <= 0L) return block.durationMs
+    return (System.currentTimeMillis() - start).coerceAtLeast(block.durationMs)
 }

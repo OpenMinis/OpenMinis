@@ -595,7 +595,10 @@ internal fun ToolCallPill(
                     text = block.toolTitle.ifEmpty { block.toolName },
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    // [P-process-card] A failed call tints its OWN row's title
+                    // (matching the icon) — the reference card colours the
+                    // error line and leaves every other row untouched.
+                    color = if (isFailed) ToolErrorColor else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
@@ -782,6 +785,20 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                 color = thinkingBlue,
             )
             Spacer(modifier = Modifier.weight(1f))
+            // [P-process-card] Thinking duration, settled by the agent loop
+            // when the first text/tool call ends the reasoning phase. Same
+            // slot family as the char count so the header reads
+            // "思考 · 4m 59s · 11k" like the reference card.
+            formatProcessDuration(block.durationMs)?.let { dur ->
+                Text(
+                    text = dur,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    color = thinkingBlue.copy(alpha = 0.6f),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
             if (charCount > 0) {
                 Text(
                     text = charLabel,
@@ -1077,122 +1094,27 @@ internal fun ProcessSummaryBar(
                 thickness = 0.5.dp,
                 color = thinkingBlue.copy(alpha = 0.15f),
             )
+            // [P-process-card] Render steps with the SAME components the
+            // unfolded list uses — ThinkingBlock for reasoning, ToolCallPill
+            // for tool calls. Icons, accent colors, duration chips, status
+            // styling and the 500ms thinking auto-collapse all come from the
+            // shared implementations; the card adds no look of its own below
+            // the header. This is what keeps folded and unfolded visually
+            // identical instead of merely similar.
             steps.forEach { step ->
-                ProcessStepRow(step = step, onOpen = { onOpenStep(step.id) })
+                if (step.kind == "thinking") {
+                    ThinkingBlock(block = step.block, isStreaming = step.running)
+                } else {
+                    ToolCallPill(
+                        block = step.block,
+                        onOpenDetail = { onOpenStep(step.id) },
+                    )
+                }
             }
         }
     }
 }
 
-/**
- * One row inside an expanded process card. Thinking rows show their own
- * state and duration ("思考完毕 (1.4秒)"); tool rows show the tool title
- * with a "查看" affordance that opens the shared tool detail sheet.
- */
-@Composable
-private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
-    val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val thinkingBlue = Color(0xFF007AFF)
-    val isThinking = step.kind == "thinking"
-    val duration = formatProcessDuration(step.durationMs)
-    val title = when {
-        isThinking && step.running -> "正在思考中…"
-        isThinking && duration != null -> "思考完毕 ($duration)"
-        isThinking -> "思考完毕"
-        else -> step.title
-    }
-    val icon = when {
-        isThinking && step.running -> Icons.Default.Psychology
-        isThinking -> Icons.Default.Lightbulb
-        else -> Icons.Default.Search
-    }
-    // [P-process-card] Thinking layer, independent of the card layer: a
-    // running thinking step auto-expands while its text streams, and settles
-    // 500ms after it finishes. A step the user collapsed by hand
-    // (userTouched) is never reopened by the card expanding, and never
-    // auto-collapsed over their choice — same rule as ThinkingBlock. State
-    // is keyed on step.id so one step's toggle never leaks to the next.
-    var stepExpanded by remember(step.id) { mutableStateOf(step.running) }
-    var userTouched by remember(step.id) { mutableStateOf(false) }
-    LaunchedEffect(step.id, step.running) {
-        if (!step.running && !userTouched) {
-            delay(500)
-            stepExpanded = false
-        }
-    }
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable {
-                    if (isThinking) {
-                        userTouched = true
-                        stepExpanded = !stepExpanded
-                    } else {
-                        onOpen()
-                    }
-                }
-                .padding(vertical = 7.dp),
-        ) {
-            Icon(
-                icon,
-                contentDescription = null,
-                tint = if (isThinking) thinkingBlue else muted,
-                modifier = Modifier.size(16.dp),
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Text(
-                text = title,
-                fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!isThinking) {
-                Box(
-                    modifier = Modifier
-                        .size(7.dp)
-                        .background(Color(0xFF34C759), CircleShape),
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = stringResource(R.string.chat_process_step_view),
-                    fontSize = 13.sp,
-                    color = Color(0xFF8E8EFF),
-                )
-                Spacer(modifier = Modifier.width(2.dp))
-            }
-            Icon(
-                imageVector = if (isThinking) {
-                    if (stepExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown
-                } else {
-                    Icons.AutoMirrored.Filled.KeyboardArrowRight
-                },
-                contentDescription = null,
-                tint = if (isThinking) thinkingBlue.copy(alpha = 0.5f) else muted,
-                modifier = Modifier.size(16.dp),
-            )
-        }
-        if (isThinking) {
-            AnimatedVisibility(visible = stepExpanded && step.content.isNotEmpty()) {
-                val scrollState = rememberScrollState()
-                Text(
-                    text = step.content,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 26.dp, top = 2.dp, bottom = 6.dp)
-                        .heightIn(max = 300.dp)
-                        .verticalScroll(scrollState),
-                )
-            }
-        }
-    }
-}
 
 /**
  * [T-thinking-render-perf-android] Full-screen viewer for thinking content

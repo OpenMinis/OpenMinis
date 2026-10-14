@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material.icons.automirrored.filled.Article
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -3071,6 +3072,15 @@ fun ChatScreen(
                 // fresh and auto-expands again. Re-opening by hand is not
                 // suppressed — the set only blocks the automatic path.
                 val userCollapsedCards = remember(sessionId) { mutableSetOf<String>() }
+                // [P-process-card] Cards the user re-opened by hand after they
+                // settled. The 500ms auto-close below never touches these —
+                // "user opened it, it stays open" — and nothing else closes a
+                // settled card either.
+                val manualReopenedCards = remember(sessionId) { mutableSetOf<String>() }
+                // [P-process-card] runningCardKeys as of the previous effect
+                // pass, so a pass can tell "just settled" (was running, now
+                // is not) from "has been settled for a while".
+                var prevRunningCardKeys by remember(sessionId) { mutableStateOf(emptySet<String>()) }
                 // Derived from the messages rather than flatItems: the row
                 // list is built further down, inside the list's own scope.
                 // A running card auto-expands unless the user collapsed it by
@@ -3114,6 +3124,21 @@ fun ChatScreen(
                     val settled = expandedProcessIds.filter { it in runningCardKeys && it !in auto }.toSet()
                     val next = (expandedProcessIds - settled) + auto
                     if (next != expandedProcessIds) expandedProcessIds = next
+                    // [P-process-card] A card that JUST settled (was running,
+                    // now is not) auto-closes 500ms later, not on the same
+                    // frame: the reply text lands first and the last steps
+                    // stay readable for a beat — the same settle the thinking
+                    // block gives its own content. A card the user re-opened
+                    // by hand during (or after) the window is never closed
+                    // here; manualReopenedCards is the "keep open" mark.
+                    val justSettled = prevRunningCardKeys - runningCardKeys
+                    prevRunningCardKeys = runningCardKeys
+                    val closable = justSettled.filter { it in expandedProcessIds && it !in manualReopenedCards }
+                    if (closable.isNotEmpty()) {
+                        delay(500)
+                        val stillOpen = closable.filter { it in expandedProcessIds && it !in manualReopenedCards }
+                        if (stillOpen.isNotEmpty()) expandedProcessIds = expandedProcessIds - stillOpen
+                    }
                 }
                 // [P0-4] The floating surface is the ToolActivityPill (34dp
                 // capsule). Its mount gate and this reserve predicate must be
@@ -4453,6 +4478,11 @@ fun ChatScreen(
                                     } else {
                                         expandedProcessIds = expandedProcessIds + id
                                         userCollapsedCards -= id
+                                        // [P-process-card] Open by hand: from
+                                        // now on this card is never auto-closed
+                                        // (the 500ms settle skips it). "User
+                                        // opened it, it stays open."
+                                        manualReopenedCards += id
                                     }
                                 },
                             )
