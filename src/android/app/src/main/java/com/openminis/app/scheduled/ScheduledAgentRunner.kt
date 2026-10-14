@@ -305,6 +305,17 @@ object ScheduledAgentRunner {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val title = "Minis: ${task.label.ifBlank { "Scheduled task" }}"
+        // [T-approval-lockscreen] The 200-char agent-reply preview is model
+        // output the user may not want exposed on a locked screen (a scheduled
+        // run can echo anything that passed through the chat). Post the full
+        // row unlocked, and only a benign stand-in on the lock screen.
+        val publicVersion = NotificationCompat.Builder(context, ScheduledTaskManager.CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_recent_history)
+            .setContentTitle("Minis")
+            .setContentText("定时任务已完成 — 解锁查看结果")
+            .setContentIntent(contentPi)
+            .setAutoCancel(true)
+            .build()
         val notification = NotificationCompat.Builder(context, ScheduledTaskManager.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_recent_history)
             .setContentTitle(title)
@@ -313,6 +324,8 @@ object ScheduledAgentRunner {
             .setContentIntent(contentPi)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion)
             .build()
         try {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE)

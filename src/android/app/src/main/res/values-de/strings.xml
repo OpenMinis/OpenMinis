@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Leer</string>
     <string name="common_close">Schließen</string>
     <string name="common_skip">Überspringen</string>
-    <string name="common_next">Weiter</string>
-    <string name="onboarding_welcome_title">Willkommen bei Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Ihr Minis Ultra Agent mit Terminal-, Browser- und nativem Gerätezugriff.</string>
-    <string name="onboarding_get_started">Loslegen</string>
-    <string name="onboarding_provider_title">Anbieter hinzufügen</string>
-    <string name="onboarding_provider_subtitle">Geben Sie einen API-Schlüssel für mindestens einen Anbieter ein, um zu beginnen.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API-Schlüssel</string>
-    <string name="onboarding_save_api_key">API-Schlüssel speichern</string>
-    <string name="onboarding_saved">Gespeichert</string>
     <string name="onboarding_select_models_title">Modelle auswählen</string>
     <string name="onboarding_select_models_subtitle">Wählen Sie bis zu 3 Modelle für Ihre Standardgruppe.</string>
-    <string name="onboarding_search_models">Modelle suchen</string>
     <string name="onboarding_filter_models">Modelle filtern</string>
     <string name="onboarding_done_count">Fertig (%1$d/3)</string>
     <string name="onboarding_loading_models">Modelle werden geladen…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Neue Chats in eine passende Gruppe einsortieren</string>
     <string name="appearance_auto_grouping_footer">Wenn der Titel eines Chats zum ersten Mal erzeugt wird, wird der Chat außerdem in eine passende vorhandene Gruppe einsortiert. Läuft einmal pro Chat, verwendet nur bereits von Ihnen angelegte Gruppen und lässt den Chat ohne Gruppe, wenn nichts passt.</string>
     <string name="appearance_section_tool_preview">Tool-Statusleiste</string>
-    <string name="appearance_tool_preview_footer">Während der Agent-Ausführung eine Live-Vorschau-Miniaturansicht neben der Tool-Statusleiste anzeigen.</string>
-    <string name="appearance_tool_preview_title">Tool-Vorschaufenster</string>
     <string name="appearance_section_auto_focus_after_reply">Eingabefeld nach der Antwort automatisch fokussieren</string>
     <string name="appearance_auto_focus_after_reply_title">Eingabefeld nach der Antwort automatisch fokussieren</string>
     <string name="appearance_auto_focus_after_reply_footer">Wenn aktiviert, erscheint die Tastatur automatisch, sobald das Modell fertig geantwortet hat, sodass das Eingabefeld für eine Rückfrage bereit ist. Standardmäßig aktiviert; deaktivieren Sie es, wenn Sie die Antwort lieber ohne unerwartet auftauchende Tastatur lesen möchten.</string>
@@ -1799,4 +1787,13 @@
     <string name="dev_suite_not_installed">Nicht installiert</string>
     <string name="dev_suite_required">erforderlich</string>
     <string name="dev_suite_assemble">Einrichten</string>
+    <string name="dev_suite_start_install">Installation wird gestartet</string>
+    <string name="dev_suite_apt_failed">apt-Installation fehlgeschlagen (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Schritt fehlgeschlagen (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Installation abgeschlossen, aber die Bereitstellungsprüfung wurde nicht bestanden</string>
+    <string name="dev_suite_interrupted">Installation unterbrochen</string>
+    <string name="dev_suite_no_space">Zu wenig Speicherplatz: etwa %1$d GB erforderlich, %2$d GB frei</string>
+    <string name="dev_suite_skipped_dep">Übersprungen: %1$s wurde nicht installiert</string>
+    <string name="dev_suite_uninstall_failed">Deinstallation fehlgeschlagen (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">%1$s aus der Sandbox entfernen? Geladene Dateien und Befehlsverknüpfungen werden gelöscht; apt-Pakete bleiben installiert.</string>
 </resources>

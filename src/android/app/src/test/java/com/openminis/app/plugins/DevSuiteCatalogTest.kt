@@ -3,6 +3,7 @@ package com.openminis.app.plugins
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -79,6 +80,71 @@ class DevSuiteCatalogTest {
         val core = DevSuiteCatalog.bundleById("android-suite")!!.component("android-core")!!
         assertTrue(core.postInstallSteps.any { it.contains("minis-android-sdk-setup") })
         assertTrue(core.aptPackages.isNotEmpty())
+    }
+
+    @Test
+    fun `android core skips the ndk leg and android ndk runs it`() {
+        // [T-devsuite-ndk-split] minis-android-sdk-setup installs the ~1 GB NDK
+        // unless MINIS_SKIP_NDK=1 and exits 1 when the NDK tail check fails, so
+        // an unflagged core step both pulled the NDK for a "core only" assembly
+        // and marked core FAILED on an NDK hiccup. The NDK belongs to the
+        // optional android-ndk component.
+        val suite = DevSuiteCatalog.bundleById("android-suite")!!
+        val core = suite.component("android-core")!!
+        val ndk = suite.component("android-ndk")!!
+        assertTrue(
+            "android-core must skip the NDK: ${core.postInstallSteps}",
+            core.postInstallSteps.all {
+                it.contains("minis-android-sdk-setup") && it.contains("MINIS_SKIP_NDK=1")
+            },
+        )
+        assertTrue(
+            "android-ndk must run the NDK leg: ${ndk.postInstallSteps}",
+            ndk.postInstallSteps.any {
+                it.contains("minis-android-sdk-setup") && !it.contains("MINIS_SKIP_NDK=1")
+            },
+        )
+        // ...and the core probe checks exactly what the core step installs.
+        assertTrue(core.checkCommand.contains("aapt2"))
+        assertFalse(core.checkCommand.contains("ndk"))
+    }
+
+    @Test
+    fun `every downloaded payload reserves disk`() {
+        // [T-devsuite-disk-gate] Components whose recipe curls a payload must
+        // carry an estimate, otherwise `needed <= 0` skips the gate entirely;
+        // the apt-heavy ones are not free either (dpkg keeps the .deb AND the
+        // unpacked tree).
+        DevSuiteCatalog.allComponents().forEach { c ->
+            val downloads = c.postInstallSteps.isNotEmpty() || c.aptPackages.isNotEmpty()
+            if (downloads) {
+                assertTrue(
+                    "component ${c.id} installs something but reserves no space",
+                    c.estimatedBytes > 0L,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `deep link ids resolve to a bundle or an online tool`() {
+        // [T-devsuite-tool-link] installTargetById is what the market screen
+        // uses for minis://devsuite/install/<id>. Resolving only bundles made
+        // an online-tool link a silent no-op: the link was consumed, the
+        // market opened, nothing installed, no error.
+        assertNotNull(DevSuiteCatalog.installTargetById("android-suite"))
+        val tool = DevSuiteCatalog.installTargetById("llama-cpp")
+        assertNotNull(tool)
+        assertEquals(listOf("llama-cpp"), tool!!.components.map { it.id })
+        assertTrue(DevSuiteCatalog.isOnlineToolId("llama-cpp"))
+        assertFalse(DevSuiteCatalog.isOnlineToolId("android-suite"))
+        assertNull(DevSuiteCatalog.installTargetById("no-such-thing"))
+        // Every id the link path can produce must be a valid link target.
+        (DevSuiteCatalog.bundles.map { it.id } + DevSuiteCatalog.onlineTools.map { it.id })
+            .forEach { id ->
+                assertNotNull("no install target for $id", DevSuiteCatalog.installTargetById(id))
+                assertEquals(DevSuiteCatalog.installLink(id), "minis://devsuite/install/$id")
+            }
     }
 
     @Test

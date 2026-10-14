@@ -1031,7 +1031,8 @@ class BrowserUseManager(
     /**
      * Public live-preview snapshot — mirrors iOS `webView.takeSnapshot()`.
      * Called by the UI on a timer (e.g. every 3s while a tool is streaming) so
-     * the Minis Computer sheet and FloatingToolStatusBar can show the browser
+     * the Minis Computer sheet and the in-app tool-status capsule (the quiet
+     * composer pill that replaced the old full-width bar) can show the browser
      * state even for actions that don't save an imageFilePath (get_readable,
      * get_text, execute_js, fetch, etc.).
      */

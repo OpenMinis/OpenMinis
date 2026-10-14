@@ -356,18 +356,8 @@
     <string name="memory_file_empty">Gol</string>
     <string name="common_close">Închide</string>
     <string name="common_skip">Omite</string>
-    <string name="common_next">Înainte</string>
-    <string name="onboarding_welcome_title">Bine ai venit în Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Agentul tău Minis Ultra, cu terminal, browser și acces direct la dispozitiv.</string>
-    <string name="onboarding_get_started">Începe</string>
-    <string name="onboarding_provider_title">Adaugă un furnizor</string>
-    <string name="onboarding_provider_subtitle">Pentru a începe, introdu cheia API a cel puțin unui furnizor.</string>
-    <string name="onboarding_provider_api_key_label">Cheie API %1$s</string>
-    <string name="onboarding_save_api_key">Salvează cheia API</string>
-    <string name="onboarding_saved">Salvat</string>
     <string name="onboarding_select_models_title">Alege modelele</string>
     <string name="onboarding_select_models_subtitle">Alege cel mult 3 modele pentru grupul tău implicit.</string>
-    <string name="onboarding_search_models">Caută modele</string>
     <string name="onboarding_filter_models">Filtrează modelele</string>
     <string name="onboarding_done_count">Gata (%1$d/3)</string>
     <string name="onboarding_loading_models">Se încarcă modelele…</string>
@@ -629,8 +619,6 @@
     <string name="appearance_auto_grouping_subtitle">Pune conversațiile noi într-un grup potrivit</string>
     <string name="appearance_auto_grouping_footer">Când titlul unei conversații este generat prima dată, conversația este pusă și într-un grup existent potrivit. Rulează o singură dată pentru fiecare conversație, folosește doar grupurile create de tine și lasă conversația fără grup dacă nimic nu se potrivește.</string>
     <string name="appearance_section_tool_preview">Bara de stare a instrumentului</string>
-    <string name="appearance_tool_preview_footer">Afișează o previzualizare live lângă bara de stare a instrumentului, cât timp Agentul lucrează.</string>
-    <string name="appearance_tool_preview_title">Fereastra de previzualizare a instrumentului</string>
     <string name="appearance_section_auto_focus_after_reply">Focalizare automată pe câmp după răspuns</string>
     <string name="appearance_auto_focus_after_reply_title">Focalizare automată pe câmp după răspuns</string>
     <string name="appearance_auto_focus_after_reply_footer">Când este activat, tastatura apare automat după ce modelul termină răspunsul, astfel încât câmpul să fie pregătit pentru următoarea întrebare. Activat implicit; dezactivează-l dacă preferi să citești răspunsul fără ca tastatura să apară pe neașteptate.</string>
@@ -1801,4 +1789,13 @@
     <string name="dev_suite_not_installed">Neinstalat</string>
     <string name="dev_suite_required">obligatoriu</string>
     <string name="dev_suite_assemble">Asamblează</string>
+    <string name="dev_suite_start_install">Se pornește instalarea</string>
+    <string name="dev_suite_apt_failed">Instalarea apt a eșuat (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Pas eșuat (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Instalarea s-a încheiat, dar testul de pregătire nu a trecut</string>
+    <string name="dev_suite_interrupted">Instalare întreruptă</string>
+    <string name="dev_suite_no_space">Spațiu insuficient: sunt necesari aproximativ %1$d GB, disponibil %2$d GB</string>
+    <string name="dev_suite_skipped_dep">Omis: %1$s nu a fost instalat</string>
+    <string name="dev_suite_uninstall_failed">Dezinstalarea a eșuat (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Eliminați %1$s din sandbox? Fișierele descărcate și legăturile de comandă sunt șterse; pachetele apt rămân instalate.</string>
 </resources>

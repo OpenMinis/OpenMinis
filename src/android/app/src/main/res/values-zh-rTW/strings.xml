@@ -406,18 +406,8 @@
     <string name="memory_file_empty">空</string>
     <string name="common_close">關閉</string>
     <string name="common_skip">跳過</string>
-    <string name="common_next">下一步</string>
-    <string name="onboarding_welcome_title">歡迎使用 Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">集終端、瀏覽器與裝置本機存取於一身的 AI 助手。</string>
-    <string name="onboarding_get_started">開始使用</string>
-    <string name="onboarding_provider_title">新增提供方</string>
-    <string name="onboarding_provider_subtitle">請至少為一個提供方輸入 API 金鑰以開始使用。</string>
-    <string name="onboarding_provider_api_key_label">%1$s API 金鑰</string>
-    <string name="onboarding_save_api_key">儲存 API 金鑰</string>
-    <string name="onboarding_saved">已儲存</string>
     <string name="onboarding_select_models_title">選擇模型</string>
     <string name="onboarding_select_models_subtitle">為預設模型組選擇最多 3 個模型。</string>
-    <string name="onboarding_search_models">搜尋模型</string>
     <string name="onboarding_filter_models">篩選模型</string>
     <string name="onboarding_done_count">完成 (%1$d/3)</string>
     <string name="onboarding_loading_models">正在載入模型…</string>
@@ -681,8 +671,6 @@
     <string name="appearance_auto_grouping_subtitle">把新對話歸入相符的群組</string>
     <string name="appearance_auto_grouping_footer">當對話的標題首次產生時，一併把它歸入相符的既有群組。每個對話只執行一次，只會使用您已建立的群組；若沒有相符的群組，則讓對話維持未分組。</string>
     <string name="appearance_section_tool_preview">工具狀態列</string>
-    <string name="appearance_tool_preview_footer">在 Agent 執行期間，於工具狀態列旁顯示即時預覽縮圖。</string>
-    <string name="appearance_tool_preview_title">工具預覽視窗</string>
     <string name="appearance_section_auto_focus_after_reply">回覆後自動聚焦輸入框</string>
     <string name="appearance_auto_focus_after_reply_title">回覆後自動聚焦輸入框</string>
     <string name="appearance_auto_focus_after_reply_footer">啟用後，模型回覆結束時鍵盤會自動彈出，讓輸入框隨時可以接著追問。預設為開啟；若您偏好在閱讀回覆時不被鍵盤打斷，可以關閉。</string>
@@ -1888,4 +1876,13 @@
     <string name="dev_suite_not_installed">未安裝</string>
     <string name="dev_suite_required">必要</string>
     <string name="dev_suite_assemble">裝配</string>
+    <string name="dev_suite_start_install">開始安裝</string>
+    <string name="dev_suite_apt_failed">apt 安裝失敗（exit %1$d）</string>
+    <string name="dev_suite_step_failed">步驟失敗（exit %1$d）：%2$s</string>
+    <string name="dev_suite_probe_failed">安裝完成但探針未通過</string>
+    <string name="dev_suite_interrupted">安裝被中斷</string>
+    <string name="dev_suite_no_space">儲存空間不足：需要約 %1$d GB，可用 %2$d GB</string>
+    <string name="dev_suite_skipped_dep">已跳過：%1$s 未安裝成功</string>
+    <string name="dev_suite_uninstall_failed">解除安裝失敗（exit %1$d）</string>
+    <string name="dev_suite_remove_confirm">從沙箱移除 %1$s？將刪除已下載的檔案與命令連結，apt 套件保持不變。</string>
 </resources>

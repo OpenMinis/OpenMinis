@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Accessibility
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BarChart
@@ -108,6 +109,12 @@ fun SettingsScreen(
     onSoulClick: () -> Unit = {},
     onEvolutionClick: () -> Unit = {},
     onPermissionsClick: () -> Unit = {},
+    // [T-android-system-permissions-entry] SystemPermissionsScreen existed but
+    // had no navigation to it anywhere in the app (see Routes.SYSTEM_PERMISSIONS),
+    // which also hid the ONLY surface for the voice-correction consent toggle /
+    // data wipe and the force-stop accessibility repair row. Default no-op keeps
+    // older callers and previews compiling.
+    onSystemPermissionsClick: () -> Unit = {},
     onUsageClick: () -> Unit = {},
     onAppearanceClick: () -> Unit = {},
     onLogsClick: () -> Unit = {},
@@ -325,6 +332,20 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_section_permissions),
                     subtitle = stringResource(R.string.settings_permissions_subtitle),
                     onClick = onPermissionsClick,
+                    showDivider = true,
+                )
+                // [T-android-system-permissions-entry] OS-level grants the app
+                // cannot toggle itself: accessibility service status + the
+                // force-stop repair, OEM keep-alive guidance, and the
+                // voice-correction data consent. Subtitle stays null because no
+                // string key describes this page on its own and res/values is
+                // outside this change.
+                SettingsItem(
+                    icon = Icons.Outlined.Accessibility,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.system_permissions_title),
+                    subtitle = null,
+                    onClick = onSystemPermissionsClick,
                     showDivider = false,
                 )
             }

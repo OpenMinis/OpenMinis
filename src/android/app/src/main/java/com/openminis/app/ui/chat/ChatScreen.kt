@@ -1973,6 +1973,11 @@ fun ChatScreen(
             showFloatingToolBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_FLOATING_TOOL_BAR, true)
             showCompletedToolCards = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)
             foldAiProcess = sp.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, com.openminis.app.ui.settings.DEFAULT_FOLD_AI_PROCESS)
+            // [T-composer-mic-toggle] The listener below handles this key, but
+            // this function is the ON_RESUME safety net for notifications that
+            // never arrive (a `minis-config set appearance.…` write landing on a
+            // different SharedPreferences instance), so it must cover every key.
+            showMicButton = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_MIC_BUTTON, com.openminis.app.ui.settings.DEFAULT_SHOW_MIC_BUTTON)
             showSubAgentBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)
             autoFocusAfterReply = sp.getBoolean(com.openminis.app.ui.settings.KEY_AUTO_FOCUS_AFTER_REPLY, true)
             showChatTitlePill = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)
@@ -2994,8 +2999,6 @@ fun ChatScreen(
             // Messages + scroll-to-bottom button
             Box(modifier = Modifier.weight(1f)) {
                 var toolBarHeightPx by remember { mutableStateOf(0) }
-                val density = LocalDensity.current
-                val toolBarHeightDp = with(density) { toolBarHeightPx.toDp() }
                 // T166 / T170 / T173: bottomReserve must clear the visible
                 // top of the floating activity pill. Layout primitive comes
                 // from ToolActivityPill: capsule height 34dp, mounted with
@@ -3026,7 +3029,7 @@ fun ChatScreen(
                 //
                 // Asymmetry between the bar's render condition and its
                 // bottomReserve gate: [lastToolBlocks] (drives whether to
-                // mount FloatingToolStatusBar) merges `messages` with the
+                // mount the ToolActivityPill) merges `messages` with the
                 // streaming-side-channel `streamingById`, so during a live
                 // turn the in-flight tool's toolStatus shows up there →
                 // bar renders. [hasFloatingTools] (drives bottomReserve)
@@ -3062,69 +3065,12 @@ fun ChatScreen(
                 // "user opened it, it stays open" — and nothing else closes a
                 // settled card either.
                 val manualReopenedCards = remember(sessionId) { mutableSetOf<String>() }
-                // [P-process-card] runningCardKeys as of the previous effect
-                // pass, so a pass can tell "just settled" (was running, now
-                // is not) from "has been settled for a while".
-                var prevRunningCardKeys by remember(sessionId) { mutableStateOf(emptySet<String>()) }
-                // Derived from the messages rather than flatItems: the row
-                // list is built further down, inside the list's own scope.
-                // A running card auto-expands unless the user collapsed it by
-                // hand; once the run settles the card leaves this set and the
-                // expanded flag drops with it, which is the auto-collapse.
-                // Keyed on the block STRUCTURE, not the streaming text: a card
-                // starts and settles when blocks are added or their status
-                // flips, never when a token arrives. Recomputing the row
-                // projection per token would rebuild the whole list twice.
-                val processStructure = remember(messages, streamingById) {
-                    val merged = if (streamingById.isEmpty()) messages
-                        else mergeStreamingOverlay(messages, streamingById)
-                    merged.joinToString("\u0001") { m ->
-                        m.id + ":" + m.isStreaming + ":" + m.isAwaitingModelResponse + ":" +
-                            m.toolBlocks.joinToString(",") { b ->
-                                b.id + "/" + b.kind + "/" + (b.toolStatus?.name ?: "") + "/" +
-                                    b.content.isNotEmpty()
-                            }
-                    }
-                }
-                val runningCardKeys = remember(processStructure, foldAiProcess, showSubAgentBar, activeSubAgentToolIds) {
-                    if (!foldAiProcess) emptySet() else {
-                        val merged = if (streamingById.isEmpty()) messages
-                            else mergeStreamingOverlay(messages, streamingById)
-                        buildFlatChatItems(
-                            merged,
-                            foldAiProcess = true,
-                            activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
-                        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>()
-                            .filter { it.running }
-                            .map { it.messageId }
-                            .toSet()
-                    }
-                }
-                LaunchedEffect(runningCardKeys) {
-                    // Only ever ADDS a running card the user has not collapsed,
-                    // and only DROPS a card once its run has settled. A card
-                    // the user opened by hand is not in runningCardKeys, so it
-                    // is never touched here.
-                    val auto = runningCardKeys.filterNot { it in userCollapsedCards }
-                    val settled = expandedProcessIds.filter { it in runningCardKeys && it !in auto }.toSet()
-                    val next = (expandedProcessIds - settled) + auto
-                    if (next != expandedProcessIds) expandedProcessIds = next
-                    // [P-process-card] A card that JUST settled (was running,
-                    // now is not) auto-closes 500ms later, not on the same
-                    // frame: the reply text lands first and the last steps
-                    // stay readable for a beat — the same settle the thinking
-                    // block gives its own content. A card the user re-opened
-                    // by hand during (or after) the window is never closed
-                    // here; manualReopenedCards is the "keep open" mark.
-                    val justSettled = prevRunningCardKeys - runningCardKeys
-                    prevRunningCardKeys = runningCardKeys
-                    val closable = justSettled.filter { it in expandedProcessIds && it !in manualReopenedCards }
-                    if (closable.isNotEmpty()) {
-                        delay(500)
-                        val stillOpen = closable.filter { it in expandedProcessIds && it !in manualReopenedCards }
-                        if (stillOpen.isNotEmpty()) expandedProcessIds = expandedProcessIds - stillOpen
-                    }
-                }
+                // [P-process-card] The running-card set and the expand/settle
+                // effect live BELOW the `flatItems` declaration: they derive
+                // from the published rows instead of re-running the flatten
+                // here in composition. `AssistantProcessSummary.running` never
+                // reads expandedProcessIds (ChatFlatItems 496/542/603/1016),
+                // so the rows already carry the answer.
                 // [P0-4] The floating surface is the ToolActivityPill (34dp
                 // capsule). Its mount gate and this reserve predicate must be
                 // the SAME decision, so both route through
@@ -3228,6 +3174,52 @@ fun ChatScreen(
                 // computation on every new emission.
                 var flatItems by remember(sessionId) {
                     mutableStateOf<List<FlatChatItem>>(emptyList())
+                }
+
+                // [P-process-card] Which process cards are mid-run, read off
+                // the rows the pipeline already published. This used to be
+                // computed in composition from `messages` + `streamingById`:
+                // a whole-transcript structure string on every streaming tick
+                // (16-50ms) plus a SECOND complete buildFlatChatItems pass per
+                // block-structure flip — exactly the O(transcript) main-thread
+                // work the frozen/live pipeline below spends real effort
+                // keeping off the composition thread. Deriving is safe because
+                // `running` is a function of the blocks and the stream, never
+                // of expandedProcessIds, so the published rows carry it.
+                val runningCardKeys = remember(flatItems, foldAiProcess) {
+                    if (!foldAiProcess) emptySet<String>()
+                    else flatItems
+                        .filterIsInstance<FlatChatItem.AssistantProcessSummary>()
+                        .filterTo(LinkedHashSet()) { it.running }
+                        .mapTo(HashSet()) { it.messageId }
+                }
+                // runningCardKeys as of the previous pass, so a pass can tell
+                // "just settled" from "has been settled for a while".
+                var prevRunningCardKeys by remember(sessionId) { mutableStateOf(emptySet<String>()) }
+                LaunchedEffect(runningCardKeys) {
+                    // Only ever ADDS a running card the user has not collapsed,
+                    // and only DROPS a card once its run has settled. A card
+                    // the user opened by hand is not in runningCardKeys, so it
+                    // is never touched here.
+                    val auto = runningCardKeys.filterNot { it in userCollapsedCards }
+                    val settled = expandedProcessIds.filter { it in runningCardKeys && it !in auto }.toSet()
+                    val next = (expandedProcessIds - settled) + auto
+                    if (next != expandedProcessIds) expandedProcessIds = next
+                    // [P-process-card] A card that JUST settled (was running,
+                    // now is not) auto-closes 500ms later, not on the same
+                    // frame: the reply text lands first and the last steps
+                    // stay readable for a beat — the same settle the thinking
+                    // block gives its own content. A card the user re-opened
+                    // by hand during (or after) the window is never closed
+                    // here; manualReopenedCards is the "keep open" mark.
+                    val justSettled = prevRunningCardKeys - runningCardKeys
+                    prevRunningCardKeys = runningCardKeys
+                    val closable = justSettled.filter { it in expandedProcessIds && it !in manualReopenedCards }
+                    if (closable.isNotEmpty()) {
+                        delay(500)
+                        val stillOpen = closable.filter { it in expandedProcessIds && it !in manualReopenedCards }
+                        if (stillOpen.isNotEmpty()) expandedProcessIds = expandedProcessIds - stillOpen
+                    }
                 }
 
                 // [T-android-search-jump] Shared row-count prefix: the number
@@ -3505,7 +3497,14 @@ fun ChatScreen(
                 // scope. The flatten still runs per token (cheap-ish; ran
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
-                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds, showSubAgentBar) {
+                // [P-process-card] `expandedProcessIds` is deliberately NOT an
+                // effect key: a card being born or settling used to cancel and
+                // restart this whole pipeline, throwing away the cached frozen
+                // rows and re-flattening every frozen message twice per turn (and
+                // re-firing StreamPerfMonitor.turnStart mid-turn). It now arrives
+                // as a flow input, and the frozen prefix is rebuilt when — and
+                // only when — it actually changes.
+                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, showSubAgentBar) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
                     // `messages` is CONSTANT within this effect (the effect is
@@ -3535,6 +3534,18 @@ fun ChatScreen(
                     var frozenRows: List<FlatChatItem> = emptyList()
                     var frozenKeys: Set<String> = emptySet()
                     var frozenSplitIdx = -1
+                    var frozenExpanded: Set<String> = emptySet()
+                    // [T-android-subagent-ids-frozen-input]
+                    // `effectiveBlocks` hides a sub-agent transcript card while
+                    // its run is still live, so the roster is a build input of
+                    // the frozen prefix like expandedProcessIds is. It must be
+                    // part of the reuse check: a run that settles AFTER the
+                    // turn drained changes neither splitIdx nor the expansion
+                    // set, and the finished card would stay hidden. Read from
+                    // the tracker flow rather than the composition-captured
+                    // `activeSubAgentToolIds`, which is frozen for the whole
+                    // effect run (a plain `remember(subAgentMembers)` value).
+                    var frozenActiveSubAgent: Set<String> = emptySet()
                     var streamWasActive = false
                     // [T-android-stream-pipeline-incremental] Flush the perf
                     // turn when this effect is CANCELLED mid-turn: the
@@ -3548,10 +3559,16 @@ fun ChatScreen(
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
-                    ) { msgs, stream -> msgs to stream }
+                        snapshotFlow { expandedProcessIds },
+                        com.openminis.app.service.SubAgentActivityTracker.members,
+                    ) { msgs, stream, expanded, members ->
+                        Triple(msgs, stream, expanded to members.mapTo(HashSet()) { it.parentToolId })
+                    }
                         .conflate()
                         .sample(80L)
-                        .collect { (msgs, stream) ->
+                        .collect { (msgs, stream, expandedAndActive) ->
+                            val expandedIds = expandedAndActive.first
+                            val activeIds = if (showSubAgentBar) expandedAndActive.second else emptySet()
                             val tickStartNs = System.nanoTime()
                             if (stream.isNotEmpty() && !streamWasActive) {
                                 streamWasActive = true
@@ -3566,7 +3583,17 @@ fun ChatScreen(
                                 val i = msgs.indexOfFirst { stream.containsKey(it.id) }
                                 if (i < 0) msgs.size else i
                             }
-                            val frozenReused = splitIdx == frozenSplitIdx
+                            // [P-process-card-dup] The index the two builds
+                            // hand a boundary-round process card over at. Only
+                            // meaningful while a live suffix actually gets built
+                            // below it: with the stream idle the frozen prefix
+                            // IS the whole list, so the trailing run's card has
+                            // no other owner and must be emitted normally
+                            // (-1 = no boundary).
+                            val cardBoundary = if (splitIdx < msgs.size) splitIdx else -1
+                            val frozenReused = splitIdx == frozenSplitIdx &&
+                                expandedIds == frozenExpanded &&
+                                activeIds == frozenActiveSubAgent
                             if (!frozenReused) {
                                 val tBuildStart = System.nanoTime()
                                 val wasEmptyPre = flatItems.isEmpty()
@@ -3598,14 +3625,17 @@ fun ChatScreen(
                                         sessionId,
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
-                                        expandedProcessIds = expandedProcessIds,
-                                        activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
+                                        expandedProcessIds = expandedIds,
+                                        activeSubAgentToolIds = activeIds,
+                                        processCardBoundary = cardBoundary,
                                     )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
                                 frozenRows = rows
                                 frozenKeys = rows.mapTo(HashSet()) { it.key }
                                 frozenSplitIdx = splitIdx
+                                frozenExpanded = expandedIds
+                                frozenActiveSubAgent = activeIds
                                 // [T-android-coldload-offmain-parse] Parallel
                                 // viewport prewarm: block-parse + inline-warm
                                 // the newest (viewport-candidate) markdown
@@ -3685,8 +3715,12 @@ fun ChatScreen(
                                         seedKeys = frozenKeys,
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
-                                        expandedProcessIds = expandedProcessIds,
-                                        activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
+                                        expandedProcessIds = expandedIds,
+                                        activeSubAgentToolIds = activeIds,
+                                        // [P-process-card-dup] The frozen prefix
+                                        // suppressed this round's boundary card;
+                                        // this build owns it, as its first row.
+                                        processCardBoundary = cardBoundary,
                                     )
                                 }
                             }
@@ -3807,7 +3841,6 @@ fun ChatScreen(
                 fun FlatChatItem.isCompacted(): Boolean = when (this) {
                     is FlatChatItem.UserBubble -> grayedMap[message.id] == true
                     is FlatChatItem.AssistantHeader -> grayedMap[messageId] == true
-                    is FlatChatItem.AssistantText -> grayedMap[messageId] == true
                     is FlatChatItem.AssistantMarkdownBlock -> grayedMap[messageId] == true
                     is FlatChatItem.AssistantThinking -> grayedMap[messageId] == true
                     is FlatChatItem.AssistantProcessSummary -> grayedMap[messageId] == true
@@ -4171,7 +4204,6 @@ fun ChatScreen(
                         val tHangDiagLen = remember(item.key) {
                             when (item) {
                                 is FlatChatItem.UserBubble -> item.message.content.length
-                                is FlatChatItem.AssistantText -> item.messageMarkdown.length
                                 else -> 0
                             }
                         }
@@ -4342,55 +4374,14 @@ fun ChatScreen(
                             )
                             } // close UserBubble SideEffect + UserMessageBubble block
                             is FlatChatItem.AssistantHeader -> AssistantHeader(item.speakerName, item.speakerVendor)
-                            is FlatChatItem.AssistantText -> BoundsTrackedBlock(
-                                messageId = item.messageId,
-                                slotKey = "text:${item.block.id}",
-                                markdown = item.messageMarkdown,
-                            ) {
-                                // T-android-gc-storm-issue17: collapse oversized frozen
-                                // assistant text before feeding the markdown parser, which
-                                // is the GC-storm hotspot for legacy sessions.
-                                LargeContentGuard(
-                                    content = item.block.content,
-                                    isStreaming = item.isStreaming,
-                                    stableKey = "text:${item.messageId}:${item.block.id}",
-                                ) {
-                                    SideEffect {
-                                        selectionController.rememberMessageMarkdown(item.messageId, item.messageMarkdown)
-                                    }
-                                    if (!item.isStreaming && item.block.content.isNotBlank()) {
-                                        TranslateCorner(
-                                            button = {
-                                                AssistantTranslateButton(
-                                                    source = item.block.content,
-                                                    taskScope = coroutineScope,
-                                                    onTranslated = {
-                                                        viewModel.replaceAssistantTextBlock(item.messageId, item.block.id, it)
-                                                    },
-                                                )
-                                            },
-                                        ) {
-                                            StreamingMarkdownText(
-                                                content = item.block.content,
-                                                isStreaming = item.isStreaming,
-                                                shardId = TextShardId(
-                                                    messageId = item.messageId,
-                                                    shardId = "text:${item.block.id}",
-                                                ),
-                                            )
-                                        }
-                                    } else {
-                                        StreamingMarkdownText(
-                                            content = item.block.content,
-                                            isStreaming = item.isStreaming,
-                                            shardId = TextShardId(
-                                                messageId = item.messageId,
-                                                shardId = "text:${item.block.id}",
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
+                            // Assistant text renders ONLY here: the
+                            // FlatChatItem.AssistantText row class was deleted
+                            // (nothing ever built one), and its branch below is
+                            // the one every text block reaches.
+                            // T-android-gc-storm-issue17: LargeContentGuard
+                            // collapses oversized frozen assistant text before
+                            // feeding the markdown parser — the GC-storm hotspot
+                            // for legacy sessions.
                             is FlatChatItem.AssistantMarkdownBlock -> BoundsTrackedBlock(
                                 messageId = item.messageId,
                                 slotKey = "mdblock:${item.parentBlockId}:${item.blockIndex}",

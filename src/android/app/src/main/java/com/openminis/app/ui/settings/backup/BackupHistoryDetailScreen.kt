@@ -430,7 +430,26 @@ internal fun durationText(millis: Long): String {
     return if (total < 60) "${total}s" else "${total / 60}m ${total % 60}s"
 }
 
-/** Local time-of-day for a log line. */
-internal fun formatTimeOnly(millis: Long): String =
-    java.text.DateFormat.getTimeInstance(java.text.DateFormat.MEDIUM)
-        .format(java.util.Date(millis))
+/**
+ * Local time-of-day for a log line.
+ *
+ * [T-android-dateformat-per-call] Cached per locale: this ran once per log row
+ * and built a new java.text.DateFormat each time, on a screen that re-composes
+ * its whole log list whenever the record's StateFlow ticks.
+ */
+private val timeOnlyFormatters =
+    java.util.concurrent.ConcurrentHashMap<java.util.Locale, java.time.format.DateTimeFormatter>()
+
+internal fun formatTimeOnly(millis: Long): String {
+    val locale = java.util.Locale.getDefault()
+    val formatter = timeOnlyFormatters.getOrPut(locale) {
+        // No ofLocalizedTime(.., Locale) overload exists; withLocale() is applied
+        // to the style-based formatter, which resolves its pattern against its own
+        // locale at format time. The cache key is that same locale.
+        java.time.format.DateTimeFormatter
+            .ofLocalizedTime(java.time.format.FormatStyle.MEDIUM)
+            .withLocale(locale)
+            .withZone(java.time.ZoneId.systemDefault())
+    }
+    return formatter.format(java.time.Instant.ofEpochMilli(millis))
+}

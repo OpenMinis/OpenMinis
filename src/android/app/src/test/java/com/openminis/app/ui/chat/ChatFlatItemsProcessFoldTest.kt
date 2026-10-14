@@ -3,6 +3,7 @@ package com.openminis.app.ui.chat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -61,7 +62,6 @@ class ChatFlatItemsProcessFoldTest {
         when (item) {
             is FlatChatItem.UserBubble -> "user"
             is FlatChatItem.AssistantHeader -> "header"
-            is FlatChatItem.AssistantText -> "text"
             is FlatChatItem.AssistantMarkdownBlock -> "md"
             is FlatChatItem.AssistantProcessSummary -> "summary"
             is FlatChatItem.AssistantThinking -> "thinking"
@@ -489,6 +489,91 @@ class ChatFlatItemsProcessFoldTest {
         assertEquals(3, summary.steps.count { it.kind == "tool_use" })
     }
 
+    // ── [P-process-card-dup] frozen prefix / live suffix card hand-over ──
+    //
+    // ChatScreen builds the rows in two passes while a turn streams: the
+    // frozen prefix over the messages BEFORE the streamed one (so it never
+    // sees it) and the live suffix over the merged full list. Both fold the
+    // same still-open run, so without the `processCardBoundary` rule a resumed
+    // run rendered two cards — one settled ✅ beside one spinner — and the
+    // round key moved every time the round gained an assistant row.
+
+    private val resumedMessages = listOf(
+        user("u1"),
+        assistant(id = "a1", blocks = listOf(thinking("th1"), tool(id = "t1"))),
+    )
+
+    private fun boundaryBuild(messages: List<ChatMessage>, fromIndex: Int, boundary: Int) =
+        buildFlatChatItems(
+            messages,
+            fromIndex = fromIndex,
+            foldAiProcess = true,
+            showCompletedToolCards = false,
+            processCardBoundary = boundary,
+        )
+
+    @Test
+    fun `streamed step continuing the boundary run yields one running card`() {
+        val streaming = assistant(
+            id = "a2",
+            streaming = true,
+            blocks = listOf(tool(id = "t2", status = ToolBlockStatus.RUNNING)),
+        )
+        val all = resumedMessages + streaming
+        // The frozen build sees messages[0..2); the live build sees the whole
+        // list and only emits rows from index 2.
+        val frozen = boundaryBuild(resumedMessages, fromIndex = 0, boundary = 2)
+        val live = boundaryBuild(all, fromIndex = 2, boundary = 2)
+        val rows = frozen + live
+        val cards = rows.filterIsInstance<FlatChatItem.AssistantProcessSummary>()
+        assertEquals("rows=${kinds(rows)}", 1, cards.size)
+        val card = cards.single()
+        // Owned by the LIVE build: the run is still in flight, so the single
+        // surviving card is the spinning one, not the frozen ✅.
+        assertTrue(card.running)
+        assertEquals(listOf("th1", "t1", "t2"), card.steps.map { it.id })
+        // Keyed on the round's user message, identical in both builds.
+        assertEquals("u1--th1", card.messageId)
+        // The run's steps never leak back into the list beside the card.
+        assertEquals(0, rows.count { it is FlatChatItem.AssistantThinking })
+        assertEquals(0, rows.count { it is FlatChatItem.AssistantToolUse })
+    }
+
+    @Test
+    fun `run closed by the streamed reply still gets its card from the live build`() {
+        // The run's last block sits in the FROZEN range, so the live build
+        // cannot emit it from inside the row loop — it takes the hand-over and
+        // puts the card first, right below the steps it summarises. Suppressing
+        // without handing over would drop the card and its steps entirely.
+        val streaming = assistant(id = "a2", streaming = true, blocks = listOf(text("tx1", "answer")))
+        val all = resumedMessages + streaming
+        val frozen = boundaryBuild(resumedMessages, fromIndex = 0, boundary = 2)
+        val live = boundaryBuild(all, fromIndex = 2, boundary = 2)
+        val rows = frozen + live
+        val cards = rows.filterIsInstance<FlatChatItem.AssistantProcessSummary>()
+        assertEquals("rows=${kinds(rows)}", 1, cards.size)
+        assertEquals("u1--th1", cards.single().messageId)
+        assertFalse(cards.single().running)
+        assertSame(live.first(), cards.single())
+        assertEquals(0, rows.count { it is FlatChatItem.AssistantThinking })
+    }
+
+    @Test
+    fun `card key is stable while the round keeps gaining assistant rows`() {
+        val before = buildFlatChatItems(resumedMessages, foldAiProcess = true)
+            .filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
+        val after = buildFlatChatItems(
+            resumedMessages + assistant(id = "a2", blocks = listOf(tool(id = "t2"), text("tx1"))),
+            foldAiProcess = true,
+            showCompletedToolCards = false,
+        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>().first()
+        // Re-keying on the round's LAST assistant used to rename this card the
+        // moment the resume appended a row: the LazyColumn threw the composed
+        // card away and the user's collapse went with it.
+        assertEquals(before.messageId, after.messageId)
+        assertEquals("u1--th1", after.messageId)
+    }
+
     // ── Overlay (single channel) ─────────────────────────────────────────
 
     @Test
@@ -501,18 +586,6 @@ class ChatFlatItemsProcessFoldTest {
         // every step in-list, so nothing floats when folding is on.
         assertFalse(isFloatingProcessTool(running, foldAiProcess = true))
         assertFalse(isFloatingProcessTool(thinking(), foldAiProcess = false))
-    }
-
-    @Test
-    fun `folded summary still exposes tool chips for detail`() {
-        val items = buildFlatChatItems(
-            listOf(assistant(blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2"), text()))),
-            foldAiProcess = true,
-        )
-        val summary = items.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
-        assertEquals(2, summary.processTools.size)
-        assertEquals(listOf("t1", "t2"), summary.processTools.map { it.id })
-        assertEquals(listOf("bash", "bash"), summary.processTools.map { it.title })
     }
 
     @Test

@@ -280,10 +280,11 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
      * helpers pick the bundle up automatically.
      */
     private fun saveTokensJson(json: JSONObject) {
-        // Stash under the base class's own key. We can't call the
-        // private member directly, so re-implement the single-line write
-        // with the same key format.
-        val pref = context.getSharedPreferences("dummy", Context.MODE_PRIVATE)
+        // The discarded `getSharedPreferences("dummy", …)` local that used to sit
+        // here was a leftover from comparing the base's private `saveTokens` with
+        // this helper. It had no effect on the write below, but it DID create the
+        // prefs file — so every token save dropped an empty `dummy.xml` in
+        // shared_prefs. Deleted.
         // Falls back to using the base class's saveOAuthString helper,
         // but the canonical key the base reads from is "oauth_tokens_<id>".
         // The helper saves under "oauth_<key>_<id>" — so key="tokens"
@@ -338,7 +339,16 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
      * case so a manual API-key fallback or a later subscription bump
      * can pick up where we left off without re-OAuthing.
      */
-    override suspend fun refreshToken(): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * [T-oauth-refresh-race] Overrides the base's *un-guarded* refresh worker
+     * rather than `refreshToken()`, so xAI inherits the base class' single-flight
+     * lock + "fresher token already present" coalescing for free. Overriding
+     * `refreshToken()` (as this used to do) put xAI back on the un-locked path —
+     * two sends on one instance (chat + title/compaction/sub-agent) each POSTed a
+     * refresh, and the loser's `validAccessToken()` then evaluated the PRE-refresh
+     * expiry and called `logout()`, wiping the bundle the winner had just stored.
+     */
+    override suspend fun performRefreshToken(): Boolean = withContext(Dispatchers.IO) {
         val stored = JSONObject(
             loadOAuthString("tokens").takeUnless { it.isNullOrEmpty() }
                 ?: return@withContext false,

@@ -23,18 +23,61 @@ command -v cc >/dev/null 2>&1 || {
 export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
 export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
 
-sh="/tmp/rustup-init-$$.sh"
+# [T-devsuite-verify] This used to be `curl … rsproxy.cn/rustup-init.sh` and
+# then `sh "$sh"` — an unverified download-and-run as root, with a fallback to
+# a proxy mirror nobody attests. rustup publishes an integrity-checked
+# bootstrap binary instead: dist/<target>/rustup-init plus
+# dist/<target>/rustup-init.sha256, so the thing we execute is checksummed and
+# the shell script is never run.
+ARCH=$(uname -m)
+case "$ARCH" in
+  aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+  x86_64)        TARGET=x86_64-unknown-linux-gnu ;;
+  *)             TARGET="" ;;
+esac
+[ -n "$TARGET" ] || { echo "unsupported host arch ($ARCH) for the rustup bootstrap binary" >&2; exit 1; }
+
+DIST_ORIGIN="https://static.rust-lang.org/rustup/dist/$TARGET"
+DIST_MIRROR="https://rsproxy.cn/rustup/dist/$TARGET"
+NAME="rustup-init-$TARGET"
+bin="/tmp/$NAME-$$"
+payload_name="$NAME"
+
 . /usr/local/lib/minis/offline.sh
-if ! resume_fetch "$sh" rustup-init.sh \
-  "https://rsproxy.cn/rustup-init.sh" \
-  "https://sh.rustup.rs"
-then
-  echo "rustup-init download failed. Offline fallback: put rustup-init.sh in /var/minis/shared/offline/" >&2
+
+# The digest always comes from the ORIGIN host (rsproxy mirrors the same file
+# and is only used for the payload itself), and rust publishes one, so a
+# missing digest is a hard stop rather than a "download and run it anyway".
+_MINIS_EXPECTED=""
+_sha=""
+shafile="/tmp/$NAME-sha256-$$"
+if curl -fsSL --connect-timeout 12 --max-time 30 -o "$shafile" "$DIST_ORIGIN/rustup-init.sha256"; then
+  _sha=$(cut -d' ' -f1 < "$shafile" | tr -d '\r\n' | head -1)
+fi
+rm -f "$shafile"
+case "$_sha" in
+  [0-9a-fA-F][0-9a-fA-F]*) _MINIS_EXPECTED="sha256 $_sha" ;;
+esac
+if [ -z "$_MINIS_EXPECTED" ]; then
+  echo "could not fetch $DIST_ORIGIN/rustup-init.sha256 — refusing to run an unverified rustup bootstrap" >&2
+  echo "Offline path: see minis-devsuite-offline-list (pin the digest with MINIS_DEVSUITE_SHA256=\"$NAME=<sha256>\")." >&2
   exit 1
 fi
 
-sh "$sh" -y --default-toolchain stable --profile minimal --no-modify-path
-rm -f "$sh"
+if ! resume_fetch "$bin" "$payload_name" \
+  "$DIST_ORIGIN/rustup-init" \
+  "$DIST_MIRROR/rustup-init"
+then
+  echo "rustup-init download failed or checksum mismatch. Offline fallback: put $payload_name in /var/minis/shared/offline/ and set MINIS_ALLOW_OFFLINE=1." >&2
+  exit 1
+fi
+
+chmod +x "$bin"
+# `-y` on the checksummed binary; rustup then validates the toolchain
+# manifests it downloads itself (signed metadata), which the shell script
+# path could not guarantee either.
+"$bin" -y --default-toolchain stable --profile minimal --no-modify-path
+rm -f "$bin"
 
 # rustup installs to ~/.cargo; expose on PATH for every shell via profile.d.
 cat > /etc/profile.d/minis-rust.sh <<'EOF'

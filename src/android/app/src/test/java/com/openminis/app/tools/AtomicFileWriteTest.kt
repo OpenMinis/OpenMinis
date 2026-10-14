@@ -47,6 +47,45 @@ class AtomicFileWriteTest {
         assertEquals("one-two", f.readText())
     }
 
+    /**
+     * [T-append-verify-vacuous] The append check used to sample `file.length()`
+     * AFTER the append and pass it as the "expected" length, then skip the byte
+     * comparison for appends — `length == length`, always true, so a short append
+     * was reported as a success. Growth and tail bytes are verified now, so a
+     * write that lands fewer bytes must come back null (= failure).
+     */
+    @Test
+    fun appendVerificationCatchesShortWrite() {
+        val f = File(tmp.root, "append-short.txt")
+        AtomicFileWrite.write(f, "seed-") // 5 bytes
+        // 5 + len("appended") = 13 — the healthy append reports the full length.
+        assertEquals(13L, AtomicFileWrite.write(f, "appended", append = true))
+
+        // Second append would land at 13 + 8 = 21; truncate to 19 to simulate the
+        // silent short write (2 of 8 bytes never reached the disk).
+        AtomicFileWrite.truncateAfterAppendForTest = 19L
+        try {
+            assertNull(
+                "a short append must be reported as a failure, not as success",
+                AtomicFileWrite.write(f, "appended", append = true),
+            )
+        } finally {
+            AtomicFileWrite.truncateAfterAppendForTest = -1L
+        }
+    }
+
+    /** Multi-byte content: the growth check is in BYTES, not chars. */
+    @Test
+    fun appendVerifyUsesByteLength() {
+        val f = File(tmp.root, "append-utf8.txt")
+        AtomicFileWrite.write(f, "a")
+        val n = AtomicFileWrite.write(f, "é😀", append = true)
+        // "a" (1) + é (2) + 😀 (4) = 7 bytes on disk.
+        assertEquals(7L, n)
+        assertEquals(7L, f.length())
+        assertEquals("aé😀", f.readText())
+    }
+
     @Test
     fun concurrentWritesAllLand() {
         // N writers, distinct content, same file. Without the per-path lock a

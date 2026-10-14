@@ -3,6 +3,7 @@ package com.openminis.app.plugins
 import android.content.Context
 import android.os.StatFs
 import android.util.Log
+import com.openminis.app.R
 import com.openminis.app.sandbox.ExecutionCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,14 +21,16 @@ import kotlinx.coroutines.sync.withLock
  * Drives the declarative [DevComponent] recipes inside the guest sandbox
  * through [ExecutionCoordinator]:
  *
- *  1. apt install (when [DevComponent.aptPackages] is non-empty)
+ *  1. apt install (when [DevComponent.aptPackages] is non-empty) — inside the
+ *     shared guest apt lock, with an `apt-get update` first
  *  2. postInstallSteps (setup scripts shipped via assets/default_mount)
  *  3. checkCommand probe — exit 0 marks the component INSTALLED
  *
  * Concurrency: one install at a time (installMutex) — apt holds a global
  * lock in the guest anyway, so parallel installs would only queue behind
- * it while burning shell slots. Progress lines flow to [DevSuiteStore]
- * for the UI card.
+ * it while burning shell slots. Progress lines flow to [DevSuiteStore],
+ * which throttles what actually reaches disk; the card reads
+ * [DevSuiteStore.states].
  */
 object DevSuiteInstaller {
 
@@ -37,19 +40,27 @@ object DevSuiteInstaller {
     /** Long wall clock: SDK/NDK/llama.cpp installs run tens of minutes. */
     private const val INSTALL_TIMEOUT_MS = 30 * 60_000L
 
+    /** How long the installer waits for the guest-wide apt lock (seconds). */
+    private const val APT_LOCK_WAIT_SEC = 1800
+
+    /** Guest drop directory for offline payloads (see offline.sh). */
+    private const val OFFLINE_DIR = "/var/minis/shared/offline"
+    private const val CACHE_DIR = "/var/minis/shared/cache/devsuite"
+
+    /**
+     * Extra room the assembly needs on top of the component estimates: the
+     * resumable `.part` cache under [CACHE_DIR] holds the largest payload
+     * while it is being fetched (and, until it verifies, whatever half-built
+     * download it is holding), plus unpack scratch space.
+     */
+    private const val RESERVE_CAP_BYTES = 2_500_000_000L
+    private const val GB = 1_000_000_000L
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val installMutex = Mutex()
 
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
-
-    /** Live progress for the currently installing component, null when idle. */
-    private val _current = MutableStateFlow<Pair<String, String>?>(null)
-    val current: StateFlow<Pair<String, String>?> = _current.asStateFlow()
-
-    fun isReadyCached(context: Context, component: DevComponent): Boolean =
-        DevSuiteStore.snapshot(context)[component.id]?.status ==
-            DevSuiteStore.Status.INSTALLED
 
     /** Run the readiness probe in the guest. Exit 0 = ready. */
     suspend fun probe(component: DevComponent): Boolean {
@@ -65,52 +76,101 @@ object DevSuiteInstaller {
      * Install one component (apt → postInstall → probe). Returns true when
      * the probe passes. Safe to call for an already-ready component — the
      * probe short-circuits without touching apt.
+     *
+     * [probeResult] lets a caller that already ran the probe (the disk gate
+     * in [assembleBundleAsync]) reuse that answer instead of paying a second
+     * guest round trip — for the ready AND the not-ready case.
      */
-    suspend fun install(context: Context, component: DevComponent): Boolean = installMutex.withLock {
+    suspend fun install(
+        context: Context,
+        component: DevComponent,
+        probeResult: Boolean? = null,
+    ): Boolean = installMutex.withLock {
         _busy.value = true
-        _current.value = component.id to "开始安装"
-        DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLING, "开始安装")
+        val started = context.getString(R.string.dev_suite_start_install)
         try {
+            DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLING, started)
             // Fast path: probe first — idempotent recipes make reinstall a no-op,
             // but skipping apt entirely saves minutes on rebuilds.
-            if (probe(component)) {
-                DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLED, "已就绪")
+            if (probeResult ?: probe(component)) {
+                DevSuiteStore.update(
+                    context, component.id, DevSuiteStore.Status.INSTALLED,
+                    context.getString(R.string.dev_suite_ready),
+                )
                 return true
             }
 
             if (component.aptPackages.isNotEmpty()) {
-                val aptLine = "apt-get install -y --no-install-recommends " +
-                    component.aptPackages.joinToString(" ")
-                val aptResult = run(aptLine, component.id) { line ->
-                    DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120))
+                val aptResult = run(aptCommand(component), component.id) { line ->
+                    DevSuiteStore.update(
+                        context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
+                    )
                 }
                 if (aptResult != 0) {
-                    DevSuiteStore.update(context, component.id, DevSuiteStore.Status.FAILED, "apt 安装失败 (exit $aptResult)")
+                    DevSuiteStore.update(
+                        context, component.id, DevSuiteStore.Status.FAILED,
+                        context.getString(R.string.dev_suite_apt_failed, aptResult),
+                    )
                     return false
                 }
             }
 
             for (step in component.postInstallSteps) {
                 val rc = run(step, component.id) { line ->
-                    DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120))
+                    DevSuiteStore.update(
+                        context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
+                    )
                 }
                 if (rc != 0) {
-                    DevSuiteStore.update(context, component.id, DevSuiteStore.Status.FAILED, "步骤失败 (exit $rc): ${step.take(60)}")
+                    DevSuiteStore.update(
+                        context, component.id, DevSuiteStore.Status.FAILED,
+                        context.getString(R.string.dev_suite_step_failed, rc, step.substringAfterLast('/').take(60)),
+                    )
                     return false
                 }
             }
 
             if (probe(component)) {
-                DevSuiteStore.update(context, component.id, DevSuiteStore.Status.INSTALLED, "已就绪")
+                DevSuiteStore.update(
+                    context, component.id, DevSuiteStore.Status.INSTALLED,
+                    context.getString(R.string.dev_suite_ready),
+                )
                 true
             } else {
-                DevSuiteStore.update(context, component.id, DevSuiteStore.Status.FAILED, "安装完成但探针未通过")
+                DevSuiteStore.update(
+                    context, component.id, DevSuiteStore.Status.FAILED,
+                    context.getString(R.string.dev_suite_probe_failed),
+                )
                 false
             }
         } finally {
             _busy.value = false
-            _current.value = null
         }
+    }
+
+    /**
+     * [T-devsuite-apt-lock] Every guest script that touches apt takes the
+     * shared lock first (minis-setup-flutter, minis-setup-llama-cpp,
+     * minis-setup-qemu, …). The installer used to run a bare `apt-get
+     * install` through the coordinator, which contended the dpkg lock with
+     * those very installs and returned a spurious `exit 100`, and it never
+     * ran `apt-get update`, so a fresh rootfs with empty/stale lists failed
+     * package resolution. Same protocol as the scripts: source the helper,
+     * acquire, `update`, install, release.
+     *
+     * Runs in a subshell so the EXIT trap fires when THIS command finishes —
+     * the persistent guest shell outlives the command, so a trap set at top
+     * level would keep the lock until the shell died.
+     */
+    internal fun aptCommand(component: DevComponent): String {
+        val pkgs = component.aptPackages.joinToString(" ")
+        return "( . /usr/local/lib/minis/apt-lock.sh; " +
+            "if minis_acquire_apt_lock $APT_LOCK_WAIT_SEC; then " +
+            "trap minis_release_apt_lock EXIT; " +
+            "apt-get update || true; " +
+            "apt-get install -y --no-install-recommends $pkgs; " +
+            "else echo \"devsuite: apt lock busy, waited ${APT_LOCK_WAIT_SEC}s\" >&2; exit 75; " +
+            "fi )"
     }
 
     /**
@@ -120,14 +180,43 @@ object DevSuiteInstaller {
      * full phone used to start blindly, fill the volume mid-transfer and fail —
      * leaving partially unpacked SDK trees behind.
      *
+     * [components] must be the ones that still have to install: the caller
+     * filters out components whose probe already passes, otherwise re-assembling
+     * a partly installed suite would be refused for space the existing
+     * install already spent. The estimate adds a bounded reserve for the
+     * resumable `.part` cache the run is about to fill.
+     *
      * Returns the shortfall message, or null when there is room.
      */
     internal fun roomShortfall(context: Context, components: List<DevComponent>): String? {
+        if (components.isEmpty()) return null
         val needed = components.sumOf { it.estimatedBytes }
         if (needed <= 0L) return null
+        val reserve = minOf(components.maxOf { it.estimatedBytes }, RESERVE_CAP_BYTES)
+        val required = needed + reserve
         val free = runCatching { StatFs(context.filesDir.path).availableBytes }.getOrDefault(Long.MAX_VALUE)
-        if (free >= needed) return null
-        return "存储空间不足：需要约 ${needed / 1_000_000_000} GB，可用 ${free / 1_000_000_000} GB"
+        if (free >= required) return null
+        return context.getString(R.string.dev_suite_no_space, required / GB, free / GB)
+    }
+
+    /**
+     * [T-devsuite-cascade] Pure dependency cascade: given [ordered] (already in
+     * topological order) and the ids whose install FAILED, return every
+     * selected component that must be skipped, mapped to the dependency that
+     * blocks it. Components that do not (transitively) depend on a failure keep
+     * going — a failed optional Flutter download must not kill rust-dev.
+     */
+    internal fun blockedByFailures(
+        ordered: List<DevComponent>,
+        failedIds: Set<String>,
+    ): Map<String, String> {
+        val blocked = LinkedHashMap<String, String>()
+        for (c in ordered) {
+            if (c.id in failedIds) continue
+            val blocker = c.dependsOn.firstOrNull { it in failedIds || it in blocked }
+            if (blocker != null) blocked[c.id] = blocker
+        }
+        return blocked
     }
 
     /**
@@ -144,22 +233,64 @@ object DevSuiteInstaller {
     ) {
         scope.launch {
             val ordered = orderComponents(bundle, includeIds)
-            roomShortfall(context, ordered)?.let { reason ->
+            if (ordered.isEmpty()) { onDone(emptyList()); return@launch }
+            // The documented offline drop target has to exist before anyone can
+            // put a payload in it — create it here, at the start of the flow.
+            run("mkdir -p $OFFLINE_DIR $CACHE_DIR 2>/dev/null || true", "dev-suite") {}
+
+            // Probe once up front: components that are already ready cost
+            // nothing and must not count against the disk gate.
+            val readyFromProbe = ordered.mapNotNullTo(mutableSetOf<String>()) {
+                if (probe(it)) it.id else null
+            }
+            val pending = ordered.filterNot { it.id in readyFromProbe }
+
+            roomShortfall(context, pending)?.let { reason ->
                 Log.e("DevSuiteInstaller", "assembly refused: $reason")
-                ordered.firstOrNull()?.let { first ->
-                    DevSuiteStore.update(context, first.id, DevSuiteStore.Status.FAILED, reason)
+                // Selection-level refusal: every component this assembly still
+                // had to install reports the same reason. Pinning it on
+                // ordered.firstOrNull() blamed an arbitrary component for a
+                // decision that was about the whole selection.
+                pending.forEach { DevSuiteStore.update(context, it.id, DevSuiteStore.Status.FAILED, reason) }
+                readyFromProbe.forEach { id ->
+                    DevSuiteStore.update(
+                        context, id, DevSuiteStore.Status.INSTALLED,
+                        context.getString(R.string.dev_suite_ready),
+                    )
                 }
                 onDone(emptyList())
                 return@launch
             }
+
             val ready = mutableListOf<String>()
+            val failed = mutableSetOf<String>()
+            var blocked = blockedByFailures(ordered, failed)
             for (c in ordered) {
-                val ok = install(context, c)
-                if (ok) ready.add(c.id) else break  // stop at first failure; deps below would fail anyway
+                val blocker = blocked[c.id]
+                if (blocker != null) {
+                    failed.add(c.id)
+                    blocked = blockedByFailures(ordered, failed)
+                    DevSuiteStore.update(
+                        context, c.id, DevSuiteStore.Status.FAILED,
+                        context.getString(R.string.dev_suite_skipped_dep, nameOf(blocker)),
+                    )
+                    continue
+                }
+                val ok = install(context, c, probeResult = c.id in readyFromProbe)
+                if (ok) {
+                    ready.add(c.id)
+                } else {
+                    failed.add(c.id)
+                    blocked = blockedByFailures(ordered, failed)
+                }
             }
             onDone(ready)
         }
     }
+
+    /** Display name for a component id (bundles first, then online tools). */
+    private fun nameOf(id: String): String =
+        DevSuiteCatalog.allComponents().firstOrNull { it.id == id }?.name ?: id
 
     /** Topological order over dependsOn within the selection. */
     internal fun orderComponents(bundle: DevBundle, includeIds: Set<String>): List<DevComponent> {
@@ -185,6 +316,9 @@ object DevSuiteInstaller {
      * apt packages are left installed (dpkg state is shared; removing them
      * could break other components) — same trade-off taixu makes for
      * apt-backed components.
+     *
+     * [T-devsuite-uninstall] Reached from the "开发环境套件" card (installed
+     * components used to have no way back out of the app).
      */
     suspend fun uninstall(context: Context, component: DevComponent): Boolean {
         if (component.purgePaths.isEmpty() && component.purgeLinks.isEmpty()) {
@@ -200,14 +334,29 @@ object DevSuiteInstaller {
             }
         }
         val script = cmds.joinToString(" && ")
-        val rc = run("sh -c \"$script\"", component.id) {}
+        _busy.value = true
+        val rc = try {
+            run("sh -c \"$script\"", component.id) { line ->
+                DevSuiteStore.update(
+                    context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
+                )
+            }
+        } finally {
+            _busy.value = false
+        }
         val ok = rc == 0
         DevSuiteStore.update(
             context, component.id,
             if (ok) DevSuiteStore.Status.NOT_INSTALLED else DevSuiteStore.Status.FAILED,
-            if (ok) "" else "卸载失败 (exit $rc)",
+            if (ok) context.getString(R.string.dev_suite_not_installed)
+            else context.getString(R.string.dev_suite_uninstall_failed, rc),
         )
         return ok
+    }
+
+    /** Uninstall [component] without blocking the caller (UI entry point). */
+    fun uninstallAsync(context: Context, component: DevComponent, onDone: (Boolean) -> Unit = {}) {
+        scope.launch { onDone(uninstall(context, component)) }
     }
 
     private suspend fun run(

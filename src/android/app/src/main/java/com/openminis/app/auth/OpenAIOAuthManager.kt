@@ -204,7 +204,14 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
         if (responseCode !in 200..299) {
             AppLogger.error(TAG, "token exchange non-2xx: $responseCode")
-            throw Exception("Token exchange failed ($responseCode): $responseBody")
+            // [T-android-oauth-log-redaction] This message is BOTH logged and
+            // thrown into the UI, and a token error body from a broken/lying
+            // endpoint can carry the credential material itself (a malformed
+            // SUCCESS body reaching this error path dumps a live access_token /
+            // id_token into logcat and into filesDir/logs). `sanitizeBody` exists
+            // precisely for this; the base class's own exchange/refresh failure
+            // logs already go through it, so this was the drifting copy.
+            throw Exception("Token exchange failed ($responseCode): ${OAuthManager.sanitizeBody(responseBody)}")
         }
 
         val json = JSONObject(responseBody)

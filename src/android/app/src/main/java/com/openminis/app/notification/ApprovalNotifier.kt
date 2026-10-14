@@ -13,6 +13,23 @@ import com.openminis.app.R
 import com.openminis.app.service.ApprovalGate
 
 /**
+ * [T-approval-action-single-source] The ONE definition of the approval
+ * broadcast/delivery actions and the request-id extra key.
+ *
+ * Both [ApprovalNotifier] (posts the PendingIntents) and
+ * [com.openminis.app.service.AgentForegroundService] (handles the fallback
+ * delivery to onStartCommand) read these — they were previously hand-copied
+ * with a "MUST match verbatim" comment, which is exactly the drift this object
+ * exists to prevent. The literal strings are also referenced by the
+ * intent-filter in AndroidManifest.xml; any change must update that too.
+ */
+object ApprovalIntents {
+    const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
+    const val ACTION_DENY = "com.openminis.app.DENY_TOOL"
+    const val EXTRA_REQUEST_ID = "approval_request_id"
+}
+
+/**
  * Posts a one-shot "needs approval" notification for a sensitive tool call.
  * This is distinct from the ongoing agent-status notification — it sits at
  * the top of the shade with two action buttons (approve / deny) and
@@ -48,9 +65,13 @@ class ApprovalNotifier(private val context: Context) {
         private const val TAG = "ApprovalNotifier"
         const val CHANNEL_ID = "minis_approval"
 
-        const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
-        const val ACTION_DENY    = "com.openminis.app.DENY_TOOL"
-        const val EXTRA_REQUEST_ID = "approval_request_id"
+        // Single source of truth: delegate to ApprovalIntents so the service
+        // fallback and the receiver can never drift. (const = another const is
+        // a compile-time constant, so existing `ApprovalNotifier.ACTION_APPROVE`
+        // call sites keep working unchanged.)
+        const val ACTION_APPROVE = ApprovalIntents.ACTION_APPROVE
+        const val ACTION_DENY = ApprovalIntents.ACTION_DENY
+        const val EXTRA_REQUEST_ID = ApprovalIntents.EXTRA_REQUEST_ID
 
         // Different requestCode per action so the system doesn't collapse them
         // into a single PendingIntent (which would make approve/deny indistinguishable).
@@ -65,7 +86,7 @@ class ApprovalNotifier(private val context: Context) {
          * Safe to call from any thread before posting the approval notification.
          */
         fun ensureChannel(ctx: Context) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+            // minSdk 26 (O): the SDK_INT < O bail-out was unreachable.
             val mgr = ContextCompat.getSystemService(ctx, NotificationManager::class.java) ?: return
             if (mgr.getNotificationChannel(CHANNEL_ID) != null) return
             mgr.createNotificationChannel(
@@ -76,7 +97,12 @@ class ApprovalNotifier(private val context: Context) {
                 ).apply {
                     description = ctx.getString(R.string.notif_approval_channel_desc)
                     setShowBadge(false)
-                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                    // [T-approval-lockscreen] PRIVATE, not PUBLIC: the content
+                    // text is a tool-input preview and shell command lines
+                    // routinely embed tokens and private paths. The per-
+                    // notification publicVersion (see notifyApproval) keeps the
+                    // lock-screen row available with benign text only.
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
                 }
             )
         }
@@ -159,6 +185,23 @@ class ApprovalNotifier(private val context: Context) {
             .setOngoing(true)
             .setAutoCancel(false)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            // [T-approval-lockscreen] The content text is the raw tool-input
+            // preview (shell command lines carry tokens and private paths).
+            // Keep the row on the lock screen — approve/deny from a locked
+            // phone is the point — but show only this benign stand-in there.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setContentTitle("Minis 需要审批")
+                    .setContentText("敏感操作待确认，请解锁处理")
+                    .setContentIntent(launchIntent)
+                    .addAction(android.R.drawable.ic_menu_send, "同意", actionPending(true))
+                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒绝", actionPending(false))
+                    .setOngoing(true)
+                    .setAutoCancel(false)
+                    .build(),
+            )
             .build()
         try {
             nm.notify(notificationId(requestId), notification)

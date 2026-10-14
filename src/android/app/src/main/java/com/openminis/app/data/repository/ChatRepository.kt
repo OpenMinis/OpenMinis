@@ -828,15 +828,38 @@ class ChatRepository(
         val doomed = dao.rowsFrom(sessionId, keepCount)
         if (doomed.isEmpty()) return emptyList()
         val nowMs = System.currentTimeMillis()
-        return doomed.map { it.toVersionEntity(vdao, nowMs) }
+        // [T-archive-batch-version-index] ONE grouped MAX instead of one
+        // `SELECT MAX(version_index) … WHERE message_id = ?` per doomed row: a
+        // regenerate-from-turn-1 truncation archives the whole tail (~290 rows
+        // observed) and ran ~290 individual queries inside the single
+        // archive+truncate transaction.
+        //
+        // Scoping by session_id is equivalent to the old global lookup: a
+        // version row's session_id is copied from its source message, a message
+        // id belongs to exactly one session (session forks mint new ids, a
+        // backup re-import writes the same id back into the same session), and
+        // ids are random UUIDs. `doomed` is read off `messages`, whose PK is the
+        // id, so each message appears once and the per-message counter needs no
+        // in-batch bumping.
+        val baseIndexes = vdao.maxVersionIndexesForSession(sessionId)
+            .associate { it.messageId to it.maxIndex }
+        return doomed.map { it.toVersionEntity(baseIndexes[it.id] ?: 0, nowMs) }
     }
 
+    /**
+     * Single-row archive with a fresh lookup — the trimmed-row snapshot in
+     * [updateMessageParts], where there is no batch to amortise.
+     */
     private suspend fun MessageEntity.toVersionEntity(vdao: MessageVersionDao, nowMs: Long): MessageVersionEntity =
+        toVersionEntity(vdao.maxVersionIndex(id), nowMs)
+
+    /** [baseVersionIndex] is the message's current highest archived version. */
+    private fun MessageEntity.toVersionEntity(baseVersionIndex: Int, nowMs: Long): MessageVersionEntity =
         MessageVersionEntity(
             id = UUID.randomUUID().toString(),
             messageId = id,
             sessionId = sessionId,
-            versionIndex = vdao.maxVersionIndex(id) + 1,
+            versionIndex = baseVersionIndex + 1,
             role = role,
             partsJson = partsJson,
             bodyRef = bodyRef,
@@ -931,11 +954,21 @@ class ChatRepository(
             order.forEachIndexed { index, entry ->
                 if (entry.restored) {
                     val v = restoredById.getValue(entry.id)
+                    // [T-restore-preview-column] `preview` is re-derived with
+                    // the SAME truncation the normal write path applies
+                    // (storeBody: partsJson.take(PREVIEW_BYTES)). Left NULL, the
+                    // restored rows fall back to `substr(COALESCE(preview,
+                    // parts_json), 1, 65536)` in the search/digest projections —
+                    // the 64 KB cell scan the column exists to avoid, on the
+                    // very rows this restore touches in bulk (1386 in the
+                    // 2026-10-14 incident). Bodies still render either way:
+                    // inline parts and bodyRef hydration are untouched.
+                    val storedParts = v.partsJson ?: "[]"
                     val row = MessageEntity(
                         id = v.messageId,
                         sessionId = sessionId,
                         role = v.role,
-                        partsJson = v.partsJson ?: "[]",
+                        partsJson = storedParts,
                         createdAt = v.sourceCreatedAt,
                         sortOrder = index,
                         reasoningContent = v.reasoningContent,
@@ -944,6 +977,17 @@ class ChatRepository(
                         modelDisplayName = v.modelDisplayName,
                         bodyRef = v.bodyRef,
                         bodySha = v.bodySha,
+                        preview = storedParts.take(ResourceLimits.PREVIEW_BYTES),
+                        // UTF-8 size of the stored cell, same definition as
+                        // storeBody. Offloaded rows report 0 rather than the
+                        // stub's size: message_versions snapshots the row's
+                        // `parts_json` column, and the original body length is
+                        // not among the archived columns (adding it would be a
+                        // schema migration). Hydration is unaffected — it keys
+                        // off bodyRef, not this number.
+                        bodyBytes = if (v.bodyRef == null) {
+                            storedParts.toByteArray(Charsets.UTF_8).size.toLong()
+                        } else 0L,
                     )
                     dao.insertMessage(row)
                     restoredRows.add(row)
@@ -953,7 +997,17 @@ class ChatRepository(
             }
             // Retire ONLY the restored archive rows — the session's remaining
             // versions are live pre-edit history and must survive.
-            vdao.deleteByIds(restoredArchiveIds)
+            //
+            // [T-archive-delete-chunked] One chunked DELETE, not a single
+            // `IN (:ids)`: `IN` binds one SQL variable per id and this is the
+            // recovery path for exactly the loss scale where the id list is
+            // long (1386 rows in the 2026-10-14 truncation incident). Devices
+            // whose bundled SQLite caps SQLITE_MAX_VARIABLE_NUMBER at 999
+            // (Android 11 and earlier) threw here INSIDE db.withTransaction, so
+            // the whole restore rolled back and the exception escaped the
+            // caller's `viewModelScope.launch` uncaught. 500 sits under the
+            // smallest cap we ship against.
+            restoredArchiveIds.chunked(ARCHIVE_DELETE_CHUNK).forEach { vdao.deleteByIds(it) }
             restoredRows
         }
         val dbRef = db
@@ -1492,6 +1546,15 @@ class ChatRepository(
 
     companion object {
         private const val TAG = "ChatRepository"
+
+        /**
+         * [T-archive-delete-chunked] Ids per `DELETE … WHERE id IN (:ids)` on
+         * the restore path. SQLite binds one variable per id and older bundled
+         * builds (Android 11 and below) cap SQLITE_MAX_VARIABLE_NUMBER at 999;
+         * 500 stays clear of that and of the CursorWindow growth a longer
+         * prepared statement brings.
+         */
+        private const val ARCHIVE_DELETE_CHUNK = 500
 
         /**
          * Merge live rows and restored rows back into one timeline.

@@ -10,10 +10,10 @@ package com.openminis.app.sandbox
  */
 internal object GuestWorkloadPolicy {
 
-    const val CPU_SECONDS_DEFAULT = 120
-    const val CPU_SECONDS_BUILD = 300
-    const val CPU_SECONDS_INSTALL = 300
-    const val CPU_SECONDS_SETUP = 900
+    // [T-dead-cpu-tiers] CPU_SECONDS_DEFAULT / _BUILD / _INSTALL / _SETUP were
+    // deleted: BudgetClassifier.classify(command).cpuSeconds is the only CPU
+    // authority now and GuestWorkloadPolicy.cpuSeconds (below, also removed)
+    // merely delegated to it. No main-code or test reader remained.
 
     /**
      * `ulimit -u` and the host-side cap. A guest that raises its own soft
@@ -22,31 +22,35 @@ internal object GuestWorkloadPolicy {
      */
     const val PROCESS_LIMIT = 256
 
-    const val NOFILE_LIMIT = 4096
-
-    /**
-     * `ulimit -f` is in 1024-byte blocks. 2GB stops one `dd` from filling the
-     * volume without rejecting an SDK zip or an apt package. A directory of
-     * small files is caught by [diskRefusal], not by this per-file cap.
-     */
-    const val FILE_SIZE_KB = 2 * 1024 * 1024
+    // [T-dead-limits] NOFILE_LIMIT and FILE_SIZE_KB were deleted: `ulimit -f/-n`
+    // now come from the per-class ProcessBudget (BudgetClassifier fileSizeBytes)
+    // applied via GuestLimits, not these statics. DISK_HARD_USED was deleted with
+    // the [T-disk-percent-arm] change that dropped the used-percentage arm in
+    // favour of absolute DISK_MIN_FREE_BYTES alone. None had a reader.
 
     const val DISK_MIN_FREE_BYTES = 2L * 1024 * 1024 * 1024
-    const val DISK_HARD_USED = 0.92
 
     const val HOST_SU_MAX_TIMEOUT_MS = 120_000L
 
     /**
-     * Hard CPU budget. Command names do not opt out: a process that calls
-     * itself a server can still spin. An idle server burns almost no CPU, so
-     * the cap does not kill it. Only the documented setup scripts get more.
+     * [T-setup-family] The Dev Suite runs `/usr/local/bin/minis-setup-<tool>`
+     * scripts (flutter, llama-cpp, jadx, rust, pnpm, qemu — and any future
+     * member) through ExecutionCoordinator with a documented 10–30 minute
+     * build/unpack and a 30-minute request. Until now the family matched
+     * neither [isSetup]'s named list nor [isInstall]'s "minis-dev-setup"
+     * string, so it classified NORMAL (600s wall) and
+     * `BudgetClassifier.armMs = maxOf(floor, minOf(requestedMs, budget.wallMs))`
+     * capped the caller's 30 minutes down to 10 — every llama.cpp build /
+     * Flutter unpack died at ~10 min and the component was marked FAILED.
+     * One shared substring predicate covers the whole family, so a new
+     * `minis-setup-*` tool is setup-class the moment it ships.
      */
-    fun cpuSeconds(command: String): Int =
-        com.openminis.app.sandbox.kernel.BudgetClassifier.classify(command).cpuSeconds
+    fun isSetupScript(command: String): Boolean = command.lowercase().contains("minis-setup-")
 
     fun isSetup(command: String): Boolean {
         val c = command.lowercase()
-        return c.contains("minis-dev-setup-full") ||
+        return isSetupScript(c) ||
+            c.contains("minis-dev-setup-full") ||
             c.contains("minis-build-env") ||
             c.contains("minis-android-sdk-setup") ||
             c.contains("minis-self-build")
@@ -65,18 +69,6 @@ internal object GuestWorkloadPolicy {
             c.contains("sdkmanager") || c.contains("minis-build-env") || c.contains("minis-dev-setup") ||
             c.contains("pip install") || c.contains("pip3 install")
     }
-
-    /**
-     * True for a `find` rooted at /, /data, /home, /root, /var, /sys or /proc.
-     *
-     * Not a refusal any more. 2.0.10 refused these outright in every mode,
-     * which made a read-only command unavailable; slowness is handled by the
-     * wall clock, the output rate and the resident window. Kept because it is
-     * the honest description of the walk, and a caller that wants to warn
-     * about it should ask here rather than re-parsing argv.
-     */
-    fun isBroadFind(command: String): Boolean =
-        findPathArgs(command).any(::isBroadRoot)
 
     /**
      * Refuse before spawn when the disk is already stressed. This is not a
@@ -139,13 +131,10 @@ internal object GuestWorkloadPolicy {
         }
     }
 
-    /**
-     * A live guest plus one long stall is already the failure. A single short
-     * stutter is not: markdown can hitch for a few seconds without a guest
-     * being the cause. Two counted hangs, or one stall of 8s or more, kills.
-     */
-    fun shouldKillLiveWork(hangCount: Int, durationMs: Long): Boolean =
-        hangCount >= 2 || durationMs >= 8_000L
+    // [T-dead-hangpolicy] shouldKillLiveWork(hangCount, durationMs) was deleted:
+    // after the BudgetClassifier migration the hang/kill decision lives in
+    // ShellIdleSafety + the guardian, and no main-code caller read this helper
+    // (only GuestWorkloadPolicyTest did, now removed alongside it).
 
     fun exceedsProcessCap(ownedPids: Int): Boolean = ownedPids > PROCESS_LIMIT
 
@@ -354,23 +343,8 @@ internal object GuestWorkloadPolicy {
     fun clampHostTimeout(requestedMs: Long): Long =
         requestedMs.coerceIn(1L, HOST_SU_MAX_TIMEOUT_MS)
 
-    fun findPathArgs(command: String): List<String> {
-        val out = ArrayList<String>()
-        val re = Regex("""(?:^|[;&|`(\n])\s*(?:\S*/)?find\b""")
-        var from = 0
-        while (true) {
-            val m = re.find(command, from) ?: break
-            val rest = command.substring(m.range.last + 1).trim()
-            for (raw in rest.split(Regex("\\s+"))) {
-                if (raw.isEmpty()) continue
-                if (raw == "|" || raw == "||" || raw == "&&" || raw == ";") break
-                if (raw.startsWith("-")) break
-                out += raw.trim('"', '\'', '`')
-            }
-            from = m.range.last + 1
-        }
-        return out
-    }
+    // [T-dead-hangpolicy] findPathArgs() and its isBroadRoot() helper were
+    // deleted with isBroadFind above — nothing else parsed find's path args.
 
     private fun hasWriteSyntax(command: String): Boolean {
         // [T-devnull-redirect] `2>/dev/null` — and `>/dev/null`, `>>/dev/null`,
@@ -399,11 +373,5 @@ internal object GuestWorkloadPolicy {
         val verb = segment.trim().split(Regex("\\s+")).dropWhile { it.contains("=") }
             .drop(1).firstOrNull()?.lowercase() ?: return false
         return verb in setOf("status", "log", "diff", "show", "rev-parse", "blame", "ls-files", "describe")
-    }
-
-    private fun isBroadRoot(path: String): Boolean {
-        val p = path.trimEnd('/').ifEmpty { "/" }
-        return p == "/" || p == "/data" || p.startsWith("/data/") ||
-            p == "/home" || p == "/root" || p == "/var" || p == "/sys" || p == "/proc"
     }
 }

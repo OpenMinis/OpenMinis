@@ -37,13 +37,20 @@ import com.openminis.app.plugins.DevSuiteStore
  * checkboxes (required ones locked on), an assemble button, live progress
  * from the recipe engine, and standalone online tools below. The heavy
  * payloads never ship in the APK — recipes download them on demand.
+ *
+ * [T-devsuite-progress-write] The live progress line comes from
+ * [DevSuiteStore.states] (`progressLine`, throttled by the store), which is
+ * now the only place that fact is kept — the installer used to hold a second
+ * copy that the UI read while the stored one had no reader at all.
  */
 @Composable
 fun DevSuiteSection(
     /**
-     * [T-dev-suite-link-consent] Bundle id handed over by a
-     * `minis://devsuite/install/<id>` deep link. It only PRESELECTS the
-     * confirmation dialog — the install still starts when the user taps 装配.
+     * [T-dev-suite-link-consent] Id handed over by a
+     * `minis://devsuite/install/<id>` deep link — a bundle OR an online tool
+     * (see [DevSuiteCatalog.installTargetById]; resolving only bundles made an
+     * online-tool link a silent no-op). It only PRESELECTS the confirmation
+     * dialog — the install still starts when the user taps 装配.
      * A chat-emitted (and therefore prompt-injectable) link used to call
      * assembleBundleAsync with every component pre-selected, silently pulling
      * gigabytes on a metered connection.
@@ -54,12 +61,17 @@ fun DevSuiteSection(
     val context = LocalContext.current
     val states by DevSuiteStore.states.collectAsState()
     val busy by DevSuiteInstaller.busy.collectAsState()
-    val current by DevSuiteInstaller.current.collectAsState()
     var confirmBundle by remember { mutableStateOf<DevBundle?>(null) }
+    var preselectEverything by remember { mutableStateOf(false) }
+    var confirmRemove by remember { mutableStateOf<DevComponent?>(null) }
 
     LaunchedEffect(pendingInstallBundleId) {
         val id = pendingInstallBundleId ?: return@LaunchedEffect
-        confirmBundle = DevSuiteCatalog.bundleById(id)
+        // An online-tool link is a single component the user already chose by
+        // name, so it is pre-checked; a bundle keeps the consent dialog strict
+        // (required components on, heavy optional ones off).
+        preselectEverything = DevSuiteCatalog.isOnlineToolId(id)
+        confirmBundle = DevSuiteCatalog.installTargetById(id)
         onPendingInstallConsumed()
     }
 
@@ -80,7 +92,7 @@ fun DevSuiteSection(
             val readyCount = bundle.components.count {
                 states[it.id]?.status == DevSuiteStore.Status.INSTALLED
             }
-            val installing = bundle.components.any {
+            val active = bundle.components.firstOrNull {
                 states[it.id]?.status == DevSuiteStore.Status.INSTALLING
             }
             val failed = bundle.components.any {
@@ -92,16 +104,21 @@ fun DevSuiteSection(
                     append(bundle.summary)
                     append(" · ")
                     append(stringResource(R.string.dev_suite_progress, readyCount, bundle.components.size))
-                    if (installing) {
+                    if (active != null) {
                         append(" · ")
-                        append(current?.second?.take(40)?.ifBlank { stringResource(R.string.dev_suite_installing) }
-                            ?: stringResource(R.string.dev_suite_installing))
+                        append(
+                            states[active.id]?.progressLine?.take(40)?.ifBlank { null }
+                                ?: stringResource(R.string.dev_suite_installing)
+                        )
                     } else if (failed) {
                         append(" · ")
                         append(stringResource(R.string.dev_suite_failed))
                     }
                 },
-                onClick = { confirmBundle = bundle },
+                onClick = {
+                    preselectEverything = false
+                    confirmBundle = bundle
+                },
             )
         }
     }
@@ -120,15 +137,20 @@ fun DevSuiteSection(
                     append(
                         when (st) {
                             DevSuiteStore.Status.INSTALLED -> stringResource(R.string.dev_suite_ready)
-                            DevSuiteStore.Status.INSTALLING -> stringResource(R.string.dev_suite_installing)
-                            DevSuiteStore.Status.FAILED -> stringResource(R.string.dev_suite_failed)
+                            DevSuiteStore.Status.INSTALLING ->
+                                states[tool.id]?.progressLine?.take(40)?.ifBlank { null }
+                                    ?: stringResource(R.string.dev_suite_installing)
+                            DevSuiteStore.Status.FAILED ->
+                                states[tool.id]?.progressLine?.take(40)?.ifBlank { null }
+                                    ?: stringResource(R.string.dev_suite_failed)
                             DevSuiteStore.Status.NOT_INSTALLED -> stringResource(R.string.dev_suite_not_installed)
                         }
                     )
                 },
                 onClick = {
-                    if (!busy) {
-                        DevSuiteInstaller.assembleBundleAsync(
+                    when {
+                        st == DevSuiteStore.Status.INSTALLED -> confirmRemove = tool
+                        !busy -> DevSuiteInstaller.assembleBundleAsync(
                             context,
                             DevBundle(id = "online", name = tool.name, summary = "", components = listOf(tool)),
                             includeIds = setOf(tool.id),
@@ -144,10 +166,34 @@ fun DevSuiteSection(
             bundle = bundle,
             states = states,
             busy = busy,
+            preselectEverything = preselectEverything,
             onDismiss = { confirmBundle = null },
             onAssemble = { selected ->
                 confirmBundle = null
                 DevSuiteInstaller.assembleBundleAsync(context, bundle, selected)
+            },
+            onRemove = { confirmRemove = it },
+        )
+    }
+
+    confirmRemove?.let { component ->
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text(component.name) },
+            text = { Text(stringResource(R.string.dev_suite_remove_confirm, component.name)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmRemove = null
+                        DevSuiteInstaller.uninstallAsync(context, component)
+                    },
+                    enabled = !busy,
+                ) { Text(stringResource(R.string.common_remove)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = null }) {
+                    Text(stringResource(android.R.string.cancel))
+                }
             },
         )
     }
@@ -158,12 +204,18 @@ private fun DevSuiteBundleDialog(
     bundle: DevBundle,
     states: Map<String, DevSuiteStore.ComponentState>,
     busy: Boolean,
+    preselectEverything: Boolean,
     onDismiss: () -> Unit,
     onAssemble: (Set<String>) -> Unit,
+    onRemove: (DevComponent) -> Unit,
 ) {
-    var selected by remember(bundle.id) {
+    var selected by remember(bundle.id, preselectEverything) {
         mutableStateOf(
-            bundle.components.filter { it.isRequired || states[it.id]?.status == DevSuiteStore.Status.INSTALLED }
+            bundle.components
+                .filter {
+                    it.isRequired || preselectEverything ||
+                        states[it.id]?.status == DevSuiteStore.Status.INSTALLED
+                }
                 .map { it.id }.toSet()
         )
     }
@@ -182,12 +234,16 @@ private fun DevSuiteBundleDialog(
                     DevComponentRow(
                         component = c,
                         status = st,
+                        progressLine = states[c.id]?.progressLine.orEmpty(),
                         checked = c.id in selected,
+                        canRemove = st == DevSuiteStore.Status.INSTALLED &&
+                            (c.purgePaths.isNotEmpty() || c.purgeLinks.isNotEmpty()),
                         onChecked = { on ->
                             if (!c.isRequired) {
                                 selected = if (on) selected + c.id else selected - c.id
                             }
                         },
+                        onRemove = { onRemove(c) },
                     )
                 }
                 if (busy) {
@@ -218,8 +274,11 @@ private fun DevSuiteBundleDialog(
 private fun DevComponentRow(
     component: DevComponent,
     status: DevSuiteStore.Status,
+    progressLine: String,
     checked: Boolean,
+    canRemove: Boolean,
     onChecked: (Boolean) -> Unit,
+    onRemove: () -> Unit,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -230,7 +289,7 @@ private fun DevComponentRow(
             onCheckedChange = onChecked,
             enabled = component.isRequired.not() || checked,
         )
-        Column(modifier = Modifier.padding(start = 4.dp)) {
+        Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
             Text(
                 component.name + if (component.isRequired) {
                     " · " + stringResource(R.string.dev_suite_required)
@@ -238,11 +297,27 @@ private fun DevComponentRow(
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                component.description,
+                // The throttled live line replaces the description while the
+                // component is installing, so the card is not frozen on
+                // "start install" for a multi-GB download.
+                when (status) {
+                    DevSuiteStore.Status.INSTALLING ->
+                        progressLine.ifBlank { component.description }
+                    DevSuiteStore.Status.FAILED ->
+                        progressLine.ifBlank { component.description }
+                    else -> component.description
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
             )
+        }
+        // [T-devsuite-uninstall] Installed components used to have no way back
+        // out of the app — uninstall() existed but nothing called it.
+        if (canRemove) {
+            TextButton(onClick = onRemove, enabled = true) {
+                Text(stringResource(R.string.common_remove), style = MaterialTheme.typography.labelSmall)
+            }
         }
     }
 }

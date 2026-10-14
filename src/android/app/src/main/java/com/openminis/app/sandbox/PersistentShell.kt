@@ -207,6 +207,9 @@ class PersistentShell(
         }
         lastExitCode = null
         utf8 = Utf8ChunkDecoder()
+        // [T-offload-prelude-source-once] A brand-new bash has no offload
+        // functions defined; force the next command to re-source the prelude.
+        sourcedOffloadSignature = null
 
         val cmd = mutableListOf<String>()
         cmd.add(rootfsManager.prootBinary.absolutePath)
@@ -502,11 +505,35 @@ class PersistentShell(
      *
      * @return Pair of (output, exitCode)
      */
+    /**
+     * [T-offload-prelude-source-once] Offload reply-parsing shell functions,
+     * sourced into the persistent bash. This used to run `file.readText()` on
+     * the rootfs and re-source ~25 functions on EVERY command. The shell is
+     * long-lived and reused, so the functions persist once loaded — the only
+     * thing that invalidates them is a change in the registered handler set
+     * (app update / new handler). So the body is built, the script file written,
+     * and the `. source` emitted ONLY when the signature changes; every other
+     * command returns "" and prepends nothing.
+     *
+     * [sourcedOffloadSignature] resets on respawn (a new bash has no functions),
+     * so the next command after a restart re-sources. The offload-exit reporting
+     * the prelude exists for (the `__MINIS_OFFLOAD_RC` / handler_timeout mapping)
+     * keeps working unchanged: the wrapper functions are in the shell exactly as
+     * before, just installed once instead of per command.
+     */
+    @Volatile
+    private var sourcedOffloadSignature: String? = null
+
     private fun offloadExitPrelude(): String {
         val names = NativeOffloadServer.registeredHandlers
             .filter { it.matches(Regex("[A-Za-z0-9._+-]+")) }
             .sorted()
-        if (names.isEmpty()) return ""
+        if (names.isEmpty()) {
+            sourcedOffloadSignature = null
+            return ""
+        }
+        val signature = names.joinToString(",")
+        if (signature == sourcedOffloadSignature) return ""  // already in this shell
         val body = buildString {
             appendLine("minis_offload_wrap() {")
             appendLine("  local name=\"\$1\"")
@@ -534,11 +561,13 @@ class PersistentShell(
         }
         val file = File(RootfsManager.getInstance(context).rootfsDir, "etc/minis-offload-exit.sh")
         runCatching {
+            // Only touch the disk when the script content actually changed.
             if (!file.isFile || file.readText() != body) {
                 file.parentFile?.mkdirs()
                 file.writeText(body)
             }
         }.onFailure { return "" }
+        sourcedOffloadSignature = signature
         return ". /etc/minis-offload-exit.sh 2>/dev/null || true\n"
     }
 

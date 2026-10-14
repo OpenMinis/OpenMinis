@@ -746,6 +746,13 @@ internal class OpenAIRequestBodies(
         // depending on who asked for it, and would destroy proportionality.
         val capacity = host.model.maxOutputTokens ?: maxTokens
         val lid = host.model.id.lowercase()
+        // [T-zen-mimo-must-think] The `mimo-v2.5` arm is NOT dead code even though
+        // commit 56b7437 dropped `mimo-v2.5-free` from the bundled SEED: this lane
+        // follows the LIVE catalogue (`isZenFreeLaneId` = any `-free` suffix, see
+        // ProviderRepository [T-zen-free-lane-follow]), so an upstream
+        // re-advertisement of a mimo-v2.5* id lands here and would silently lose
+        // its must-think rescale if the arm were removed. Pinned by
+        // ZenFreeThinkingBudgetTest's `mimo-v2p5 …` cases. Keep both arms.
         val mustThink = lid.startsWith("mimo-v2.6") || lid.startsWith("mimo-v2.5")
         return ThinkingLadder.budgetFor(level, capacity, if (mustThink) 2 else 1)
     }

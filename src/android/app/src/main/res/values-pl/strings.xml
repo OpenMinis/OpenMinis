@@ -357,18 +357,8 @@
     <string name="memory_file_empty">Pusty</string>
     <string name="common_close">Zamknij</string>
     <string name="common_skip">Pomiń</string>
-    <string name="common_next">Dalej</string>
-    <string name="onboarding_welcome_title">Witamy w Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Twój Agent Minis Ultra z terminalem, przeglądarką i bezpośrednim dostępem do urządzenia.</string>
-    <string name="onboarding_get_started">Rozpocznij</string>
-    <string name="onboarding_provider_title">Dodaj dostawcę</string>
-    <string name="onboarding_provider_subtitle">Aby rozpocząć, podaj klucz API co najmniej jednego dostawcy.</string>
-    <string name="onboarding_provider_api_key_label">Klucz API: %1$s</string>
-    <string name="onboarding_save_api_key">Zapisz klucz API</string>
-    <string name="onboarding_saved">Zapisano</string>
     <string name="onboarding_select_models_title">Wybierz modele</string>
     <string name="onboarding_select_models_subtitle">Wybierz maksymalnie 3 modele do swojej domyślnej grupy.</string>
-    <string name="onboarding_search_models">Szukaj modeli</string>
     <string name="onboarding_filter_models">Filtruj modele</string>
     <string name="onboarding_done_count">Gotowe (%1$d/3)</string>
     <string name="onboarding_loading_models">Wczytywanie modeli…</string>
@@ -630,8 +620,6 @@
     <string name="appearance_auto_grouping_subtitle">Umieszczaj nowe czaty w pasującej grupie</string>
     <string name="appearance_auto_grouping_footer">Gdy tytuł czatu jest generowany po raz pierwszy, czat trafia także do pasującej istniejącej grupy. Działa raz na czat, korzysta wyłącznie z grup już utworzonych przez Ciebie i pozostawia czat bez grupy, gdy nic nie pasuje.</string>
     <string name="appearance_section_tool_preview">Pasek stanu narzędzia</string>
-    <string name="appearance_tool_preview_footer">Pokazuje podgląd na żywo obok paska stanu narzędzia podczas pracy Agenta.</string>
-    <string name="appearance_tool_preview_title">Okno podglądu narzędzia</string>
     <string name="appearance_section_auto_focus_after_reply">Automatyczny kursor w polu po odpowiedzi</string>
     <string name="appearance_auto_focus_after_reply_title">Automatyczny kursor w polu po odpowiedzi</string>
     <string name="appearance_auto_focus_after_reply_footer">Gdy włączone, klawiatura pojawia się automatycznie po zakończeniu odpowiedzi modelu, więc pole jest gotowe na kolejne pytanie. Domyślnie włączone; wyłącz, jeśli wolisz czytać odpowiedź bez niespodziewanie wysuwającej się klawiatury.</string>
@@ -1805,4 +1793,13 @@
     <string name="dev_suite_not_installed">Nie zainstalowano</string>
     <string name="dev_suite_required">wymagane</string>
     <string name="dev_suite_assemble">Zainstaluj</string>
+    <string name="dev_suite_start_install">Rozpoczynanie instalacji</string>
+    <string name="dev_suite_apt_failed">Instalacja apt nie powiodła się (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Krok nieudany (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Instalacja zakończona, ale test gotowości nie przeszedł</string>
+    <string name="dev_suite_interrupted">Instalacja przerwana</string>
+    <string name="dev_suite_no_space">Za mało miejsca: potrzeba około %1$d GB, dostępnych %2$d GB</string>
+    <string name="dev_suite_skipped_dep">Pominięto: %1$s nie zostało zainstalowane</string>
+    <string name="dev_suite_uninstall_failed">Odinstalowanie nie powiodło się (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Usunąć %1$s z piaskownicy? Pobrane pliki i dowiązania poleceń zostaną usunięte; pakiety apt pozostaną zainstalowane.</string>
 </resources>

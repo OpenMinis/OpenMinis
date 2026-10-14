@@ -355,18 +355,8 @@
     <string name="memory_file_empty">空</string>
     <string name="common_close">閉じる</string>
     <string name="common_skip">スキップ</string>
-    <string name="common_next">次へ</string>
-    <string name="onboarding_welcome_title">Minis Ultra へようこそ</string>
-    <string name="onboarding_welcome_subtitle">ターミナル、ブラウザ、ネイティブデバイスへのアクセスを備えた Minis Ultra Agent。</string>
-    <string name="onboarding_get_started">はじめる</string>
-    <string name="onboarding_provider_title">プロバイダーを追加</string>
-    <string name="onboarding_provider_subtitle">少なくとも 1 つのプロバイダーの API キーを入力して開始します。</string>
-    <string name="onboarding_provider_api_key_label">%1$s API キー</string>
-    <string name="onboarding_save_api_key">API キーを保存</string>
-    <string name="onboarding_saved">保存しました</string>
     <string name="onboarding_select_models_title">モデルを選択</string>
     <string name="onboarding_select_models_subtitle">デフォルトグループに最大 3 つのモデルを選択してください。</string>
-    <string name="onboarding_search_models">モデルを検索</string>
     <string name="onboarding_filter_models">モデルを絞り込み</string>
     <string name="onboarding_done_count">完了 (%1$d/3)</string>
     <string name="onboarding_loading_models">モデルを読み込んでいます…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">新しいチャットを適したグループに振り分けます</string>
     <string name="appearance_auto_grouping_footer">チャットのタイトルが初めて生成されるときに、適した既存のグループへも振り分けます。実行は 1 つのチャットにつき 1 回だけで、すでに作成済みのグループのみを使い、該当するものがなければグループなしのままにします。</string>
     <string name="appearance_section_tool_preview">ツールステータスバー</string>
-    <string name="appearance_tool_preview_footer">Agent 実行中、ツールステータスバーと共にライブプレビューサムネイルを表示します。</string>
-    <string name="appearance_tool_preview_title">ツールプレビューウィンドウ</string>
     <string name="appearance_section_auto_focus_after_reply">返信後に入力欄を自動でフォーカス</string>
     <string name="appearance_auto_focus_after_reply_title">返信後に入力欄を自動でフォーカス</string>
     <string name="appearance_auto_focus_after_reply_footer">オンにすると、モデルの返信が終わった時点でキーボードが自動的に表示され、すぐに続けて質問できます。既定でオンです。キーボードが不意に出てこない状態で返信を読みたい場合はオフにしてください。</string>
@@ -1796,4 +1784,13 @@
     <string name="dev_suite_not_installed">未導入</string>
     <string name="dev_suite_required">必須</string>
     <string name="dev_suite_assemble">セットアップ</string>
+    <string name="dev_suite_start_install">インストールを開始します</string>
+    <string name="dev_suite_apt_failed">apt インストールに失敗しました（exit %1$d）</string>
+    <string name="dev_suite_step_failed">ステップが失敗しました（exit %1$d）：%2$s</string>
+    <string name="dev_suite_probe_failed">インストールは完了しましたが、準備完了チェックを通りませんでした</string>
+    <string name="dev_suite_interrupted">インストールが中断されました</string>
+    <string name="dev_suite_no_space">ストレージが不足しています：約 %1$d GB 必要、利用可能 %2$d GB</string>
+    <string name="dev_suite_skipped_dep">スキップしました：%1$s のインストールに失敗</string>
+    <string name="dev_suite_uninstall_failed">アンインストールに失敗しました（exit %1$d）</string>
+    <string name="dev_suite_remove_confirm">サンドボックスから %1$s を削除しますか？ダウンロード済みのファイルとコマンドリンクが削除され、apt パッケージは残ります。</string>
 </resources>

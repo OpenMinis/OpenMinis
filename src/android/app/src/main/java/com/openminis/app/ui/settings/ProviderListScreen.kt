@@ -71,6 +71,20 @@ import com.openminis.app.ui.components.SwipeRowActions
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.R
 
+/**
+ * Result of the file-picked provider import, computed on Dispatchers.IO and
+ * turned into a toast back on the main thread — see [ProviderListScreen]'s
+ * importLauncher for why the two halves are separated.
+ */
+private sealed class ProviderImportOutcome {
+    data object ExtractFailed : ProviderImportOutcome()
+    data object NoSupported : ProviderImportOutcome()
+    data object Invalid : ProviderImportOutcome()
+    data object ReadFailed : ProviderImportOutcome()
+    data class Imported(val label: String) : ProviderImportOutcome()
+    data class ZipSummary(val ok: Int, val total: Int) : ProviderImportOutcome()
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProviderListScreen(
@@ -108,39 +122,76 @@ fun ProviderListScreen(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val mime = context.contentResolver.getType(uri).orEmpty()
-        val name = ProviderImportZip.queryDisplayName(context, uri).orEmpty()
-        val looksLikeZip = mime == "application/zip" ||
-            mime == "application/x-zip-compressed" ||
-            name.lowercase().endsWith(".zip")
-        try {
-            if (looksLikeZip) {
-                val toastFailed = context.getString(R.string.import_zip_extract_failed)
-                val toastNoSupported = context.getString(R.string.import_zip_no_supported)
-                ProviderImportZip.importFromZip(
-                    context = context,
-                    uri = uri,
-                    onImportSingle = { jsonStr -> providerRepository.importInstanceJSON(jsonStr) },
-                    onExtractFailed = { Toast.makeText(context, toastFailed, Toast.LENGTH_SHORT).show() },
-                    onNoSupported = { Toast.makeText(context, toastNoSupported, Toast.LENGTH_SHORT).show() },
-                    onSummary = { ok, total ->
-                        val msg = context.getString(R.string.import_zip_summary, ok, total)
-                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                    },
-                )
-            } else {
-                val jsonStr = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText()
-                if (jsonStr != null) {
-                    val label = providerRepository.importInstanceJSON(jsonStr)
-                    if (label != null) {
-                        Toast.makeText(context, context.getString(R.string.provider_imported, label), Toast.LENGTH_SHORT).show()
+        // [T-android-sessionlist-prefs-io] An ActivityResult callback is invoked
+        // on the MAIN thread. This body unzipped the picked archive straight
+        // into cacheDir (ProviderImportZip.importFromZip is a synchronous
+        // stream-and-write, per entry), read the JSON, and ran
+        // importInstanceJSON — a non-suspend repository write — all of it on the
+        // UI thread, right where a multi-MB provider bundle stalls the frame the
+        // picker's resume needs. The work now runs on Dispatchers.IO and only
+        // the toasts — which need the main thread's handler — come back to it.
+        syncScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                try {
+                    val mime = context.contentResolver.getType(uri).orEmpty()
+                    val name = ProviderImportZip.queryDisplayName(context, uri).orEmpty()
+                    val looksLikeZip = mime == "application/zip" ||
+                        mime == "application/x-zip-compressed" ||
+                        name.lowercase().endsWith(".zip")
+                    if (looksLikeZip) {
+                        var extractFailed = false
+                        var noSupported = false
+                        var ok = 0
+                        var total = 0
+                        ProviderImportZip.importFromZip(
+                            context = context,
+                            uri = uri,
+                            onImportSingle = { jsonStr ->
+                                providerRepository.importInstanceJSON(jsonStr)
+                            },
+                            onExtractFailed = { extractFailed = true },
+                            onNoSupported = { noSupported = true },
+                            onSummary = { o, t -> ok = o; total = t },
+                        )
+                        when {
+                            extractFailed -> ProviderImportOutcome.ExtractFailed
+                            noSupported -> ProviderImportOutcome.NoSupported
+                            else -> ProviderImportOutcome.ZipSummary(ok, total)
+                        }
                     } else {
-                        Toast.makeText(context, context.getString(R.string.provider_import_invalid), Toast.LENGTH_SHORT).show()
+                        val jsonStr = context.contentResolver.openInputStream(uri)
+                            ?.bufferedReader()?.readText()
+                        if (jsonStr == null) {
+                            ProviderImportOutcome.ReadFailed
+                        } else {
+                            val label = providerRepository.importInstanceJSON(jsonStr)
+                            if (label != null) ProviderImportOutcome.Imported(label)
+                            else ProviderImportOutcome.Invalid
+                        }
                     }
+                } catch (e: Exception) {
+                    AppLogger.warning(
+                        "ProviderListScreen",
+                        "provider import failed: ${e.message}",
+                    )
+                    ProviderImportOutcome.ReadFailed
                 }
             }
-        } catch (e: Exception) {
-            Toast.makeText(context, context.getString(R.string.provider_import_read_failed), Toast.LENGTH_SHORT).show()
+            val msg = when (outcome) {
+                ProviderImportOutcome.ExtractFailed ->
+                    context.getString(R.string.import_zip_extract_failed)
+                ProviderImportOutcome.NoSupported ->
+                    context.getString(R.string.import_zip_no_supported)
+                is ProviderImportOutcome.ZipSummary ->
+                    context.getString(R.string.import_zip_summary, outcome.ok, outcome.total)
+                ProviderImportOutcome.Invalid ->
+                    context.getString(R.string.provider_import_invalid)
+                ProviderImportOutcome.ReadFailed ->
+                    context.getString(R.string.provider_import_read_failed)
+                is ProviderImportOutcome.Imported ->
+                    context.getString(R.string.provider_imported, outcome.label)
+            }
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
         }
     }
 

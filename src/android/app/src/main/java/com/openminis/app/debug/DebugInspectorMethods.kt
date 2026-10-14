@@ -18,6 +18,7 @@ import androidx.compose.ui.semantics.SemanticsPropertyKey
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.util.Locale
 
 /**
  * Compose-Semantics + View hierarchy introspection for the debug RPC server.
@@ -66,7 +67,10 @@ object DebugInspectorMethods {
             snapshot.clear()
             val matches = JSONArray()
             val root = activity.window?.decorView ?: return@runOnMain matches
-            walkAndMatch(root, keyword.lowercase(), scope, matches)
+            // [T-android-turkish-dotted-i] Keyword matching is a comparison,
+            // not display — fold locale-invariantly on BOTH sides so a Turkish/
+            // Azeri device default can't strand the dotted/dotless i.
+            walkAndMatch(root, keyword.lowercase(Locale.ROOT), scope, matches)
             matches
         }
 
@@ -174,28 +178,30 @@ object DebugInspectorMethods {
     }
 
     private fun matches(view: View, kw: String, scope: String): Boolean {
+        // Locale.ROOT everywhere: these feed comparison against the folded
+        // keyword (see search()), not display text.
         when (scope) {
-            "type" -> return view.javaClass.simpleName.lowercase().contains(kw)
+            "type" -> return view.javaClass.simpleName.lowercase(Locale.ROOT).contains(kw)
             "text" -> {
                 if (view is android.widget.TextView) {
-                    if (view.text?.toString()?.lowercase()?.contains(kw) == true) return true
+                    if (view.text?.toString()?.lowercase(Locale.ROOT)?.contains(kw) == true) return true
                 }
-                if (view.contentDescription?.toString()?.lowercase()?.contains(kw) == true) return true
+                if (view.contentDescription?.toString()?.lowercase(Locale.ROOT)?.contains(kw) == true) return true
                 return false
             }
         }
         // "all"
-        if (view.javaClass.simpleName.lowercase().contains(kw)) return true
-        if (view is android.widget.TextView && view.text?.toString()?.lowercase()?.contains(kw) == true) return true
-        if (view.contentDescription?.toString()?.lowercase()?.contains(kw) == true) return true
+        if (view.javaClass.simpleName.lowercase(Locale.ROOT).contains(kw)) return true
+        if (view is android.widget.TextView && view.text?.toString()?.lowercase(Locale.ROOT)?.contains(kw) == true) return true
+        if (view.contentDescription?.toString()?.lowercase(Locale.ROOT)?.contains(kw) == true) return true
         return false
     }
 
     private fun matchesSemantics(node: SemanticsNode, kw: String, scope: String): Boolean {
-        val text = node.config.readOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }?.lowercase()
-        val desc = node.config.readOrNull(SemanticsProperties.ContentDescription)?.joinToString(" ")?.lowercase()
-        val tag = node.config.readOrNull(SemanticsProperties.TestTag)?.lowercase()
-        val role = node.config.readOrNull(SemanticsProperties.Role)?.toString()?.lowercase()
+        val text = node.config.readOrNull(SemanticsProperties.Text)?.joinToString(" ") { it.text }?.lowercase(Locale.ROOT)
+        val desc = node.config.readOrNull(SemanticsProperties.ContentDescription)?.joinToString(" ")?.lowercase(Locale.ROOT)
+        val tag = node.config.readOrNull(SemanticsProperties.TestTag)?.lowercase(Locale.ROOT)
+        val role = node.config.readOrNull(SemanticsProperties.Role)?.toString()?.lowercase(Locale.ROOT)
         return when (scope) {
             "type" -> role?.contains(kw) == true || tag?.contains(kw) == true
             "text" -> text?.contains(kw) == true || desc?.contains(kw) == true
@@ -352,7 +358,8 @@ object DebugInspectorMethods {
         }, durationMs)
     }
 
-    private fun parseColor(name: String): Int = when (name.lowercase()) {
+    // RPC token → ARGB mapping: compare locale-invariantly (protocol token).
+    private fun parseColor(name: String): Int = when (name.lowercase(Locale.ROOT)) {
         "red" -> Color.RED
         "green" -> Color.GREEN
         "blue" -> Color.BLUE

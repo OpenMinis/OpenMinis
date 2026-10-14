@@ -6,6 +6,8 @@ import android.net.Uri
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import com.openminis.app.network.withDohDns
@@ -29,6 +31,29 @@ abstract class OAuthManager(
     companion object {
         private const val TAG = "OAuthManager"
         private const val KEY_MANUAL_BEARER = "manual_bearer_token"
+
+        /**
+         * [T-oauth-refresh-race] Per-instance single-flight refresh lock, living
+         * in the BASE class so every manager inherits it.
+         *
+         * It used to live in three subclasses only (Claude / Gemini / Kimi), which
+         * left OpenAIOAuthManager, AntigravityOAuthManager and XAIOAuthManager
+         * refreshing completely un-locked — and the lock was per-CLASS, so two
+         * manager objects for the same account (chat builds one, provider routing
+         * builds another) had two locks.
+         *
+         * Two concurrent sends on the SAME account are normal here: the chat turn
+         * plus a title / compaction / sub-agent call on a sibling coroutine. Both
+         * read the same expiring token, so without one shared lock both POST a
+         * refresh — and refresh-token reuse is exactly what IdPs answer with
+         * `invalid_grant`, after which the loser's `logout()` wiped the winner's
+         * brand-new bundle. Keyed by instanceId because each OAuth account has
+         * its own token state; mirrors iOS `actor` serialization.
+         */
+        private val refreshMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+
+        internal fun refreshMutexFor(instanceId: String): Mutex =
+            refreshMutexes.getOrPut(instanceId) { Mutex() }
 
         /** Shared OkHttp client for all OAuth HTTP requests (respects system proxy). */
         internal val httpClient = OkHttpClient.Builder()
@@ -233,7 +258,45 @@ abstract class OAuthManager(
         return params
     }
 
-    open suspend fun refreshToken(): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * [T-oauth-refresh-race] Single-flight refresh. The network work moved to
+     * [performRefreshToken] and this entry point wraps it in the shared
+     * per-instance lock, so EVERY manager — including ones that never overrode
+     * the old body (OpenAI, Antigravity) — coalesces concurrent refreshers
+     * instead of racing them. Subclasses that own a richer refresh (their own
+     * `refreshTokenClassified`) reuse the same lock via
+     * [OAuthManager.refreshMutexFor], which is what makes one account's token
+     * state have one guardian.
+     */
+    open suspend fun refreshToken(): Boolean = coalesceRefresh { performRefreshToken() }
+
+    /**
+     * [T-oauth-refresh-race] Take the per-instance refresh lock and re-check
+     * whether the refresh is still needed before spending a round-trip.
+     *
+     * The expiry must be read OUTSIDE the lock: the whole point is to compare what
+     * the caller believed was expiring against what is stored by the time it gets
+     * the lock. (The subclasses' original version read both values inside the
+     * lock, where they can only ever be equal, so its "fresher token already
+     * present" branch was unreachable and every queued caller still hit the
+     * network.)
+     */
+    protected suspend fun coalesceRefresh(refresh: suspend () -> Boolean): Boolean {
+        val priorExpireAt = loadStoredTokens()?.optLong("expire_at", 0) ?: 0L
+        return withContext(Dispatchers.IO) {
+            refreshMutexFor(instanceId).withLock {
+                val storedExpireAt = loadStoredTokens()?.optLong("expire_at", 0) ?: 0L
+                if (storedExpireAt != priorExpireAt && storedExpireAt > System.currentTimeMillis()) {
+                    Log.d(TAG, "Refresh skipped — fresher token already present (concurrent refresh coalesced)")
+                    return@withLock true
+                }
+                refresh()
+            }
+        }
+    }
+
+    /** The un-guarded refresh round-trip. Call [refreshToken], not this. */
+    protected open suspend fun performRefreshToken(): Boolean = withContext(Dispatchers.IO) {
         val stored = loadStoredTokens() ?: return@withContext false
         val refreshToken = stored.optString("refresh_token", "").ifEmpty { return@withContext false }
 
@@ -288,12 +351,28 @@ abstract class OAuthManager(
             if (refreshToken()) {
                 return loadStoredTokens()?.optString("access_token")
             }
-            // Refresh failed — if token is already expired, clear credentials
-            if (expireAt > 0 && now >= expireAt) {
+            // [T-oauth-refresh-race] Re-read BEFORE deciding anything. `token` and
+            // `expireAt` above are PRE-refresh values, and the old code tested them
+            // straight into `logout()` — so when a concurrent sender (title /
+            // compaction / sub-agent on the same instance) had just stored a fresh
+            // bundle and this call's own attempt failed transiently (network blip,
+            // 5xx, or losing the refresh-token-reuse race), we wiped the winner's
+            // credentials and forced a full re-login out of a perfectly good token.
+            val current = loadStoredTokens() ?: return null
+            val currentExpireAt = current.optLong("expire_at", 0)
+            val currentToken = current.optString("access_token", "")
+            if (currentExpireAt > System.currentTimeMillis() && currentToken.isNotEmpty()) {
+                Log.i(TAG, "Refresh reported failure but a non-expired token is stored — keeping it")
+                return currentToken
+            }
+            // Refresh failed — if the token CURRENTLY stored is expired too, the
+            // credential really is dead: clear it.
+            if (currentExpireAt > 0 && System.currentTimeMillis() >= currentExpireAt) {
                 Log.w(TAG, "Token expired and refresh failed — clearing credentials")
                 logout()
                 return null
             }
+            return currentToken.ifEmpty { token }
         }
         return token
     }

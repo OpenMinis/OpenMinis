@@ -49,7 +49,7 @@ class ToolLoopDetectorTest {
     fun `generic_repeat ignores poll tools`() {
         val detector = ToolLoopDetector()
         repeat(15) {
-            val post = detector.record("command_status", mapOf("id" to "job-1"),
+            val post = detector.record("check_agent", mapOf("id" to "job-1"),
                 result = "running", errorMessage = null)
             // Poll tool should follow the poll path; record() emits at >= warning
             // threshold, but the warning text must reference polling, not generic.
@@ -183,13 +183,13 @@ class ToolLoopDetectorTest {
     fun `known_poll_no_progress warns at threshold`() {
         val detector = ToolLoopDetector()
         repeat(9) {
-            detector.record("command_status", mapOf("id" to "job-1"),
+            detector.record("check_agent", mapOf("id" to "job-1"),
                 result = "running", errorMessage = null)
         }
-        val preBefore = detector.check("command_status", mapOf("id" to "job-1"))
+        val preBefore = detector.check("check_agent", mapOf("id" to "job-1"))
         assertEquals("9 prior records, streak=9, no warn yet",
             Level.NONE, preBefore.level)
-        val post = detector.record("command_status", mapOf("id" to "job-1"),
+        val post = detector.record("check_agent", mapOf("id" to "job-1"),
             result = "running", errorMessage = null)
         assertEquals("10th record triggers WARNING", Level.WARNING, post.level)
         assertTrue(post.message?.contains("Stop polling") == true)
@@ -199,11 +199,11 @@ class ToolLoopDetectorTest {
     fun `known_poll_no_progress blocks at critical threshold`() {
         val detector = ToolLoopDetector()
         repeat(20) {
-            detector.record("command_status", mapOf("id" to "job-1"),
+            detector.record("check_agent", mapOf("id" to "job-1"),
                 result = "running", errorMessage = null)
         }
         // After 20 records the streak is 20; next check must block as CRITICAL.
-        val pre = detector.check("command_status", mapOf("id" to "job-1"))
+        val pre = detector.check("check_agent", mapOf("id" to "job-1"))
         assertEquals(Level.CRITICAL, pre.level)
         assertTrue(pre.message?.contains("Session execution blocked") == true)
     }
@@ -212,28 +212,48 @@ class ToolLoopDetectorTest {
     fun `known_poll_no_progress resets when result changes`() {
         val detector = ToolLoopDetector()
         repeat(9) {
-            detector.record("command_status", mapOf("id" to "job-1"),
+            detector.record("check_agent", mapOf("id" to "job-1"),
                 result = "running", errorMessage = null)
         }
         // Result changed → progress observed; streak should break.
-        detector.record("command_status", mapOf("id" to "job-1"),
+        detector.record("check_agent", mapOf("id" to "job-1"),
             result = "completed", errorMessage = null)
         // Now even with the same args, no-progress streak = 1 (just the latest).
-        val pre = detector.check("command_status", mapOf("id" to "job-1"))
+        val pre = detector.check("check_agent", mapOf("id" to "job-1"))
         assertEquals("progress resets streak", Level.NONE, pre.level)
     }
 
     @Test
-    fun `known_poll_no_progress recognizes process action poll`() {
+    fun `known_poll_no_progress recognizes check_agent op poll`() {
         val detector = ToolLoopDetector()
         repeat(10) {
-            detector.record("process",
-                mapOf("action" to "poll", "id" to "p1"),
+            detector.record("check_agent",
+                mapOf("op" to "status", "id" to "p1"),
                 result = "still_running", errorMessage = null)
         }
         // Streak now 10 → next check on the same poll args yields a WARNING.
-        val pre = detector.check("process", mapOf("action" to "poll", "id" to "p1"))
+        val pre = detector.check("check_agent", mapOf("op" to "status", "id" to "p1"))
         assertEquals(Level.WARNING, pre.level)
+    }
+
+    /**
+     * [T-poll-tool-drift] `op=clear` mutates the registry instead of polling it,
+     * so it must stay on the generic path. The detector previously keyed on tool
+     * names that do not exist here (`command_status`, `process`), which meant NO
+     * call ever took the poll branch at all.
+     */
+    @Test
+    fun `check_agent op clear is not treated as a poll`() {
+        val detector = ToolLoopDetector()
+        repeat(10) {
+            detector.record("check_agent",
+                mapOf("op" to "clear"), result = "cleared", errorMessage = null)
+        }
+        val post = detector.check("check_agent", mapOf("op" to "clear"))
+        assertTrue(
+            "clear must not use the poll wording: ${post.message}",
+            post.message?.contains("Stop polling") != true,
+        )
     }
 
     // ─── 4. global_circuit_breaker ───────────────────────────────────────────

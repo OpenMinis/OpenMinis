@@ -502,9 +502,10 @@ internal fun ToolCallPill(
     // running. iOS only animates a left→right shimmer sweep across the
     // pill background and keeps the typed icon visible — the spinner
     // both fought the icon for attention and looked stylistically off
-    // next to the iOS counterpart. The bottom FloatingToolStatusBar
-    // still shows a CircularProgressIndicator (that is the running-tool
-    // status surface, where a spinner reads correctly).
+    // next to the iOS counterpart. The bottom ToolActivityPill does keep a
+    // CircularProgressIndicator — that is the running-tool status surface,
+    // where a spinner reads correctly (the bar this row sits in does not).
+    // [FloatingToolStatusBar was removed in e6beebb; the pill replaced it.]
     val shimmerTranslate = if (isRunning) {
         val transition = rememberInfiniteTransition(label = "toolPillShimmer")
         transition.animateFloat(

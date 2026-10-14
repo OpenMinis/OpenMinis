@@ -1,100 +1,21 @@
 package com.openminis.app.tools
 
 import com.openminis.app.data.repository.MemoryRepository
-import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Tool definitions and execution for memory_write and memory_get.
- * Schema matches iOS AgentToolDefinition exactly.
+ * Execution for memory_write and memory_get.
+ *
+ * [T-memory-tools-dead-schema] The four hand-built JSON schema factories that
+ * used to open this file (`memoryWriteToolDefinition`, `memoryGetToolDefinition`,
+ * `memoryWriteOpenAIDefinition`, `memoryGetOpenAIDefinition`) had NO callers left:
+ * every provider gets its schema from [AgentTools] (`memoryWriteDefinition` /
+ * `memoryGetDefinition`), which is also where the `scope` enum lives now. They
+ * had additionally DRIFTED — they advertised `scope=evolution`, which the live
+ * schema did not, while [executeMemoryGet] really does implement it. Deleted
+ * rather than "kept in sync"; the enum is reconciled in AgentTools instead.
  */
 object MemoryTools {
-
-    // -- Tool Definitions (Anthropic format) --
-
-    fun memoryWriteToolDefinition(): JSONObject {
-        val properties = JSONObject().apply {
-            put("tool_title", JSONObject().apply {
-                put("type", "string")
-                put("description", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Save user preference for Python', 'Note today's project context'). Use the same language as the user.")
-            })
-            put("content", JSONObject().apply {
-                put("type", "string")
-                put("description", "The memory content to write. Use concise Markdown with a short heading (## Topic) and context about what was done/learned.")
-            })
-        }
-
-        return JSONObject().apply {
-            put("name", "memory_write")
-            put("description", "Write a memory entry to today's daily log (YYYY-MM-DD.md). Memories persist across all sessions. Each entry is prepended with a timestamp. Save: user preferences, recurring patterns, key facts, project conventions, reusable knowledge. Avoid saving passwords, API keys, tokens, or secrets unless the user explicitly confirms after being warned. Keep entries concise and general-purpose. GLOBAL.md is read-only (user-maintained via Settings).")
-            put("input_schema", JSONObject().apply {
-                put("type", "object")
-                put("properties", properties)
-                put("required", JSONArray().apply {
-                    put("tool_title")
-                    put("content")
-                })
-            })
-        }
-    }
-
-    fun memoryGetToolDefinition(): JSONObject {
-        val properties = JSONObject().apply {
-            put("tool_title", JSONObject().apply {
-                put("type", "string")
-                put("description", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Recall user preferences', 'Search past notes'). Use the same language as the user.")
-            })
-            put("scope", JSONObject().apply {
-                put("type", "string")
-                put("description", "Memory scope: 'daily' for daily logs, 'all' for daily logs + GLOBAL.md, 'evolution' for self-evolution proposals (accept/reject those with the evolution tool).")
-                put("enum", JSONArray().apply {
-                    put("daily")
-                    put("all")
-                    put("evolution")
-                })
-            })
-            put("keywords", JSONObject().apply {
-                put("type", "string")
-                put("description", "Space-separated keywords for fuzzy matching (e.g. 'python preference' or 'API key setup'). All keywords must appear in a line or its surrounding context for a match. Leave empty to return full memory files.")
-            })
-        }
-
-        return JSONObject().apply {
-            put("name", "memory_get")
-            put("description", "Retrieve memories. scope=evolution returns self-evolution proposals so you can see learned behavior without opening Settings. Accept or reject a proposal with the evolution tool. Other scopes search daily logs and GLOBAL.md.")
-            put("input_schema", JSONObject().apply {
-                put("type", "object")
-                put("properties", properties)
-                put("required", JSONArray().apply {
-                    put("tool_title")
-                })
-            })
-        }
-    }
-
-    // -- OpenAI Function Calling format --
-
-    fun memoryWriteOpenAIDefinition(): JSONObject {
-        return JSONObject().apply {
-            put("type", "function")
-            put("function", JSONObject().apply {
-                put("name", "memory_write")
-                put("description", memoryWriteToolDefinition().getString("description"))
-                put("parameters", memoryWriteToolDefinition().getJSONObject("input_schema"))
-            })
-        }
-    }
-
-    fun memoryGetOpenAIDefinition(): JSONObject {
-        return JSONObject().apply {
-            put("type", "function")
-            put("function", JSONObject().apply {
-                put("name", "memory_get")
-                put("description", memoryGetToolDefinition().getString("description"))
-                put("parameters", memoryGetToolDefinition().getJSONObject("input_schema"))
-            })
-        }
-    }
 
     // -- Execution --
 

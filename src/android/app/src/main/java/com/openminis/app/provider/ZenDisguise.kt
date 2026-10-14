@@ -2,7 +2,6 @@ package com.openminis.app.provider
 
 import com.openminis.app.data.model.LLMMessage
 import okhttp3.Request
-import org.json.JSONObject
 import java.math.BigInteger
 import java.security.MessageDigest
 
@@ -93,23 +92,17 @@ object ZenDisguise {
 
     fun requestId(): String = "req_" + java.util.UUID.randomUUID().toString().replace("-", "")
 
-    fun applyToBody(builder: Request.Builder, body: String): Request.Builder {
-        val messages = runCatching {
-            val array = JSONObject(body).optJSONArray("messages") ?: return@runCatching emptyList<LLMMessage>()
-            buildList {
-                for (i in 0 until array.length()) {
-                    val item = array.optJSONObject(i) ?: continue
-                    val role = when (item.optString("role")) {
-                        "assistant" -> LLMMessage.Role.ASSISTANT
-                        else -> LLMMessage.Role.USER
-                    }
-                    add(LLMMessage(role, item.optString("content")))
-                }
-            }
-        }.getOrDefault(emptyList())
-        return apply(builder, messages)
-    }
-
+    /**
+     * [T-zen-disguise-single-serialize] The `applyToBody(builder, body)` variant
+     * that used to sit here is GONE: it re-parsed the entire serialised request
+     * body — multi-MB by the T302 measurements in OpenAIRawStream — purely to
+     * recover the first user message for [sessionId], which re-introduced exactly
+     * the memory pressure T302 removed on top of a deliberately single
+     * `body.toString()`. Its only call site had the `messages` list in hand, so
+     * [apply] takes that list. If a future caller genuinely has only the bytes,
+     * derive the seed from the message list it was built from, not from a
+     * re-parse.
+     */
     fun apply(builder: Request.Builder, messages: List<LLMMessage>): Request.Builder {
         val session = sessionId(messages)
         return builder

@@ -204,22 +204,33 @@ internal suspend fun ChatViewModel.executeTool(
                     json.optString("path").takeIf { it.isNotBlank() }?.let { put("path", it) }
                 }
             }
-            ToolExecutionResult(
-                output = runCatching {
-                    CodeGraphTool.execute(
-                        args = args,
-                        sessionId = activeSessionId,
-                        context = context,
-                        dao = AppDatabase.getInstance(context).codeIndexDao(),
-                        resolvePath = { path ->
-                            com.openminis.app.sandbox.PRootKernel.resolveSessionHostPath(
-                                activeSessionId, path, context
-                            )?.path
-                        },
+            // [T-code-graph-honest-result] This used to wrap the call in
+            // runCatching and report `success = true` either way, so a failed
+            // index query (locked DB, unresolvable path) reached the model as a
+            // normal result carrying an error sentence, and the
+            // `!result.success` evolution hook never fired.
+            runCatching {
+                CodeGraphTool.execute(
+                    args = args,
+                    sessionId = activeSessionId,
+                    context = context,
+                    dao = AppDatabase.getInstance(context).codeIndexDao(),
+                    resolvePath = { path ->
+                        com.openminis.app.sandbox.PRootKernel.resolveSessionHostPath(
+                            activeSessionId, path, context
+                        )?.path
+                    },
+                )
+            }.fold(
+                onSuccess = { ToolExecutionResult(it, true, toolTitle = "code_graph") },
+                onFailure = { e ->
+                    ToolExecutionResult(
+                        "code_graph 执行失败: ${e.message}",
+                        false,
+                        errorCode = com.openminis.app.tools.ToolErrorCode.EXECUTION_FAILED,
+                        toolTitle = "code_graph",
                     )
-                }.getOrElse { e -> "code_graph 执行失败: ${e.message}" },
-                success = true,
-                toolTitle = "code_graph",
+                },
             )
         }
         else -> if (com.openminis.app.plugins.OnlineApiTool.isOnline(name)) {

@@ -1,7 +1,6 @@
 package com.openminis.app.ui.chat
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -1034,19 +1033,15 @@ class SelectionController {
  * Composition local exposing the active [SelectionController] to descendants.
  * Default = a no-op controller so callers can pretend it's always there;
  * shards composed without a real controller simply never participate in any
- * selection. Wrap with [ProvideSelectionController] at the ChatScreen level.
+ * selection.
+ *
+ * ChatScreen provides it directly in the same `CompositionLocalProvider` that
+ * supplies [LocalMessageBoundsRegistry] and the markdown `LocalTextToolbar`
+ * (one wrapper composable for three locals would have meant nesting that whole
+ * ~740-line block, so the thin `ProvideSelectionController` helper that used to
+ * sit here was never called and has been deleted).
  */
 val LocalMinisSelectionController = compositionLocalOf<SelectionController?> { null }
-
-@Composable
-fun ProvideSelectionController(
-    controller: SelectionController,
-    content: @Composable () -> Unit,
-) {
-    CompositionLocalProvider(LocalMinisSelectionController provides controller) {
-        content()
-    }
-}
 
 /**
  * Helper for shard owners: registers the shard with the ambient controller
@@ -1165,7 +1160,7 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSelectionForShard(
  *
  * Convention from ChatScreen.kt: shard ids look like
  *   "mdblock:<parentBlockId>:<blockIndex>"   ← splitMarkdownIntoBlockTexts
- *   "text:<blockId>"                          ← single AssistantText block
+ *   "text:<blockId>"                          ← single un-split text block
  *   "legacy"                                  ← whole-message legacy path
  * The mdblock case is the only one that needs ordering today; the others
  * are single-shard so the comparison never has to disambiguate.

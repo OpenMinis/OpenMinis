@@ -147,16 +147,29 @@ class BackupFileTreeExporter(
 
     /**
      * True for anything that is itself a backup artifact — a delivered
-     * `.minisbak`, or the directory they are delivered into.
+     * `.minisbak`, the directory they are delivered into, or one of the two
+     * scratch trees.
      *
      * Without this a backup sweeps up the previous backup as "user data",
      * nesting packages inside packages until the size runs away. Matched on the
      * leading path component as well as the extension, so a whole `Backups/`
      * tree is skipped in one step rather than file by file.
+     *
+     * [T-restore-plaintext-scratch] `restore-work` (cacheDir, the BackupImporter's
+     * DECRYPTED plaintext tree — chats, secrets.json, env-var values) and
+     * `backup-staging` (filesDir, the exporter's pre-zip scratch tree) are the
+     * same hazard in scratch form: a CACHE-category export taken while a
+     * previous restore left its scratch behind would package a full plaintext
+     * copy of the user's data into the next backup — and restoring that package
+     * would then write it back over the importer's own work directory. Neither
+     * is user data; both must never be walked.
      */
     private fun isBackupArtifact(rel: String): Boolean {
         if (rel.endsWith(".${BackupFormat.FILE_EXTENSION}")) return true
-        return rel.substringBefore('/') == BACKUPS_DIR_NAME
+        return when (rel.substringBefore('/')) {
+            BACKUPS_DIR_NAME, RESTORE_WORK_DIR_NAME, STAGING_DIR_NAME -> true
+            else -> false
+        }
     }
 
     companion object {
@@ -164,6 +177,12 @@ class BackupFileTreeExporter(
 
         /** Sibling of `shared`/`skills`/`memory`, matching iOS's delivery directory. */
         const val BACKUPS_DIR_NAME = "Backups"
+
+        /** cacheDir scratch of [BackupImporter] — decrypted plaintext, never user data. */
+        const val RESTORE_WORK_DIR_NAME = "restore-work"
+
+        /** filesDir scratch of [BackupExporter] — pre-zip staging, never user data. */
+        const val STAGING_DIR_NAME = "backup-staging"
     }
 }
 

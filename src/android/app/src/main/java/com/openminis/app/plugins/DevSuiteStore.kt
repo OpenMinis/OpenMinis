@@ -1,6 +1,7 @@
 package com.openminis.app.plugins
 
 import android.content.Context
+import com.openminis.app.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -9,11 +10,22 @@ import kotlinx.coroutines.flow.asStateFlow
  * [T-dev-suite] Install state for dev-suite components.
  *
  * SharedPreferences rather than Room: the state is a flat per-component
- * marker (installed / installing / failed) with no relational shape, and
- * avoiding a schema migration keeps the change low-risk. The guest itself
+ * marker (installed / installing / failed) with the latest progress line,
+ * and avoiding a schema migration keeps the change low-risk. The guest itself
  * is the source of truth for "is it really ready" — [DevSuiteInstaller]
  * re-probes checkCommand on demand; this store only caches the last known
  * outcome so the UI doesn't shell out on every recompose.
+ *
+ * [T-devsuite-progress-write] Write amplification was the reason this file
+ * looks the way it does now: a multi-GB install streams thousands of guest
+ * lines, and every one of them used to do `putString().apply()` PLUS a full
+ * `snapshot()` re-read of every key. Persistence is now limited to status
+ * transitions ([shouldPersistComponentState]) — progress lines live only in
+ * the in-memory [states] flow, so the UI stays live while the disk stays
+ * quiet — and [snapshot] merges rather than replaces, so a re-read cannot
+ * rewind a newer in-memory line. [ComponentState.progressLine] is the single
+ * store of the live progress line (the installer used to keep a second,
+ * parallel copy that nothing read).
  */
 object DevSuiteStore {
     private const val PREFS = "dev_suite_state"
@@ -24,7 +36,7 @@ object DevSuiteStore {
     data class ComponentState(
         val componentId: String,
         val status: Status = Status.NOT_INSTALLED,
-        /** Last progress line from the installer (for the UI card). */
+        /** Last progress line from the installer (the only one the UI reads). */
         val progressLine: String = "",
         val updatedAtMs: Long = 0L,
     )
@@ -32,19 +44,38 @@ object DevSuiteStore {
     private val _states = MutableStateFlow<Map<String, ComponentState>>(emptyMap())
     val states: StateFlow<Map<String, ComponentState>> = _states.asStateFlow()
 
+    private val lock = Any()
+
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun snapshot(context: Context): Map<String, ComponentState> {
+    private fun readFromDisk(context: Context): Map<String, ComponentState> {
         val p = prefs(context)
         val out = mutableMapOf<String, ComponentState>()
         for (id in p.all.keys) {
             out[id] = decodeComponentState(id, p.getString(id, null)) ?: continue
         }
-        _states.value = out
         return out
     }
 
+    /** Full read from disk — the prefs stay authoritative across process death. */
+    fun snapshot(context: Context): Map<String, ComponentState> = synchronized(lock) {
+        val disk = readFromDisk(context)
+        // Keep any in-memory change that is newer than what survived to disk
+        // (throttled progress lines) so a snapshot never rewinds the UI.
+        val merged = disk.toMutableMap()
+        for ((id, live) in _states.value) {
+            val stored = merged[id]
+            if (stored == null || stored.updatedAtMs <= live.updatedAtMs) merged[id] = live
+        }
+        _states.value = merged
+        merged
+    }
+
+    /**
+     * Record a status/progress transition. Only a status change persists to
+     * disk — see [T-dev-suite-prefs-storm] in [update].
+     */
     fun update(context: Context, componentId: String, status: Status, progressLine: String = "") {
         val previous = _states.value[componentId]
         val next = ComponentState(
@@ -83,7 +114,8 @@ object DevSuiteStore {
         val interrupted = current.values
             .filter { it.status == Status.INSTALLING }
             .map { it.componentId }
-        interrupted.forEach { update(context, it, Status.FAILED, "安装被中断") }
+        val reason = context.getString(R.string.dev_suite_interrupted)
+        interrupted.forEach { update(context, it, Status.FAILED, reason) }
         return interrupted
     }
 

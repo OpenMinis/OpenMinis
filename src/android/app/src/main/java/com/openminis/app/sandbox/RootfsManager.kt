@@ -80,8 +80,8 @@ class RootfsManager private constructor(private val context: Context) {
     }
 
     /**
-     * Observable install progress. UI layers (OnboardingScreen,
-     * RootfsManagementScreen) bind this and render a progress bar during
+     * Observable install progress. The sandbox screen (RootfsManagementScreen,
+     * via RootfsManagementViewModel) binds this and renders a progress bar during
      * `installIfNeeded()` / `reset()`. Emits `Installed` on success and
      * `Failed` on error so callers can surface retry affordances.
      */

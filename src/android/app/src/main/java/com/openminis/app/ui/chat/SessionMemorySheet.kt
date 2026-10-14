@@ -135,7 +135,6 @@ fun SessionMemorySheet(
     ) {
         when (val m = mode) {
             MemorySheetMode.List -> ListBody(
-                memoryRepository = memoryRepository,
                 autoItems = autoItems,
                 toolRecords = toolRecords,
                 onAutoItemClick = { item ->
@@ -305,7 +304,6 @@ private fun DetailToolbar(
 
 @Composable
 private fun ListBody(
-    memoryRepository: MemoryRepository,
     autoItems: List<AutoItem>,
     toolRecords: List<MemoryToolRecord>,
     onAutoItemClick: (AutoItem) -> Unit,
@@ -435,8 +433,6 @@ private fun ListBody(
 
         item { Spacer(modifier = Modifier.height(24.dp)) }
     }
-
-    @Suppress("UNUSED_EXPRESSION") memoryRepository
 }
 
 /**

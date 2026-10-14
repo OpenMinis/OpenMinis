@@ -34,11 +34,14 @@ Android arm64 上的私人 AI Agent。把兼容接口接到手机里的一台 Ub
 PRoot 和 Ubuntu rootfs 在构建时生成，不进仓库。需要 NDK r29（`29.0.14206865`）。完整步骤见 [BUILDING.md](BUILDING.md)。
 
 ```sh
-git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
+git clone https://github.com/tall-1997/OpenMinis-Linux.git
 cd OpenMinis-Linux
+git submodule update --init deps/proot
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
-cd src/android && ./gradlew :app:assembleDebug
+cd src/android && ./gradlew :app:assembleRelease
 ```
+
+Android 只需要 `deps/proot` 这一个子模块；`deps/ish` 是 iOS 遗留子模块，本仓库不编译它（见 BUILDING.md）。只构建 release 变体：`assembleDebug` 在默认配置下不存在，`debug` 变体已被 `app/build.gradle.kts` 停用。
 
 国内镜像见内置技能 `android-sdk-mirrors`。不要用 sdkmanager 的 x86_64 包覆盖客户机里的 aarch64 `aapt2`。
 
@@ -100,11 +103,14 @@ Allow unknown-app installs before sideloading. A debug signature cannot replace 
 PRoot and the Ubuntu rootfs are produced at build time and are not stored in git. NDK r29 (`29.0.14206865`) is required. Full steps are in [BUILDING.md](BUILDING.md).
 
 ```sh
-git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
+git clone https://github.com/tall-1997/OpenMinis-Linux.git
 cd OpenMinis-Linux
+git submodule update --init deps/proot
 ./deps/build_proot.sh && ./scripts/prepare_android_sandbox.sh
-cd src/android && ./gradlew :app:assembleDebug
+cd src/android && ./gradlew :app:assembleRelease
 ```
+
+`deps/proot` is the only submodule the Android build needs; `deps/ish` is a leftover iOS submodule this repository never compiles (see BUILDING.md). Release variant only: `assembleDebug` does not exist in the default configuration because `app/build.gradle.kts` disables every `debug` variant.
 
 Do not replace the guest's aarch64 `aapt2` with the sdkmanager x86_64 package. Mirrors: the built-in `android-sdk-mirrors` skill.
 

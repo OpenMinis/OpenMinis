@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Vacío</string>
     <string name="common_close">Cerrar</string>
     <string name="common_skip">Omitir</string>
-    <string name="common_next">Siguiente</string>
-    <string name="onboarding_welcome_title">Te damos la bienvenida a Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Tu Minis Ultra Agent con terminal, navegador y acceso nativo al dispositivo.</string>
-    <string name="onboarding_get_started">Comenzar</string>
-    <string name="onboarding_provider_title">Agregar un proveedor</string>
-    <string name="onboarding_provider_subtitle">Ingresa una API key de al menos un proveedor para comenzar.</string>
-    <string name="onboarding_provider_api_key_label">API key de %1$s</string>
-    <string name="onboarding_save_api_key">Guardar API key</string>
-    <string name="onboarding_saved">Guardado</string>
     <string name="onboarding_select_models_title">Seleccionar modelos</string>
     <string name="onboarding_select_models_subtitle">Elige hasta 3 modelos para tu grupo predeterminado.</string>
-    <string name="onboarding_search_models">Buscar modelos</string>
     <string name="onboarding_filter_models">Filtrar modelos</string>
     <string name="onboarding_done_count">Listo (%1$d/3)</string>
     <string name="onboarding_loading_models">Cargando modelos…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Clasificar los chats nuevos en un grupo que coincida</string>
     <string name="appearance_auto_grouping_footer">Cuando se genera por primera vez el título de un chat, también se archiva en un grupo existente que coincida. Se ejecuta una vez por chat, solo usa grupos que ya creaste y deja el chat sin grupo cuando nada coincide.</string>
     <string name="appearance_section_tool_preview">Barra de estado de herramientas</string>
-    <string name="appearance_tool_preview_footer">Muestra una miniatura de vista previa en vivo junto a la barra de estado de herramientas durante la ejecución de Minis Ultra Agent.</string>
-    <string name="appearance_tool_preview_title">Ventana de vista previa de herramientas</string>
     <string name="appearance_section_auto_focus_after_reply">Enfocar la entrada tras responder</string>
     <string name="appearance_auto_focus_after_reply_title">Enfocar la entrada tras responder</string>
     <string name="appearance_auto_focus_after_reply_footer">Cuando está activado, el teclado aparece automáticamente al terminar la respuesta del modelo, para que puedas escribir de inmediato. Está activado de forma predeterminada; desactívalo si prefieres leer la respuesta sin que aparezca el teclado.</string>
@@ -1799,4 +1787,13 @@
     <string name="dev_suite_not_installed">No instalado</string>
     <string name="dev_suite_required">obligatorio</string>
     <string name="dev_suite_assemble">Montar</string>
+    <string name="dev_suite_start_install">Iniciando la instalación</string>
+    <string name="dev_suite_apt_failed">Fallo de la instalación de apt (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Paso fallido (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">La instalación terminó pero la comprobación de disponibilidad no pasó</string>
+    <string name="dev_suite_interrupted">Instalación interrumpida</string>
+    <string name="dev_suite_no_space">Almacenamiento insuficiente: se necesitan unos %1$d GB, hay %2$d GB libres</string>
+    <string name="dev_suite_skipped_dep">Omitido: %1$s no se instaló</string>
+    <string name="dev_suite_uninstall_failed">Desinstalación fallida (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">¿Quitar %1$s de la sandbox? Se eliminan los archivos descargados y los enlaces de comandos; los paquetes apt permanecen instalados.</string>
 </resources>

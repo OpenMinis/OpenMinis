@@ -140,8 +140,16 @@ class GeminiProvider(
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
+                // [T-sse-data-prefix-tolerance] Tolerate `data:` with or without
+                // the optional space, exactly as OpenAIRawStream does — the SSE
+                // spec makes only ONE leading space ignorable, and Gemini-
+                // compatible relays behind a custom base emit `data:{...}`.
+                // Strict `data: ` matching dropped every chunk and the turn then
+                // surfaced as an empty-response failure.
+                if (!l.startsWith("data:")) continue
+                val payload = l.removePrefix("data:").let {
+                    if (it.startsWith(" ")) it.removePrefix(" ") else it
+                }
 
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
 
@@ -539,7 +547,10 @@ class GeminiProvider(
             return LLMError.InvalidApiKey()
         }
         if (statusCode == 429) return HttpRetryAfter.map429(body, retryAfterHeader)
-        val message = "Gemini API error $statusCode: ${body.take(200)}"
+        // [T-llm-error-secret-mask] `body` is upstream-controlled and reaches
+        // LLMError.message, which the chat UI renders. OpenAI's mapper masks here
+        // (OpenAIProviderErrors); Gemini was the drifting copy.
+        val message = "Gemini API error $statusCode: ${com.openminis.app.util.SecretMasking.mask(body.take(200))}"
         // [T-llm-error-classification] 细分 Gemini 400 类错误。
         val lower = message.lowercase()
         when {

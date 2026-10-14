@@ -12,6 +12,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -132,35 +133,80 @@ class SkillRepository(private val context: Context) {
     /** Last disk signature that [loadAll] (or a skipped reload) published. */
     private var diskSignatures: Map<String, String>? = null
 
+    /** Set once the first disk read has completed, successfully or not. */
+    @Volatile
+    private var loaded = false
+
+    /** Serialises the first-load path so two callers don't parse the library twice. */
+    private val loadLock = Any()
+
     init {
-        // [T-android-safemode-lateinit-crash-147] Never let a bad skill take
-        // the whole app down. This constructor runs inline in
-        // MinisApp.onCreate, BEFORE subsystemsInitialized is set, so anything
-        // escaping here aborts onCreate with the repositories half-assigned.
-        // The Application object is then permanently broken (onCreate never
-        // re-runs), every subsequent launch crashes on the first Compose frame
-        // with "lateinit property chatRepository has not been initialized",
-        // and each crash writes a log that re-trips the crash-burst detector —
-        // the self-sustaining loop reported in GH#147, where the user could
-        // only recover by reinstalling.
+        // [T-android-startup-repo-io] The constructor used to run
+        // `loadAll(); installBundledSkills()` INLINE — open `skills.db`, walk every
+        // skill directory and YAML-parse every SKILL.md — while MinisApp.onCreate()
+        // was still on the main thread. #753 (ProviderRepository) and
+        // [T-android-startup-splash-hang] moved the sibling costs off Main and the
+        // constructors were the missed ones; the team already moved
+        // `refreshOnStartup` off Main "so a large library (100+ dirs) never blocks
+        // the first frame" — this initial parse IS that cost.
         //
-        // loadAll() reads rows written by third-party skill imports and uses
-        // getColumnIndexOrThrow plus SKILL.md parsing, so a malformed skill
-        // from an external hub is exactly the kind of input that can throw.
-        // Degrading to "some skills missing from the list" is always better
-        // than an app that cannot start.
-        val loaded = runCatching { loadAll() }.onFailure {
-            Log.e(TAG, "loadAll failed — continuing with ${_skills.value.size} skill(s): ${it.message}", it)
-        }.isSuccess
-        val bundled = runCatching { installBundledSkills() }.onFailure {
-            Log.e(TAG, "installBundledSkills failed — continuing: ${it.message}", it)
-        }.isSuccess
-        if (loaded && bundled) noteDisk()
+        // The first read now happens on the repository's own IO scope. Read
+        // semantics are preserved by [ensureLoaded], which every mutating or
+        // decision-making entry point calls: a caller that arrives before the
+        // warm-up lands waits for the ONE load instead of acting on the empty
+        // placeholder (idempotent, so at most one stall per process).
+        backgroundScope.launch {
+            runCatching { loadOnce() }.onFailure {
+                Log.e(TAG, "deferred skill load failed: ${it.message}", it)
+            }
+        }
+    }
+
+    /** [T-android-startup-repo-io] Explicit suspend entry point; MinisApp may call it on IO. */
+    suspend fun load() = withContext(Dispatchers.IO) { loadOnce() }
+
+    private fun loadOnce() {
+        synchronized(loadLock) {
+            if (loaded) return
+            // [T-android-safemode-lateinit-crash-147] Never let a bad skill take
+            // the whole app down. Anything escaping here used to abort
+            // MinisApp.onCreate with the repositories half-assigned, and the
+            // Application object is then permanently broken (onCreate never
+            // re-runs) — the GH#147 crash loop. loadAll() reads rows written by
+            // third-party skill imports and uses getColumnIndexOrThrow plus
+            // SKILL.md parsing, so a malformed skill from an external hub is
+            // exactly the kind of input that can throw. Degrading to "some skills
+            // missing from the list" is always better than an app that cannot
+            // start, so both steps stay individually guarded here too.
+            val ok = runCatching { loadAll() }.onFailure {
+                Log.e(TAG, "loadAll failed — continuing with ${_skills.value.size} skill(s): ${it.message}", it)
+            }.isSuccess
+            val bundled = runCatching { installBundledSkills() }.onFailure {
+                Log.e(TAG, "installBundledSkills failed — continuing: ${it.message}", it)
+            }.isSuccess
+            if (ok && bundled) noteDisk()
+            // Set on every path, as the old constructor behaved: leaving it false
+            // would make every later ensureLoaded() re-run a full disk parse.
+            // refreshOnStartup() retries the real work on the next launch.
+            loaded = true
+        }
+    }
+
+    /** [T-android-startup-repo-io] Blocks ONLY while the very first load is outstanding. */
+    private fun ensureLoaded() {
+        // Thread.holdsLock is the re-entrancy escape: loadOnce() itself calls
+        // installBundledSkills() → add()/update(), and without this the nested
+        // ensureLoaded() would re-enter loadOnce() and recurse forever. A caller on
+        // ANOTHER thread does block on loadLock inside loadOnce(), which is the
+        // "wait for the one load, never act on the empty placeholder" behaviour.
+        if (loaded || Thread.holdsLock(loadLock)) return
+        loadOnce()
     }
 
     // -- CRUD --
 
     fun add(name: String, description: String, body: String, version: String = "1.0.0", source: ImportSource = ImportSource.FILE, sourceURL: String? = null): Skill? {
+        ensureLoaded()
         val id = slugify(name)
         if (id.isBlank()) return null
         if (_skills.value.any { it.id == id }) return null
@@ -177,12 +223,20 @@ class SkillRepository(private val context: Context) {
 
         insertDb(skill)
         writeSkillMd(skill)
-        _skills.value = _skills.value + skill
+        // [T-android-skill-rmw-cas] `_skills.value = _skills.value.map/plus(…)` read
+        // the flow, transformed a snapshot and wrote it back with no lock and no CAS,
+        // while background writers run on other dispatchers (`updateFromURL` uses
+        // withContext(IO); MinisApp.kt runs refreshOnStartup on IO). A UI toggle
+        // concurrent with a background update lost ONE write — in memory AND on disk.
+        // `MutableStateFlow.update {}` re-runs the block until a compare-and-set
+        // wins, so no concurrent publication is ever discarded.
+        _skills.update { current -> current + skill }
         Log.i(TAG, "Added skill: ${skill.id}")
         return skill
     }
 
     fun update(id: String, name: String? = null, description: String? = null, body: String? = null): Boolean {
+        ensureLoaded()
         val current = _skills.value.find { it.id == id } ?: return false
         val updated = current.copy(
             name = name ?: current.name,
@@ -196,7 +250,7 @@ class SkillRepository(private val context: Context) {
             arrayOf<Any>(updated.name, updated.description, updated.version, updated.updatedAt, id)
         )
         writeSkillMd(updated)
-        _skills.value = _skills.value.map { if (it.id == id) updated else it }
+        _skills.update { list -> list.map { if (it.id == id) updated else it } }
         return true
     }
 
@@ -223,12 +277,13 @@ class SkillRepository(private val context: Context) {
     }
 
     fun delete(id: String) {
+        ensureLoaded()
         db.execSQL("DELETE FROM skills WHERE id=?", arrayOf(id))
         db.execSQL("DELETE FROM session_skill_overrides WHERE skill_id=?", arrayOf(id))
         overrideRevision++
         val dir = File(skillsDir, id)
         dir.deleteRecursively()
-        _skills.value = _skills.value.filter { it.id != id }
+        _skills.update { list -> list.filter { it.id != id } }
         noteDisk()
         Log.i(TAG, "Deleted skill: $id")
     }
@@ -280,6 +335,9 @@ class SkillRepository(private val context: Context) {
      * ids the user explicitly switched off (recorded in prefs) stay off.
      */
     fun refreshOnStartup() {
+        // [T-android-startup-repo-io] Runs on MinisApp's IO scope; ensureLoaded()
+        // is a no-op there (the deferred init load already ran or is running).
+        ensureLoaded()
         runCatching { reloadFromDisk() }.onFailure {
             Log.e(TAG, "startup refresh loadAll failed: ${it.message}", it)
         }
@@ -306,20 +364,29 @@ class SkillRepository(private val context: Context) {
         }
         if (changes.isNotEmpty()) {
             val byId = changes.toMap()
-            _skills.value = _skills.value.map { skill ->
-                val enable = byId[skill.id] ?: return@map skill
-                skill.copy(isEnabled = enable)
+            // [T-android-skill-rmw-cas] atomic re-read instead of a lost update.
+            _skills.update { list ->
+                list.map { skill ->
+                    val enable = byId[skill.id] ?: return@map skill
+                    skill.copy(isEnabled = enable)
+                }
             }
         }
         noteDisk()
     }
 
     fun setEnabled(id: String, enabled: Boolean) {
+        ensureLoaded()
         // Record the explicit user choice; refreshOnStartup() re-asserts it.
         markUserDisabled(id, !enabled)
         db.execSQL("UPDATE skills SET is_enabled=? WHERE id=?", arrayOf<Any>(if (enabled) 1 else 0, id))
-        _skills.value = _skills.value.map {
-            if (it.id == id) it.copy(isEnabled = enabled) else it
+        // [T-android-skill-rmw-cas] This is THE race the report names: a UI toggle
+        // written as `_skills.value = _skills.value.map { … }` raced a background
+        // `updateFromURL` on another dispatcher and one of the two writes vanished
+        // from memory (and, for the loser, from disk). `update {}` retries the
+        // transform against whatever was published in between.
+        _skills.update { list ->
+            list.map { if (it.id == id) it.copy(isEnabled = enabled) else it }
         }
     }
 
@@ -520,17 +587,21 @@ class SkillRepository(private val context: Context) {
      * so long-lived installs don't drift into multi-thousand-read territory.
      */
     fun recordSkillUse(skillId: String) {
+        ensureLoaded()
         val current = _skills.value.find { it.id == skillId } ?: return
         val bumped = current.copy(useCount = current.useCount + 1.0)
         db.execSQL(
             "UPDATE skills SET use_count = use_count + 1 WHERE id=?",
             arrayOf<Any>(skillId)
         )
-        var next = _skills.value.map { if (it.id == skillId) bumped else it }
-        if (bumped.useCount > NORMALIZE_THRESHOLD) {
-            next = normalizeUseCounts(next)
+        // [T-android-skill-rmw-cas] read-modify-write made atomic.
+        _skills.update { list ->
+            var next: List<Skill> = list.map { if (it.id == skillId) bumped else it }
+            if (bumped.useCount > NORMALIZE_THRESHOLD) {
+                next = normalizeUseCounts(next)
+            }
+            next
         }
-        _skills.value = next
     }
 
     private fun normalizeUseCounts(list: List<Skill>): List<Skill> {
@@ -589,6 +660,7 @@ class SkillRepository(private val context: Context) {
      * Returns the created Skill or null on failure.
      */
     fun importFromContent(content: String, source: ImportSource = ImportSource.FILE, sourceURL: String? = null): Skill? {
+        ensureLoaded()
         val parsed = parseSkillMd(content) ?: return null
         val id = slugify(parsed.name)
         if (id.isNotBlank() && _skills.value.any { it.id == id }) {
@@ -612,7 +684,7 @@ class SkillRepository(private val context: Context) {
                 )
             )
             writeSkillMd(replaced)
-            _skills.value = _skills.value.map { if (it.id == id) replaced else it }
+            _skills.update { list -> list.map { if (it.id == id) replaced else it } }
             return replaced
         }
         return add(
@@ -738,7 +810,7 @@ class SkillRepository(private val context: Context) {
                 "UPDATE skills SET updated_at=? WHERE id=?",
                 arrayOf<Any>(bumped.updatedAt, skill.id)
             )
-            _skills.value = _skills.value.map { if (it.id == skill.id) bumped else it }
+            _skills.update { list -> list.map { if (it.id == skill.id) bumped else it } }
             if (!outcome.isComplete) {
                 Log.w(TAG, "importFromGitHub partial for ${skill.id}: ${outcome.reason ?: "${outcome.filesFailed} file(s) failed"}")
             }
@@ -782,6 +854,10 @@ class SkillRepository(private val context: Context) {
      * failure so the UI can surface *why* the update failed.
      */
     suspend fun updateFromURL(skillId: String): UpdateResult = withContext(Dispatchers.IO) {
+        // [T-android-startup-repo-io] already on IO: waiting for the one-time
+        // initial load here is cheap, and without it a user hitting "Update"
+        // during the startup window got a bogus "Skill not found".
+        ensureLoaded()
         val existing = _skills.value.find { it.id == skillId }
             ?: return@withContext UpdateResult.Failure("Skill not found")
         if (existing.importSource != ImportSource.URL) {
@@ -972,6 +1048,7 @@ class SkillRepository(private val context: Context) {
      * Returns the refreshed skill or null if the file is gone or malformed.
      */
     fun rescanFromDisk(skillId: String): Skill? {
+        ensureLoaded()
         val current = _skills.value.find { it.id == skillId } ?: return null
         val file = File(File(skillsDir, skillId), "SKILL.md")
         if (!file.exists()) {
@@ -999,7 +1076,7 @@ class SkillRepository(private val context: Context) {
             "UPDATE skills SET name=?, description=?, version=?, updated_at=? WHERE id=?",
             arrayOf<Any>(refreshed.name, refreshed.description, refreshed.version, refreshed.updatedAt, skillId)
         )
-        _skills.value = _skills.value.map { if (it.id == skillId) refreshed else it }
+        _skills.update { list -> list.map { if (it.id == skillId) refreshed else it } }
         return refreshed
     }
 
@@ -1009,6 +1086,7 @@ class SkillRepository(private val context: Context) {
      * from existing sessions don't break.
      */
     fun renameSkill(skillId: String, newName: String): Boolean {
+        ensureLoaded()
         val current = _skills.value.find { it.id == skillId } ?: return false
         val trimmed = newName.trim()
         if (trimmed.isBlank()) return false
@@ -1023,7 +1101,7 @@ class SkillRepository(private val context: Context) {
             "UPDATE skills SET name=?, updated_at=? WHERE id=?",
             arrayOf<Any>(refreshed.name, refreshed.updatedAt, skillId)
         )
-        _skills.value = _skills.value.map { if (it.id == skillId) refreshed else it }
+        _skills.update { list -> list.map { if (it.id == skillId) refreshed else it } }
         return true
     }
 
@@ -1336,7 +1414,12 @@ class SkillRepository(private val context: Context) {
 
     private fun installBundledSkills() {
         installOrUpgradeBundled("skill-creator", "2.0.0", SKILL_CREATOR_CONTENT)
-        installOrUpgradeBundled("android-sdk-mirrors", "1.2.0", ANDROID_SDK_MIRRORS_CONTENT)
+        // [T-android-bundled-skill-version] 1.2.0 shipped the pre-b3a2136 text;
+        // b3a2136 rewrote ANDROID_SDK_MIRRORS_CONTENT but left the version alone,
+        // so every already-installed device skipped the corrected guidance
+        // forever (the lexicographic `existing.version >= bundledVersion` test was
+        // true). Any content change to a bundled skill MUST come with a bump here.
+        installOrUpgradeBundled("android-sdk-mirrors", "1.2.1", ANDROID_SDK_MIRRORS_CONTENT)
         installOrUpgradeBundled(
             ANDROID_DEVICE_OPS_SKILL_ID,
             ANDROID_DEVICE_OPS_SKILL_VERSION,
@@ -1344,9 +1427,17 @@ class SkillRepository(private val context: Context) {
         )
     }
 
+    /**
+     * [T-android-bundled-skill-version] See [BundledSkillUpgradeGate] for why the
+     * old string comparison was wrong; kept as a member only so the call site
+     * below reads in terms of this repository.
+     */
+    internal fun bundledSkillNeedsUpgrade(installed: String, bundled: String): Boolean =
+        BundledSkillUpgradeGate.needsUpgrade(installed, bundled)
+
     private fun installOrUpgradeBundled(bundledId: String, bundledVersion: String, content: String) {
         val existing = _skills.value.find { it.id == bundledId }
-        if (existing != null && existing.version >= bundledVersion) return
+        if (existing != null && !bundledSkillNeedsUpgrade(existing.version, bundledVersion)) return
 
         val parsed = parseSkillMd(content) ?: return
         if (existing != null) {
@@ -1361,7 +1452,8 @@ class SkillRepository(private val context: Context) {
                 arrayOf<Any>(updated.description, bundledVersion, updated.updatedAt, bundledId)
             )
             writeSkillMd(updated)
-            _skills.value = _skills.value.map { if (it.id == bundledId) updated else it }
+            // [T-android-skill-rmw-cas] atomic publication of the upgrade.
+            _skills.update { list -> list.map { if (it.id == bundledId) updated else it } }
             Log.i(TAG, "Upgraded bundled skill: $bundledId → v$bundledVersion")
         } else {
             add(
@@ -1391,6 +1483,10 @@ class SkillRepository(private val context: Context) {
      * path), not overwriting any preserved DB toggle.
      */
     fun reloadFromDisk() {
+        // [T-android-startup-repo-io] The prompt path calls this before
+        // skillPromptFragment(), so the one-time load happens here rather than
+        // the fragment silently advertising an empty library.
+        ensureLoaded()
         val next = runCatching { SkillDiskIndex.signatures(skillsDir) }.getOrElse {
             loadAll()
             noteDisk()
@@ -1430,35 +1526,52 @@ class SkillRepository(private val context: Context) {
     private fun applyDiskDelta(delta: SkillDiskIndex.Delta): Boolean {
         if (delta.isEmpty) return true
         val byId = _skills.value.associateBy { it.id }
-        val next = _skills.value.toMutableList()
+        // [T-android-skill-rmw-cas] The disk/DB side effects run first, then the
+        // whole merge is published through MutableStateFlow.update{}. Building
+        // `next` off a `_skills.value` snapshot and assigning it back lost any
+        // skill a concurrent writer added/changed in between (this runs from
+        // reloadFromDisk on the prompt path while refreshOnStartup runs on IO).
+        val removedNonBundled = LinkedHashSet<String>()
+        val blankedBundled = LinkedHashSet<String>()
         for (id in delta.removed) {
-            val skill = byId[id]
-            if (skill == null) return false
+            val skill = byId[id] ?: return false
             if (skill.importSource == ImportSource.BUNDLED) {
-                val idx = next.indexOfFirst { it.id == id }
-                if (idx >= 0) next[idx] = skill.copy(body = "")
+                blankedBundled.add(id)
                 continue
             }
             db.execSQL("DELETE FROM skills WHERE id=?", arrayOf(id))
             db.execSQL("DELETE FROM session_skill_overrides WHERE skill_id=?", arrayOf(id))
             overrideRevision++
-            next.removeAll { it.id == id }
+            removedNonBundled.add(id)
             Log.i(TAG, "Pruned skill missing from disk: $id")
         }
+        val refreshed = HashMap<String, Skill>()
         for (id in delta.changed) {
             val skill = byId[id] ?: return false
             val updated = rereadSkill(skill) ?: return false
-            val idx = next.indexOfFirst { it.id == id }
-            if (idx >= 0) next[idx] = updated
+            refreshed[id] = updated
         }
+        val discovered = ArrayList<Skill>()
         for (id in delta.added) {
-            if (next.any { it.id == id }) continue
+            if (byId[id] != null) continue
             val skill = discoverOne(id) ?: return false
             insertDb(skill)
-            next.add(skill)
+            discovered.add(skill)
             Log.i(TAG, "Auto-discovered skill: $id")
         }
-        _skills.value = next
+        _skills.update { current ->
+            val merged = current
+                .filterNot { it.id in removedNonBundled }
+                .map { skill ->
+                    when {
+                        skill.id in blankedBundled -> skill.copy(body = "")
+                        refreshed[skill.id] != null -> refreshed.getValue(skill.id)
+                        else -> skill
+                    }
+                }
+            val present = merged.mapTo(HashSet(merged.size)) { it.id }
+            merged + discovered.filterNot { it.id in present }
+        }
         return true
     }
 
@@ -2075,7 +2188,7 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
 private val ANDROID_SDK_MIRRORS_CONTENT = """
 ---
 name: android-sdk-mirrors
-version: 1.2.0
+version: 1.2.1
 description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 注意事项。当用户需要安装 Android SDK、sdkmanager、build-tools、platforms，或遇到 Google dl.google.com 无法访问、aapt2 被 x86_64 覆盖时使用本技能。
 ---
 
@@ -2190,3 +2303,24 @@ internal object SkillEnableMigration {
     fun merge(prefsIds: Set<String>, dbDisabledIds: Set<String>): Set<String> =
         prefsIds + dbDisabledIds
 }
+
+/**
+ * Numeric version comparison for bundled-skill upgrades.
+ *
+ * [T-android-bundled-skill-version] The check used to be
+ * `existing.version >= bundledVersion` — a STRING comparison, so
+ * `"1.9.0" >= "1.10.0"` is TRUE (`9` sorts after `1` character-wise) and the
+ * moment a bundled skill crossed a two-digit component nobody already holding the
+ * older copy ever received the SKILL.md shipped in the APK — not on upgrade, not
+ * on reinstall, because the row on disk already "looks newer".
+ *
+ * [com.openminis.app.data.UpdateVersionLogic.compareVersions] is the repo's own
+ * numeric comparator; `< 0` keeps the old "equal version means no work" rule.
+ * Declared top-level (like [SkillEnableMigration]) so it is JVM-testable without
+ * a Context, SQLite and a skill directory.
+ */
+internal object BundledSkillUpgradeGate {
+    fun needsUpgrade(installed: String, bundled: String): Boolean =
+        com.openminis.app.data.UpdateVersionLogic.compareVersions(installed, bundled) < 0
+}
+

@@ -355,18 +355,8 @@
     <string name="memory_file_empty">비어 있음</string>
     <string name="common_close">닫기</string>
     <string name="common_skip">건너뛰기</string>
-    <string name="common_next">다음</string>
-    <string name="onboarding_welcome_title">Minis Ultra에 오신 것을 환영합니다</string>
-    <string name="onboarding_welcome_subtitle">터미널, 브라우저, 네이티브 장치 액세스를 갖춘 Minis Ultra Agent 입니다.</string>
-    <string name="onboarding_get_started">시작하기</string>
-    <string name="onboarding_provider_title">제공자 추가</string>
-    <string name="onboarding_provider_subtitle">시작하려면 최소 한 제공자의 API 키를 입력하세요.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API 키</string>
-    <string name="onboarding_save_api_key">API 키 저장</string>
-    <string name="onboarding_saved">저장됨</string>
     <string name="onboarding_select_models_title">모델 선택</string>
     <string name="onboarding_select_models_subtitle">기본 그룹에 최대 3개 모델을 선택하세요.</string>
-    <string name="onboarding_search_models">모델 검색</string>
     <string name="onboarding_filter_models">모델 필터링</string>
     <string name="onboarding_done_count">완료 (%1$d/3)</string>
     <string name="onboarding_loading_models">모델을 불러오는 중…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">새 채팅을 어울리는 그룹에 넣습니다</string>
     <string name="appearance_auto_grouping_footer">채팅의 제목이 처음 생성될 때 어울리는 기존 그룹에도 넣습니다. 채팅마다 한 번만 실행되고, 이미 만들어 둔 그룹만 사용하며, 어울리는 그룹이 없으면 그룹 없이 둡니다.</string>
     <string name="appearance_section_tool_preview">도구 상태 바</string>
-    <string name="appearance_tool_preview_footer">Agent 실행 중 도구 상태 바와 함께 실시간 미리보기 썸네일을 표시합니다.</string>
-    <string name="appearance_tool_preview_title">도구 미리보기 창</string>
     <string name="appearance_section_auto_focus_after_reply">답변 후 입력창 자동 활성화</string>
     <string name="appearance_auto_focus_after_reply_title">답변 후 입력창 자동 활성화</string>
     <string name="appearance_auto_focus_after_reply_footer">켜면 모델이 답변을 마친 뒤 키보드가 자동으로 올라와 바로 이어서 질문할 수 있습니다. 기본적으로 켜져 있으며, 키보드가 갑자기 올라오지 않는 상태로 답변을 읽고 싶다면 끄세요.</string>
@@ -1796,4 +1784,13 @@
     <string name="dev_suite_not_installed">설치 안 됨</string>
     <string name="dev_suite_required">필수</string>
     <string name="dev_suite_assemble">설치</string>
+    <string name="dev_suite_start_install">설치 시작</string>
+    <string name="dev_suite_apt_failed">apt 설치 실패 (exit %1$d)</string>
+    <string name="dev_suite_step_failed">단계 실패 (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">설치는 완료되었으나 준비 확인을 통과하지 못했습니다</string>
+    <string name="dev_suite_interrupted">설치가 중단되었습니다</string>
+    <string name="dev_suite_no_space">저장 공간 부족: 약 %1$d GB 필요, 사용 가능 %2$d GB</string>
+    <string name="dev_suite_skipped_dep">건너뜀: %1$s 설치 실패</string>
+    <string name="dev_suite_uninstall_failed">제거 실패 (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">샌드박스에서 %1$s을(를) 제거할까요? 다운로드한 파일과 명령 링크가 삭제되며 apt 패키지는 그대로 남습니다.</string>
 </resources>

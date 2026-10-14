@@ -54,6 +54,20 @@ class MinisAccessibilityService : AccessibilityService() {
 
     val nodeRegistry: NodeRegistry = NodeRegistry()
 
+    /**
+     * [T-a11y-shared-executor] One daemon-thread executor shared by every
+     * [captureScreenshot] call. The old code minted a new single-thread
+     * ExecutorService per screenshot; `takeScreenshot` needs an executor only
+     * as a callback delivery thread, so a fresh thread + pool object per call
+     * was pure garbage — and a burst of captures (browser loop, skill replay)
+     * paid it every time. Serializing callbacks on one thread is also what
+     * the per-call pools effectively did.
+     */
+    private val screenshotExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "a11y-screenshot").apply { isDaemon = true }
+        }
+
     override fun onCreate() {
         super.onCreate()
         _instance = this
@@ -239,9 +253,10 @@ class MinisAccessibilityService : AccessibilityService() {
         val resultRef = java.util.concurrent.atomic.AtomicReference(
             ShotResult(null, "TIMEOUT", "takeScreenshot timed out")
         )
-        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        // [T-a11y-shared-executor] Shared executor — deliberately NOT shut
+        // down here: it belongs to the service lifetime, not the call.
         try {
-            takeScreenshot(displayId, executor, object : TakeScreenshotCallback {
+            takeScreenshot(displayId, screenshotExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(screenshot: ScreenshotResult) {
                     try {
                         val hwBuffer: HardwareBuffer = screenshot.hardwareBuffer
@@ -273,8 +288,6 @@ class MinisAccessibilityService : AccessibilityService() {
             }
         } catch (t: Throwable) {
             resultRef.set(ShotResult(null, "INTERNAL", "${t.javaClass.simpleName}: ${t.message ?: ""}"))
-        } finally {
-            executor.shutdown()
         }
         return resultRef.get()
     }

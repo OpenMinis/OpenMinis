@@ -10,6 +10,17 @@
     <include domain="file" path="minis-global" />
     <include domain="file" path="skills" />
 
+    <!-- [T-backup-domains] Real data roots referenced BY minis.db: message
+         bodies are content-addressed files under bodies/ and session
+         attachments live under minis-sessions/ — a DB restored without them
+         points bodyRef/attachment paths at files that do not exist. ssh/
+         carries hosts.json + known_hosts.json: without it the TOFU pins do
+         not migrate and the new device silently re-pins every host, losing
+         the changed-key (MITM) alarm. -->
+    <include domain="file" path="minis-sessions" />
+    <include domain="file" path="bodies" />
+    <include domain="file" path="ssh" />
+
     <!-- Non-secret presentation and permission-mode preferences. -->
     <include domain="sharedpref" path="appearance_prefs.xml" />
     <include domain="sharedpref" path="minis_settings.xml" />

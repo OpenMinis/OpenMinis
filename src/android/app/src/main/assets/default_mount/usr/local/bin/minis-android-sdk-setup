@@ -56,8 +56,16 @@ curl_first() {
   # [T-devsuite-resume] Downloads land in a FIXED .part under
   # /var/minis/shared/cache/devsuite (not /tmp/$$) so an interrupted
   # download — app killed, reboot, dead mirror — resumes on the next run
-  # with curl -C - instead of starting over. Mirrors proxy the same
-  # release bytes, so a .part may be resumed by a different mirror.
+  # with curl -C - instead of starting over.
+  # [T-devsuite-verify] Three rules the old version did not have:
+  #   * the URL list is ordered ORIGIN FIRST; every later URL (CN mirror or
+  #     GitHub proxy) is only tried when a published digest exists for $2,
+  #     because without one nothing detects a body the mirror swapped;
+  #   * the completed .part is checksum-verified before it is copied out —
+  #     a mismatch deletes the cache entry so the next mirror starts from
+  #     zero instead of resuming a spliced file;
+  #   * a payload that finished (and verified) deletes its .part, so the
+  #     cache holds only incomplete transfers, capped by minis_cache_prune.
   _curl_dest=$1
   _curl_name=$2
   shift 2
@@ -65,11 +73,19 @@ curl_first() {
   if offline_pick "$_curl_dest" "$_curl_name"; then
     return 0
   fi
-  _cf_dir=/var/minis/shared/cache/devsuite
+  _cf_expected=$(minis_expected_digest "$_curl_name")
+  _cf_dir="$MINIS_CACHE_DIR"
   _cf_part="$_cf_dir/$_curl_name.part"
-  mkdir -p "$_cf_dir" 2>/dev/null || _cf_part="/tmp/$_curl_name.part"
+  mkdir -p "$_cf_dir" "$MINIS_OFFLINE_DIR" 2>/dev/null || _cf_part="/tmp/$_curl_name.part"
+  minis_cache_prune
+  _cf_index=0
   for url in "$@"; do
     [ -n "$url" ] || continue
+    _cf_index=$((_cf_index + 1))
+    if [ -z "$_cf_expected" ] && [ "$_cf_index" != 1 ]; then
+      echo "  skipping $url: no published checksum for $_curl_name — mirrors/proxies disabled" >&2
+      continue
+    fi
     if [ -s "$_cf_part" ]; then
       echo "  resuming $_curl_name from $(( $(wc -c < "$_cf_part") )) bytes via $url"
     else
@@ -98,34 +114,91 @@ curl_first() {
         echo "  …连接中（$((_ticks * 5))s）"
       fi
     done
-    if wait "$_cpid"; then
-      cp "$_cf_part" "$_curl_dest"
-      return 0
-    fi
-    _cf_rc=$?
+    _cf_rc=0
+    wait "$_cpid" || _cf_rc=$?
     if [ "$_cf_rc" = "33" ]; then
       # Range not supported by this mirror — wipe and retry from zero.
       rm -f "$_cf_part"
-      if curl -fL --retry 1 --retry-delay 1 --connect-timeout 12 \
-          --speed-time 30 --speed-limit 100 \
-          -o "$_cf_part" "$url"; then
-        cp "$_cf_part" "$_curl_dest"
-        return 0
-      fi
+      _cf_rc=0
+      curl -fL --retry 1 --retry-delay 1 --connect-timeout 12 \
+        --speed-time 30 --speed-limit 100 \
+        -o "$_cf_part" "$url" || _cf_rc=$?
     fi
-    echo "  failed $url (rc=$_cf_rc)" >&2
-    # Keep the .part for the next mirror / next run.
+    if [ "$_cf_rc" != 0 ]; then
+      echo "  failed $url (rc=$_cf_rc)" >&2
+      # Incomplete: keep the .part so the next run resumes (safe only while a
+      # digest exists to catch the splice when it completes).
+      continue
+    fi
+    _cf_v=0
+    minis_verify_payload "$_cf_part" "$_curl_name" || _cf_v=$?
+    if [ "$_cf_v" = 0 ]; then
+      cp "$_cf_part" "$_curl_dest"
+      rm -f "$_cf_part"
+      return 0
+    fi
+    if [ "$_cf_v" = 1 ]; then
+      rm -f "$_cf_part"
+      echo "  failed $url (checksum mismatch — cache dropped)" >&2
+      continue
+    fi
+    # rc 2: no digest published for this name. Accept ONLY the origin URL
+    # (TLS to the publisher); never a mirror — that is the _cf_index guard
+    # above, and an empty $_cf_expected means we are on index 1 here.
+    cp "$_cf_part" "$_curl_dest"
+    rm -f "$_cf_part"
+    return 0
   done
   return 1
 }
 
+# Digests published by the vendor, resolved at run time so a version bump
+# does not silently drop the check.
+google_expected() {
+  # dl.google.com publishes <checksum type="sha1"> for every archive in
+  # repository2-3.xml (that repository ships SHA-1 only — it is still the
+  # publisher's own digest, and the file names are versioned and immutable).
+  [ -n "${1:-}" ] || return 0
+  if [ -z "${GOOGLE_REPO_XML:-}" ] || [ ! -s "${GOOGLE_REPO_XML:-}" ]; then
+    GOOGLE_REPO_XML=/tmp/minis-google-repository23.xml
+    curl -fsSL --connect-timeout 12 --max-time 90 -o "$GOOGLE_REPO_XML" \
+      "https://dl.google.com/android/repository/repository2-3.xml" 2>/dev/null || true
+  fi
+  _ge_sha=$(awk -v want="$1" '
+    /<checksum type="sha1">/ { s=$0; sub(/.*<checksum type="sha1">/, "", s); sub(/<\/checksum>.*/, "", s) }
+    /<url>/ { u=$0; sub(/.*<url>/, "", u); sub(/<\/url>.*/, "", u); if (u == want) { print s; exit } }
+  ' "$GOOGLE_REPO_XML" 2>/dev/null)
+  [ -n "$_ge_sha" ] || return 0
+  printf 'sha1 %s\n' "$_ge_sha"
+}
+
+cmake_expected() {
+  # Kitware publishes cmake-<ver>-SHA-256.txt as a GitHub release asset (and
+  # the .asc signed by their key). Read it from github.com — the publisher —
+  # and pick the line for the aarch64 tarball about to be downloaded.
+  _ce_ver="${1:-}"
+  [ -n "$_ce_ver" ] || return 0
+  _ce_file="cmake-${_ce_ver}-linux-aarch64.tar.gz"
+  _ce_sha=$(curl -fsSL --connect-timeout 12 --max-time 40 \
+      "https://github.com/Kitware/CMake/releases/download/v${_ce_ver}/cmake-${_ce_ver}-SHA-256.txt" 2>/dev/null \
+    | tr -d '\r' | grep -F "$_ce_file" | head -1 | cut -d' ' -f1)
+  case "$_ce_sha" in
+    [0-9a-fA-F][0-9a-fA-F]*) printf 'sha256 %s\n' "$_ce_sha" ;;
+    *) return 0 ;;
+  esac
+}
+
 github_urls() {
   # $1 = https://github.com/org/repo/releases/download/tag/file
+  # [T-devsuite-verify] Origin first. ghfast.top / ghproxy.net /
+  # mirror.ghproxy.com are anonymous third-party relays, not the publisher:
+  # they are only reachable when offline.sh has a digest to check the result
+  # against (see curl_first).
   orig=$1
+  echo "$orig"
   echo "https://ghfast.top/$orig"
   echo "https://ghproxy.net/$orig"
   echo "https://mirror.ghproxy.com/$orig"
-  echo "$orig"
 }
 
 accept_licenses() {
@@ -162,24 +235,37 @@ install_platform() {
   mkdir -p "$stage"
   . /usr/local/lib/minis/offline.sh
   ok=0
+  # Candidate archive names, in the order dl.google.com publishes them.
+  # Verified against repository2-3.xml: platform-36 ships _r02, platform-35
+  # ships _r02 plus the ext15/_r01 and ext14/_r01 flavours (the ext14_r03 and
+  # ext18_r03 spellings that used to be here never existed, so they only cost
+  # a failed fetch before a working name was reached).
   for zip in \
       "platform-${api}_r02.zip" \
       "platform-${api}_r01.zip" \
       "platform-${api}-ext19_r01.zip" \
       "platform-${api}-ext18_r03.zip" \
       "platform-${api}-ext15_r01.zip" \
+      "platform-${api}-ext14_r01.zip" \
       "platform-${api}-ext14_r03.zip"
   do
     set +e
+    # [T-devsuite-verify] Google publishes a sha1 per archive in
+    # repository2-3.xml; resolve it before the fetch so a CN mirror (or a
+    # hand-dropped offline file) can be checked instead of trusted.
+    # dl.google.com is the first URL now — without a digest curl_first skips
+    # the CN mirrors, which is the point: an unchecked mirror swap is code
+    # execution as root in the guest.
+    _MINIS_EXPECTED=$(google_expected "$zip")
     if offline_pick "$tmpzip" "$zip"; then
       cr=0
     else
       curl_first "$tmpzip" "$zip" \
+        "https://dl.google.com/android/repository/$zip" \
         ${SDK_MIRROR:+"$SDK_MIRROR/$zip"} \
         "https://mirrors.cloud.tencent.com/android/repository/$zip" \
         "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip" \
-        "https://mirrors.ustc.edu.cn/android/repository/$zip" \
-        "https://dl.google.com/android/repository/$zip"
+        "https://mirrors.ustc.edu.cn/android/repository/$zip"
       cr=$?
     fi
     set -e
@@ -254,6 +340,10 @@ install_one_cmake() {
   tarball="cmake-${ver}-linux-aarch64.tar.gz"
   set +e
   . /usr/local/lib/minis/offline.sh
+  # [T-devsuite-verify] Kitware publishes cmake-<ver>-SHA-256.txt for the
+  # release these tarballs come from; check it before `tar -xzf` drops a
+  # binary tree onto PATH.
+  _MINIS_EXPECTED=$(cmake_expected "$ver")
   if offline_pick "$tgz" "$tarball"; then
     cr=0
   else
@@ -378,8 +468,15 @@ extract_sdk_archive() {
   case "$_xa_archive" in
     *.tar.xz|*.txz)
       if ! command -v xz >/dev/null 2>&1; then
+        # [T-devsuite-apt-lock] Same shared lock every other apt caller uses;
+        # a bare apt-get here raced the installer's own apt step (exit 100).
+        . /usr/local/lib/minis/apt-lock.sh
+        minis_acquire_apt_lock 1800 || return 1
         apt-get update || true
         apt-get install -y --no-install-recommends xz-utils
+        _xa_apt_rc=$?
+        minis_release_apt_lock
+        [ "$_xa_apt_rc" = 0 ] || return 1
       fi
       echo "extracting $(basename "$_xa_archive") — PRoot 解大量小文件会比较慢，没有新行也在继续"
       tar -xJf "$_xa_archive" -C "$_xa_out" --checkpoint=20000 --checkpoint-action='echo=…仍在解包'
@@ -408,6 +505,11 @@ install_sdk_tools_zip() {
   gh="https://github.com/lzhiyong/android-sdk-tools/releases/download/${local_rev}/${zip_name}"
   tmpzip="/tmp/minis-sdk-tools-$$.zip"
   . /usr/local/lib/minis/offline.sh
+  # [T-devsuite-verify] lzhiyong/android-sdk-tools publishes NO digest for
+  # this asset, so curl_first uses the first URL only (github.com over TLS)
+  # and skips the proxies. To mirror or pre-fetch it, pin the digest:
+  # MINIS_DEVSUITE_SHA256="$zip_name=<sha256>".
+  _MINIS_EXPECTED=""
   if ! offline_pick "$tmpzip" "$zip_name"; then
     set +e
     curl_first "$tmpzip" "$zip_name" $(github_urls "$gh")
@@ -453,13 +555,16 @@ install_cmdline_tools() {
   zip_name="commandlinetools-linux-${ct_ver}_latest.zip"
   tmpzip="/tmp/minis-cmdline-tools-$$.zip"
   . /usr/local/lib/minis/offline.sh
+  # [T-devsuite-verify] sha1 from repository2-3.xml; origin first so the CN
+  # mirrors are only reachable once the bytes can actually be checked.
+  _MINIS_EXPECTED=$(google_expected "$zip_name")
   if ! offline_pick "$tmpzip" "$zip_name"; then
     set +e
     curl_first "$tmpzip" "$zip_name" \
+      "https://dl.google.com/android/repository/$zip_name" \
       "https://mirrors.cloud.tencent.com/AndroidRepository/$zip_name" \
       "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip_name" \
-      "https://mirrors.ustc.edu.cn/android/repository/$zip_name" \
-      "https://dl.google.com/android/repository/$zip_name"
+      "https://mirrors.ustc.edu.cn/android/repository/$zip_name"
     cr=$?
     set -e
     if [ "$cr" -ne 0 ]; then
@@ -528,6 +633,7 @@ install_ndk() {
   echo "Installing NDK ${NDK_TAG} linux-aarch64. Set MINIS_SKIP_NDK=1 to skip."
   echo "Source: lzhiyong/termux-ndk tag android-ndk (Google NDK host tools are x86_64)."
   archive="/tmp/minis-ndk-$$"
+  . /usr/local/lib/minis/offline.sh
   set +e
   if [ -n "${MINIS_NDK_URL:-}" ]; then
     case "${MINIS_NDK_URL%%\?*}" in
@@ -536,6 +642,10 @@ install_ndk() {
       *.zip) archive="${archive}.zip" ;;
       *) archive="${archive}.bin" ;;
     esac
+    # [T-devsuite-verify] User-supplied URL: exactly one URL reaches
+    # curl_first, so the origin-only rule applies to it, and a digest can be
+    # pinned with MINIS_DEVSUITE_SHA256="<basename of the URL>=<sha256>".
+    _MINIS_EXPECTED=$(minis_expected_digest "$(basename "${MINIS_NDK_URL%%\?*}")")
     curl_first "$archive" "$(basename "${MINIS_NDK_URL%%\?*}")" "$MINIS_NDK_URL"
     cr=$?
   else
@@ -544,6 +654,12 @@ install_ndk() {
     archive="${archive}.tar.xz"
     ndk_file="android-ndk-${NDK_TAG}-aarch64.tar.xz"
     . /usr/local/lib/minis/offline.sh
+    # [T-devsuite-verify] lzhiyong/termux-ndk publishes NO digest for the NDK
+    # repackage, so this runs origin-only (github.com over TLS) and the
+    # proxies are skipped — an unverified archive here unpacks a toolchain
+    # that every later native build executes. Pin one to use a mirror:
+    # MINIS_DEVSUITE_SHA256="$ndk_file=<sha256>".
+    _MINIS_EXPECTED=""
     if offline_pick "$archive" "$ndk_file"; then
       cr=0
     else

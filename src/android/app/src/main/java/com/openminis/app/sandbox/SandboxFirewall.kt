@@ -5,7 +5,6 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.os.Build
 import android.os.Process
 import org.json.JSONArray
 import org.json.JSONObject
@@ -85,9 +84,9 @@ object SandboxFirewall {
             json.put("error", "no_connectivity_manager")
             return json
         }
-        if (Build.VERSION.SDK_INT >= 24) {
-            json.put("restrict_background_status", restrictName(cm.restrictBackgroundStatus))
-        }
+        // minSdk 26 (N): ConnectivityManager.restrictBackgroundStatus is API 24,
+        // so the old `SDK_INT >= 24` guard was always true and dead.
+        json.put("restrict_background_status", restrictName(cm.restrictBackgroundStatus))
         json.put("bound_network", cm.boundNetworkForProcess != null)
         json.put("networks", networksJson(cm))
         json.put("active", networkJson(cm, cm.activeNetwork))

@@ -447,11 +447,19 @@ object SubAgentRunner {
             "Read these skills first (file_read `/var/minis/skills/<id>/SKILL.md`): $it\n"
         } ?: ""
         val kindLine = "Kind: $kind.\n"
-        val writeLine = if (writePaths.isNotEmpty()) {
-            "You may only file_write/file_edit under: ${writePaths.joinToString()}. " +
-                "Keep shell writes in those prefixes; MINIS_WRITE_PATHS is exported.\n"
-        } else {
-            ""
+        // [T-write-guard-fail-closed] Same three states as the brief: usable
+        // prefixes only get listed, the poison state is spelled out as a write
+        // lock-out instead of pasting WritePathGuard.INVALID into the system prompt.
+        val writePrefixes = WritePathGuard.usablePrefixes(writePaths)
+        val writeLine = when {
+            writePrefixes.isNotEmpty() ->
+                "You may only file_write/file_edit under: ${writePrefixes.joinToString()}. " +
+                    "Keep shell writes in those prefixes; MINIS_WRITE_PATHS is exported.\n"
+            WritePathGuard.isPoisoned(writePaths) ->
+                "Your write_paths contained no usable absolute prefix, so file_write/file_edit are " +
+                    "DENIED for this worker and MINIS_WRITE_PATHS is not exported. Do not retry " +
+                    "writes — report what you could do without them.\n"
+            else -> ""
         }
         val toolLine = if (SubAgentKind.isReadOnly(kind)) {
             "- Read-only: file_read, grep_source, and shell_execute for inspection only (date, uname, cat, ls). Do not write files or redirect output into a file."

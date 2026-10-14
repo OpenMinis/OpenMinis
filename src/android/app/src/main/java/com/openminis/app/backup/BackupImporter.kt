@@ -161,6 +161,11 @@ class BackupImporter(
             report.wasEncrypted = true
         }
 
+        // The decrypted plaintext scratch tree, when this package is
+        // encrypted. Tracked here so importBody's finally can wipe it — see
+        // [T-restore-plaintext-scratch] below the decrypt call.
+        var scratchWork: File? = null
+
         try {
             if (!options.skipIntegrityCheck) {
                 onProgress?.invoke("Verifying integrity…")
@@ -180,14 +185,26 @@ class BackupImporter(
             // data has been written to the device.
             val work = if (keys != null) {
                 onProgress?.invoke("Decrypting…")
-                decryptMembers(root, keys)
+                decryptMembers(root, keys).also { scratchWork = it }
             } else {
                 root
             }
 
+            // [T-restore-plaintext-scratch] A package whose CACHE tree addresses
+            // `cache/restore-work/…` would restore back INTO the very directory
+            // the decrypted scratch tree lives in — CACHE lands before
+            // PROVIDERS/env-vars in ORDER, so the clobber happens mid-run, over
+            // the still-unread secrets.json and chat bodies. Refuse such a
+            // package outright rather than half-restoring over our own feet.
+
             val fileIndex = readFileIndex(work)
             val wanted = options.categories
                 ?: manifest.categories.keys.mapNotNull(BackupCategory::fromKey).toSet()
+
+            val scratch = scratchWork
+            if (scratch != null && BackupCategory.CACHE in wanted) {
+                assertNoScratchCollision(scratch, fileIndex)
+            }
 
             // Order matters: chats writes sessions before the messages that
             // reference them.
@@ -277,6 +294,20 @@ class BackupImporter(
             return report
         } finally {
             keys?.destroy()
+            // [T-restore-plaintext-scratch] decryptMembers() writes EVERY
+            // decrypted member — chats, provider secrets.json, env-var values —
+            // as plaintext under cacheDir/restore-work. Wiping the keys alone
+            // left that full plaintext copy of the user's data sitting on disk
+            // until the OS evicted the cache or the NEXT restore's first pass
+            // deleted it (and until then a CACHE-category export could sweep it
+            // into a new package). Scrub the scratch tree on every exit path,
+            // including failure paths after partial decryption.
+            scratchWork?.let { w ->
+                runCatching { w.deleteRecursively() }
+                    .onFailure {
+                        AppLogger.warning(TAG, "[Restore] could not wipe plaintext scratch tree: ${it.message}")
+                    }
+            }
         }
     }
 
@@ -853,6 +884,41 @@ class BackupImporter(
             }
         }
         return work
+    }
+
+    /**
+     * [T-restore-plaintext-scratch] Refuse a restore whose CACHE destination
+     * resolves under the decrypted scratch root.
+     *
+     * CACHE restores land in `cacheDir`, so `cache/restore-work/<x>` maps onto
+     * `cacheDir/restore-work/<x>` — the directory the importer decrypted the
+     * package INTO and is still reading from (secrets.json, provider config,
+     * chat bodies). A package carrying such paths (e.g. a CACHE export taken
+     * while a previous restore's scratch tree existed) would overwrite the
+     * mid-run source data. Checked on canonical paths before ANY category is
+     * written, so the refusal is whole-package, not half-applied.
+     */
+    private fun assertNoScratchCollision(scratch: File, fileIndex: List<BackupFileIndexEntry>) {
+        val scratchPath = scratch.canonicalPath + File.separator
+        val cacheDest = context.cacheDir
+        val clash = fileIndex.firstOrNull { entry ->
+            entry.category == BackupCategory.CACHE.key && entry.skipped == null &&
+                entry.path.startsWith("cache/") &&
+                runCatching {
+                    val dest = File(cacheDest, entry.path.removePrefix("cache/"))
+                    val resolved = if (dest.exists()) dest.canonicalPath else File(
+                        dest.parentFile?.canonicalFile ?: return@runCatching false, dest.name,
+                    ).path
+                    resolved == scratch.canonicalPath || resolved.startsWith(scratchPath)
+                }.getOrDefault(false)
+        }
+        if (clash != null) {
+            throw BackupException(
+                "This package contains cache paths that collide with the restore work area " +
+                    "(${clash.path}). Re-export from the source device without the cache " +
+                    "category, or restore the remaining categories separately.",
+            )
+        }
     }
 
     private fun readFileIndex(root: File): List<BackupFileIndexEntry> {

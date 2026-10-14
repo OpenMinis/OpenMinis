@@ -14,6 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -226,11 +227,17 @@ fun rememberSystemResourceMonitor(active: Boolean): SystemResourceMonitor {
         // Prime the baseline; first read returns 0% by design (no prior
         // tick snapshot to subtract). Two seconds later we have a real
         // delta, matching iOS's first-tick behavior.
-        monitor.sampleOnce(context)
+        // [T-android-hud-sample-off-main] sampleOnce reads /proc/self/stat and
+        // calls Debug.getMemoryInfo / ActivityManager.getMemoryInfo — file IO
+        // plus a binder round-trip that commonly costs 1-10 ms. This coroutine
+        // runs on the composition dispatcher, so sampling it here put that work
+        // on the main thread every 2 s, on the very frames the streaming pipeline
+        // is also contending for. Sample off-main; only the state write stays here.
+        withContext(kotlinx.coroutines.Dispatchers.Default) { monitor.sampleOnce(context) }
         tick++
         while (isActive) {
             delay(2000)
-            monitor.sampleOnce(context)
+            withContext(kotlinx.coroutines.Dispatchers.Default) { monitor.sampleOnce(context) }
             tick++
         }
     }

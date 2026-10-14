@@ -99,9 +99,7 @@ class EvolutionEngine(
                         ?: return@withLock false
                     if (skill.importSource == SkillRepository.ImportSource.BUNDLED) {
                         val snap = learned.snapshotRegion()
-                        val rule = LearnedPrefsStore.normalize(
-                            "When using skill ${skill.name}: ${p.draftText}",
-                        ) ?: return@withLock false
+                        val rule = bundledPatchRule(skill.name, p.draftText) ?: return@withLock false
                         if (!learned.addBullet(rule)) return@withLock false
                         store.setStatus(id, EvolutionProposal.Status.ACCEPTED, snap)
                         true
@@ -148,7 +146,22 @@ class EvolutionEngine(
                 EvolutionProposal.Type.SKILL_PATCH -> {
                     val skillId = p.skillId
                     val snap = p.rollbackText
-                    if (skillId != null && snap != null) {
+                    val skill = skillId?.let { id -> skillRepository.skills.value.find { it.id == id } }
+                    // [T-evolution-bundled-rollback] Accepting a SKILL_PATCH for a
+                    // BUNDLED skill does NOT touch SKILL.md — it writes a
+                    // "When using skill X: …" bullet into LEARNED.md and stores the
+                    // LEARNED.md region as `rollbackText` (see accept()). The
+                    // rollback path here only looked at `skillId != null`, which is
+                    // also true for those proposals, so it called
+                    // `skillRepository.update(skillId, body = snap)` and overwrote
+                    // the SHIPPED SKILL.md with the learned-region text. Roll back
+                    // a bundled accept the way it was applied: drop its bullet.
+                    if (skill != null && skill.importSource == SkillRepository.ImportSource.BUNDLED) {
+                        val removed = learned.removeBullet(
+                            bundledPatchRule(skill.name, p.draftText) ?: "",
+                        )
+                        if (!removed && snap != null) learned.restoreRegion(snap)
+                    } else if (skillId != null && snap != null) {
                         skillRepository.update(skillId, body = snap)
                     } else {
                         learned.removeBullet(p.draftText)
@@ -159,6 +172,16 @@ class EvolutionEngine(
             true
         }
     }
+
+    /**
+     * [T-evolution-bundled-rollback] The LEARNED.md bullet that stands in for a
+     * patch a BUNDLED skill cannot receive (its SKILL.md ships with the APK and is
+     * re-installed on upgrade). accept() writes exactly this text and rollback()
+     * removes it again, so both go through here — two hand-written copies of the
+     * sentence would drift and the rollback would silently stop matching.
+     */
+    private fun bundledPatchRule(skillName: String, draftText: String): String? =
+        LearnedPrefsStore.normalize("When using skill $skillName: $draftText")
 
     private suspend fun processSession(sessionId: String) {
         val messages = chatRepository.loadSessionTail(sessionId, limit = 400).messages

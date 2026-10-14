@@ -46,6 +46,15 @@ object OnlineApiTool {
     private const val UA = "OpenMinis-Agent/1.26"
     private const val MAX_OUTPUT = 4_000
 
+    /** Byte cap on a connector response body — see [T-bounded-body-read]. */
+    private const val MAX_RESPONSE_BYTES = 256_000L
+
+    /**
+     * [T-hoisted-regex] `{placeholder}` path template matcher: constant pattern,
+     * previously recompiled on every tool call.
+     */
+    private val PATH_PLACEHOLDER_RE = Regex("""\{([a-zA-Z0-9_]+)\}""")
+
     internal fun evictNetworkClient(plugin: PluginRegistry.RemotePlugin) {
         val prefix = connectorScopePrefix(plugin.id)
         synchronized(networkClients) {
@@ -121,7 +130,7 @@ object OnlineApiTool {
     ): ToolExecutionResult {
         var urlPath = spec.path
         val substituted = mutableSetOf<String>()
-        Regex("""\{([a-zA-Z0-9_]+)\}""").findAll(urlPath).forEach { m ->
+        PATH_PLACEHOLDER_RE.findAll(urlPath).forEach { m ->
             val key = m.groupValues[1]
             val v = args.optString(key)
             if (v.isNotBlank()) {
@@ -178,7 +187,10 @@ object OnlineApiTool {
                     requestUrl = redirected.toString()
                     return@use
                 }
-                text = response.body?.string().orEmpty()
+                // [T-bounded-body-read] `body.string()` buffered the whole remote
+                // response (a connector returning a 40 MB blob allocated 40 MB)
+                // and only the first MAX_OUTPUT characters were ever used.
+                text = com.openminis.app.tools.readBodyBounded(response.body, MAX_RESPONSE_BYTES)
             }
             if (code in 300..399) continue
             break

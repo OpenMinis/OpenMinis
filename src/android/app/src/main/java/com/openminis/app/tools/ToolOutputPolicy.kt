@@ -1,7 +1,5 @@
 package com.openminis.app.tools
 
-import java.io.File
-
 /**
  * [T-tool-output-policy] Unified post-processing for every tool result
  * before it reaches the model.
@@ -10,25 +8,34 @@ import java.io.File
  *    value of 6+ chars containing both letters and digits is replaced with
  *    `[REDACTED]` — the agent gets to *see* tool output without learning
  *    the API keys / tokens that happened to leak into it.
- * 2. Oversized output spill (RikkaHub-equivalent): instead of hard-truncating,
- *    the full text is written to `tool_outputs/<toolId>.txt` inside the
- *    sandbox workspace and the model is told how to page through it with
- *    cat/grep — context growth becomes model-driven retrieval, and the
- *    full content is never silently lost.
+ * 2. Oversized output: DELEGATED to [ToolOutputSpill], which resolves the spill
+ *    file PER SESSION (host dir the app can write, guest path the model can
+ *    `file_read`).
+ *
+ * [T-tool-output-single-mechanism] This object used to carry its OWN second
+ * spill implementation writing into `File(workspaceRoot, "tool_outputs")` with
+ * `var workspaceRoot = "/var/minis/workspace"` — a GUEST path. The app process
+ * is not the guest and cannot create it, so `mkdirs()` + `writeText` failed on
+ * every call, `apply()` hit its `if (!written) return text` branch and returned
+ * the UNCAPPED body: the 12k limit never applied to anything, and the two
+ * parallel mechanisms (this one + [ToolOutputSpill], which does resolve the
+ * session and was the only one that actually spilled) duplicated the threshold,
+ * the preview format and the file naming. Redaction stays here; capping and
+ * spilling are now one code path in [ToolOutputSpill], and a spill that cannot
+ * happen still yields a bounded preview.
  */
 object ToolOutputPolicy {
-    const val TOOL_OUTPUT_CHAR_LIMIT = 12_000
-    const val TOOL_OUTPUTS_DIR = "tool_outputs"
     private const val REDACTED = "[REDACTED]"
-    private const val PREVIEW_CHARS = 2_000
-    internal const val OMISSION_MARKER = "========== [以下内容被省略] =========="
 
     /**
      * substring() 会在 UTF-16 码元边界切割，正好落在代理对中间就会产生
      * 半个 emoji（孤立的高低代理符）。这里把边界回退到码点边界，
      * 保证 head/tail 预览不会切碎任何非 BMP 字符。
+     *
+     * [T-tool-output-single-mechanism] internal because [ToolOutputSpill] — the
+     * one preview builder now — slices its head/tail through this.
      */
-    private fun safeSubstring(s: String, start: Int, endExclusive: Int): String {
+    internal fun safeSubstring(s: String, start: Int, endExclusive: Int): String {
         val startIdx = start.coerceIn(0, s.length)
         val endIdx = endExclusive.coerceIn(startIdx, s.length)
         if (startIdx == endIdx) return ""
@@ -43,8 +50,8 @@ object ToolOutputPolicy {
         return s.substring(safeStart, safeEnd)
     }
 
-    /** Sandbox workspace root as seen by shell_execute. */
-    var workspaceRoot: String = "/var/minis/workspace"
+    /** Kept as the public name of the threshold; [ToolOutputSpill.LIMIT] owns it. */
+    const val TOOL_OUTPUT_CHAR_LIMIT = ToolOutputSpill.LIMIT
 
     fun redactEnvVars(text: String): String {
         val env = runCatching { System.getenv() }.getOrDefault(emptyMap())
@@ -138,40 +145,37 @@ object ToolOutputPolicy {
     }
 
     /**
-     * Apply both policies. [toolId] is the tool-call id; blank ids fall back
-     * to a timestamped file name so no content is lost.
+     * Apply both policies. [toolId] is the tool-call id.
+     *
+     * [T-tool-output-single-mechanism] Prefer the session-aware overload: only it
+     * can put the full text somewhere the model can page through. This form has
+     * no session, so an oversized result is capped WITHOUT a spill file — capped
+     * is still the contract (the old code returned the full body here).
+     * Callers that hold a session (ui/chat/ChatViewModelExecuteToolExt.kt:263)
+     * should pass `context` + `sessionId`.
      */
-    fun apply(output: String, toolId: String): String {
-        var text = redactEnvVars(output)
-        if (text.length <= TOOL_OUTPUT_CHAR_LIMIT) return text
-        val dir = File(workspaceRoot, TOOL_OUTPUTS_DIR)
-        runCatching { dir.mkdirs() }
-        val safeId = toolId.replace(Regex("[^A-Za-z0-9_-]"), "_").ifBlank { "out" }
-        val file = File(dir, "$safeId.txt")
-        val written = runCatching {
-            file.writeText(text)
-            true
-        }.getOrDefault(false)
-        if (!written) return text
-        val head = safeSubstring(text, 0, PREVIEW_CHARS)
-        val tailStart = (text.length - PREVIEW_CHARS).coerceAtLeast(PREVIEW_CHARS)
-        val tail = safeSubstring(text, tailStart, text.length)
-        val omitted = tailStart - PREVIEW_CHARS
-        return buildString {
-            append(head)
-            append("\n\n[工具输出过长：已省略中间 ")
-            append(omitted)
-            append(" 字符，仅保留首尾各 ")
-            append(PREVIEW_CHARS)
-            append(" 字符预览。全文 ")
-            append(text.length)
-            append(" 字符已写入沙箱 ")
-            append("$TOOL_OUTPUTS_DIR/${file.name}")
-            append("，可用 shell_execute 的 cat/grep 分页检索，不用一次性读完]")
-            append("\n\n")
-            append(OMISSION_MARKER)
-            append("\n\n")
-            append(tail)
+    fun apply(output: String, toolId: String): String =
+        apply(output, toolId, null, null, "")
+
+    /**
+     * Session-aware form: redact, then hand the oversized body to
+     * [ToolOutputSpill] so it lands in THIS session's workspace and the model
+     * gets a guest path it can actually `file_read`.
+     */
+    fun apply(
+        output: String,
+        toolId: String,
+        context: android.content.Context?,
+        sessionId: String?,
+        toolName: String = "",
+    ): String {
+        val text = redactEnvVars(output)
+        if (text.length <= ToolOutputSpill.LIMIT) return text
+        val name = toolName.ifBlank { toolId.ifBlank { "tool" } }
+        return if (context != null && !sessionId.isNullOrBlank()) {
+            ToolOutputSpill.maybeSpill(context, sessionId, name, toolId, text)
+        } else {
+            ToolOutputSpill.cappedPreview(name, text)
         }
     }
 }

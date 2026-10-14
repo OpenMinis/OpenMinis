@@ -6,7 +6,6 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 
@@ -50,7 +49,14 @@ class McpStdioClient(
     private var writer: java.io.BufferedWriter? = null
     private var stdout: BufferedReader? = null
 
-    private val pending = ConcurrentHashMap<Int, SynchronousQueue<JSONObject>>()
+    // [T-mcp-stdio-reply-loss] SynchronousQueue.offer() only succeeds when a
+    // taker is ALREADY parked. The reader thread can reach that line before the
+    // caller has finished re-serialising and writing the request, so on a fast
+    // local stdio server (typical for `initialize` against a node server) the
+    // reply was dropped SILENTLY and the call then hung until the 300s timeout
+    // even though the server had answered. A 1-slot LinkedBlockingQueue always
+    // accepts the offer, and the caller still removes its own entry.
+    private val pending = ConcurrentHashMap<Int, java.util.concurrent.LinkedBlockingQueue<JSONObject>>()
     private val stderrTail = StringBuilder()
     private val lock = Any()
 
@@ -92,7 +98,14 @@ class McpStdioClient(
                     val obj = runCatching { JSONObject(line) }.getOrNull() ?: continue
                     val id = obj.optInt("id", Int.MIN_VALUE)
                     if (id != Int.MIN_VALUE && (obj.has("result") || obj.has("error"))) {
-                        pending.remove(id)?.offer(obj)
+                        // [T-mcp-stdio-reply-loss] Offer into the caller's bounded
+                        // queue WITHOUT removing the map entry: the reply may land
+                        // before the caller has reached `poll`, and removal here is
+                        // what made the delivery race with the caller's own cleanup.
+                        // The caller's `finally { pending.remove(id) }` owns the
+                        // lifetime. A second reply for the same id (protocol
+                        // violation) is dropped by the 1-slot capacity.
+                        pending[id]?.offer(obj)
                     }
                 }
             } catch (_: Exception) {
@@ -123,7 +136,7 @@ class McpStdioClient(
             )
         }
         val id = McpJsonRpc.nextId()
-        val queue = SynchronousQueue<JSONObject>()
+        val queue = java.util.concurrent.LinkedBlockingQueue<JSONObject>(1)
         pending[id] = queue
         try {
             val payload = McpJsonRpc.request(id, method, params)
@@ -134,6 +147,10 @@ class McpStdioClient(
                 w.flush()
             }
             val reply = queue.poll(timeoutMs, TimeUnit.MILLISECONDS)
+                // [T-mcp-stdio-reply-loss] Late-delivery re-check: a reply can land
+                // in the window between the poll timing out and the entry being
+                // removed. Take it rather than failing a call the server answered.
+                ?: pending.remove(id)?.poll()
                 ?: throw McpError(McpError.TIMEOUT, "no reply to '$method' within ${timeoutMs / 1000}s")
             return McpJsonRpc.unwrapResult(reply)
         } finally {

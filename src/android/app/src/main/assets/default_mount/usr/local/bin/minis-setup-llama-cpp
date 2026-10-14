@@ -7,7 +7,9 @@ export DEBIAN_FRONTEND=noninteractive
 export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
 
 LLAMA_ROOT=/opt/llama.cpp
-LLAMA_TAG="${LLAMA_TAG:-b4XXX-stable-placeholder}"
+LLAMA_TAG="${LLAMA_TAG:-}"
+API_ORIGIN="https://api.github.com/repos/ggml-org/llama.cpp"
+REPO_ORIGIN="https://github.com/ggml-org/llama.cpp"
 
 if [ -x /usr/local/bin/llama-server ]; then
   echo "llama-server already present: $(llama-server --version 2>&1 | head -1)"
@@ -27,32 +29,48 @@ if [ "$need_apt" = 1 ]; then
     build-essential cmake git ca-certificates curl
 fi
 
-# Resolve the latest stable tag from the GitHub API (with mirror fallbacks).
-if [ "$LLAMA_TAG" = "b4XXX-stable-placeholder" ]; then
-  api="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-  tag=$(curl -fsSL --connect-timeout 12 "$api" 2>/dev/null \
-    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-  [ -n "$tag" ] || tag="master"
-  LLAMA_TAG="$tag"
-fi
+. /usr/local/lib/minis/offline.sh
 
-echo "cloning llama.cpp @ $LLAMA_TAG"
+# [T-devsuite-verify] Two rules replace "clone whatever the first mirror
+# answered and compile it":
+#   1. build a TAG, never a moving branch — the old `|| tag=master` fallback
+#      compiled an unpinned tree. If no tag resolves, stop.
+#   2. verify the COMMIT OBJECT. api.github.com (origin, TLS) reports the
+#      commit a tag points at; after the clone the checkout's HEAD must equal
+#      it, so a proxy mirror cannot hand back different source — `cmake
+#      --build` of substituted code is exactly the execution path we must not
+#      feed.
+if [ -z "$LLAMA_TAG" ]; then
+  LLAMA_TAG=$(curl -fsSL --connect-timeout 12 --max-time 30 "$API_ORIGIN/releases/latest" 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+fi
+[ -n "$LLAMA_TAG" ] || { echo "could not resolve a llama.cpp release tag from $API_ORIGIN — refusing to build an unpinned tree" >&2; exit 1; }
+
+# The FIRST "sha" in the /commits/<tag> response is the commit object itself
+# (parents/tree shas follow), hence head -1 rather than a greedy sed capture.
+expected_commit=$(curl -fsSL --connect-timeout 12 --max-time 30 "$API_ORIGIN/commits/$LLAMA_TAG" \
+  | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -1 | cut -d'"' -f4)
+if [ -z "$expected_commit" ]; then
+  echo "could not resolve the commit object for tag $LLAMA_TAG from $API_ORIGIN — refusing to build" >&2
+  exit 1
+fi
+echo "llama.cpp @ $LLAMA_TAG (expected commit $expected_commit)"
+
 if [ ! -d "$LLAMA_ROOT/.git" ]; then
   rm -rf "$LLAMA_ROOT"
   ok=0
-  # Offline-first: a source tarball in /var/minis/shared/offline/ replaces
-  # the git clone entirely (minis-devsuite-offline-list names it
-  # llama.cpp-<tag>.tar.gz; "master" maps to llama.cpp-master.tar.gz).
-  . /usr/local/lib/minis/offline.sh
+  # Offline-first: a source tarball in /var/minis/shared/offline/ replaces the
+  # git clone entirely — but only with the user's opt-in AND a published
+  # digest (offline_pick enforces both), because a tarball carries no commit
+  # object to check. minis-devsuite-offline-list names it
+  # llama.cpp-<tag>.tar.gz.
   offline_name="llama.cpp-${LLAMA_TAG}.tar.gz"
-  offline_src="/var/minis/shared/offline/$offline_name"
-  # Fixed-name fallback: the tag is resolved dynamically, so the manifest
-  # tells users to save the master tarball as llama.cpp-master.tar.gz.
-  if [ ! -s "$offline_src" ] && [ -s "/var/minis/shared/offline/llama.cpp-master.tar.gz" ]; then
-    offline_name="llama.cpp-master.tar.gz"
-    offline_src="/var/minis/shared/offline/$offline_name"
-  fi
-  if [ -s "$offline_src" ]; then
+  offline_src="$MINIS_OFFLINE_DIR/$offline_name"
+  if [ "${MINIS_ALLOW_OFFLINE:-0}" = "1" ] && [ -s "$offline_src" ]; then
+    minis_verify_payload "$offline_src" "$offline_name" || {
+      echo "offline llama.cpp source rejected — pin its digest: MINIS_DEVSUITE_SHA256=\"$offline_name=<sha256>\"" >&2
+      exit 1
+    }
     echo "  using offline source: $offline_src"
     mkdir -p "$(dirname "$LLAMA_ROOT")"
     rm -rf "$LLAMA_ROOT"
@@ -60,20 +78,49 @@ if [ ! -d "$LLAMA_ROOT/.git" ]; then
     tar -xzf "$offline_src" -C "$LLAMA_ROOT" --strip-components=1
     ok=1
   else
+    if [ -s "$offline_src" ]; then
+      echo "  ignoring $offline_src: offline imports are opt-in and digest-checked (see offline.sh)" >&2
+    fi
+    # Origin first; the proxies last (they are only reached when the tag AND
+    # commit identity check can catch a swap — and GitHub mirrors only serve
+    # this repo, they do not produce it).
     for u in \
-      "https://ghfast.top/https://github.com/ggml-org/llama.cpp" \
-      "https://ghproxy.net/https://github.com/ggml-org/llama.cpp" \
-      "https://mirror.ghproxy.com/https://github.com/ggml-org/llama.cpp" \
-      "https://github.com/ggml-org/llama.cpp"
+      "$REPO_ORIGIN" \
+      "https://ghfast.top/$REPO_ORIGIN" \
+      "https://ghproxy.net/$REPO_ORIGIN" \
+      "https://mirror.ghproxy.com/$REPO_ORIGIN"
     do
       if git clone --depth 1 --branch "$LLAMA_TAG" "$u" "$LLAMA_ROOT" 2>/dev/null; then ok=1; break; fi
       rm -rf "$LLAMA_ROOT"
     done
   fi
-  [ "$ok" = 1 ] || { echo "llama.cpp clone failed (all mirrors). Offline fallback: download https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz and put it in /var/minis/shared/offline/$offline_name" >&2; exit 1; }
+  [ "$ok" = 1 ] || { echo "llama.cpp clone failed (all mirrors). Offline fallback: download $REPO_ORIGIN/archive/refs/tags/$LLAMA_TAG.tar.gz and drop it in $MINIS_OFFLINE_DIR as $offline_name (plus MINIS_ALLOW_OFFLINE=1 and its sha256 in MINIS_DEVSUITE_SHA256)." >&2; exit 1; }
+
+  # Commit identity gate: applies to the clone path. A shallow archive
+  # extraction has no git metadata, so the digest gate above is what covers it.
+  if [ -d "$LLAMA_ROOT/.git" ]; then
+    got_commit=$(git -C "$LLAMA_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+    case "$got_commit" in
+      "$expected_commit"*|"$expected_commit") : ;;
+      *)
+        echo "llama.cpp checkout $got_commit does not match the published commit for $LLAMA_TAG ($expected_commit) — source rejected, nothing was built" >&2
+        rm -rf "$LLAMA_ROOT"
+        exit 1
+        ;;
+    esac
+    echo "  commit ok: $got_commit"
+  fi
 else
   git -C "$LLAMA_ROOT" fetch --depth 1 origin "$LLAMA_TAG" || true
   git -C "$LLAMA_ROOT" checkout -q "FETCH_HEAD" 2>/dev/null || true
+  got_commit=$(git -C "$LLAMA_ROOT" rev-parse HEAD 2>/dev/null || echo "")
+  case "$got_commit" in
+    "$expected_commit"*) : ;;
+    *)
+      echo "existing $LLAMA_ROOT is at $got_commit, not $expected_commit for $LLAMA_TAG — refusing to build unverified source" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 echo "configuring cmake (native off — PRoot safe)…"

@@ -208,12 +208,33 @@ object MessageTransformerChain {
                 val lineEnd = if (nl >= 0) nl else text.length
                 val line = text.substring(searchFrom, lineEnd)
                 val trimmed = line.trimStart()
-                if (!inFence && trimmed.startsWith("```") || !inFence && trimmed.startsWith("~~~")) {
+                if (!inFence && (trimmed.startsWith("```") || trimmed.startsWith("~~~"))) {
+                    // [T-think-tag-fence-open] Flush the prose that precedes the
+                    // fence and move segStart onto the fence line. Without this
+                    // only the CLOSE branch advanced segStart, so the segment
+                    // emitted at close ran from the PREVIOUS segment's start —
+                    // i.e. everything the model wrote before this fence was
+                    // classified isCode=true, and transformProtectingCode appends
+                    // isCode chunks VERBATIM (no transform). A `<thinking>` block
+                    // or a raw `<|...|>` special token sitting in prose before a
+                    // code block therefore survived into the replayed assistant
+                    // history untouched — the exact amplification the
+                    // T-think-tag-code-fence fix was for. The fence line itself
+                    // stays part of the code segment, as before.
+                    if (searchFrom > segStart) out += segStart until searchFrom to false
+                    segStart = searchFrom
                     inFence = true
                     fenceMark = trimmed.take(3)
-                } else if (inFence && trimmed.startsWith(fenceMark) &&
-                    trimmed.length == fenceMark.length
+                } else if (inFence && trimmed.trimEnd().isNotEmpty() &&
+                    trimmed.trimEnd().all { it == fenceMark[0] } &&
+                    trimmed.trimEnd().length >= fenceMark.length
                 ) {
+                    // A closing fence is a line of nothing but the fence
+                    // character, at least as long as the opener (CommonMark):
+                    // ```` ```` and ``` followed by trailing spaces all close a
+                    // ``` block. Requiring an exact 3-character match left those
+                    // unclosed, so the rest of the reply was treated as one code
+                    // segment and its tags were never stripped.
                     // The close fence is the last line with no trailing
                     // newline: nl < 0 makes lineEnd == text.length, and
                     // `until lineEnd + 1` would set range.last = text.length,

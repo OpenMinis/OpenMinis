@@ -1,5 +1,6 @@
 package com.openminis.app.service
 
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +22,10 @@ class SlotQueueTimeout(val sessionId: String, val waitedMs: Long) :
  */
 object SessionConcurrencyManager {
     const val MAX_CONCURRENT = 5
+
+    /** [T-STALL-DIAG] Lines go through AppLogger, not System.out: println
+     * bypasses rotation/redaction and still runs in release builds. */
+    private const val TAG = "SessionConcurrency"
 
     /** [T-STALL-DIAG] Heartbeat cadence while a turn is blocked on a slot. */
     private const val SLOT_WAIT_WARN_MS = 10_000L
@@ -57,7 +62,8 @@ object SessionConcurrencyManager {
         if (fastAcquired) {
             // [T-STALL-DIAG] Fast path taken — record who now holds slots so a
             // later leak can be traced back to the turn that opened it.
-            println(
+            AppLogger.info(
+                TAG,
                 "[T-STALL-DIAG] slot ACQUIRED-fast sid=$sessionId " +
                     "running=${_runningSessions.value.size}/$MAX_CONCURRENT " +
                     "holders=${_runningSessions.value.joinToString(",")}",
@@ -72,7 +78,8 @@ object SessionConcurrencyManager {
         val waitStartMs = runCatching { android.os.SystemClock.elapsedRealtime() }
             .getOrElse { System.currentTimeMillis() }
         val waitMs = queueWaitMs(com.openminis.app.data.ToolLimitPrefs.queueTimeoutSec())
-        println(
+        AppLogger.info(
+            TAG,
             "[T-STALL-DIAG] slot WAIT-BEGIN sid=$sessionId " +
                 "running=${holdersAtWait.size}/$MAX_CONCURRENT " +
                 "holders=${holdersAtWait.joinToString(",")} " +
@@ -86,7 +93,8 @@ object SessionConcurrencyManager {
                         while (true) {
                             kotlinx.coroutines.delay(SLOT_WAIT_WARN_MS)
                             waited += SLOT_WAIT_WARN_MS
-                            println(
+                            AppLogger.info(
+                                TAG,
                                 "[T-STALL-DIAG] slot STILL-WAITING sid=$sessionId waitedMs=$waited " +
                                     "holders=${_runningSessions.value.joinToString(",")} " +
                                     "queueDepth=${_suspendedSessions.value.size} " +
@@ -108,7 +116,8 @@ object SessionConcurrencyManager {
                         watchdog.cancel()
                         val end = runCatching { android.os.SystemClock.elapsedRealtime() }
                             .getOrElse { System.currentTimeMillis() }
-                        println(
+                        AppLogger.info(
+                            TAG,
                             "[T-STALL-DIAG] slot WAIT-END sid=$sessionId waitedMs=${end - waitStartMs}",
                         )
                     }
@@ -135,7 +144,8 @@ object SessionConcurrencyManager {
             _suspendedSessions.value = _suspendedSessions.value - sessionId
             val had = sessionId in _runningSessions.value
             if (had) _runningSessions.value = _runningSessions.value - sessionId
-            println(
+            AppLogger.info(
+                TAG,
                 "[T-STALL-DIAG] slot RELEASED sid=$sessionId wasHeld=$had waiting=$removedWaiting " +
                     "running=${_runningSessions.value.size}/$MAX_CONCURRENT " +
                     "holders=${_runningSessions.value.joinToString(",")}",

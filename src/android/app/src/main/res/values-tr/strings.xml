@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Boş</string>
     <string name="common_close">Kapat</string>
     <string name="common_skip">Atla</string>
-    <string name="common_next">İleri</string>
-    <string name="onboarding_welcome_title">Minis Ultra\'e hoş geldiniz</string>
-    <string name="onboarding_welcome_subtitle">Terminal, tarayıcı ve doğrudan cihaz erişimine sahip Minis Ultra Agent\'ınız.</string>
-    <string name="onboarding_get_started">Başla</string>
-    <string name="onboarding_provider_title">Sağlayıcı Ekle</string>
-    <string name="onboarding_provider_subtitle">Başlamak için en az bir sağlayıcının API anahtarını girin.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API Anahtarı</string>
-    <string name="onboarding_save_api_key">API Anahtarını Kaydet</string>
-    <string name="onboarding_saved">Kaydedildi</string>
     <string name="onboarding_select_models_title">Model Seç</string>
     <string name="onboarding_select_models_subtitle">Varsayılan grubunuz için en fazla 3 model seçin.</string>
-    <string name="onboarding_search_models">Modellerde ara</string>
     <string name="onboarding_filter_models">Modelleri filtrele</string>
     <string name="onboarding_done_count">Bitti (%1$d/3)</string>
     <string name="onboarding_loading_models">Modeller yükleniyor…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Yeni sohbetleri eşleşen bir gruba yerleştir</string>
     <string name="appearance_auto_grouping_footer">Bir sohbetin başlığı ilk kez oluşturulduğunda, sohbet eşleşen mevcut bir gruba da yerleştirilir. Her sohbet için yalnızca bir kez çalışır, yalnızca sizin oluşturduğunuz grupları kullanır ve eşleşme yoksa sohbeti grupsuz bırakır.</string>
     <string name="appearance_section_tool_preview">Araç Durum Çubuğu</string>
-    <string name="appearance_tool_preview_footer">Agent çalışırken araç durum çubuğunun yanında canlı bir önizleme gösterir.</string>
-    <string name="appearance_tool_preview_title">Araç Önizleme Penceresi</string>
     <string name="appearance_section_auto_focus_after_reply">Yanıttan Sonra Girişe Otomatik Odaklan</string>
     <string name="appearance_auto_focus_after_reply_title">Yanıttan Sonra Girişe Otomatik Odaklan</string>
     <string name="appearance_auto_focus_after_reply_footer">Açıkken, model yanıtını bitirdikten sonra klavye kendiliğinden açılır ve giriş alanı yeni sorunuz için hazır olur. Varsayılan olarak açıktır; yanıtı klavye aniden açılmadan okumayı yeğliyorsanız kapatın.</string>
@@ -1797,4 +1785,13 @@
     <string name="dev_suite_not_installed">Kurulu değil</string>
     <string name="dev_suite_required">zorunlu</string>
     <string name="dev_suite_assemble">Kur</string>
+    <string name="dev_suite_start_install">Kurulum başlatılıyor</string>
+    <string name="dev_suite_apt_failed">apt kurulumu başarısız (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Adım başarısız (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Kurulum bitti ancak hazırlık denemesi geçilemedi</string>
+    <string name="dev_suite_interrupted">Kurulum yarıda kesildi</string>
+    <string name="dev_suite_no_space">Depolama yetersiz: yaklaşık %1$d GB gerekli, %2$d GB boş</string>
+    <string name="dev_suite_skipped_dep">Atlandı: %1$s kurulamadı</string>
+    <string name="dev_suite_uninstall_failed">Kaldırma başarısız (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">%1$s sandbox\'tan kaldırılsın mı? İndirilen dosyalar ve komut bağlantıları silinir; apt paketleri kalır.</string>
 </resources>

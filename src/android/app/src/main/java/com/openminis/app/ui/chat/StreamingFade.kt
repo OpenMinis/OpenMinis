@@ -3,7 +3,6 @@ package com.openminis.app.ui.chat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
@@ -220,15 +219,4 @@ internal fun FadeFrameDriver(controller: FadeController) {
             if (!anyActive) break
         }
     }
-}
-
-/**
- * Hold a stable mutable holder for the most recent base color so the
- * overlay() call doesn't need MdText to pass it through composition every
- * time. Currently unused externally but kept as a hook for future fade
- * extensions (color-shift, ramp-up speed) that depend on the surrounding
- * theme color.
- */
-internal data class FadeColorHolder(var color: Color = Color.Unspecified) {
-    val state = mutableStateOf(color)
 }

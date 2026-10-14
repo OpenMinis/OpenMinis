@@ -284,6 +284,15 @@
     <string name="dev_suite_not_installed">Not installed</string>
     <string name="dev_suite_required">required</string>
     <string name="dev_suite_assemble">Assemble</string>
+    <string name="dev_suite_start_install">Starting install</string>
+    <string name="dev_suite_apt_failed">apt install failed (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Step failed (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Install finished but the readiness probe did not pass</string>
+    <string name="dev_suite_interrupted">Install was interrupted</string>
+    <string name="dev_suite_no_space">Not enough storage: about %1$d GB needed, %2$d GB free</string>
+    <string name="dev_suite_skipped_dep">Skipped: %1$s did not install</string>
+    <string name="dev_suite_uninstall_failed">Uninstall failed (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Remove %1$s from the sandbox? Downloaded files and command links are deleted; apt packages stay installed.</string>
     <string name="plugin_market_footer_online">Remote OpenAPI-lite tools. Requests are SSRF-checked; API keys never enter the model context.</string>
     <string name="plugin_market_section_local">Local tools</string>
     <string name="plugin_market_local_footer">Command-template tools you author: the agent calls them like built-in tools, {{param}} placeholders are substituted at call time, and execution goes through the sandbox shell gate.</string>
@@ -642,18 +651,8 @@
     <!-- T172 — components / onboarding / preview i18n -->
     <string name="common_close">Close</string>
     <string name="common_skip">Skip</string>
-    <string name="common_next">Next</string>
-    <string name="onboarding_welcome_title">Welcome to Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Your Minis Ultra Agent with terminal, browser, and native device access.</string>
-    <string name="onboarding_get_started">Get Started</string>
-    <string name="onboarding_provider_title">Add a Provider</string>
-    <string name="onboarding_provider_subtitle">Enter an API key for at least one provider to get started.</string>
-    <string name="onboarding_provider_api_key_label">%1$s API Key</string>
-    <string name="onboarding_save_api_key">Save API Key</string>
-    <string name="onboarding_saved">Saved</string>
     <string name="onboarding_select_models_title">Select Models</string>
     <string name="onboarding_select_models_subtitle">Choose up to 3 models for your default group.</string>
-    <string name="onboarding_search_models">Search models</string>
     <string name="onboarding_filter_models">Filter models</string>
     <string name="onboarding_done_count">Done (%1$d/3)</string>
     <string name="onboarding_loading_models">Loading models…</string>
@@ -957,8 +956,6 @@
     <string name="appearance_auto_grouping_subtitle">File new chats into a matching group</string>
     <string name="appearance_auto_grouping_footer">When a chat\'s title is first generated, also file it into a matching existing group. Runs once per chat, only uses groups you already created, and leaves the chat ungrouped when nothing matches.</string>
     <string name="appearance_section_tool_preview">Tool Status Bar</string>
-    <string name="appearance_tool_preview_footer">Show a live preview thumbnail alongside the tool status bar during Agent execution.</string>
-    <string name="appearance_tool_preview_title">Tool Preview Window</string>
     <string name="appearance_section_chat_chrome">Chat chrome</string>
     <string name="appearance_chat_chrome_footer">Hide overlapping live-status UI so the transcript stays readable. Running tools still appear until they finish.</string>
     <string name="appearance_show_floating_tool_bar">Floating tool status bar</string>
@@ -981,8 +978,6 @@
     <string name="appearance_monet_title">Dynamic color</string>
     <string name="appearance_monet_subtitle">Restyle the whole app from your wallpaper (Material You): surfaces, cards, chat bubbles and icons all follow; semantic colors like red stay put. Requires Android 12+.</string>
     <string name="chat_process_step_view">View</string>
-    <string name="chat_process_summary_title">AI process</string>
-    <string name="chat_process_summary_meta">thinking %1$d · tools %2$d%3$s</string>
     <string name="appearance_section_font_size">Font Size</string>
     <string name="appearance_font_size_footer">Scale fonts for chat input, message content, and general app text. Changes apply immediately.</string>
     <string name="appearance_font_scale_title">Font Scale</string>
@@ -2468,12 +2463,6 @@
     <string name="web_search_keyless">Keyless CN fallback chain</string>
     <string name="web_search_keyless_sub">After every engine fails, try Sogou → Bing RSS → Baidu, then Wikipedia</string>
     <string name="web_search_fallback_footer">Empty results still recommend browser_use on a known URL.</string>
-    <string name="chat_card_share_title">Share conversation card</string>
-    <string name="chat_card_theme_dark">Dark</string>
-    <string name="chat_card_theme_light">Light</string>
-    <string name="chat_card_theme_paper">Paper</string>
-    <string name="chat_card_hide_tools">Hide tool output</string>
-    <string name="chat_card_paginate">Split long chats into pages</string>
     <string name="overlay_expand">Expand mini chat</string>
     <string name="overlay_compose_hint">Message Minis Ultra…</string>
     <string name="overlay_send">Send</string>

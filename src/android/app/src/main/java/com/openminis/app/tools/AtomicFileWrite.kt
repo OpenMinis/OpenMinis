@@ -76,6 +76,15 @@ object AtomicFileWrite {
     internal var failReplaceForTest = false
 
     /**
+     * [T-append-verify-vacuous] Unit tests set this to simulate an append that
+     * silently lands FEWER bytes than asked for (disk full / EIO swallowed by
+     * `appendText`, which is exactly the failure the old post-hoc
+     * `file.length()` sampling could not see). The value is the byte count the
+     * file is truncated to right after the append.
+     */
+    internal var truncateAfterAppendForTest: Long = -1L
+
+    /**
      * One lock per canonical path. The map is unbounded in theory; in practice
      * a session touches at most a few hundred distinct files, and an entry
      * costs a few dozen bytes. Reaping would need its own lock to do safely,
@@ -180,9 +189,28 @@ object AtomicFileWrite {
         if (append) {
             // Append cannot go through rename — the result depends on the
             // bytes already there. Verify instead of making atomic.
+            //
+            // [T-append-verify-vacuous] The check used to be
+            // `verify(file, file.length(), content, appended = true)`: the
+            // "expected" length was sampled AFTER appendText, so it was the same
+            // reading as the one compared against — `file.length() == file.length()`
+            // always true — and the `appended` branch skipped the byte
+            // comparison entirely. Nothing about the append was verified: a
+            // silent short write (disk full, EIO swallowed by appendText) was
+            // reported as success. Now the PREVIOUS length is captured, growth is
+            // checked against the exact byte count of [content], and the tail is
+            // re-read and compared.
             return try {
+                val priorLen = if (file.exists()) file.length() else 0L
                 file.appendText(content)
-                verify(file, file.length(), content, appended = true)
+                if (truncateAfterAppendForTest >= 0) {
+                    // Test-only: emulate the short write the check must catch.
+                    try {
+                        java.io.RandomAccessFile(file, "rw").use { it.setLength(truncateAfterAppendForTest) }
+                    } catch (_: Exception) {
+                    }
+                }
+                verifyAppend(file, priorLen, content)
             } catch (e: IOException) {
                 AppLogger.error(TAG, "append failed for ${file.name}: ${e.message}")
                 null
@@ -211,7 +239,7 @@ object AtomicFileWrite {
                 return null
             }
             if (tmp.exists()) tmp.delete()
-            return verify(file, written, content, appended = false)
+            return verify(file, written, content)
         } catch (e: IOException) {
             AppLogger.error(TAG, "write failed for ${file.name}: ${e.message}")
             tmp.delete()
@@ -354,7 +382,7 @@ object AtomicFileWrite {
      * returning without throwing is not evidence that the bytes reached the
      * filesystem, which is exactly how the original bug stayed invisible.
      */
-    private fun verify(file: File, expectedLen: Long, content: String, appended: Boolean): Long? {
+    private fun verify(file: File, expectedLen: Long, content: String): Long? {
         if (!file.exists()) {
             AppLogger.error(TAG, "verify failed: ${file.absolutePath} does not exist after write")
             return null
@@ -366,20 +394,72 @@ object AtomicFileWrite {
             )
             return null
         }
-        if (!appended) {
-            // Only the overwrite path can be compared byte-for-byte; an
-            // append's on-disk content is the old bytes plus the new ones.
-            val onDisk = try {
-                file.readText()
-            } catch (e: IOException) {
-                AppLogger.error(TAG, "verify failed: cannot re-read ${file.name}: ${e.message}")
-                return null
-            }
-            if (onDisk != content) {
-                AppLogger.error(TAG, "verify failed: ${file.name} content differs after write")
-                return null
-            }
+        val onDisk = try {
+            file.readText()
+        } catch (e: IOException) {
+            AppLogger.error(TAG, "verify failed: cannot re-read ${file.name}: ${e.message}")
+            return null
+        }
+        if (onDisk != content) {
+            AppLogger.error(TAG, "verify failed: ${file.name} content differs after write")
+            return null
         }
         return file.length()
+    }
+
+    /**
+     * Verify an APPEND: the file must be exactly `priorLen + content.toByteArray()`
+     * bytes long, and those new bytes must actually be at the end.
+     *
+     * [T-append-verify-vacuous] Only the tail is re-read (bounded by the appended
+     * content itself), so this stays cheap on a log file — the previous length is
+     * supplied by the caller, captured BEFORE appendText ran, never after.
+     */
+    private fun verifyAppend(file: File, priorLen: Long, content: String): Long? {
+        if (!file.exists()) {
+            AppLogger.error(TAG, "append verify failed: ${file.absolutePath} vanished")
+            return null
+        }
+        val payload = content.toByteArray(Charsets.UTF_8)
+        val expectedLen = priorLen + payload.size
+        val actual = file.length()
+        if (actual != expectedLen) {
+            AppLogger.error(
+                TAG,
+                "append verify failed: ${file.name} grew ${actual - priorLen} bytes, " +
+                    "expected ${payload.size} (was $priorLen, now $actual, expected $expectedLen)",
+            )
+            return null
+        }
+        if (payload.isEmpty()) return actual
+        val tail = try {
+            file.inputStream().use { input ->
+                // skip() may return short on a generic InputStream — loop it.
+                var toSkip = priorLen
+                while (toSkip > 0) {
+                    val s = input.skip(toSkip)
+                    if (s <= 0) break
+                    toSkip -= s
+                }
+                if (toSkip > 0) return@use null
+                val buf = ByteArray(payload.size)
+                var read = 0
+                while (read < payload.size) {
+                    val n = input.read(buf, read, payload.size - read)
+                    if (n < 0) break
+                    read += n
+                }
+                if (read != payload.size) return@use null
+                buf
+            }
+        } catch (e: IOException) {
+            AppLogger.error(TAG, "append verify failed: cannot re-read ${file.name}: ${e.message}")
+            null
+        }
+        if (tail == null || !tail.contentEquals(payload)) {
+            AppLogger.error(TAG, "append verify failed: ${file.name} tail bytes differ after append")
+            return null
+        }
+        return actual
     }
 }

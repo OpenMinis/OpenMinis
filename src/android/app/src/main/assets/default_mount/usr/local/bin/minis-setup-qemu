@@ -5,6 +5,13 @@
 # NOTE: binfmt_misc auto-registration does NOT work inside PRoot (no kernel
 # binfmt access). The qemu-x86_64 binary itself works fine — invoke it
 # EXPLICITLY:  qemu-x86_64 /path/to/x86_64/binary args…
+#
+# [T-devsuite-verify] No payload is fetched here: qemu-user-static comes from
+# the archive the guest's apt sources point at, and apt/dpkg verify it against
+# the repository Release/InRelease signature plus the per-package checksum, so
+# there is nothing for this script to pin. Nothing in this file may be changed
+# to a direct URL download — that is exactly the path the other minis-setup-*
+# scripts have to guard with a digest (see /usr/local/lib/minis/offline.sh).
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 export TMPDIR=/tmp TMP=/tmp TEMP=/tmp

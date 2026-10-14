@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Kosong</string>
     <string name="common_close">Tutup</string>
     <string name="common_skip">Langkau</string>
-    <string name="common_next">Seterusnya</string>
-    <string name="onboarding_welcome_title">Selamat datang ke Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Ejen Minis Ultra anda dengan terminal, pelayar, dan capaian terus kepada peranti.</string>
-    <string name="onboarding_get_started">Mulakan</string>
-    <string name="onboarding_provider_title">Tambah Pembekal</string>
-    <string name="onboarding_provider_subtitle">Masukkan kunci API bagi sekurang-kurangnya satu pembekal untuk bermula.</string>
-    <string name="onboarding_provider_api_key_label">Kunci API %1$s</string>
-    <string name="onboarding_save_api_key">Simpan Kunci API</string>
-    <string name="onboarding_saved">Disimpan</string>
     <string name="onboarding_select_models_title">Pilih Model</string>
     <string name="onboarding_select_models_subtitle">Pilih sehingga 3 model untuk kumpulan lalai anda.</string>
-    <string name="onboarding_search_models">Cari model</string>
     <string name="onboarding_filter_models">Tapis model</string>
     <string name="onboarding_done_count">Selesai (%1$d/3)</string>
     <string name="onboarding_loading_models">Memuatkan model…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Masukkan sembang baharu ke kumpulan yang sepadan</string>
     <string name="appearance_auto_grouping_footer">Apabila tajuk sesebuah sembang dijana buat kali pertama, sembang itu turut dimasukkan ke kumpulan sedia ada yang sepadan. Berjalan sekali bagi setiap sembang, hanya menggunakan kumpulan yang telah anda cipta, dan membiarkan sembang tanpa kumpulan jika tiada yang sepadan.</string>
     <string name="appearance_section_tool_preview">Bar Status Alat</string>
-    <string name="appearance_tool_preview_footer">Paparkan pratonton langsung di sebelah bar status alat semasa Ejen bekerja.</string>
-    <string name="appearance_tool_preview_title">Tetingkap Pratonton Alat</string>
     <string name="appearance_section_auto_focus_after_reply">Fokus Automatik ke Ruang Input Selepas Balasan</string>
     <string name="appearance_auto_focus_after_reply_title">Fokus Automatik ke Ruang Input Selepas Balasan</string>
     <string name="appearance_auto_focus_after_reply_footer">Apabila dihidupkan, papan kekunci muncul secara automatik selepas model selesai membalas supaya ruang input sedia untuk soalan susulan. Dihidupkan secara lalai; matikan jika anda lebih suka membaca balasan tanpa papan kekunci muncul tiba-tiba.</string>
@@ -1797,4 +1785,13 @@
     <string name="dev_suite_not_installed">Tidak dipasang</string>
     <string name="dev_suite_required">wajib</string>
     <string name="dev_suite_assemble">Pasang</string>
+    <string name="dev_suite_start_install">Memulakan pemasangan</string>
+    <string name="dev_suite_apt_failed">Pemasangan apt gagal (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Langkah gagal (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Pemasangan selesai tetapi pemeriksaan sedia tidak lulus</string>
+    <string name="dev_suite_interrupted">Pemasangan terganggu</string>
+    <string name="dev_suite_no_space">Ruang simpanan tidak cukup: perlu kira-kira %1$d GB, tersedia %2$d GB</string>
+    <string name="dev_suite_skipped_dep">Dilangkau: %1$s gagal dipasang</string>
+    <string name="dev_suite_uninstall_failed">Nyahpasang gagal (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Buang %1$s daripada sandbox? Fail yang dimuat turun dan pautan perintah dipadam; pakej apt kekal dipasang.</string>
 </resources>

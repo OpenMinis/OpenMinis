@@ -401,7 +401,17 @@ dependencies {
     // ProcessLifecycleOwner — used by XAIOAuthManager to detect Custom
     // Tab dismissal (T-xai-oauth-stop-resume port iOS d1dbdd5d).
     implementation("androidx.lifecycle:lifecycle-process:2.8.7")
-    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
+    // androidx.profileinstaller removed: no baseline profile exists to install —
+    // `git ls-files` has no baseline-prof.txt / baselineProfiles source anywhere,
+    // and :benchmark (settings.gradle.kts) is never assembled by CI or the docs,
+    // so its BaselineProfileGenerator cannot have produced one. The library
+    // therefore only added a startup ContentProvider/ProfileInstaller pass that
+    // found nothing. RE-ADD IT together with the missing wiring if the profile
+    // is ever produced: run :benchmark:assembleBenchmarkBaselineProfile (or apply
+    // the androidx.baselineprofile plugin), commit the output to
+    // app/src/main/baseline-prof.txt, and add a CI job — sideloaded installs (this
+    // project ships APKs from GitHub Releases) rely on profileinstaller at first
+    // launch on API 28 and below, so the two belong in the same change.
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
@@ -413,8 +423,13 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
-    // DataStore
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    // androidx.datastore:datastore-preferences removed — zero usage: `git grep
+    // androidx.datastore` over src/android matched only this declaration, no
+    // `preferencesDataStore`/`dataStore` builder and no import anywhere in app,
+    // :core:model, :core:common, :provider:api or :hostcapability:api. Every
+    // settings store in this app is SharedPreferences or
+    // androidx.security EncryptedSharedPreferences, and PendingUpdateStore.kt
+    // documents deliberately avoiding DataStore.
 
     // Security (EncryptedSharedPreferences)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
@@ -443,7 +458,14 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.mozilla:rhino:1.7.14")
-    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
+    // com.squareup.okhttp3:okhttp-sse removed — never imported: `git grep -E
+    // "okhttp3\.sse|EventSources|EventSourceListener"` over src/android found
+    // zero hits. Streaming is parsed off the raw response body on purpose
+    // (AnthropicProvider reads `source().readUtf8Line()` and keeps lines that
+    // start with "data:", OpenAIRawStream sniffs the content type), because the
+    // providers emit `text/event-stream` bodies that are NOT strictly SSE —
+    // Responses API interleaves bare JSON, and okhttp-sse's parser would drop
+    // frames the hand-rolled loop still handles.
 
     // [T-ssh-backend] JSch (mwiede maintained fork) — pure-Java SSH/SFTP
     // client for the remote execution backend. Chosen over sshj: no

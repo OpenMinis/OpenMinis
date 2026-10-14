@@ -39,21 +39,3 @@ fun highlightedAnnotatedString(text: String, query: String): AnnotatedString {
         }
     }
 }
-
-/**
- * Locate the first case-insensitive occurrence of [query] in [text] and
- * return a ~[radius]-char window centred on the hit. Newlines collapse to
- * spaces; ellipses prefix/suffix when truncated. Returns null if no hit.
- */
-fun snippetAround(text: String, query: String, radius: Int = 50): String? {
-    if (query.isBlank() || text.isEmpty()) return null
-    val lower = text.lowercase()
-    val pos = lower.indexOf(query.lowercase())
-    if (pos < 0) return null
-    val start = (pos - radius).coerceAtLeast(0)
-    val end = (pos + query.length + radius).coerceAtMost(text.length)
-    val core = text.substring(start, end).replace('\n', ' ').replace('\r', ' ')
-    val prefix = if (start > 0) "…" else ""
-    val suffix = if (end < text.length) "…" else ""
-    return prefix + core + suffix
-}

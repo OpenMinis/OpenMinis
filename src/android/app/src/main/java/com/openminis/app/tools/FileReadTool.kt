@@ -25,6 +25,71 @@ object FileReadTool {
         return if (requested == null) cap else requested.coerceIn(1, cap)
     }
 
+    /**
+     * A streamed line window: only the retained slice is in memory, while
+     * [LineWindow.totalLines] still counts every line for the header.
+     */
+    internal class LineWindow(
+        val lines: List<String>,
+        val totalLines: Int,
+        val firstLineIndex: Int,
+    )
+
+    /**
+     * Retention slack on top of the char cap, so the truncation pass below can
+     * still cut on a line boundary and count newlines accurately.
+     */
+    private const val WINDOW_SLACK_CHARS = 4_096
+
+    /**
+     * [T-file-read-streaming] The ranged read used to call `file.readLines()`,
+     * which materialises EVERY line of the file — a 300 MB log for a 50-line
+     * `offset`/`lines` read, twice over (the `List<String>` plus the
+     * `joinToString` copy). This streams instead: one [java.io.BufferedReader]
+     * line at a time, retaining only the requested window and only up to
+     * [charCap] + [WINDOW_SLACK_CHARS] characters (head: stop retaining once the
+     * window is full or the cap is crossed; tail: drop from the front, i.e. a
+     * ring buffer of the last lines). Line counting continues to EOF so the
+     * header's "of N lines" stays truthful.
+     */
+    internal fun readLineWindow(
+        file: File,
+        charset: Charset,
+        offset: Int,
+        count: Int?,
+        tail: Boolean,
+        charCap: Int,
+    ): LineWindow {
+        val kept = ArrayList<String>()
+        var keptChars = 0
+        var total = 0
+        var firstKept = offset.coerceAtLeast(1)
+        val retainCap = charCap + WINDOW_SLACK_CHARS
+        val windowEnd = if (count != null) offset + count - 1 else Int.MAX_VALUE
+        file.inputStream().use { input ->
+            java.io.BufferedReader(java.io.InputStreamReader(input, charset)).use { reader ->
+                while (true) {
+                    val line = reader.readLine() ?: break
+                    total++
+                    if (tail) {
+                        kept.add(line)
+                        keptChars += line.length + 1
+                        while (keptChars > retainCap && kept.size > 1) {
+                            keptChars -= kept.removeAt(0).length + 1
+                            firstKept++
+                        }
+                        continue
+                    }
+                    if (total < offset || total > windowEnd) continue
+                    if (keptChars > retainCap) continue
+                    kept.add(line)
+                    keptChars += line.length + 1
+                }
+            }
+        }
+        return LineWindow(kept, total, firstKept)
+    }
+
     /** [T-binary-preview] Reads at most [limit] bytes fully (read() may return short). */
     internal fun readHead(file: File, limit: Int): ByteArray {
         if (limit <= 0) return ByteArray(0)
@@ -196,27 +261,25 @@ object FileReadTool {
                 )
             }
 
-            val allLines = file.readLines(textCharset ?: Charsets.UTF_8)
-            val totalLines = allLines.size
-
             val requestedLines = resolveLineLimit(
                 if (args.has("lines")) args.optInt("lines") else null,
                 com.openminis.app.data.ToolLimitPrefs.fileReadMaxLines(),
             )
 
-            val selectedLines = if (direction == "tail") {
-                val count = requestedLines ?: totalLines
-                val start = (totalLines - count).coerceAtLeast(0)
-                allLines.subList(start, totalLines)
-            } else {
-                val start = (offset - 1).coerceIn(0, totalLines)
-                val end = if (requestedLines != null) {
-                    (start + requestedLines).coerceAtMost(totalLines)
-                } else {
-                    totalLines
-                }
-                allLines.subList(start, end)
-            }
+            // [T-file-read-streaming] Window + total come from ONE bounded stream
+            // pass instead of `readLines()` over the whole file. The window is
+            // contiguous and always ends at EOF (tail) or at the requested slice
+            // (head), so the range arithmetic below is unchanged.
+            val window = readLineWindow(
+                file = file,
+                charset = textCharset ?: Charsets.UTF_8,
+                offset = offset,
+                count = requestedLines,
+                tail = direction == "tail",
+                charCap = maxLength,
+            )
+            val totalLines = window.totalLines
+            val selectedLines = window.lines
 
             val showStart = if (direction == "tail") {
                 (totalLines - selectedLines.size) + 1

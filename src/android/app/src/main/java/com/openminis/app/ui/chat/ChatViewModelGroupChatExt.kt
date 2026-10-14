@@ -19,6 +19,7 @@ import com.openminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -229,14 +230,14 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
                 groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
             }
             withContext(Dispatchers.Main) {
-                _promptQueue.value = emptyList()
+                _promptQueue.update { emptyList() }
                 _messages.value = _messages.value.filterNot { it.isQueued }
             }
             setGroupChatEnabled(false)
         } else {
             publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_summary_failed))
             withContext(Dispatchers.Main) {
-                _promptQueue.value = emptyList()
+                _promptQueue.update { emptyList() }
                 _messages.value = _messages.value.filterNot { it.isQueued }
             }
             setGroupChatEnabled(false)

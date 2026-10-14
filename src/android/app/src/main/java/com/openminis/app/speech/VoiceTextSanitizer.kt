@@ -35,6 +35,33 @@ object VoiceTextSanitizer {
 
     private val DEFAULT_PHRASES = LinkPhrases()
 
+    // [T-android-voice-sanitizer-regex-hoist] All patterns are compile-once
+    // constants at object level. ReadAloudPlayer.enqueue runs sanitize() for
+    // EVERY streamed sentence during a reply, and ~16 Regex literals were
+    // being recompiled per sentence on that hot path. `Regex.replace` is
+    // documented safe for concurrent use on a shared instance, and this object
+    // is stateless, so object-level vals carry no extra risk.
+    private val MULTI_SPACE_RE = Regex("[ \\t]{2,}")
+    private val LINE_PAD_RE = Regex(" *\\n *")
+    private val FENCED_CODE_RE = Regex("```[\\s\\S]*?```")
+    private val INLINE_CODE_RE = Regex("`([^`]+)`")
+    private val MARKDOWN_LINK_RE = Regex("!?\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)")
+    private val BOLD_STAR_RE = Regex("\\*\\*([^*]+)\\*\\*")
+    private val BOLD_UNDER_RE = Regex("__([^_]+)__")
+    private val ITALIC_STAR_RE = Regex("\\*([^*]+)\\*")
+    private val UNDERSCORE_EMPH_RE = Regex("(?<!\\w)_([^_]+)_(?!\\w)")
+    private val STRIKE_RE = Regex("~~([^~]+)~~")
+    private val HEADING_RE = Regex("(?m)^\\s{0,3}#{1,6}\\s*")
+    private val BLOCKQUOTE_RE = Regex("(?m)^\\s{0,3}>\\s?")
+    private val BULLET_RE = Regex("(?m)^\\s{0,3}[-*+]\\s+")
+    private val ORDERED_RE = Regex("(?m)^\\s{0,3}\\d+[.)]\\s+")
+    private val TABLE_SEP_ROW_RE = Regex("(?m)^\\s*\\|?[-:| ]+\\|?\\s*$")
+    private val TABLE_PIPE_RE = Regex("\\|")
+    private val HRULE_RE = Regex("(?m)^\\s*([-*_])\\1{2,}\\s*$")
+    private val LEFTOVER_UNDERSCORE_RE = Regex("(?<!\\w)_+|_+(?!\\w)")
+    private val LEFTOVER_MARKER_RE = Regex("[*~`]+")
+    private val BARE_URL_RE = Regex("https?://[^\\s)\\]]+")
+
     /**
      * Strip Markdown syntax and non-speakable glyphs, then tidy whitespace.
      * Returns the cleaned, speakable string — which may legitimately be empty
@@ -57,8 +84,8 @@ object VoiceTextSanitizer {
         }
         // Collapse the whitespace the removals left behind.
         return sb.toString()
-            .replace(Regex("[ \\t]{2,}"), " ")
-            .replace(Regex(" *\\n *"), "\n")
+            .replace(MULTI_SPACE_RE, " ")
+            .replace(LINE_PAD_RE, "\n")
             .trim()
     }
 
@@ -69,27 +96,27 @@ object VoiceTextSanitizer {
     private fun stripMarkdown(text: String, phrases: LinkPhrases): String {
         var s = text
         // Fenced code blocks are dropped entirely — reading code aloud is noise.
-        s = s.replace(Regex("```[\\s\\S]*?```"), " ")
+        s = s.replace(FENCED_CODE_RE, " ")
         // Inline `code` → keep the inner text.
-        s = s.replace(Regex("`([^`]+)`"), "$1")
+        s = s.replace(INLINE_CODE_RE, "$1")
         // Links/images before emphasis, so a description containing * is safe.
         s = rewriteMarkdownLinks(s, phrases)
         // Emphasis: **x** __x__ *x* _x_ ~~x~~ → x
-        s = s.replace(Regex("\\*\\*([^*]+)\\*\\*"), "$1")
-        s = s.replace(Regex("__([^_]+)__"), "$1")
-        s = s.replace(Regex("\\*([^*]+)\\*"), "$1")
+        s = s.replace(BOLD_STAR_RE, "$1")
+        s = s.replace(BOLD_UNDER_RE, "$1")
+        s = s.replace(ITALIC_STAR_RE, "$1")
         // Intra-word underscores (snake_case) must survive, hence the guards.
-        s = s.replace(Regex("(?<!\\w)_([^_]+)_(?!\\w)"), "$1")
-        s = s.replace(Regex("~~([^~]+)~~"), "$1")
+        s = s.replace(UNDERSCORE_EMPH_RE, "$1")
+        s = s.replace(STRIKE_RE, "$1")
         // Line-leading block markers.
-        s = s.replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")        // # headings
-        s = s.replace(Regex("(?m)^\\s{0,3}>\\s?"), "")             // > blockquote
-        s = s.replace(Regex("(?m)^\\s{0,3}[-*+]\\s+"), "")         // - bullet
-        s = s.replace(Regex("(?m)^\\s{0,3}\\d+[.)]\\s+"), "")      // 1. ordered
-        s = s.replace(Regex("(?m)^\\s*\\|?[-:| ]+\\|?\\s*$"), " ") // table separator
-        s = s.replace(Regex("\\|"), " ")                           // table pipes
+        s = s.replace(HEADING_RE, "")        // # headings
+        s = s.replace(BLOCKQUOTE_RE, "")             // > blockquote
+        s = s.replace(BULLET_RE, "")         // - bullet
+        s = s.replace(ORDERED_RE, "")      // 1. ordered
+        s = s.replace(TABLE_SEP_ROW_RE, " ") // table separator
+        s = s.replace(TABLE_PIPE_RE, " ")                           // table pipes
         // Horizontal rules --- *** ___
-        s = s.replace(Regex("(?m)^\\s*([-*_])\\1{2,}\\s*$"), " ")
+        s = s.replace(HRULE_RE, " ")
         // Stray leftover emphasis markers.
         //
         // DIVERGENCE FROM iOS (bug fix): iOS strips `[*_~`]{1,}` unconditionally,
@@ -98,8 +125,8 @@ object VoiceTextSanitizer {
         // Underscores are only stripped when NOT sitting between word
         // characters, so snake_case survives; the other markers are never
         // meaningful mid-identifier and stay unconditional.
-        s = s.replace(Regex("(?<!\\w)_+|_+(?!\\w)"), "")
-        s = s.replace(Regex("[*~`]+"), "")
+        s = s.replace(LEFTOVER_UNDERSCORE_RE, "")
+        s = s.replace(LEFTOVER_MARKER_RE, "")
         return s
     }
 
@@ -108,8 +135,7 @@ object VoiceTextSanitizer {
      * verbatim; an empty one becomes the spoken link phrase.
      */
     private fun rewriteMarkdownLinks(text: String, phrases: LinkPhrases): String {
-        val re = Regex("!?\\[([^\\]]*)\\]\\(([^)\\s]+)[^)]*\\)")
-        return re.replace(text) { m ->
+        return MARKDOWN_LINK_RE.replace(text) { m ->
             val desc = m.groupValues[1].trim()
             if (desc.isEmpty()) linkPhrase(m.groupValues[2], phrases) else desc
         }
@@ -117,7 +143,7 @@ object VoiceTextSanitizer {
 
     /** Replace bare http(s) URLs in plain text with the spoken link phrase. */
     private fun rewriteBareUrls(text: String, phrases: LinkPhrases): String =
-        Regex("https?://[^\\s)\\]]+").replace(text) { m -> linkPhrase(m.value, phrases) }
+        BARE_URL_RE.replace(text) { m -> linkPhrase(m.value, phrases) }
 
     private fun linkPhrase(url: String, phrases: LinkPhrases): String {
         val host = hostOf(url)

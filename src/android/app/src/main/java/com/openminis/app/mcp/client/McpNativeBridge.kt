@@ -63,6 +63,22 @@ object McpNativeBridge {
     private data class Cached(val fingerprint: String, val client: McpClient)
 
     private val clients = ConcurrentHashMap<String, Cached>()
+
+    /**
+     * [T-mcp-client-rebuild-leak] One monitor per server id guarding the
+     * check-then-build-then-publish in [clientFor]. `ConcurrentHashMap` alone made
+     * each step atomic but the SEQUENCE not: two IO threads hitting the same server
+     * after a config change both read the stale entry, both passed the fingerprint
+     * test and both ran `buildClient()` — and for stdio that means two PRoot guest
+     * processes plus their reader/stderr threads. The second `clients[id] = …`
+     * then replaced the first WITHOUT closing it, leaking the process and its FDs,
+     * and a later `invalidate()/close()` tore down the wrong (surviving) instance.
+     *
+     * Per-id monitors instead of one global lock: a slow node-server startup for
+     * one server must not stall calls to an unrelated one.
+     */
+    private val clientBuildLocks = ConcurrentHashMap<String, Any>()
+
     private var envRepoRef: EnvVarRepository? = null
 
     private fun envRepo(context: Context): EnvVarRepository =
@@ -222,14 +238,24 @@ object McpNativeBridge {
         // or the server starting/stopping must rebuild the client, not reuse
         // a stale URL or a client without the built-in token.
         val fp = fingerprint(cfg) + "|" + loopbackFingerprint(context, cfg)
-        val cached = clients[cfg.id]
-        if (cached != null && cached.fingerprint == fp) return cached.client to cfg
-        // Config changed (or first use): rebuild. A dead stdio process also
-        // lands here via invalidate() from the caller's error path.
-        if (cached != null) runCatching { cached.client.close() }
-        val client = buildClient(context, cfg)
-        clients[cfg.id] = Cached(fp, client)
-        return client to cfg
+        val cachedNow = clients[cfg.id]
+        if (cachedNow != null && cachedNow.fingerprint == fp) return cachedNow.client to cfg
+        // [T-mcp-client-rebuild-leak] Re-check under the per-id monitor: the
+        // winner of the race publishes, everyone else adopts its client instead of
+        // building a second one. The stale/changed previous instance is closed
+        // HERE (inside the lock), so it can never be leaked nor double-closed by a
+        // concurrent rebuild.
+        val monitor = clientBuildLocks.getOrPut(cfg.id) { Any() }
+        synchronized(monitor) {
+            val cached = clients[cfg.id]
+            if (cached != null && cached.fingerprint == fp) return cached.client to cfg
+            // Config changed (or first use): rebuild. A dead stdio process also
+            // lands here via invalidate() from the caller's error path.
+            if (cached != null) runCatching { cached.client.close() }
+            val client = buildClient(context, cfg)
+            clients[cfg.id] = Cached(fp, client)
+            return client to cfg
+        }
     }
 
     private fun buildClient(context: Context, cfg: MCPServerConfig): McpClient {

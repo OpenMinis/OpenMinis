@@ -49,7 +49,6 @@ class ChatFlatItemsToolOnlyFoldTest {
         when (item) {
             is FlatChatItem.UserBubble -> "user"
             is FlatChatItem.AssistantHeader -> "header"
-            is FlatChatItem.AssistantText -> "text"
             is FlatChatItem.AssistantMarkdownBlock -> "md"
             is FlatChatItem.AssistantProcessSummary -> "summary"
             is FlatChatItem.AssistantThinking -> "thinking"

@@ -25,17 +25,11 @@ object ShellTimeoutPolicy {
     /** Default (baseline) timeout matching the existing call-site default. */
     const val DEFAULT_TIMEOUT_MS = 600_000L      // 10 min
 
-    /** Quick tier — shell builtins, pure text utilities, metadata queries. */
-    const val QUICK_TIMEOUT_MS = 60_000L         // 1 min
-
-    /** Interactive / networked queries (ping, dig, curl one-shots). */
-    const val NETWORK_TIMEOUT_MS = 180_000L      // 3 min
-
-    /** Package installs — apk / pip / npm / gem / cargo install. */
-    const val INSTALL_TIMEOUT_MS = 600_000L      // 10 min
-
-    /** Build / compile — make, cargo build, go build, gradle, ninja. */
-    const val BUILD_TIMEOUT_MS = 1_200_000L      // 20 min
+    // [T-dead-timeout-tiers] QUICK_TIMEOUT_MS / NETWORK_TIMEOUT_MS /
+    // INSTALL_TIMEOUT_MS / BUILD_TIMEOUT_MS were deleted: after the
+    // BudgetClassifier migration every live arm reads the *_WALL_MS tiers
+    // below through BudgetClassifier.classify, and the four per-tier
+    // constants had no remaining reader in main code or tests.
 
     /** Long-running services / daemons — always allowed the full budget. */
     const val LONG_RUNNING_TIMEOUT_MS = 1_800_000L // 30 min
@@ -57,6 +51,12 @@ object ShellTimeoutPolicy {
     fun minimumMs(command: String): Long {
         val lower = command.lowercase()
         return when {
+            // [T-setup-family] The minis-setup-* Dev Suite scripts are
+            // documented at 10–30 minutes; without this floor a short caller
+            // request would still arm them at the NORMAL/BATCH wall. Routes
+            // through GuestWorkloadPolicy's ONE shared predicate (not a second
+            // literal) so the setup family is defined in exactly one place.
+            GuestWorkloadPolicy.isSetupScript(lower) -> LONG_RUNNING_TIMEOUT_MS
             "minis-dev-setup-full" in lower || "minis-build-env" in lower -> LONG_RUNNING_TIMEOUT_MS
             "minis-android-sdk-setup" in lower -> LONG_RUNNING_TIMEOUT_MS
             "minis-self-build" in lower -> LONG_RUNNING_TIMEOUT_MS

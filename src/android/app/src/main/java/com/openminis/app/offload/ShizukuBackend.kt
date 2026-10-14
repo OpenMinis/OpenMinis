@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.sandbox.BoundedOutputBuffer
 import rikka.shizuku.Shizuku
 import rikka.sui.Sui
 import java.util.concurrent.TimeUnit
@@ -217,19 +218,24 @@ class ShizukuBackend(private val appContext: Context) {
             "shizuku.newProcess returned ${procAny.javaClass.name}, not java.lang.Process",
         )
 
-        val out = StringBuilder()
-        val err = StringBuilder()
+        // [T-shizuku-bounded-output] dumpsys-class output can be many MB. The
+        // old uncapped StringBuilder over forEachLine retained all of it in the
+        // app heap (the only backend not using BoundedOutputBuffer). Bound it
+        // head+tail like every other command path; the reader still drains the
+        // pipe so the child never stalls on a full buffer.
+        val out = com.openminis.app.sandbox.BoundedOutputBuffer()
+        val err = com.openminis.app.sandbox.BoundedOutputBuffer()
         val outThread = Thread {
             runCatching {
                 proc.inputStream?.use { s ->
-                    s.bufferedReader().forEachLine { l -> synchronized(out) { out.append(l).append('\n') } }
+                    s.bufferedReader().forEachLine { l -> synchronized(out) { out.appendLine(l) } }
                 }
             }
         }
         val errThread = Thread {
             runCatching {
                 proc.errorStream?.use { s ->
-                    s.bufferedReader().forEachLine { l -> synchronized(err) { err.append(l).append('\n') } }
+                    s.bufferedReader().forEachLine { l -> synchronized(err) { err.appendLine(l) } }
                 }
             }
         }

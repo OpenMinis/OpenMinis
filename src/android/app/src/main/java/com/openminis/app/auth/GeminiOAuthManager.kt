@@ -27,11 +27,12 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
          */
         private const val REFRESH_BUFFER_MS = 5 * 60 * 1000L
 
-        /** Per-instance refresh mutex — serializes concurrent refresh calls. */
-        private val refreshMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
-
-        private fun mutexFor(instanceId: String): Mutex =
-            refreshMutexes.getOrPut(instanceId) { Mutex() }
+        /**
+         * Per-instance refresh mutex — serializes concurrent refresh calls.
+         * [T-oauth-refresh-race] Lives in [OAuthManager] now so this classified
+         * path and the base single-flight refresh share ONE lock per account.
+         */
+        private fun mutexFor(instanceId: String): Mutex = OAuthManager.refreshMutexFor(instanceId)
     }
 
     /**
@@ -194,6 +195,10 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      *  - `SUCCESS` — new access token persisted.
      */
     suspend fun refreshTokenClassified(): RefreshOutcome = withContext(Dispatchers.IO) {
+        // [T-oauth-refresh-race] Snapshot the expiry BEFORE queueing on the lock:
+        // comparing two in-lock reads could never detect a concurrent winner, so
+        // every queued caller still POSTed a refresh.
+        val priorExpireAt = loadStoredTokens()?.optLong("expire_at", 0) ?: 0L
         val mutex = mutexFor(instanceId)
         mutex.withLock {
             val stored = loadStoredTokens() ?: return@withLock RefreshOutcome.NO_TOKEN
@@ -202,8 +207,7 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
             // Coalesce concurrent refreshers: if another coroutine refreshed
             // while we were queued on the mutex, short-circuit with SUCCESS.
-            val priorExpireAt = stored.optLong("expire_at", 0)
-            val freshCheck = loadStoredTokens()?.optLong("expire_at", 0) ?: 0
+            val freshCheck = stored.optLong("expire_at", 0)
             if (freshCheck > priorExpireAt && freshCheck > System.currentTimeMillis()) {
                 Log.d(TAG, "Refresh skipped — fresher token already present (concurrent refresh coalesced)")
                 return@withLock RefreshOutcome.SUCCESS
@@ -283,8 +287,16 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             RefreshOutcome.SUCCESS ->
                 loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
             RefreshOutcome.INVALID_GRANT -> null
-            RefreshOutcome.TRANSIENT ->
-                if (expireAt > 0 && now >= expireAt) null else token
+            RefreshOutcome.TRANSIENT -> {
+                // [T-oauth-refresh-race] `expireAt`/`token` are PRE-refresh values
+                // — re-read the store, a concurrent refresher may have landed a
+                // fresher bundle while our own attempt was failing.
+                val current = loadStoredTokens()
+                val currentExpireAt = current?.optLong("expire_at", 0) ?: 0
+                if (currentExpireAt > System.currentTimeMillis()) {
+                    current?.optString("access_token", "")?.ifEmpty { null } ?: token
+                } else if (expireAt > 0 && now >= expireAt) null else token
+            }
             RefreshOutcome.NO_TOKEN -> null
         }
     }

@@ -36,6 +36,11 @@ internal suspend fun ProviderRepository.persistToDbAndMirror(config: ProviderCon
     // already persisted synchronously. commit() blocks the writer
     // (~5–30ms) but guarantees DB and JSON land together.
     //
+    // [T-android-save-off-main-thread] "the writer" is now the repository's
+    // persistence worker, never a Compose click handler: saveConfig hands the
+    // snapshot to that single coroutine, so this synchronous commit no longer
+    // stalls the main thread while keeping its durability guarantee.
+    //
     // commit() returns false (no exception) on disk-full / permission
     // failure / corrupted prefs XML. We log so the situation is
     // observable; the DB already holds the new state authoritatively,

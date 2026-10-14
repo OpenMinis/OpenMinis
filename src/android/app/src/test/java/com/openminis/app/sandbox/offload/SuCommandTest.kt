@@ -37,6 +37,26 @@ class SuCommandTest {
         assertEquals("getprop ro.build.version.release", p.command)
     }
 
+    /**
+     * [T-su-exec-quoting] A token the guest shell delivered as one argv slot
+     * because the user quoted it must stay ONE argument on the host `su -c`.
+     */
+    @Test
+    fun execQuotesTokenContainingSpace() {
+        val p = SuCommand.parse(listOf("android-su", "exec", "cat", "/data/x a.txt"))
+        assertEquals(SuCommand.Kind.EXEC, p.kind)
+        assertEquals("cat '/data/x a.txt'", p.command)
+    }
+
+    @Test
+    fun execEscapesEmbeddedSingleQuote() {
+        val p = SuCommand.parse(listOf("android-su", "exec", "echo", "it's"))
+        assertEquals(SuCommand.Kind.EXEC, p.kind)
+        // POSIX: 'it'\''s' — close-quote, escaped quote, reopen-quote.
+        // As a Kotlin literal: 'it' + \(from \\) + '' + s + ' = "echo 'it'\\''s'".
+        assertEquals("echo 'it'\\''s'", p.command)
+    }
+
     @Test
     fun timeoutFlagIsParsedBeforeCommand() {
         val p = SuCommand.parse(listOf("su", "--timeout", "15", "-c", "id"))

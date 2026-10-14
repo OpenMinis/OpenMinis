@@ -63,28 +63,94 @@ object MultiEditTool {
                     toolTitle = toolTitle,
                 )
             }
-            var last: ToolExecutionResult? = null
-            for (i in 0 until edits.length()) {
-                val e = edits.getJSONObject(i)
-                val one = JSONObject()
-                    .put("tool_title", toolTitle)
-                    .put("path", path)
-                    .put("old_string", e.optString("old_string", e.optString("old", "")))
-                    .put("new_string", e.optString("new_string", e.optString("new", "")))
-                    .put("replace_all", e.optBoolean("replace_all", false))
-                last = FileEditTool.execute(one.toString(), sessionId, context)
-                if (last?.success != true) {
-                    return ToolExecutionResult(
-                        "multi_edit stopped at #${i + 1}: ${last?.output}",
-                        false,
-                        toolTitle = toolTitle,
-                    )
+            val file = PRootKernel.resolveSessionHostPath(sessionId, path, context)
+                ?: return ToolExecutionResult("Error: Cannot resolve path: $path", false, toolTitle = toolTitle)
+            if (!file.exists()) {
+                return ToolExecutionResult("Error: File not found: $path", false, toolTitle = toolTitle)
+            }
+            com.openminis.app.data.repository.MemoryRepository
+                .fileToolQuotaRefusal(context.filesDir, sessionId, path)
+                ?.let { msg -> return ToolExecutionResult(msg, false, toolTitle = toolTitle) }
+
+            // [T-multi-edit-one-rmw] This used to loop `FileEditTool.execute` once
+            // per edit, and each iteration took the per-path lock AGAIN, re-read
+            // the file, re-ran the guards and — worst of all — captured its OWN
+            // checkpoint. Two consequences:
+            //  - N checkpoints per call against a 50-slot budget, so one 30-edit
+            //    batch ate 60% of the whole session's restore history and evicted
+            //    real user snapshots;
+            //  - the lock was released between edits, so a concurrent writer could
+            //    land between #1 and #2 and edit #2 was computed against bytes that
+            //    were no longer the ones edit #1 had just written — the classic
+            //    lost-update this repo closed for file_edit in
+            //    [T-file-edit-silent-drop], reintroduced one level up.
+            // The whole array is now one read-modify-write: ONE lock acquisition,
+            // ONE read, all replacements computed in memory, ONE pre-batch capture,
+            // ONE verified write. A failing edit still reports the same
+            // "stopped at #k" message and leaves the file untouched, because the
+            // write only happens once the entire batch matched.
+            val outcome = AtomicFileWrite.readModifyWrite(file) { current ->
+                when (val r = applyAll(edits, current)) {
+                    is BatchOutcome.Failed -> FileEditTool.EditFailure(r.message)
+                    is BatchOutcome.Ok -> {
+                        FileCheckpointStore.capture(
+                            context, sessionId, listOf(path),
+                            label = "before multi_edit", source = "multi_edit",
+                        )
+                        FileEditTool.ReplaceOutcome(r.text, r.total)
+                    }
                 }
             }
-            ToolExecutionResult("Applied ${edits.length()} edits to $path. ${last?.output.orEmpty()}", true, toolTitle = toolTitle)
+
+            when (outcome) {
+                null -> ToolExecutionResult(
+                    "Error: failed to write $path (atomic write did not verify on disk)",
+                    false, toolTitle = toolTitle,
+                )
+                is FileEditTool.EditFailure ->
+                    ToolExecutionResult("Error: ${outcome.message}", false, toolTitle = toolTitle)
+                is FileEditTool.ReplaceOutcome -> ToolExecutionResult(
+                    "Applied ${edits.length()} edits to $path " +
+                        "(${outcome.replacements} replacement(s), ${outcome.newContent.length} bytes)",
+                    true, toolTitle = toolTitle,
+                )
+                else -> ToolExecutionResult("Error: unexpected outcome", false, toolTitle = toolTitle)
+            }
         } catch (e: Exception) {
             ToolExecutionResult("Error multi_edit: ${e.message}", false, toolTitle = toolTitle)
         }
+    }
+
+    internal sealed class BatchOutcome {
+        class Ok(val text: String, val total: Int) : BatchOutcome()
+        class Failed(val index: Int, val message: String) : BatchOutcome()
+    }
+
+    /**
+     * Apply every edit to [current] in order, in memory. Pure so it is
+     * JVM-testable without a filesystem or a Context.
+     */
+    internal fun applyAll(edits: JSONArray, current: String): BatchOutcome {
+        var text = current
+        var total = 0
+        for (i in 0 until edits.length()) {
+            val e = edits.optJSONObject(i)
+                ?: return BatchOutcome.Failed(i + 1, "edit #${i + 1} is not an object")
+            val oldString = e.optString("old_string", e.optString("old", ""))
+            val newString = e.optString("new_string", e.optString("new", ""))
+            if (oldString.isEmpty()) {
+                return BatchOutcome.Failed(i + 1, "'old_string' is required and cannot be empty (edit #${i + 1})")
+            }
+            when (val r = TextReplacers.replace(text, oldString, newString, e.optBoolean("replace_all", false))) {
+                is TextReplacers.Result.Success -> {
+                    text = r.newContent
+                    total += r.count
+                }
+                is TextReplacers.Result.Failure ->
+                    return BatchOutcome.Failed(i + 1, "multi_edit stopped at #${i + 1}: ${r.message}")
+            }
+        }
+        return BatchOutcome.Ok(text, total)
     }
 
     /**

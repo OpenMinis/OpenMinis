@@ -19,6 +19,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.openminis.app.MinisApp
 import com.openminis.app.R
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,15 +83,14 @@ class AgentForegroundService : Service() {
         // framework.jar (const-string "android.requestPromotedOngoing").
         private const val EXTRA_REQUEST_PROMOTED_ONGOING = "android.requestPromotedOngoing"
         private const val ACTION_STOP = "com.openminis.app.STOP_AGENT_SERVICE"
-        // Reuse the shared constants from ApprovalNotifier instead of duplicating —
-        // keeps the approve/deny strings in sync without a circular dependency
-        // (this file cannot import ApprovalNotifier because that would create a
-        // cyclic compilation order against the receiver). These string values
-        // MUST match ApprovalNotifier.Companion's copies verbatim.
-        private const val ACTION_APPROVE = "com.openminis.app.APPROVE_TOOL"
-        private const val ACTION_DENY = "com.openminis.app.DENY_TOOL"
+        // [T-approval-action-single-source] Approval actions + the request-id
+        // extra live in one shared object (ApprovalIntents) with the notifier
+        // that posts them — the old hand-copied duplicates here carried a
+        // "MUST match verbatim" comment, which is drift waiting to happen.
+        private const val ACTION_APPROVE = com.openminis.app.notification.ApprovalIntents.ACTION_APPROVE
+        private const val ACTION_DENY = com.openminis.app.notification.ApprovalIntents.ACTION_DENY
         private const val ACTION_INTERRUPT = "com.openminis.app.INTERRUPT_AGENT"
-        private const val EXTRA_APPROVAL_ID = "approval_request_id"
+        private const val EXTRA_APPROVAL_ID = com.openminis.app.notification.ApprovalIntents.EXTRA_REQUEST_ID
 
         /**
          * Starts or updates the foreground service with current status.
@@ -100,11 +100,8 @@ class AgentForegroundService : Service() {
             // snapshot in start intents caused stale/duplicate foreground posts.
             val intent = Intent(context, AgentForegroundService::class.java)
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
+                // minSdk 26 (O) — the pre-O startService() branch was unreachable.
+                context.startForegroundService(intent)
             } catch (e: IllegalStateException) {
                 // API 31+ ForegroundServiceStartNotAllowedException when the
                 // process is backgrounded. The job keeps running; the
@@ -232,7 +229,11 @@ class AgentForegroundService : Service() {
         // service is being kept alive for streams that no longer exist.
         val call = onStartCommandCalls.incrementAndGet()
         val active = SessionActivityTracker.activeSessions.value
-        println(
+        // [T-STALL-DIAG] Routed through AppLogger, not println: System.out
+        // bypasses AppLogger's file rotation and redaction, and these lines
+        // carry session-id lists — in release too.
+        AppLogger.info(
+            TAG,
             "[T-STALL-DIAG] FGS onStartCommand#$call pid=${android.os.Process.myPid()} " +
                 "revival=${intent == null} flags=$flags startId=$startId " +
                 "activeSessions=${active.size}[${active.joinToString(",")}] " +
@@ -315,10 +316,13 @@ class AgentForegroundService : Service() {
             return START_NOT_STICKY
         }
         if (intent?.action == ACTION_INTERRUPT) {
-            // [T-android-interrupt] Pause the running agent loop AND clear the
-            // notification — the user explicitly asked for a stop/pause, so the
-            // ongoing status row must go too. If any sessions remain (they
-            // were never cancelled) the service re-anchors itself below.
+            // [T-android-interrupt] Stop the running agent loop AND clear the
+            // notification. [T-interrupt-no-pause-button] No notification
+            // button posts this any more (it used to be labelled "Pause"
+            // while it destroyed the turn); the branch stays so intents
+            // already queued by an older build, or sent by external tools,
+            // resolve with the documented teardown instead of falling through
+            // to a plain status refresh.
             // [T-android-approval-teardown] Same contract as ACTION_STOP:
             // an interrupt resolves every pending approval and clears its
             // notification before the service tears down.
@@ -396,28 +400,43 @@ class AgentForegroundService : Service() {
             true
         } catch (t: Throwable) {
             Log.w(TAG, "applyForeground failed: ${t.message}")
-            // The service was launched with startForegroundService(), so the
-            // system has a hard ~5s deadline for a successful startForeground().
-            // That deadline is queued the moment the START call lands — it is
-            // NOT lifted by stopSelf(), which only tears down the component.
-            // If startForeground() threw (a forked SystemUI rejecting the
-            // notification, a missing channel after restore, a transient
-            // DeadObject), swallowing the error and just returning false leaves
-            // the deadline armed against a service that will never anchor: the
-            // caller's stopSelf() destroys it, and the system then fires
-            // ForegroundServiceDidNotStartInTimeException and kills the app.
-            // Dropping out of the foreground state explicitly is the only
-            // call that retracts that pending requirement — it tells the
-            // ActivityManager "this service is no longer expected to go
-            // foreground", so the already-destroyed component has nothing left
-            // to answer for.
-            try {
-                androidx.core.app.ServiceCompat.stopForeground(
-                    this,
-                    androidx.core.app.ServiceCompat.STOP_FOREGROUND_REMOVE,
-                )
-            } catch (t2: Throwable) {
-                Log.w(TAG, "stopForeground after applyForeground failure also failed: ${t2.message}")
+            if (!foregroundAnchored) {
+                // Bootstrap case (publishBootstrap, before any successful
+                // startForeground). The service was launched with
+                // startForegroundService(), so the system has a hard ~5s
+                // deadline for a successful startForeground(). That deadline
+                // is queued the moment the START call lands — it is NOT lifted
+                // by stopSelf(), which only tears down the component. If
+                // startForeground() threw (a forked SystemUI rejecting the
+                // notification, a missing channel after restore, a transient
+                // DeadObject), swallowing the error and just returning false
+                // leaves the deadline armed against a service that will never
+                // anchor: the caller's stopSelf() destroys it, and the system
+                // then fires ForegroundServiceDidNotStartInTimeException and
+                // kills the app. Dropping out of the foreground state
+                // explicitly is the only call that retracts that pending
+                // requirement — it tells the ActivityManager "this service is
+                // no longer expected to go foreground", so the already-
+                // destroyed component has nothing left to answer for.
+                try {
+                    androidx.core.app.ServiceCompat.stopForeground(
+                        this,
+                        androidx.core.app.ServiceCompat.STOP_FOREGROUND_REMOVE,
+                    )
+                } catch (t2: Throwable) {
+                    Log.w(TAG, "stopForeground after applyForeground failure also failed: ${t2.message}")
+                }
+            } else {
+                // [T-fgs-reanchor] Mid-run throw (status-refresh path, ~824):
+                // the service ALREADY anchored, so it is still in foreground —
+                // retracting here would drop a LIVE agent run out of foreground
+                // and remove its notification over one transient DeadObject,
+                // while the caller only logs. Do NOT stopForeground. Clear the
+                // anchor flag instead so the next publish takes the
+                // startForeground branch and re-binds the row, rather than
+                // silently degrading to notify()-only on exactly the forked
+                // SystemUIs where notify() on an FGS row is ignored.
+                foregroundAnchored = false
             }
             false
         }
@@ -442,7 +461,8 @@ class AgentForegroundService : Service() {
         // here decides whether a swipe-away leaves a service behind that the
         // system will later revive with START_STICKY.
         val activeAtRemoval = SessionActivityTracker.activeSessions.value
-        println(
+        AppLogger.info(
+            TAG,
             "[T-STALL-DIAG] FGS onTaskRemoved pid=${android.os.Process.myPid()} " +
                 "activeSessions=${activeAtRemoval.size}[${activeAtRemoval.joinToString(",")}] " +
                 "decision=${if (activeAtRemoval.isEmpty()) "stopSelf" else "KEEP-ALIVE"} " +
@@ -914,47 +934,67 @@ class AgentForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-            // Undo the IMPORTANCE_MIN migration once. MIN + SECRET hides the
-            // ongoing row from the status bar and MIUI island. After this,
-            // never delete the channel again so a user who changes it in
-            // system settings keeps that choice.
-            if (!prefs.getBoolean(KEY_CHANNEL_RESTORED, false)) {
-                val existing = manager.getNotificationChannel(CHANNEL_ID)
-                if (existing != null && existing.importance <= NotificationManager.IMPORTANCE_MIN) {
-                    manager.deleteNotificationChannel(CHANNEL_ID)
-                    Log.i(TAG, "Restored agent_status channel to IMPORTANCE_LOW")
-                }
-                prefs.edit().putBoolean(KEY_CHANNEL_RESTORED, true).apply()
+        // minSdk 26 (O) — the SDK_INT >= O wrapper was always true; the
+        // getSharedPreferences call it guarded runs unconditionally below.
+        val manager = getSystemService(NotificationManager::class.java)
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        // Undo the IMPORTANCE_MIN migration once. MIN + SECRET hides the
+        // ongoing row from the status bar and MIUI island. After this,
+        // never delete the channel again so a user who changes it in
+        // system settings keeps that choice.
+        if (!prefs.getBoolean(KEY_CHANNEL_RESTORED, false)) {
+            val existing = manager.getNotificationChannel(CHANNEL_ID)
+            if (existing != null && existing.importance <= NotificationManager.IMPORTANCE_MIN) {
+                manager.deleteNotificationChannel(CHANNEL_ID)
+                Log.i(TAG, "Restored agent_status channel to IMPORTANCE_LOW")
             }
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                getString(R.string.bg_service_channel_name),
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                description = getString(R.string.bg_service_channel_description)
-                setShowBadge(false)
-                setSound(null, null)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            }
-            // [T-bg-overlay phase 2 fix] Higher-importance channel for the
-            // SYSTEM_ALERT_WINDOW permission nudge. IMPORTANCE_DEFAULT
-            // gets a heads-up surface so the user actually sees that the
-            // overlay they enabled needs one more grant.
-            val nudgeChannel = NotificationChannel(
-                OVERLAY_NUDGE_CHANNEL_ID,
-                getString(R.string.bg_overlay_nudge_channel_name),
-                NotificationManager.IMPORTANCE_DEFAULT,
-            ).apply {
-                description = getString(R.string.bg_overlay_nudge_channel_description)
-                setShowBadge(true)
-            }
-            manager.createNotificationChannel(channel)
-            manager.createNotificationChannel(nudgeChannel)
+            prefs.edit().putBoolean(KEY_CHANNEL_RESTORED, true).apply()
         }
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            getString(R.string.bg_service_channel_name),
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = getString(R.string.bg_service_channel_description)
+            setShowBadge(false)
+            setSound(null, null)
+            // [T-approval-lockscreen] PRIVATE, not PUBLIC. The row's own text
+            // is benign (session count / tool label, no user content), and the
+            // builders below attach a benign publicVersion so a lock-screen
+            // row still shows; the channel no longer whitelists any future
+            // content the row might carry for raw visibility.
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+        // [T-bg-overlay phase 2 fix] Higher-importance channel for the
+        // SYSTEM_ALERT_WINDOW permission nudge. IMPORTANCE_DEFAULT
+        // gets a heads-up surface so the user actually sees that the
+        // overlay they enabled needs one more grant.
+        val nudgeChannel = NotificationChannel(
+            OVERLAY_NUDGE_CHANNEL_ID,
+            getString(R.string.bg_overlay_nudge_channel_name),
+            NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+            description = getString(R.string.bg_overlay_nudge_channel_description)
+            setShowBadge(true)
+        }
+        manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(nudgeChannel)
     }
+
+    /**
+     * [T-approval-lockscreen] Benign lock-screen stand-in for the ongoing
+     * status row: app name + stable subtitle only. Never carries tool
+     * previews or session content, so the channel can stay
+     * VISIBILITY_PRIVATE while the row remains visible.
+     */
+    private fun publicLockscreenRow(title: String, text: String, tap: PendingIntent): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification_status)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(tap)
+            .setOngoing(true)
+            .build()
 
     /**
      * [T-bg-overlay phase 2 fix] Throttle for the SAW permission nudge.
@@ -1120,25 +1160,26 @@ class AgentForegroundService : Service() {
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            // [T-approval-lockscreen] Channel is PRIVATE now; keep the row on
+            // the lock screen with a benign publicVersion (the collapsed text
+            // is content-free — session count + elapsed only).
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicLockscreenRow(titleText, collapsedText, pendingIntent))
 
         // [T-android-live-update-completed] Same rule as the promoted branch:
         // no Stop once there is nothing left to stop.
+        // [T-interrupt-no-pause-button] The second button used to read
+        // "Pause" while ACTION_INTERRUPT actually does
+        // cleanupAll + cancelAllActiveStreams + stopSelf — tapping it on an
+        // overnight turn DESTROYED it. There is no real suspend in the run
+        // pipeline, so the lying button is removed rather than half-wired;
+        // ACTION_INTERRUPT keeps its handler (see onStartCommand) so any
+        // PendingIntent already in flight still resolves sanely.
         if (!isCompleted) {
             builder.addAction(
                 R.drawable.ic_notification_status,
                 getString(R.string.bg_service_stop_action),
                 stopPendingIntent,
-            )
-            // Interrupt: pause the agent loop.
-            val interruptIntent = Intent(this, AgentForegroundService::class.java).apply {
-                action = ACTION_INTERRUPT
-            }
-            val interruptPi = PendingIntent.getService(
-                this, 2, interruptIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-            builder.addAction(
-                R.drawable.ic_notification_status, "Pause", interruptPi,
             )
         }
 
@@ -1200,6 +1241,11 @@ class AgentForegroundService : Service() {
             .setWhen(runWhenMs)
             .setOnlyAlertOnce(true)
             .setContentIntent(contentIntent)
+            // [T-approval-lockscreen] PRIVATE + benign publicVersion (same
+            // content-free strings) so the promoted row survives the channel
+            // visibility change on the lock screen.
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicLockscreenRow(titleText, collapsedText, contentIntent))
             // Explicitly NOT colorized and NOT a group summary — both would
             // disqualify the notification from promotion.
             .setColorized(false)
@@ -1251,8 +1297,8 @@ class AgentForegroundService : Service() {
 
     /**
      * T-bg-overlay phase 1: human-readable label per tool, mirroring
-     * `ChatScreen.kt:5974 toolTitleLabel` so the notification's title
-     * matches what the in-app FloatingToolStatusBar shows. Falls back
+     * `ChatScreen.kt toolTitleLabel` so the notification's title
+     * matches what the in-app floating tool-status capsule shows. Falls back
      * to the raw tool name for unknowns rather than a generic string,
      * so the user still gets a hint about what's running.
      */
@@ -1332,13 +1378,11 @@ class AgentForegroundService : Service() {
         )
         val focusJson = HyperOsIsland.buildFocusParamJson(content)
 
-        val interruptIntent = Intent(this, AgentForegroundService::class.java).apply {
-            action = ACTION_INTERRUPT
-        }
-        val interruptPendingIntent = PendingIntent.getService(
-            this, 2, interruptIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        // [T-interrupt-no-pause-button] The shade row's second button used to
+        // read "Pause" while ACTION_INTERRUPT stops and destroys every running
+        // turn. No real suspend exists yet, so the lying button is dropped —
+        // only Stop remains, matching ACTION_STOP's behaviour. The
+        // ACTION_INTERRUPT handler in onStartCommand stays for compat.
 
         // 模板库 rule: miui.focus.pics icons must be COLOR content icons
         // (square, >=88*88px). The status-bar small icon is a white alpha
@@ -1363,12 +1407,18 @@ class AgentForegroundService : Service() {
             .setShowWhen(false)
             .setContentIntent(contentIntent)
             .setCategory(Notification.CATEGORY_SERVICE)
+            // [T-approval-lockscreen] PRIVATE + benign publicVersion (see the
+            // promoted builder note); the shade-row text is static app strings.
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicLockscreenRow(titleText, collapsedText, contentIntent))
 
         // Shade-row buttons keep the white status icon — the shade tints
         // small icons itself. The island button is separate: hintInfo carries
         // ONE actionInfo, so only Stop goes to the island (方式一: the system
         // renders the miui.focus.actions Action's Icon + Title — color icon,
         // real label). No Stop once there is nothing left to stop.
+        // [T-interrupt-no-pause-button] The "Pause" action was removed here
+        // too — see the note above buildHyperOsFocusNotification.
         val islandActions = mutableMapOf<String, Notification.Action>()
         if (!isCompleted) {
             val stopAction = Notification.Action.Builder(
@@ -1378,14 +1428,6 @@ class AgentForegroundService : Service() {
             ).build()
             builder.addAction(stopAction)
             islandActions[HyperOsIsland.ACTION_STOP] = stopAction
-
-            // Shade-row only: hintInfo has no slot for a second button.
-            val interruptAction = Notification.Action.Builder(
-                statusIcon,
-                "Pause",
-                interruptPendingIntent,
-            ).build()
-            builder.addAction(interruptAction)
         }
 
         HyperOsIsland.attachFocusExtras(
@@ -1433,6 +1475,10 @@ class AgentForegroundService : Service() {
             .setContentIntent(contentIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            // [T-approval-lockscreen] Benign private + publicVersion, as for
+            // the plain row (this builder's text is static app strings).
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicLockscreenRow(title, text, contentIntent))
         if (!isCompleted) {
             builder.addAction(
                 R.drawable.ic_notification_status,

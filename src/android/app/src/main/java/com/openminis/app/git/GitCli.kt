@@ -210,10 +210,19 @@ object GitCli {
      * Commit via a base64-relayed message file: the message never touches
      * shell quoting (b64 alphabet is quote-free), and `-F` preserves
      * multi-line bodies verbatim.
+     *
+     * [T-git-commit-temp-collision] The message file is keyed by the shell's
+     * own pid (`$$`, expanded inside the single `bash -c` this runs in), not a
+     * fixed name. The ExecutionCoordinator mutex is per session, so two
+     * sessions committing concurrently used to clobber the same
+     * `/tmp/.minis-git-msg` — the second `rm -f` could delete the first's file
+     * mid-flight. A per-invocation path makes each commit independent.
      */
-    fun buildCommitCommand(messageB64: String, root: String? = null): String =
-        "printf '%s' '$messageB64' | base64 -d > /tmp/.minis-git-msg && " +
-            "${gitPrefix(root)} commit -F /tmp/.minis-git-msg && rm -f /tmp/.minis-git-msg"
+    fun buildCommitCommand(messageB64: String, root: String? = null): String {
+        val msg = "/tmp/.minis-git-msg.$$"
+        return "printf '%s' '$messageB64' | base64 -d > $msg && " +
+            "${gitPrefix(root)} commit -F $msg && rm -f $msg"
+    }
 
     /** POSIX single-quote escaping: `'` → `'\''`. */
     fun shellQuote(s: String): String = "'" + s.replace("'", "'\\''") + "'"

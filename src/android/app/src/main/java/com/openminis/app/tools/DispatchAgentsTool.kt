@@ -67,7 +67,13 @@ object DispatchAgentsTool {
                 .put("kind", kind)
                 .put("role", agentName)
             if (type != null && type.skillNames.isNotEmpty()) {
-                obj.put("skills", JSONArray(type.skillNames))
+                // [T-dispatch-skills-contract] `skills` is DECLARED as a string
+                // ("Comma-separated skill ids", AgentTools spawn_agent schema) and
+                // the consumer reads it with `args.optString("skills")`. Emitting a
+                // JSONArray made the value arrive as the literal text
+                // `["a","b"]` inside the worker's system prompt — brackets and
+                // quotes and all. Join it into the contracted form.
+                obj.put("skills", type.skillNames.joinToString(","))
             }
             tasks.put(obj)
         }

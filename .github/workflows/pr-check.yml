@@ -26,6 +26,9 @@ env:
   JAVA_VERSION: "17"
   ANDROID_PLATFORM: "android-36"
   ANDROID_BUILD_TOOLS: "35.0.0"
+  # Build number of the command-line tools zip: was inline in the download URL,
+  # exposed so the SDK cache key invalidates when it changes.
+  ANDROID_CMDLINE_TOOLS: "11076708"
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
 
 jobs:
@@ -47,14 +50,39 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
 
+      - name: Restore Android SDK cache
+        uses: actions/cache@v4
+        with:
+          # setup-java's `cache: gradle` only covers ~/.gradle — the platform and
+          # build-tools were re-downloaded on every PR. Key names both pinned
+          # versions plus the command-line tools build, so a toolchain bump in
+          # `env` misses instead of restoring an outdated SDK.
+          # sdkmanager below stays unconditional: against restored packages it
+          # reads package.xml and no-ops, so nothing about the installed
+          # toolchain changes.
+          path: |
+            /usr/local/lib/android/sdk/cmdline-tools
+            /usr/local/lib/android/sdk/platforms
+            /usr/local/lib/android/sdk/build-tools
+            /usr/local/lib/android/sdk/licenses
+          key: prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-cmdline-${{ env.ANDROID_CMDLINE_TOOLS }}
+          restore-keys: |
+            prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-
+            prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-
+
       - name: Install Android SDK
         run: |
           set -e
-          curl -fsSL -o /tmp/cmdline-tools.zip \
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-          sudo mkdir -p /usr/local/lib/android/sdk/cmdline-tools
-          sudo unzip -q /tmp/cmdline-tools.zip -d /tmp/sdk
-          sudo mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          mkdir -p /usr/local/lib/android/sdk/cmdline-tools
+          # sudo dropped deliberately: the cached dirs must stay owned by the
+          # runner user or actions/cache cannot extract into them on a hit, and
+          # android-apk.yml already writes to this exact path unprivileged.
+          if [ ! -x /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager ]; then
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-${{ env.ANDROID_CMDLINE_TOOLS }}_latest.zip"
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/sdk
+            mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          fi
           yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
           /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
             "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"

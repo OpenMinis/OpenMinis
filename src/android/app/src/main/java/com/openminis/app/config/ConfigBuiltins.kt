@@ -143,9 +143,17 @@ internal object ConfigBuiltins {
             ClosureField(
                 path = "session.thinkingLevel",
                 displayName = "Thinking level (current session)",
-                description = "off / low / medium / high / xhigh. Applied to the active chat.",
+                // [T-android-thinking-tokens-schema] The reader/writer below both
+                // map `max` and `ultra` (ThinkingLevel.MAX / ULTRA, added with
+                // [T-android-thinking-level-arch] for the GPT-5.6 tiers), and the
+                // writer would happily accept them — but the SCHEMA still declared
+                // only off/low/medium/high/xhigh. A minis-config client validating
+                // against valueSchema rejected the two levels that actually exist,
+                // and a read of a session set to MAX produced a token the field
+                // claimed was illegal.
+                description = "off / low / medium / high / xhigh / max / ultra. Applied to the active chat.",
                 valueSchema = ConfigSchema.StrEnum(
-                    listOf("off", "low", "medium", "high", "xhigh")
+                    listOf("off", "low", "medium", "high", "xhigh", "max", "ultra")
                 ),
                 risk = ConfigRisk.NORMAL,
                 revertable = true,
@@ -383,16 +391,18 @@ internal object ConfigBuiltins {
         // (Compose recomposes immediately, no manual cache invalidation
         // needed on Android — there is no analogue to iOS
         // FontSettings.messageBaseScale .Published cache).
-        r.register(
-            PrefsBoolField(
-                path = "chat.toolPreview",
-                displayName = "Tool preview",
-                description = "Show live preview during agent tool execution.",
-                prefs = appearancePrefs,
-                key = com.openminis.app.ui.settings.KEY_TOOL_PREVIEW,
-                defaultValue = true,
-            )
-        )
+        // (No chat.toolPreview entry here any more.) [T-android-config-dead-key]
+        // The key was still registered against `appearance_prefs` /
+        // KEY_TOOL_PREVIEW, but the "Tool Preview Window" switch was deleted from
+        // AppearanceScreen ([P0-4]: the floating surface became the single-line
+        // ToolActivityPill) and NOTHING reads that preference now — verified by
+        // grepping both `KEY_TOOL_PREVIEW` and the raw `"tool_preview"` key: the
+        // only remaining hits are the constant's own declaration (kept so older
+        // persisted values are simply ignored) and this registration's test.
+        // A minis-config write therefore "succeeded" into a dead preference, and
+        // `get` reported a setting no screen honours. Unregistered instead of
+        // silently kept; iOS parity is a spec question, not a reason to expose a
+        // knob with no effect.
         r.register(
             PrefsBoolField(
                 path = "chat.foldAiProcess",

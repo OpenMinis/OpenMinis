@@ -189,6 +189,9 @@ class GitCliParseTest {
         val b64 = java.util.Base64.getEncoder().encodeToString(msg.toByteArray(Charsets.UTF_8))
         val cmd = GitCli.buildCommitCommand(b64)
         assertTrue(cmd.contains("git commit -F /tmp/.minis-git-msg"))
+        // [T-git-commit-temp-collision] Unique per invocation via the shell pid,
+        // so two concurrent session commits cannot clobber one message file.
+        assertTrue("per-pid temp path expected: $cmd", cmd.contains("/tmp/.minis-git-msg.\$\$"))
         assertTrue(cmd.contains(b64))
         // The b64 alphabet is quote-free, so the payload survives single quotes.
         assertFalse(b64.contains("'"))

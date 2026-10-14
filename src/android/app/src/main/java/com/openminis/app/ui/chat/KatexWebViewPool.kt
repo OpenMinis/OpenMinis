@@ -134,7 +134,13 @@ internal object KatexWebViewPool {
     @Volatile
     private var isReady = false
     @Volatile
-    private var pending: CompletableDeferred<Triple<Int, Int, String>>? = null
+    /**
+     * Pending render plus the token that was handed to the page. A late
+     * callback from an abandoned (timed-out) render is dropped by token
+     * comparison instead of completing whoever is waiting now — see the
+     * [T-android-katex-render-token] note in assets/katex/katex-render.html.
+     */
+    private var pending: Pair<String, CompletableDeferred<Triple<Int, Int, String>>>? = null
 
     /**
      * Render [latex] via KaTeX. Returns null on error / timeout. Callers
@@ -168,19 +174,25 @@ internal object KatexWebViewPool {
         if (!awaitReady()) return null
 
         val deferred = CompletableDeferred<Triple<Int, Int, String>>()
-        pending = deferred
+        val token = java.util.UUID.randomUUID().toString()
+        pending = token to deferred
 
         val js = "renderMath(" +
             "'${latex.escapeForJs()}', " +
             "$displayMode, " +
             "$fontSizePx, " +
-            "$isDark" +
+            "$isDark, " +
+            "'$token'" +
             ")"
         runOnMain { wv.evaluateJavascript(js, null) }
 
         val (w, h, err) = withTimeoutOrNull(RENDER_TIMEOUT_MS) { deferred.await() }
             ?: Triple(0, 0, "timeout")
-        pending = null
+        // Only clear the slot this render still owns: renders for different
+        // formulas overlap, and an unconditional `pending = null` here would
+        // wipe the slot belonging to the render that started while this one was
+        // timing out — leaving THAT callback with nothing to complete.
+        if (pending?.first == token) pending = null
         if (err.isNotEmpty() || w <= 0 || h <= 0) {
             android.util.Log.w(TAG, "render failed latex='${latex.take(40)}' err=$err w=$w h=$h")
             return null
@@ -218,8 +230,15 @@ internal object KatexWebViewPool {
             settings.javaScriptEnabled = true
             settings.allowFileAccess = true
             settings.cacheMode = WebSettings.LOAD_NO_CACHE
-            addJavascriptInterface(JsBridge { w, h, err ->
-                pending?.complete(Triple(w, h, err))
+            addJavascriptInterface(JsBridge { w, h, err, cbToken ->
+                val p = pending ?: return@JsBridge
+                if (p.first != cbToken) {
+                    // A stale formula finished late; its geometry belongs to no
+                    // live request. Ignoring it is the whole point of the token.
+                    android.util.Log.w(TAG, "dropping stale KaTeX callback (dims ${w}x$h)")
+                    return@JsBridge
+                }
+                p.second.complete(Triple(w, h, err))
             }, "AndroidBridge")
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -335,10 +354,10 @@ internal object KatexWebViewPool {
             .replace("\n", "\\n")
             .replace("\r", "")
 
-    private class JsBridge(private val onResult: (Int, Int, String) -> Unit) {
+    private class JsBridge(private val onResult: (Int, Int, String, String) -> Unit) {
         @JavascriptInterface
-        fun onRendered(width: Int, height: Int, error: String) {
-            onResult(width, height, error)
+        fun onRendered(width: Int, height: Int, error: String, token: String) {
+            onResult(width, height, error, token)
         }
     }
 }

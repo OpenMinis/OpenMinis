@@ -257,11 +257,26 @@ class ToolLoopDetector(private val config: ToolLoopConfig = ToolLoopConfig()) {
         return streak
     }
 
+    /**
+     * [T-poll-tool-drift] This used to match `command_status` and `process`, two
+     * tool names that DO NOT EXIST in this app (see the `NAME` constants in
+     * tools/ and AgentTools' schema list). The consequence was silent: no call
+     * ever took the poll branch, so the tightened `known_poll_no_progress`
+     * warning/block never fired and repeated polls fell through to the looser
+     * `generic_repeat` rule.
+     *
+     * Retargeted at the tools this build actually polls with:
+     *  - `check_agent` — the background sub-agent wave status/await/collect tool,
+     *    whose whole purpose is re-reading a job until it finishes (`op=clear` is
+     *    a mutation, not a poll);
+     *  - `update_goal` / `ask_reasoning` are NOT polls (they mutate or ask), and
+     *    `shell_execute` is deliberately excluded: a repeated identical shell call
+     *    is the generic_repeat case, not a poll.
+     */
     private fun isPollTool(toolName: String, params: Map<String, Any?>): Boolean {
-        if (toolName == "command_status") return true
-        if (toolName == "process") {
-            val action = (params["action"] as? String)?.lowercase()
-            if (action == "poll" || action == "log") return true
+        if (toolName == "check_agent") {
+            val op = (params["op"] as? String)?.lowercase()?.ifBlank { null } ?: "status"
+            return op != "clear"
         }
         return false
     }

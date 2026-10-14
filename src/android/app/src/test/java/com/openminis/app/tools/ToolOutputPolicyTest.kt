@@ -1,8 +1,7 @@
 package com.openminis.app.tools
 
 import org.junit.Assert.assertEquals
-import org.junit.After
-import org.junit.Before
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolOutputPolicyTest {
@@ -10,24 +9,13 @@ class ToolOutputPolicyTest {
     private val sensitive = listOf("sk-Ab12Cd34Ef56Gh78")
 
     /**
-     * [T-spill-hermetic] The spill path writes to
-     * `workspaceRoot/tool_outputs/`. The production default
-     * `/var/minis/workspace` exists on the phone but NOT on a CI runner,
-     * where the write fails and apply() falls back to returning the full
-     * text — the omission-marker assertions then fail for the wrong
-     * reason. Redirect to a temp dir so the test exercises the spill path
-     * everywhere, and restore the default afterwards.
+     * [T-tool-output-single-mechanism] There is no `workspaceRoot` to redirect any
+     * more: the oversized-output path is [ToolOutputSpill]'s per-session one and
+     * an apply() call without a Context/session cannot spill at all — it must
+     * still come back CAPPED. These tests therefore exercise exactly that
+     * no-file-available branch, which is hermetic on any machine (the old test
+     * only passed because it pointed a GUEST path at a temp dir).
      */
-    @Before
-    fun redirectSpillToTempDir() {
-        ToolOutputPolicy.workspaceRoot =
-            java.nio.file.Files.createTempDirectory("tool-output-policy-").toFile().absolutePath
-    }
-
-    @After
-    fun restoreWorkspaceRoot() {
-        ToolOutputPolicy.workspaceRoot = "/var/minis/workspace"
-    }
 
     @Test
     fun plainTextReplace() {
@@ -81,45 +69,49 @@ class ToolOutputPolicyTest {
 
     @Test
     fun belowThresholdNoSpill() {
-        val text = "a".repeat(11_999)
+        val text = "a".repeat(ToolOutputSpill.LIMIT - 1)
         val out = ToolOutputPolicy.apply(text, "test1")
-        assertEquals(11_999, out.length)
+        assertEquals(text.length, out.length)
         assertEquals(text, out)
     }
 
     @Test
-    fun overThresholdIncludesHeadTailAndMarker() {
+    fun overThresholdIsCappedToHeadTailPreview() {
         val text = "a".repeat(25_000)
         val out = ToolOutputPolicy.apply(text, "test2")
-        // Should contain head (2000 chars)
-        assert(out.startsWith("a".repeat(2000))) { "Should start with head" }
-        // Should contain tail (last 2000 chars)
-        assert(out.endsWith("a".repeat(2000))) { "Should end with tail" }
-        // Should contain omission marker
-        assert(out.contains("========== [以下内容被省略] ==========")) { "Should contain omission marker" }
-        // Should not contain full body (should be much shorter than 25k)
+        // The preview is header-first ("[tool-output-spill] … produced N chars"),
+        // so the head slice is not at index 0 — it follows the header line.
+        assert(out.startsWith("[tool-output-spill]")) { "header must lead, got: ${out.take(80)}" }
+        assert(out.contains("a".repeat(ToolOutputSpill.HEAD))) { "head slice missing" }
+        assert(out.endsWith("a".repeat(ToolOutputSpill.TAIL))) { "Should end with tail" }
+        assert(out.contains("[tool-output-spill]")) { "Should carry the spill header" }
+        assert(out.contains("chars omitted")) { "Should say how much was omitted" }
         assert(out.length < 25_000) { "Result should be shorter than full text" }
-        // Verify info in message about omitted chars
-        val omitted = 25_000 - 2000 - 2000
-        assert(out.contains("已省略中间 $omitted 字符")) { "Should show omitted char count" }
+    }
+
+    /**
+     * [T-tool-output-single-mechanism] The bug this pins: `apply()` used to
+     * `return text` — the UNCAPPED body — whenever its own spill write failed
+     * (which was ALWAYS, because it wrote to the guest path
+     * `/var/minis/workspace/tool_outputs`). A session-less caller must still get
+     * a bounded preview.
+     */
+    @Test
+    fun capHoldsEvenWhenNoSpillIsPossible() {
+        val text = "x".repeat(200_000)
+        val out = ToolOutputPolicy.apply(text, "no-session")
+        assert(out.length < 12_000) { "uncapped body reached the model: ${out.length} chars" }
+        assert(out.contains("could not be saved")) { "preview must admit there is no spill file" }
+        assert(!out.contains("minis://workspace")) { "must not point at a file that does not exist" }
     }
 
     @Test
     fun emojiBoundarySafe() {
-        // Test with emojis that could be split if we use char-indexing incorrectly
+        // Emojis would be split if we used raw char-index slicing.
         val emoji = "\uD83D\uDE00" // 😀 surrogate pair
         val text = (emoji + "prefix_").repeat(5000) + "suffix_" + (emoji + "end_").repeat(5000)
         val out = ToolOutputPolicy.apply(text, "emoji-test")
-        // Ensure we don't have orphaned surrogate halves in the preview.
         assert(!hasOrphanSurrogate(out)) { "Should not contain orphaned surrogate halves" }
-        // Verify the spill file holds the complete text.
-        val file = java.io.File(ToolOutputPolicy.workspaceRoot, "tool_outputs/emoji-test.txt")
-        if (file.exists()) {
-            val content = file.readText()
-            assert(!hasOrphanSurrogate(content)) { "Spill should not have orphaned surrogates" }
-            assert(content.length == text.length) { "Spill should contain the full text" }
-            file.delete()
-        }
     }
 
     private fun hasOrphanSurrogate(s: String): Boolean {
@@ -142,31 +134,52 @@ class ToolOutputPolicyTest {
 
     @Test
     fun spillIsCompleteRedactedContent() {
-        // Test that the spill file contains the full redacted text
-        // We test redactWith directly and verify the apply flow writes it correctly
-        val original = "Start sk-Ab12Cd34Ef56Gh78 middle " + "b".repeat(12_500) + " end"
-        
-        // First, get the fully redacted version
-        val redacted = ToolOutputPolicy.redactWith(original, sensitive)
-        
-        // Verify redaction happened
-        assert(redacted.contains("[REDACTED]")) { "Should contain [REDACTED]" }
-        assert(!redacted.contains("sk-Ab12Cd34Ef56Gh78")) { "Should not contain original key" }
-        
-        // Now test apply with a simple text that triggers spill
-        val spillText = "a".repeat(25_000)
-        val out = ToolOutputPolicy.apply(spillText, "spill-complete-test")
-        
-        // Check spill file exists
-        val file = java.io.File(ToolOutputPolicy.workspaceRoot, "tool_outputs/spill-complete-test.txt")
-        if (file.exists()) {
-            val content = file.readText()
-            // File should have full content (all 'a's in this case since no env var redaction)
-            assert(content.length == spillText.length) { "Spill should be complete redacted content" }
-            assert(content == spillText) { "Spill content should match" }
-            file.delete()
-        }
+        // Redaction happens BEFORE the cap, so what reaches the preview — and, on
+        // the session path, the spill FILE the model can later file_read — is the
+        // redacted text. apply() hardwires that order:
+        //   cappedPreview(name, redactEnvVars(output)).
+        // redactEnvVars() only knows values that are actually in the process
+        // environment, so the deterministic half of this runs against the
+        // injectable seam (redactWith) composed with the same preview builder the
+        // cap uses, and the end-to-end half runs whenever the host really does
+        // carry a redactable value (see pickRedactableEnvValue).
+        val original = "Start sk-Ab12Cd34Ef56Gh78 middle " + "b".repeat(25_000)
+        val out = ToolOutputSpill.cappedPreview(
+            "spill-complete-test",
+            ToolOutputPolicy.redactWith(original, sensitive),
+        )
+        assert(!out.contains("sk-Ab12Cd34Ef56Gh78")) { "Should not contain original key" }
+        assert(out.contains("[REDACTED]")) { "Should contain [REDACTED]" }
+        // Same shape apply() produces for an oversized session-less result.
+        val applied = ToolOutputPolicy.apply(original, "spill-complete-test")
+        assertTrue(applied.startsWith("[tool-output-spill]"))
+        assertTrue(applied.contains("middle"))
     }
+
+    /**
+     * End-to-end through [ToolOutputPolicy.apply] with a value the redactor can
+     * actually see. Skipped when the host environment has nothing matching the
+     * redaction predicate (6+ chars with both letters and digits) — a skip is
+     * honest, a hard-coded fake secret silently pinned nothing.
+     */
+    @Test
+    fun applyRedactsBeforeCapping() {
+        val candidate = pickRedactableEnvValue()
+        org.junit.Assume.assumeTrue(
+            "no process env value matches the redaction predicate on this host",
+            candidate != null,
+        )
+        val secret = candidate ?: return
+        val text = "head $secret tail " + "c".repeat(20_000)
+        val out = ToolOutputPolicy.apply(text, "env-redact")
+        assert(!out.contains(secret)) { "secret survived into the preview" }
+        assert(out.contains("[REDACTED]")) { "preview shows no redaction at all" }
+    }
+
+    /** An env value [ToolOutputPolicy.redactEnvVars] would replace, or null. */
+    private fun pickRedactableEnvValue(): String? =
+        runCatching { System.getenv().values }.getOrNull()
+            ?.firstOrNull { it.length >= 6 && it.any(Char::isLetter) && it.any(Char::isDigit) }
 
     @Test
     fun existingJsonRecursiveTestsStillGreen() {

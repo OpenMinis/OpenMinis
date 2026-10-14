@@ -132,8 +132,12 @@ object ExecutionCoordinator {
         }
         SandboxJobKeepAlive.onStart(appContext, sessionId, command)
         try {
-        // ConcurrentHashMap.getOrPut is not atomic, use putIfAbsent pattern
-        val mutex = mutexes.getOrPut(sessionId) { Mutex() }
+        // ConcurrentHashMap.getOrPut (the Kotlin extension) is NOT atomic — it
+        // does get→compute→put, so two first-touching coroutines can both
+        // construct a Mutex and the loser's callers serialise on an orphan.
+        // computeIfAbsent is atomic; use it and say so (matches the same
+        // pattern in SandboxResourceGate.withNamedLock).
+        val mutex = mutexes.computeIfAbsent(sessionId) { Mutex() }
 
         return mutex.withLock {
         lastIdle.remove(sessionId)
@@ -259,10 +263,27 @@ object ExecutionCoordinator {
     private fun recordLastCommand(sessionId: String, command: String) {
         if (sessionId.startsWith("__") || sessionId == "self-build") return
         if (!SandboxNotifyActions.shouldRecordLastCommand(command)) return
+        // [T-per-command-file-write] The only consumer of this file is the
+        // background task-completion notification's RETRY action
+        // (`sh /var/minis/workspace/.minis-last-cmd.sh`), which
+        // BackgroundTaskNotifier posts only while "Task Notifications" is
+        // enabled. With that toggle off nothing reads the file, so skip the
+        // per-command write + chmod entirely. Defaults to recording when the
+        // setting cannot be resolved (feature ships ON; conservative).
+        val notifyEnabled = runCatching {
+            (appContext.applicationContext as? com.openminis.app.MinisApp)
+                ?.backgroundSettingsRepository?.taskNotificationsEnabled?.value
+        }.getOrNull() ?: true
+        if (!notifyEnabled) return
         val host = PRootKernel.resolveHostPath(SandboxNotifyActions.LAST_CMD_GUEST_PATH) ?: return
+        val content = "#!/bin/sh\n# recorded by ExecutionCoordinator\n$command\n"
         try {
+            // Skip the truncate-rewrite + setExecutable when the exact same
+            // command is already recorded — a no-op rewrite is not consumed by
+            // anything and the exec bit is already set on an existing file.
+            if (host.isFile && host.readText() == content) return
             host.parentFile?.mkdirs()
-            host.writeText("#!/bin/sh\n# recorded by ExecutionCoordinator\n$command\n")
+            host.writeText(content)
             host.setExecutable(true, false)
         } catch (t: Throwable) {
             Log.w(TAG, "recordLastCommand failed: ${t.message}")

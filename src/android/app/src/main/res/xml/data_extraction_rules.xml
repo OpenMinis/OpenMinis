@@ -7,6 +7,12 @@
         <include domain="file" path="minis-workspaces" />
         <include domain="file" path="minis-global" />
         <include domain="file" path="skills" />
+        <!-- [T-backup-domains] DB-referenced data roots (bodies/, minis-sessions/)
+             + SSH TOFU pins (ssh/) must migrate with minis.db or the restored DB
+             points at missing files and every host key silently re-pins. -->
+        <include domain="file" path="minis-sessions" />
+        <include domain="file" path="bodies" />
+        <include domain="file" path="ssh" />
         <include domain="sharedpref" path="appearance_prefs.xml" />
         <include domain="sharedpref" path="minis_settings.xml" />
         <include domain="sharedpref" path="minis_memory_prefs.xml" />
@@ -21,6 +27,12 @@
         <include domain="file" path="minis-workspaces" />
         <include domain="file" path="minis-global" />
         <include domain="file" path="skills" />
+        <!-- [T-backup-domains] Same rule as cloud-backup: the DB is useless
+             without bodies/ + minis-sessions/ it references, and ssh/ holds
+             the TOFU pins. -->
+        <include domain="file" path="minis-sessions" />
+        <include domain="file" path="bodies" />
+        <include domain="file" path="ssh" />
         <include domain="sharedpref" path="appearance_prefs.xml" />
         <include domain="sharedpref" path="minis_settings.xml" />
         <include domain="sharedpref" path="minis_memory_prefs.xml" />

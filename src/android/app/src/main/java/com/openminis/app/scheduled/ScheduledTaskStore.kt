@@ -69,14 +69,27 @@ class ScheduledTaskStore(private val context: Context) {
         }
     }
 
-    /** Null model pins that name entries removed by a provider model-list clear. */
+    /**
+     * Null model pins that name entries removed by a provider model-list clear.
+     *
+     * [T-scheduled-binding-exact] The pin used to be tested with
+     * `binding.contains(id)`. Entry ids are `instance/model`, so removing
+     * `inst/gpt-4` also un-pinned every task bound to `inst/gpt-4o` — the same
+     * over-match [com.openminis.app.data.db.ChatDao.clearBindingReferencing]
+     * had, and it silently dropped the user's model choice. Match the parsed
+     * `entryId` against the removed set instead (same JSON shape
+     * [ScheduledAgentRunner] reads; the only writer,
+     * [com.openminis.app.ui.scheduled.ScheduledTaskEditScreen], always emits
+     * that shape.
+     */
     fun dropEntryRefs(removedIds: Set<String>) {
         if (removedIds.isEmpty()) return
         mutate { cur ->
             for (i in cur.indices) {
                 val task = cur[i]
                 val binding = task.modelBinding
-                val bindingHit = binding != null && removedIds.any { it.isNotEmpty() && binding.contains(it) }
+                val entryId = binding?.let { entryIdOfBinding(it) }
+                val bindingHit = entryId != null && entryId in removedIds
                 val modelHit = task.modelId != null && task.modelId in removedIds
                 if (!bindingHit && !modelHit) continue
                 cur[i] = task.copy(
@@ -86,6 +99,13 @@ class ScheduledTaskStore(private val context: Context) {
             }
         }
     }
+
+    private fun entryIdOfBinding(json: String): String? = runCatching {
+        val o = org.json.JSONObject(json)
+        if (o.optString("type") == "entry") {
+            o.optString("entryId").takeIf { it.isNotEmpty() }
+        } else null
+    }.getOrNull()
 
     fun clear() {
         prefs.edit().remove(KEY_TASKS).commit()

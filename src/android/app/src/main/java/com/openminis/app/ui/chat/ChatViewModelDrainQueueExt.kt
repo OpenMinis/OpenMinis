@@ -10,6 +10,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
+ * [T-android-queue-atomic-mutation] Atomically take the whole queued-prompt
+ * snapshot, leaving the queue empty; null when there is nothing to claim.
+ *
+ * CAS, not the old read-then-clear: the drain / inject paths run on
+ * Dispatchers.IO (the agent loop) while `enqueuePrompt` writes from Main, and
+ * a plain read+clear is NOT atomic across that boundary. A prompt enqueued
+ * between the read and the clear was dropped silently — its `queued_msg_…`
+ * placeholder bubble stayed "queued" forever — and the reverse interleaving
+ * re-materialised an already-drained snapshot, so the next drain re-persisted
+ * and re-sent a combined user message (the double-append class
+ * `T-android-queued-message-duplicated-on-inject` fought). `resumeQueueAfterCancel`
+ * made this worse: its `validAccessToken()` suspend gap sits between the
+ * `_isStreaming` gate and the claim, so two drains can be in flight at once.
+ * A CAS loser simply retries against the value that won the race, so every
+ * prompt is claimed exactly once.
+ */
+internal fun ChatViewModel.claimPromptQueue(): List<QueuedPrompt>? {
+    while (true) {
+        val current = _promptQueue.value
+        if (current.isEmpty()) return null
+        if (_promptQueue.compareAndSet(current, emptyList())) return current
+    }
+}
+
+/**
  * Drain queued prompts after an agent loop finishes. Each queued prompt is
  * appended to agentHistory, persisted, and re-runs the agent loop.
  * Mirrors iOS AIChatViewModel.drainQueuedPrompts().
@@ -20,9 +45,8 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
     fallbackProviders: List<ChatViewModel.FallbackCandidate>,
     fallbackStrategy: com.openminis.app.data.model.FallbackStrategy,
 ) {
-    while (_promptQueue.value.isNotEmpty()) {
-        val queued = _promptQueue.value
-        _promptQueue.value = emptyList()
+    while (true) {
+        val queued = claimPromptQueue() ?: break
         Log.i(ChatViewModel.TAG, "📨[DRAIN] Draining ${queued.size} queued prompt(s): " +
             queued.joinToString(", ") { "${it.id}=\"${it.text.take(20)}...\"" })
 

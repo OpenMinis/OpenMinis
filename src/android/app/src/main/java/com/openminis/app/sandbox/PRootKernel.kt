@@ -13,7 +13,9 @@ import com.openminis.app.data.MountedFoldersStore
 import java.io.File
 import java.util.TimeZone
 import kotlin.math.abs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * PRoot configuration holder and command builder.
@@ -58,6 +60,18 @@ object PRootKernel {
             return
         }
 
+        // [T-android-startup-splash-hang] The blocking boot body — refreshDns /
+        // configureUbuntuGuest file writes, registerGlobalBindMounts().mkdirs(),
+        // installHandlerStubs() writes, NativeOffloadServer.start()'s abstract-
+        // socket bind + Thread.sleep backoff and listFiles() sweep, and
+        // applyMountedFoldersSnapshot()'s ContentResolver queries +
+        // File.canExecute() checks — had no dispatcher switch, so the first
+        // interactive terminal open (and any ExecutionCoordinator auto-boot) ran
+        // all of it on the caller's thread, including Dispatchers.Main. Force it
+        // onto Dispatchers.IO. Body ORDER and the isBooted guarantee are
+        // unchanged: isBooted is set at the very end of this block, which the
+        // suspend caller sees only after withContext returns.
+        withContext(Dispatchers.IO) {
         rootfsManagerRef = RootfsManager.getInstance(context)
         rootfsManager.installIfNeeded()
         rootfsManager.installProotIfNeeded()
@@ -234,6 +248,7 @@ object PRootKernel {
             "loader=$prootLoaderPath " +
             "bindMounts=${bindMounts.size} " +
             "offloadHandlers=${NativeOffloadServer.registeredHandlers.sorted()}")
+        }
     }
 
     fun addBindMount(linuxPath: String, hostPath: String) {
@@ -616,13 +631,14 @@ object PRootKernel {
         if (volumeId.equals("primary", ignoreCase = true) || volumeId.isEmpty()) {
             return Environment.getExternalStorageDirectory()?.absolutePath
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val sm = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager ?: return null
-            for (volume in sm.storageVolumes) {
-                if (volume.uuid?.equals(volumeId, ignoreCase = true) == true) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        return volume.directory?.absolutePath
-                    }
+        // getStorageVolumes() is API 24; with minSdk 26 the old `>= N` gate was
+        // always true, so it is unwrapped. `volume.directory` is API 30 (R) —
+        // that gate stays, it is real.
+        val sm = context.getSystemService(Context.STORAGE_SERVICE) as? StorageManager ?: return null
+        for (volume in sm.storageVolumes) {
+            if (volume.uuid?.equals(volumeId, ignoreCase = true) == true) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    return volume.directory?.absolutePath
                 }
             }
         }
@@ -879,16 +895,33 @@ object PRootKernel {
      */
     private fun installHandlerStubs(rootfsDir: File) {
         val binDir = File(rootfsDir, "usr/local/bin").also { it.mkdirs() }
+        val registered = NativeOffloadServer.registeredHandlers
+        // The stub is fixed text, so a file matching it byte-for-byte was
+        // written by THIS mechanism. Anything else in the dir (a real binary,
+        // a guard/`top` wrapper) has different content and is never touched.
+        val stubBody = "#!/bin/sh\nexit 0\n"
         var created = 0
         var existed = 0
-        for (name in NativeOffloadServer.registeredHandlers) {
+        var removed = 0
+        for (name in registered) {
             val stub = File(binDir, name)
             if (stub.exists()) { existed++; continue }
-            stub.writeText("#!/bin/sh\nexit 0\n")
+            stub.writeText(stubBody)
             stub.setExecutable(true, false)
             created++
         }
-        Log.d(TAG, "installHandlerStubs dir=${binDir.absolutePath} created=$created existed=$existed")
+        // [T-stale-handler-stubs] A command that was registered in an earlier
+        // app version and then renamed/retired kept its `exit 0` stub forever:
+        // the guest invoked it and got a silent success with EMPTY output —
+        // the worst possible dead end for an agent, because there is no error
+        // to react to. Enumerate the dir and delete stubs (by exact content
+        // signature) whose name is no longer registered.
+        binDir.listFiles()?.forEach { f ->
+            if (!f.isFile || f.name in registered) return@forEach
+            val body = runCatching { f.readText() }.getOrNull() ?: return@forEach
+            if (body == stubBody && f.delete()) removed++
+        }
+        Log.d(TAG, "installHandlerStubs dir=${binDir.absolutePath} created=$created existed=$existed removed=$removed")
 
         installShellWrappers(binDir)
     }
@@ -1019,10 +1052,26 @@ object PRootKernel {
      * the wrappers are removed entirely so they add zero overhead in the common
      * case (every argument would pass the check anyway).
      *
-     * Coverage note: this catches the argv-target commands agents actually use
-     * (touch/cp/mv/tee/mkdir/rm/…). Pure shell `>` redirects are handled by the
-     * OS itself — proot forwards the open(2) to the host FS, which returns EACCES
-     * for a read-only mount — so those already fail truthfully.
+     * Coverage note ([T-mount-guard-bypass]): this catches the argv-target
+     * commands agents actually use (touch/cp/mv/tee/mkdir/rm/dd/ln/…), and the
+     * candidate write target is CANONICALISED with `realpath -m` before matching,
+     * so `..` hops, relative paths, symlinks-out-of-the-jail and `dd of=…` no
+     * longer slip past the old literal `"$prefix"`-prefixed glob match. `-T` /
+     * `--target-directory` indirection is peeled, and when a real path argument
+     * cannot be canonicalised the wrapper FAILS CLOSED (denies).
+     *
+     * Residual holes this wrapper structurally CANNOT close (argv-only,
+     * installed per-command):
+     *  - a program outside the guarded argv names writing the tree directly
+     *    (an interpreter like `python -c`, or an unwrapped binary);
+     *  - shell redirection / heredoc targets (`> /var/minis/mounts/<ro>/f`) —
+     *    opened by the calling shell, never passed through this argv. proot
+     *    forwards the open(2) to the host FS, which returns EACCES for a
+     *    genuinely read-only SAF view, but the wrapper cannot see the path;
+     *  - a file operand that begins with `-` (treated as a flag, skipped).
+     * These are named here so the next reader does not mistake the guard for a
+     * sandbox-wide invariant. The guarded trees are SAF-mounted user data, so the
+     * defense is layered with the FileWriteTool/FileEditTool host-side guard.
      */
     private fun installMountWriteGuards(context: Context, readOnlyLinuxPrefixes: List<String>) {
         val rootfs = try {
@@ -1054,21 +1103,46 @@ object PRootKernel {
             wrapper.writeText(
                 """#!/bin/sh
                 |# $GUARD_MARKER — reject writes into read-only mounted folders.
-                |# Auto-installed by MinisApp PRootKernel (T219-4).
+                |# Auto-installed by MinisApp PRootKernel (T219-4, T-mount-guard-bypass).
                 |cfg=/var/minis/.mount-readonly-prefixes
                 |if [ -f "${'$'}cfg" ]; then
-                |    for arg in "${'$'}@"; do
-                |        case "${'$'}arg" in
-                |            -*) continue;;  # skip flags
-                |        esac
+                |    if command -v realpath >/dev/null 2>&1; then have_rp=1; else have_rp=0; fi
+                |    # canonicalise a write target and match it against every
+                |    # read-only prefix; realpath resolves '..'/symlinks and works
+                |    # on not-yet-existing paths. Fail closed when a real path
+                |    # argument cannot be canonicalised.
+                |    check() {
+                |        t="${'$'}1"
+                |        [ -n "${'$'}t" ] || return 0
+                |        if [ "${'$'}have_rp" = 1 ]; then
+                |            c="${'$'}(realpath -m -- "${'$'}t" 2>/dev/null)"
+                |            if [ -z "${'$'}c" ]; then
+                |                echo "$name: ${'$'}t: read-only mounted folder — target could not be resolved (write blocked)" >&2
+                |                exit 1
+                |            fi
+                |        else
+                |            c="${'$'}t"
+                |        fi
                 |        while IFS= read -r prefix; do
                 |            [ -z "${'$'}prefix" ] && continue
-                |            case "${'$'}arg" in
+                |            case "${'$'}c" in
                 |                "${'$'}prefix"|"${'$'}prefix"/*)
-                |                    echo "$name: ${'$'}arg: read-only mounted folder — writes are disabled (toggle in Settings → Mount External Folders)" >&2
+                |                    echo "$name: ${'$'}t: read-only mounted folder — writes are disabled (toggle in Settings → Mount External Folders)" >&2
                 |                    exit 1;;
                 |            esac
                 |        done < "${'$'}cfg"
+                |        return 0
+                |    }
+                |    expect=0
+                |    for arg in "${'$'}@"; do
+                |        if [ "${'$'}expect" = 1 ]; then expect=0; check "${'$'}arg"; continue; fi
+                |        case "${'$'}arg" in
+                |            -T|--target-directory) expect=1;;
+                |            --target-directory=*) check "${'$'}{arg#--target-directory=}";;
+                |            of=*) check "${'$'}{arg#of=}";;
+                |            -*) : ;;
+                |            *) check "${'$'}arg";;
+                |        esac
                 |    done
                 |fi
                 |exec /bin/busybox $name "${'$'}@"

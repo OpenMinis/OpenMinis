@@ -729,7 +729,14 @@ private suspend fun ChatViewModel.runOneSubAgentInner(
         val writePaths = spawn.writePaths
         val maxTurns = spawn.maxTurns
         val title = spawn.title.ifEmpty { "子代理 $index/$total" }
-        if (SubAgentKind.requiresWritePaths(kind, parallelWriters) && writePaths.isEmpty()) {
+        // A present-but-all-invalid `write_paths` parses to the poison marker,
+        // which WritePathGuard resolves to "deny every write" — correct, but
+        // useless to the model, which would see a worker that cannot write
+        // anything and no explanation. Treat it as "not supplied" so the
+        // actionable error below fires instead of a silent denial at runtime.
+        if (SubAgentKind.requiresWritePaths(kind, parallelWriters) &&
+            (writePaths.isEmpty() || com.openminis.app.tools.WritePathGuard.isPoisoned(writePaths))
+        ) {
             val msg = "Error: parallel workers must set write_paths to non-overlapping directories, or write_paths=none if this task must not write."
             publishSubAgentCard(
                 parentToolId = toolId,

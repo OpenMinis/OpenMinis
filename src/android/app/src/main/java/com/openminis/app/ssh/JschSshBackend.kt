@@ -66,8 +66,6 @@ class JschSshBackend(
         try {
             channel.setCommand(wrapped)
             channel.setPty(false)
-            val stdout = ByteArrayOutputStream()
-            val stderr = ByteArrayOutputStream()
             val outIn: InputStream = runCatching { channel.inputStream }
                 .getOrElse { throw SshFailure.Protocol("cannot open stdout stream: ${it.message}") }
             val errIn: InputStream = runCatching { channel.errStream }
@@ -75,40 +73,83 @@ class JschSshBackend(
             runCatching { channel.connect(CHANNEL_TIMEOUT_MS) }
                 .onFailure { throw SshFailure.Network(cfg.label, it.message) }
 
-            val buf = ByteArray(8192)
-            var outTotal = 0L
-            var errTotal = 0L
-            var timedOut = false
+            // [T-ssh-blocking-readers] Was a Thread.sleep(POLL_MS) +
+            // available() busy poll: on a byte-immediately stream every 25ms
+            // wakeup was pure latency + CPU, and on a quiet one the loop
+            // spun anyway. Two blocking reader threads drain each stream as
+            // the bytes arrive and exit on EOF (channel close), so the wait
+            // becomes a join with the remaining deadline budget.
+            // Same arm point as the old loop: the deadline starts ticking
+            // once the channel is connected, not at method entry.
             val deadline = System.currentTimeMillis() + timeoutMs
-            while (true) {
-                outTotal += drainCapped(outIn, stdout, buf)
-                errTotal += drainCapped(errIn, stderr, buf)
-                if (channel.isClosed) break
-                if (System.currentTimeMillis() >= deadline) {
-                    timedOut = true
-                    break
-                }
-                Thread.sleep(POLL_MS)
-            }
-            if (!timedOut) {
-                // Final drain: isClosed flipped while bytes were still buffered.
-                outTotal += drainCapped(outIn, stdout, buf)
-                errTotal += drainCapped(errIn, stderr, buf)
-            }
+            val stdout = ByteArrayOutputStream()
+            val stderr = ByteArrayOutputStream()
+            val outTotal = java.util.concurrent.atomic.AtomicLong()
+            val errTotal = java.util.concurrent.atomic.AtomicLong()
+            val outReader = startStreamReader(outIn, stdout, outTotal, "ssh-stdout")
+            val errReader = startStreamReader(errIn, stderr, errTotal, "ssh-stderr")
+            val timedOut = !awaitWithDeadline(outReader, errReader, deadline)
             val exit = if (timedOut) -1 else channel.exitStatus
             return SshExecResult(
                 exitCode = exit,
-                stdout = stdout.toString("UTF-8"),
-                stderr = stderr.toString("UTF-8"),
+                stdout = sinkText(stdout),
+                stderr = sinkText(stderr),
                 timedOut = timedOut,
                 durationMs = System.currentTimeMillis() - started,
                 hostLabel = cfg.label,
-                truncated = outTotal > MAX_CAPTURE || errTotal > MAX_CAPTURE,
+                truncated = outTotal.get() > MAX_CAPTURE || errTotal.get() > MAX_CAPTURE,
             )
         } finally {
+            // Disconnecting the channel EOFs both streams, which releases the
+            // reader threads even on the timeout path (they are daemons
+            // regardless).
             runCatching { channel.disconnect() }
         }
     }
+
+    /**
+     * Blocking drain of [inp] into [sink] on a daemon thread.
+     *
+     * `read` returns -1 at stream EOF — JSch flips that when the channel
+     * closes, so no polling is needed. The total byte count is tracked
+     * separately from the capped sink so `truncated` keeps the old semantics
+     * (the sink holds at most MAX_CAPTURE bytes but counting continues).
+     */
+    private fun startStreamReader(
+        inp: InputStream,
+        sink: ByteArrayOutputStream,
+        counter: java.util.concurrent.atomic.AtomicLong,
+        name: String,
+    ): Thread = Thread {
+        val buf = ByteArray(8192)
+        while (true) {
+            val n = runCatching { inp.read(buf) }.getOrDefault(-1)
+            if (n <= 0) break
+            counter.addAndGet(n.toLong())
+            synchronized(sink) {
+                val room = MAX_CAPTURE - sink.size()
+                if (room > 0) sink.write(buf, 0, minOf(n, room))
+            }
+        }
+    }.apply {
+        isDaemon = true
+        this.name = name
+        start()
+    }
+
+    /** Join both readers within [deadline]; true when both drained before it. */
+    private fun awaitWithDeadline(out: Thread, err: Thread, deadline: Long): Boolean {
+        val budget = deadline - System.currentTimeMillis()
+        if (budget <= 0) return false
+        out.join(budget)
+        val remaining = deadline - System.currentTimeMillis()
+        if (remaining <= 0 && err.isAlive) return false
+        err.join(maxOf(remaining, 0L))
+        return !out.isAlive && !err.isAlive
+    }
+
+    private fun sinkText(sink: ByteArrayOutputStream): String =
+        synchronized(sink) { sink.toString("UTF-8") }
 
     // ---------------------------------------------------------------- sftp
 
@@ -228,8 +269,24 @@ class JschSshBackend(
                 pool.remove(cfg.id)
             }
         }
+        // openSession deliberately runs OUTSIDE poolLock (a connect can take
+        // up to CONNECT_TIMEOUT_MS and must not stall other hosts), which
+        // leaves a race: two concurrent acquires for the same cfg.id can both
+        // miss above and both connect. Re-check under the lock and make the
+        // LOSER disconnect its own session — the old code just overwrote
+        // pool[cfg.id], orphaning the first connected Session forever (never
+        // disconnected, identity still registered in JSch).
         val session = openSession(cfg)
         synchronized(poolLock) {
+            val existing = pool[cfg.id]
+            if (existing != null && existing.session.isConnected) {
+                runCatching { session.disconnect() }
+                existing.lastUsed = System.currentTimeMillis()
+                return existing.session
+            }
+            // A stale not-connected entry (inserted by a third thread between
+            // our check and our lock) gets replaced and torn down too.
+            if (existing != null) runCatching { existing.session.disconnect() }
             pool[cfg.id] = Pooled(session, System.currentTimeMillis())
             if (pool.size > MAX_POOL) {
                 val oldest = pool.entries.minByOrNull { it.value.lastUsed }
@@ -327,21 +384,6 @@ class JschSshBackend(
         }
     }
 
-    /** Reads everything available now; stores at most [MAX_CAPTURE] bytes, keeps counting the rest. */
-    private fun drainCapped(inp: InputStream, sink: ByteArrayOutputStream, buf: ByteArray): Long {
-        var total = 0L
-        while (true) {
-            val avail = runCatching { inp.available() }.getOrDefault(0)
-            if (avail <= 0) break
-            val n = runCatching { inp.read(buf, 0, minOf(buf.size, avail)) }.getOrDefault(-1)
-            if (n <= 0) break
-            total += n
-            val room = MAX_CAPTURE - sink.size()
-            if (room > 0) sink.write(buf, 0, minOf(n, room))
-        }
-        return total
-    }
-
     /**
      * Bridges JSch's [HostKeyRepository] onto [SshKnownHosts].
      *
@@ -412,7 +454,8 @@ class JschSshBackend(
         const val IDLE_EVICT_MS = 5 * 60_000L
         const val MAX_CAPTURE = 200_000
         private const val MAX_POOL = 6
-        private const val POLL_MS = 25L
+        // POLL_MS gone with the busy-poll loop ([T-ssh-blocking-readers]):
+        // exec now waits on blocking reader threads, not timed wakeups.
         /** Sibling staging prefix/suffix for downloads — never a real artifact name. */
         internal const val STAGE_PREFIX = ".minis-sftp-"
         internal const val STAGE_SUFFIX = ".tmp"

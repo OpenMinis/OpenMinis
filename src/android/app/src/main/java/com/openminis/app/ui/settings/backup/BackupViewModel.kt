@@ -472,7 +472,18 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             removeHistoryRecord(id)
             return
         }
-        viewModelScope.launch {
+        // [T-android-backup-delete-cancelled-scope] Application scope, NOT
+        // viewModelScope. The only caller is the history-detail screen, which
+        // pops itself right after calling this; that pop clears the entry's
+        // ViewModelStore, so viewModelScope was cancelled before the first IO
+        // line ran. Both the rclone package deletions and the local
+        // removeHistoryRecord(id) that ends the block were therefore silently
+        // dropped — the inner runCatching swallowed the cancellation, the row
+        // reappeared on the next visit, and the UI had already implied success.
+        // A process-lifetime scope lets the cleanup finish whoever navigates in
+        // the meantime. Falls back to viewModelScope when the Application is not
+        // the real MinisApp (unit tests), so behaviour there is unchanged.
+        deletionScope().launch {
             withContext(Dispatchers.IO) {
                 runCatching {
                     val store = com.openminis.app.backup.remote.RcloneRemoteStore(getApplication())
@@ -495,6 +506,14 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             removeHistoryRecord(id)
         }
     }
+
+    /**
+     * The scope long-lived deletions run in. Separate from viewModelScope for
+     * the reason spelled out at [removeHistoryRecordWithFiles].
+     */
+    private fun deletionScope() =
+        (getApplication<Application>() as? com.openminis.app.MinisApp)
+            ?.appCoroutineScopes?.io ?: viewModelScope
 
     fun removeHistoryRecord(id: String) {
         history.remove(id)
@@ -1020,12 +1039,10 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Bytes as "32.0 MB", for a message rather than a UI row. */
-    private fun humanBytesPlain(bytes: Long): String = when {
-        bytes >= 1_000_000_000 -> String.format(java.util.Locale.US, "%.1f GB", bytes / 1e9)
-        bytes >= 1_000_000 -> String.format(java.util.Locale.US, "%.1f MB", bytes / 1e6)
-        bytes >= 1_000 -> String.format(java.util.Locale.US, "%.0f kB", bytes / 1e3)
-        else -> "$bytes B"
-    }
+    // [T-android-human-bytes-one-place] Deliberately NOT a second formatter:
+    // this function used to duplicate BackupAndRestoreScreen.humanBytes with a
+    // different unit label for the same divisors. Both now read the same one.
+    private fun humanBytesPlain(bytes: Long): String = humanBytes(bytes)
 
     companion object {
         private const val TAG = "BackupViewModel"

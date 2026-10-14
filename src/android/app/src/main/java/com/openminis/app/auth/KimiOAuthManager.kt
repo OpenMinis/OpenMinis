@@ -51,10 +51,10 @@ class KimiOAuthManager(
         /** 5-minute proactive-refresh buffer (Claude/Gemini/iOS parity). */
         private const val REFRESH_BUFFER_MS = 5 * 60 * 1000L
 
-        /** Per-instance refresh mutex — single-flight (see ClaudeOAuthManager). */
-        private val refreshMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
-        private fun mutexFor(instanceId: String): Mutex =
-            refreshMutexes.getOrPut(instanceId) { Mutex() }
+        /** Per-instance refresh mutex — single-flight (see ClaudeOAuthManager).
+         *  [T-oauth-refresh-race] Provided by [OAuthManager] so the base class'
+         *  refresh path and this one share one lock per account. */
+        private fun mutexFor(instanceId: String): Mutex = OAuthManager.refreshMutexFor(instanceId)
 
         /**
          * Full device-code login flow. Suspends until the user approves (or
@@ -211,6 +211,10 @@ class KimiOAuthManager(
     // ── Refresh (single-flight + compare-before-delete) ─────────────────
 
     suspend fun refreshTokenClassified(): RefreshOutcome = withContext(Dispatchers.IO) {
+        // [T-oauth-refresh-race] Snapshot the expiry BEFORE queueing on the lock:
+        // two in-lock reads can never differ, so the coalescing branch was
+        // unreachable and every queued caller still POSTed a refresh.
+        val priorExpireAt = loadStoredTokens()?.optLong("expire_at", 0) ?: 0L
         val mutex = mutexFor(instanceId)
         mutex.withLock {
             val stored = loadStoredTokens() ?: return@withLock RefreshOutcome.NO_TOKEN
@@ -220,8 +224,7 @@ class KimiOAuthManager(
             // Coalesce concurrent refreshers (see ClaudeOAuthManager): if a
             // fresher token landed while we were blocked on the mutex, skip
             // the network round-trip entirely.
-            val priorExpireAt = stored.optLong("expire_at", 0)
-            val freshCheck = loadStoredTokens()?.optLong("expire_at", 0) ?: 0
+            val freshCheck = stored.optLong("expire_at", 0)
             if (freshCheck > priorExpireAt && freshCheck > System.currentTimeMillis()) {
                 Log.d(TAG, "Refresh skipped — fresher token already present (coalesced)")
                 return@withLock RefreshOutcome.SUCCESS
@@ -300,8 +303,16 @@ class KimiOAuthManager(
             RefreshOutcome.SUCCESS ->
                 loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
             RefreshOutcome.INVALID_GRANT -> null // logout() already ran
-            RefreshOutcome.TRANSIENT ->
-                if (expireAt in 1..now) null else token
+            RefreshOutcome.TRANSIENT -> {
+                // [T-oauth-refresh-race] `expireAt`/`token` are PRE-refresh values
+                // — re-read the store before declaring the credential dead; a
+                // concurrent refresher may have landed a fresher bundle.
+                val current = loadStoredTokens()
+                val currentExpireAt = current?.optLong("expire_at", 0) ?: 0
+                if (currentExpireAt > System.currentTimeMillis()) {
+                    current?.optString("access_token", "")?.ifEmpty { null } ?: token
+                } else if (expireAt in 1..now) null else token
+            }
             RefreshOutcome.NO_TOKEN -> null
         }
     }

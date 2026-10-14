@@ -77,11 +77,14 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
          * the rest fall through to read the fresh stored token. Mirrors iOS
          * `actor` serialization. Keyed by instanceId because each OAuth
          * account has its own token state.
+         *
+         * [T-oauth-refresh-race] The map now lives in [OAuthManager] so the base
+         * class' single-flight [refreshToken] and this classified path share ONE
+         * lock per account — with a per-class map, a manager built by provider
+         * routing and one built by the chat path guarded the same tokens with
+         * different locks.
          */
-        private val refreshMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
-
-        private fun mutexFor(instanceId: String): Mutex =
-            refreshMutexes.getOrPut(instanceId) { Mutex() }
+        private fun mutexFor(instanceId: String): Mutex = OAuthManager.refreshMutexFor(instanceId)
 
         /**
          * Static helper: perform full login flow and save the API key.
@@ -252,6 +255,11 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * serialized refresh path.
      */
     suspend fun refreshTokenClassified(): RefreshOutcome = withContext(Dispatchers.IO) {
+        // [T-oauth-refresh-race] Snapshot the expiry BEFORE queueing on the lock.
+        // The old version read it INSIDE the lock and compared it against a second
+        // in-lock read, so the two values were always equal, the coalescing branch
+        // was unreachable, and every queued caller still POSTed a refresh.
+        val priorExpireAt = loadStoredTokens()?.optLong("expire_at", 0) ?: 0L
         val mutex = mutexFor(instanceId)
         mutex.withLock {
             val stored = loadStoredTokens() ?: return@withLock RefreshOutcome.NO_TOKEN
@@ -260,11 +268,10 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
             // Coalesce concurrent refreshers: if the token was refreshed while
             // we were blocked on the mutex, return SUCCESS without hitting the
-            // network again. Detected by comparing expire_at to what we saw
-            // entering the lock — a different value means another coroutine
-            // already refreshed.
-            val priorExpireAt = stored.optLong("expire_at", 0)
-            val freshCheck = loadStoredTokens()?.optLong("expire_at", 0) ?: 0
+            // network again. Detected by comparing the stored expire_at to the
+            // pre-lock snapshot — a newer, still-valid value means another
+            // coroutine already refreshed.
+            val freshCheck = stored.optLong("expire_at", 0)
             if (freshCheck > priorExpireAt && freshCheck > System.currentTimeMillis()) {
                 Log.d(TAG, "Refresh skipped — fresher token already present (concurrent refresh coalesced)")
                 return@withLock RefreshOutcome.SUCCESS
@@ -350,7 +357,16 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             RefreshOutcome.TRANSIENT -> {
                 // Old token still usable if not actually expired. If it IS
                 // expired, surface null so the caller can bubble up auth error.
-                if (expireAt > 0 && now >= expireAt) null else token
+                //
+                // [T-oauth-refresh-race] `expireAt`/`token` are PRE-refresh values:
+                // a concurrent refresher may have stored a fresher bundle between
+                // our read above and this failure, so re-read the store before
+                // declaring the credential dead.
+                val current = loadStoredTokens()
+                val currentExpireAt = current?.optLong("expire_at", 0) ?: 0
+                if (currentExpireAt > System.currentTimeMillis()) {
+                    current?.optString("access_token", "")?.ifEmpty { null } ?: token
+                } else if (expireAt > 0 && now >= expireAt) null else token
             }
             RefreshOutcome.NO_TOKEN -> null
         }

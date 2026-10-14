@@ -30,10 +30,28 @@ object ShellExecutor {
         val durationMs: Long
     )
 
-    /** The currently running process, if any. Can be destroyed to stop execution. */
-    @Volatile
-    var currentProcess: Process? = null
-        private set
+    /**
+     * [T-current-process-registry] Running one-shot proot processes, keyed by an
+     * owner key supplied by the caller (a session/lane id, or a fresh token when
+     * none is given). The old single `@Volatile var currentProcess` slot was
+     * overwritten by every `runOnce`, so with two concurrent one-shot executions
+     * (sub-agent lanes, self-build + chat) cancelling one command destroyed
+     * ANOTHER session's proot while the cancelled one ran to its full wall. A
+     * map keyed per run keeps each cancellation aimed at its own process, and
+     * [destroyCurrent] (the legacy stop-all) iterates every live entry.
+     */
+    private val runningProcesses = java.util.concurrent.ConcurrentHashMap<String, Process>()
+
+    /**
+     * Diagnostic view: the sole running one-shot process when exactly one is
+     * live, otherwise null (multiple concurrent runs make "current" ambiguous —
+     * that ambiguity was the bug). Not used to cancel; use [destroyProcess] or
+     * [destroyCurrent].
+     */
+    val currentProcess: Process? get() = runningProcesses.values.singleOrNull()
+
+    /** Monotonic token so concurrent owner-key-less calls never collide. */
+    private val anonRunSeq = java.util.concurrent.atomic.AtomicLong(0)
 
     /**
      * Execute a command inside the PRoot sandbox.
@@ -61,9 +79,15 @@ object ShellExecutor {
         environment: Map<String, String> = emptyMap(),
         lineCallback: ((String) -> Unit)? = null,
         resourceClass: SandboxResourceGate.ResourceClass = SandboxResourceGate.ResourceClass.AUTO,
+        // [T-current-process-registry] Owner of this run in the process map. A
+        // session/lane id lets a targeted [destroyProcess] cancel exactly this
+        // command; null falls back to a fresh anonymous token so concurrent
+        // owner-less calls never share a slot.
+        ownerKey: String? = null,
     ): ShellResult = withContext(Dispatchers.IO) {
         check(PRootKernel.isBooted) { "PRootKernel must be booted before executing commands" }
 
+        val runKey = ownerKey ?: "anon:${anonRunSeq.incrementAndGet()}"
         val budget = BudgetClassifier.classify(command, resourceClass)
         // [T-timeout-honored] The caller may shorten the class wall but never
         // extend it, and the setup floor survives.
@@ -75,6 +99,7 @@ object ShellExecutor {
             context, command, armed, environment, lineCallback, noSeccomp = false,
             outputCapBytes = budget.outputCapBytes,
             outputRateBytesPerSec = budget.outputRateBytesPerSec,
+            ownerKey = runKey,
         )
 
         // [T-android-seccomp-selfheal / GH#186] If the child died on an early
@@ -102,6 +127,7 @@ object ShellExecutor {
             context, command, armed, environment, lineCallback, noSeccomp = true,
             outputCapBytes = budget.outputCapBytes,
             outputRateBytesPerSec = budget.outputRateBytesPerSec,
+            ownerKey = runKey,
         )
         if (retried.exitCode == 0) {
             com.openminis.app.logging.AppLogger.warning(
@@ -129,6 +155,7 @@ object ShellExecutor {
         noSeccomp: Boolean,
         outputCapBytes: Long = BudgetClassifier.normal().outputCapBytes,
         outputRateBytesPerSec: Long = BudgetClassifier.normal().outputRateBytesPerSec,
+        ownerKey: String,
     ): ShellResult = withContext(Dispatchers.IO) {
         val prootCommand = PRootKernel.buildProotCommand(command)
 
@@ -172,14 +199,16 @@ object ShellExecutor {
         var exitCode = -1
 
         // Keep the Process in a local. withTimeout cancels the block and runs
-        // its finally before the catch, so clearing currentProcess there made
-        // destroyForcibly a no-op and left the timed-out proot alive.
+        // its finally before the catch, so clearing the registry there made
+        // destroyForcibly a no-op and left the timed-out proot alive. The
+        // registry is keyed per run ([ownerKey]) so a concurrent execution's
+        // process cannot clobber this one's cancellation target.
         var started: Process? = null
         var activeRun: com.openminis.app.service.ActiveRun? = null
         try {
             val process = processBuilder.start()
             started = process
-            currentProcess = process
+            runningProcesses[ownerKey] = process
             SandboxWorkload.track(process, "oneshot")
             activeRun = ActiveRunContext.current()
             activeRun?.registerProcess(process)
@@ -277,7 +306,9 @@ object ShellExecutor {
             output.appendLine("\n[Error: ${e.message}]")
             exitCode = -1
         } finally {
-            if (currentProcess === started) currentProcess = null
+            // remove(key, value) so a retried/concurrent run under the same key
+            // cannot evict a process that is no longer ours.
+            if (started != null) runningProcesses.remove(ownerKey, started)
             if (started != null) activeRun?.unregisterProcess(started)
             SandboxWorkload.release(started, kill = false, reason = "oneshot-done")
         }
@@ -294,13 +325,30 @@ object ShellExecutor {
     }
 
     /**
-     * Forcibly destroy the currently running process.
+     * Destroy every live one-shot proot process. Kept for the legacy global
+     * "stop all" path ([ExecutionCoordinator.stopCurrentCommand] with no
+     * session id); a targeted cancel should use [destroyProcess]. Iterating the
+     * whole registry (instead of a single clobbered slot) is what makes this
+     * correct under concurrent executions.
      */
     fun destroyCurrent() {
-        currentProcess?.let { process ->
-            Log.i(TAG, "Destroying current process")
+        for ((key, process) in runningProcesses.entries.toList()) {
+            Log.i(TAG, "Destroying current process ($key)")
             SandboxWorkload.release(process, kill = true, reason = "destroyCurrent")
-            currentProcess = null
+            runningProcesses.remove(key, process)
         }
+    }
+
+    /**
+     * Destroy only the process registered under [ownerKey] — cancelling one
+     * command cannot touch another session's proot. Returns true when a process
+     * was found and signalled.
+     */
+    fun destroyProcess(ownerKey: String): Boolean {
+        val process = runningProcesses[ownerKey] ?: return false
+        Log.i(TAG, "Destroying one-shot process for $ownerKey")
+        SandboxWorkload.release(process, kill = true, reason = "destroyProcess")
+        runningProcesses.remove(ownerKey, process)
+        return true
     }
 }

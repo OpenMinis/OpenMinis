@@ -3,6 +3,7 @@ package com.openminis.app.sandbox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
 import java.util.zip.ZipFile
@@ -11,12 +12,20 @@ import java.util.zip.ZipInputStream
 /**
  * Integrity guard for the ZIPs vendored under `src/main/assets`.
  *
- * [T-apk-size] The SDK host-tool zips are no longer vendored (they download
- * on demand inside minis-android-sdk-setup), so this guard is dormant until
- * a future change vendors a zip again. The historical damage mode it was
- * built for:
+ * **STATUS: DORMANT.** Since #25 (built on `18dff0c`) no `.zip` is vendored at
+ * all: the SDK host tools (`android-sdk-tools-aarch64.zip`,
+ * `android-cmdline-tools.zip`) left the APK and are downloaded on demand inside
+ * the guest by `minis-android-sdk-setup`. Every test here therefore reports as
+ * SKIPPED rather than passed — they state out loud why they did not run instead
+ * of silently returning from an empty loop, which is how a guard goes rotten
+ * without anyone noticing. [assetsCarryNoRetiredVendoredZip] is the one test
+ * that always runs, and [DORMANT_REASON] is the message it prints.
  *
- * These archives are fetched verbatim from third-party releases by
+ * The class is kept on purpose: the four guards below are the only automated
+ * check for a future re-vendor, and the damage mode they were written for is
+ * genuinely nasty. Historical behaviour this encodes:
+ *
+ * These archives were fetched verbatim from third-party releases by
  * `scripts/prepare_android_sandbox.sh` and committed to the tree. A damaged
  * blob therefore ships to every device, and it fails in a way that is very
  * hard to attribute:
@@ -40,9 +49,27 @@ import java.util.zip.ZipInputStream
  * reader families agree". [streamingAndRandomAccessSeeTheSameMembers] encodes
  * exactly that disagreement.
  *
+ * Note that anything sitting in `src/main/assets` on disk is packaged by AGP
+ * even when it is not tracked by git — which is why a stale leftover of a
+ * retired zip is a real shipping hazard, not a cosmetic one.
+ *
  * Run with: `:app:testReleaseUnitTest --tests com.openminis.app.sandbox.VendoredAssetIntegrityTest`
  */
 class VendoredAssetIntegrityTest {
+
+    /**
+     * The two archives this guard was written for, un-vendored in #25. Kept as
+     * data so [assetsCarryNoRetiredVendoredZip] can name them.
+     */
+    private val retiredVendoredZips = listOf(
+        "android-sdk-tools-aarch64.zip",
+        "android-cmdline-tools.zip",
+    )
+
+    private val dormantReason: String
+        get() = "no .zip is vendored in src/main/assets any more (SDK host tools " +
+            "download on demand via minis-android-sdk-setup since #25) — re-vendor " +
+            "a zip and this guard becomes live again"
 
     private fun assetsDir(): File =
         find("src/android/app/src/main/assets")
@@ -64,15 +91,23 @@ class VendoredAssetIntegrityTest {
         assetsDir().listFiles { f -> f.isFile && f.name.endsWith(".zip") }?.sortedBy { it.name }
             ?: emptyList()
 
+    /**
+     * A named archive that no longer ships is a SKIP, not a silent pass. The
+     * message names the removal so the reason survives in the test report.
+     */
+    private fun requireVendoredZip(name: String): File {
+        val zip = File(assetsDir(), name)
+        assumeTrue("SKIPPED: $name is absent — $dormantReason", zip.isFile)
+        return zip
+    }
+
     /** Every vendored archive must survive a full CRC-checked random-access read. */
     @Test
     fun everyVendoredZipInflatesUnderRandomAccess() {
         val zips = vendoredZips()
-        // [T-apk-size] No .zip ships in the APK anymore (SDK host tools moved
-        // to on-demand download inside minis-android-sdk-setup). An empty set
-        // is the expected steady state; the guard only bites if a future
-        // change vendors a zip again.
-        if (zips.isEmpty()) return
+        // An empty set is the expected steady state since #25; skip loudly so the
+        // dormancy shows up in the report instead of hiding behind a green check.
+        assumeTrue("SKIPPED: assets/ holds no .zip — $dormantReason", zips.isNotEmpty())
         for (zip in zips) {
             ZipFile(zip).use { zf ->
                 val entries = zf.entries().toList()
@@ -97,7 +132,9 @@ class VendoredAssetIntegrityTest {
      */
     @Test
     fun streamingAndRandomAccessSeeTheSameMembers() {
-        for (zip in vendoredZips()) {
+        val zips = vendoredZips()
+        assumeTrue("SKIPPED: assets/ holds no .zip — $dormantReason", zips.isNotEmpty())
+        for (zip in zips) {
             val viaRandomAccess = ZipFile(zip).use { zf ->
                 zf.entries().toList().map { it.name }.sorted()
             }
@@ -131,8 +168,7 @@ class VendoredAssetIntegrityTest {
      */
     @Test
     fun bundledSdkToolsAreAarch64Elf() {
-        val zip = File(assetsDir(), "android-sdk-tools-aarch64.zip")
-        if (!zip.isFile) return // not prepared in this checkout (offline build)
+        val zip = requireVendoredZip("android-sdk-tools-aarch64.zip")
         val required = listOf(
             "build-tools/aapt2",
             "build-tools/zipalign",
@@ -163,8 +199,7 @@ class VendoredAssetIntegrityTest {
      */
     @Test
     fun previouslyLostPlatformToolsArePresent() {
-        val zip = File(assetsDir(), "android-sdk-tools-aarch64.zip")
-        if (!zip.isFile) return
+        val zip = requireVendoredZip("android-sdk-tools-aarch64.zip")
         val expected = listOf(
             "platform-tools/make_f2fs",
             "platform-tools/make_f2fs_casefold",
@@ -182,5 +217,37 @@ class VendoredAssetIntegrityTest {
                 )
             }
         }
+    }
+
+    /**
+     * The dormancy itself, pinned as an assertion instead of an early return —
+     * the only test in this class that always runs.
+     *
+     * #25 un-vendored these two archives and nothing is supposed to put them
+     * back. AGP packages whatever sits in `src/main/assets` even when git does
+     * not track it, so a stale leftover of either name still ships to every
+     * device — and `android-sdk-tools-aarch64.zip` is exactly the one that
+     * shipped damaged.
+     *
+     * A deliberate re-vendor under these names SHOULD fail here: that is the
+     * signal that the four integrity guards above went live again, so the
+     * steady state this test pins has to be re-checked (and this assertion
+     * retired) in the same change.
+     */
+    @Test
+    fun assetsCarryNoRetiredVendoredZip() {
+        val present = vendoredZips()
+            .map { it.name }
+            .filter { it in retiredVendoredZips }
+            .sorted()
+        assertTrue(
+            "src/main/assets still carries retired vendored archives: $present — they " +
+                "were un-vendored in #25 (the SDK host tools now download on demand via " +
+                "minis-android-sdk-setup) and AGP would package them into the APK anyway. " +
+                "Delete them; or, if this is an intentional re-vendor, the four integrity " +
+                "guards in this class are live again — run them and retire this assertion " +
+                "in the same change.",
+            present.isEmpty()
+        )
     }
 }

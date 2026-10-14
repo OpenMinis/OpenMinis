@@ -49,6 +49,13 @@ object SandboxResourceGate {
 
     fun isPackageManager(command: String): Boolean {
         val c = command.lowercase()
+        // [T-setup-family] The minis-setup-* scripts shell out to apt/dpkg
+        // themselves and take the in-guest `minis_acquire_apt_lock`; until now
+        // the installer ran OUTSIDE this host apt mutex, so a concurrent
+        // agent `apt-get` and a Dev Suite setup raced on the dpkg lock files.
+        // Treat the family as package-manager work so it also serialises on
+        // the host mutex.
+        if (GuestWorkloadPolicy.isSetupScript(c)) return true
         return c.contains("apt-get") || c.contains("apt ") ||
             c.contains("dpkg") || c.contains("sdkmanager") ||
             c.contains("minis-dev-setup") || c.contains("minis-build-env") || c.contains("minis-android-sdk-setup") ||
@@ -169,7 +176,9 @@ object SandboxResourceGate {
     }
 
     suspend fun <T> withNamedLock(name: String, block: suspend () -> T): T {
-        val mutex = named.getOrPut(name) { Mutex() }
+        // computeIfAbsent (atomic), not getOrPut (get→compute→put, non-atomic):
+        // the same guarantee ExecutionCoordinator relies on for its mutex map.
+        val mutex = named.computeIfAbsent(name) { Mutex() }
         return mutex.withLock { block() }
     }
 }

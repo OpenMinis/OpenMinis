@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -11,11 +12,14 @@ import kotlinx.coroutines.launch
  *
  * Deliberately close to — but not the same as — [retryFromMessage]. Both
  * rewind the conversation to a point, so this reuses that method's DB
- * anchoring: walk the persisted rows counting only user messages that have
- * VISIBLE text, because the agent loop also persists synthetic
- * `<system-reminder>` user rows that never rendered a bubble. Counting
- * those would anchor the cut one turn too early and silently take an extra
- * exchange with it (the iOS retry-anchor fix, ported here already).
+ * anchoring ([resolveDeleteCutoffSortOrder]): the tapped message resolves
+ * straight to its own persisted `sort_order` by ROW ID (with `sourceDbIds`
+ * covering merged bubbles) — no walk, no counting. The ordinal version this
+ * replaced counted only user messages with VISIBLE text while skipping the
+ * synthetic `<system-reminder>` / tool-result user rows the agent loop also
+ * persists, and the two counters disagreed on any session with tool traffic:
+ * the cut landed early and everything from there went with it (the
+ * [T-delete-anchor-by-id] incident, 2026-10-14).
  *
  * The one deliberate difference is the cut point: retry keeps the target
  * user message and re-sends it, so it cuts at `sortOrder + 1`. Delete From
@@ -46,7 +50,7 @@ fun ChatViewModel.deleteFromMessage(messageId: String) {
     val retainedHead = messages.subList(0, index)
     for (m in deletedMessages) {
         m.queuedPromptId?.let { pid ->
-            _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
+            _promptQueue.update { queue -> queue.filterNot { it.id == pid } }
         }
     }
     _messages.value = retainedHead

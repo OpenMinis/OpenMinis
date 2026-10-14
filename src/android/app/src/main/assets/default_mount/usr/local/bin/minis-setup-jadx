@@ -22,18 +22,28 @@ command -v unzip >/dev/null 2>&1 || {
   apt-get install -y --no-install-recommends unzip
 }
 
+# [T-devsuite-verify] skylot/jadx publishes NO checksum for its release assets
+# (the v1.5.1 release carries only the two zips, no .sha256 and no signed
+# digest file), so there is nothing published to compare the bytes against.
+# Consequence, enforced by offline.sh: the download runs against the FIRST URL
+# only — github.com over TLS — and the anonymous GitHub proxies below are
+# skipped, because without a digest a proxy could substitute the zip and
+# `unzip -qo` + the PATH links would run whatever it put there. To use a proxy
+# or an offline copy, pin the digest yourself (Settings -> Environment
+# Variables): MINIS_DEVSUITE_SHA256="$ZIP=<sha256-of-the-zip>".
 tmp="/tmp/jadx-$$.zip"
 . /usr/local/lib/minis/offline.sh
 if ! resume_fetch "$tmp" "$ZIP" \
+  "$GH" \
   "https://ghfast.top/$GH" \
   "https://ghproxy.net/$GH" \
-  "https://mirror.ghproxy.com/$GH" \
-  "$GH"
+  "https://mirror.ghproxy.com/$GH"
 then
-  echo "jadx download failed (all mirrors). Offline fallback: put $ZIP in /var/minis/shared/offline/" >&2
+  echo "jadx download failed (all reachable sources) or checksum mismatch. Offline fallback: put $ZIP in /var/minis/shared/offline/ and set MINIS_ALLOW_OFFLINE=1." >&2
   exit 1
 fi
 
+# Verified (when a digest is known) — only now does the archive touch disk.
 stage="/tmp/jadx-unpack-$$"
 mkdir -p "$stage"
 unzip -qo "$tmp" -d "$stage"

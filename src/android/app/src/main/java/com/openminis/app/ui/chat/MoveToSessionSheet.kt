@@ -321,8 +321,16 @@ private fun relativeDate(context: Context, timestamp: Long): String {
     val days = TimeUnit.MILLISECONDS.toDays(diff)
     if (days < 7) {
         // T172: device-locale weekday name via java.text.DateFormatSymbols.
+        // NO `- 1` here: `weekdays` is the 1-based Calendar table — 8 entries,
+        // index 0 unused, Sunday at Calendar.SUNDAY (1). The old
+        // `DAY_OF_WEEK - 1` read the previous slot, so every row in this
+        // window was labelled one weekday early ("周一" on a Tuesday).
+        // TODO(duplication): this whole helper is a near-copy of
+        // ui/sessions/SessionListScreen.kt's relativeDate (which indexes
+        // correctly); lifting the two into one shared util is out of this
+        // file's scope, so they still have to be changed in both places.
         val dayNames = java.text.DateFormatSymbols(java.util.Locale.getDefault()).weekdays
-        return dayNames[dateCal.get(Calendar.DAY_OF_WEEK) - 1]
+        return dayNames[dateCal.get(Calendar.DAY_OF_WEEK)]
     }
     val month = dateCal.get(Calendar.MONTH) + 1
     val day = dateCal.get(Calendar.DAY_OF_MONTH)

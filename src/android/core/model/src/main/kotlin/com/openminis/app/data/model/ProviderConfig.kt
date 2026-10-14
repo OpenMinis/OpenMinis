@@ -444,8 +444,11 @@ data class ProviderConfig(
     // Compact fallback: used only after the current session model fails to
     // compact. Same slot shape as visionGroupId (group id or entry:<id>).
     var compactFallbackGroupId: String? = null,
-    // Unused translation slot kept so old configs still load and save. Live
-    // translation reads TranslationPrefs, not this field. Absent → null.
+    // [T-android-translation-single-source] Legacy: nothing reads, writes, or
+    // persists this any more (ProviderConfigMapping stopped round-tripping it into
+    // provider_config_meta and the delete path stopped scrubbing it). Translation
+    // has exactly one source of truth — TranslationPrefs. The property stays so an
+    // older persisted JSON mirror still decodes instead of failing the whole load.
     var defaultTranslationModelId: String? = null,
     // Models and groups exposed to the agent loop (minis-model-use terminal
     // command) — mirrors iOS agentLoopModelEntryIds / agentLoopGroupIds.

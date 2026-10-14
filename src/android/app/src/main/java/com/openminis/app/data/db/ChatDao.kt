@@ -71,13 +71,6 @@ data class MessageHeadRow(
 
 data class MessageCountRow(val count: Int)
 
-data class MessageAnchorRow(
-    val id: String,
-    val role: String,
-    @ColumnInfo(name = "sort_order") val sortOrder: Int,
-    @ColumnInfo(name = "head_text") val headText: String?,
-)
-
 data class MessageSortAnchor(
     @ColumnInfo(name = "sort_order") val sortOrder: Int,
     val role: String,
@@ -189,8 +182,23 @@ interface ChatDao {
     @Query("UPDATE sessions SET model_binding = :binding, model_id = :modelId, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateSessionBinding(id: String, binding: String, modelId: String, updatedAt: Long = System.currentTimeMillis())
 
-    /** Drop a session pin that names a model entry the provider list no longer has. */
-    @Query("UPDATE sessions SET model_binding = NULL, updated_at = :updatedAt WHERE model_binding LIKE '%' || :entryId || '%'")
+    /**
+     * Drop a session pin that names a model entry the provider list no longer has.
+     *
+     * [T-android-binding-clear-anchor] The needle used to be the bare id inside a
+     * `%…%` LIKE. Entry ids are `instance/model`, so clearing `inst/gpt-4` also
+     * un-pinned every session bound to `inst/gpt-4o` — silently dropping those
+     * users' model choice. The binding column holds compact JSON written as
+     * `{"type":"entry","entryId":"<id>"}` (ConfigBuiltins:210,
+     * HeadlessChatRunner:107), so matching the quoted `entryId` value is exact.
+     * `instr` rather than `LIKE` because the id itself is data: `_` and `%` are
+     * legal in model ids and LIKE would read them as wildcards, which would
+     * re-open the same over-match with a different spelling.
+     */
+    @Query(
+        "UPDATE sessions SET model_binding = NULL, updated_at = :updatedAt " +
+            "WHERE instr(model_binding, '\"entryId\":\"' || :entryId || '\"') > 0",
+    )
     suspend fun clearBindingReferencing(entryId: String, updatedAt: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM sessions WHERE id = :id")
@@ -806,19 +814,6 @@ interface ChatDao {
     """)
     suspend fun loadMessageIdsPage(sessionId: String, offset: Int, limit: Int): List<String>
 
-    @Query("""
-        SELECT id, role, sort_order, substr(parts_json, 1, :headChars) AS head_text
-        FROM messages
-        WHERE session_id = :sessionId
-        ORDER BY sort_order ASC, created_at ASC
-        LIMIT :limit OFFSET :offset
-    """)
-    suspend fun loadMessageAnchorsPage(
-        sessionId: String,
-        offset: Int,
-        limit: Int,
-        headChars: Int,
-    ): List<MessageAnchorRow>
     /**
      * [T-android-huge-session-load-oom] Title / snippet / harvest callers only
      * need the first USER text head of a session (plus its char length to

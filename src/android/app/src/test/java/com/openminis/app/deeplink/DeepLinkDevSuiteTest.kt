@@ -1,6 +1,7 @@
 package com.openminis.app.deeplink
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,8 +23,17 @@ class DeepLinkDevSuiteTest {
 
     @Test
     fun `online tool id is also a valid install target`() {
+        // The parser only shape-checks the id; what makes this link honest is
+        // that the market resolves it through DevSuiteCatalog.installTargetById
+        // — see DevSuiteCatalogTest."deep link ids resolve to a bundle or an
+        // online tool". A tool id that parsed but resolved nowhere used to be
+        // consumed silently, leaving the user on an opened screen with nothing
+        // happening.
         val action = DeepLinkHandler.parseDevSuitePath("/install/llama-cpp")
         assertEquals("llama-cpp", (action as DeepLinkAction.OpenDevSuiteInstall).bundleId)
+        assertNotNull(
+            com.openminis.app.plugins.DevSuiteCatalog.installTargetById(action.bundleId),
+        )
     }
 
     @Test

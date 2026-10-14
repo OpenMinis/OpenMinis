@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.lang.ref.WeakReference
 import java.nio.charset.StandardCharsets
@@ -132,35 +133,50 @@ class TerminalSession(private val context: Context) {
 
         scope.launch {
             try {
-                PRootKernel.boot(context)
-
-                // Seed per-session env into the shared customEnvironment so the
-                // interactive shell inherits agent-configured vars.
-                if (sessionId != null) {
-                    ExecutionCoordinator.envVarRepository?.allAsDict()?.let { envVars ->
-                        PRootKernel.customEnvironment.putAll(envVars)
-                    }
+                // [T-android-startup-splash-hang] The first terminal open used
+                // to boot the PRoot kernel ON THE UI THREAD: refreshDns /
+                // configureUbuntuGuest file writes, registerGlobalBindMounts()
+                // .mkdirs(), installHandlerStubs() writes, NativeOffloadServer
+                // .start()'s abstract-socket bind + Thread.sleep backoff (up to
+                // ~1.55s) and its listFiles() sweep, and applyMountedFolders
+                // Snapshot()'s ContentResolver queries + File.canExecute()
+                // checks — all on Dispatchers.Main, the same ANR class the
+                // SessionWorkspace warmup fix removed. Run the blocking boot body
+                // (and this session's bind snapshot, itself mkdirs + resolve) on
+                // Dispatchers.IO; only the Termux session construction below
+                // needs Main (the scope default), so the PTY is still wired up
+                // on the UI thread. Boot ordering and isBooted visibility are
+                // unchanged — boot() is awaited in place and sets isBooted at its
+                // own end, before this withContext returns.
+                val launch = withContext(Dispatchers.IO) {
+                    PRootKernel.boot(context)
+                    val rootfsManager = RootfsManager.getInstance(context)
+                    val proot = rootfsManager.prootBinary.absolutePath
+                    val filesDir = context.filesDir.absolutePath
+                    // Refresh this chat's binds before reading the process-wide
+                    // map, or the terminal inherits whichever session booted last.
+                    sessionId?.let { ExecutionCoordinator.sessionBindMounts(it) }
+                    // Build PRoot arguments (mirrors legacy buildInteractiveCommand).
+                    // Pass the proot binary path so it lands in argv[0] — critical
+                    // for PRoot's option parsing (see buildTermuxArgs docs).
+                    val args = buildTermuxArgs(sessionId, rootfsManager, proot)
+                    // [T-session-env-not-global] Per-session env (API tokens from
+                    // the Environments store) is merged into THIS terminal's envp
+                    // by buildTermuxEnv; it is deliberately NOT pushed into
+                    // PRootKernel.customEnvironment — that is the process-global
+                    // map every later proot spawn reads, so putAll there leaked
+                    // one session's secrets into every other session and the
+                    // interactive terminal, and they were never cleared.
+                    val env = buildTermuxEnv(rootfsManager)
+                    TermuxLaunch(proot, filesDir, args, env)
                 }
-
-                val rootfsManager = RootfsManager.getInstance(context)
-                val proot = rootfsManager.prootBinary.absolutePath
-                val filesDir = context.filesDir.absolutePath
-                // Refresh this chat's binds before reading the process-wide map,
-                // or the terminal inherits whichever session booted last.
-                sessionId?.let { ExecutionCoordinator.sessionBindMounts(it) }
-
-                // Build PRoot arguments (mirrors legacy buildInteractiveCommand).
-                // Pass the proot binary path so it lands in argv[0] — critical
-                // for PRoot's option parsing (see buildTermuxArgs docs).
-                val args = buildTermuxArgs(sessionId, rootfsManager, proot)
-                val env = buildTermuxEnv(rootfsManager)
 
                 val client = TermuxSessionClient()
                 val session = com.termux.terminal.TerminalSession(
-                    proot,
-                    filesDir,
-                    args.toTypedArray(),
-                    env.toTypedArray(),
+                    launch.proot,
+                    launch.filesDir,
+                    launch.args.toTypedArray(),
+                    launch.env.toTypedArray(),
                     2_000, // scrollback rows — match RikkaHub default
                     client,
                 )
@@ -468,6 +484,17 @@ class TerminalSession(private val context: Context) {
     // ──────────────────────────────────────────────
     //  TermuxSessionClient — callbacks → outputBytes
     // ──────────────────────────────────────────────
+
+    /**
+     * The IO-prepared inputs for constructing a [com.termux.terminal.TerminalSession].
+     * Computed on [kotlinx.coroutines.Dispatchers.IO] in [start]; consumed on Main.
+     */
+    private data class TermuxLaunch(
+        val proot: String,
+        val filesDir: String,
+        val args: List<String>,
+        val env: List<String>,
+    )
 
     /**
      * Bridges Termux terminal events into the legacy [outputBytes] flow so

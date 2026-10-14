@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Vazio</string>
     <string name="common_close">Fechar</string>
     <string name="common_skip">Pular</string>
-    <string name="common_next">Avançar</string>
-    <string name="onboarding_welcome_title">Boas-vindas ao Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Seu Agente Minis Ultra, com terminal, navegador e acesso direto ao aparelho.</string>
-    <string name="onboarding_get_started">Começar</string>
-    <string name="onboarding_provider_title">Adicionar provedor</string>
-    <string name="onboarding_provider_subtitle">Para começar, informe a chave de API de pelo menos um provedor.</string>
-    <string name="onboarding_provider_api_key_label">Chave de API do %1$s</string>
-    <string name="onboarding_save_api_key">Salvar chave de API</string>
-    <string name="onboarding_saved">Salvo</string>
     <string name="onboarding_select_models_title">Escolher modelos</string>
     <string name="onboarding_select_models_subtitle">Escolha até 3 modelos para o seu grupo padrão.</string>
-    <string name="onboarding_search_models">Buscar modelos</string>
     <string name="onboarding_filter_models">Filtrar modelos</string>
     <string name="onboarding_done_count">Pronto (%1$d/3)</string>
     <string name="onboarding_loading_models">Carregando modelos…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Coloca novas conversas em um grupo compatível</string>
     <string name="appearance_auto_grouping_footer">Quando o título de uma conversa é gerado pela primeira vez, ela também é colocada em um grupo existente compatível. Roda uma vez por conversa, usa apenas grupos que você já criou e deixa a conversa sem grupo quando nada corresponde.</string>
     <string name="appearance_section_tool_preview">Barra de status da ferramenta</string>
-    <string name="appearance_tool_preview_footer">Mostra uma prévia ao vivo ao lado da barra de status da ferramenta enquanto o Agente trabalha.</string>
-    <string name="appearance_tool_preview_title">Janela de prévia da ferramenta</string>
     <string name="appearance_section_auto_focus_after_reply">Focar o campo automaticamente após a resposta</string>
     <string name="appearance_auto_focus_after_reply_title">Focar o campo automaticamente após a resposta</string>
     <string name="appearance_auto_focus_after_reply_footer">Quando ligado, o teclado aparece sozinho depois que o modelo termina de responder, deixando o campo pronto para a próxima pergunta. Vem ligado; desligue se preferir ler a resposta sem o teclado subindo de repente.</string>
@@ -1797,4 +1785,13 @@
     <string name="dev_suite_not_installed">Não instalado</string>
     <string name="dev_suite_required">obrigatório</string>
     <string name="dev_suite_assemble">Montar</string>
+    <string name="dev_suite_start_install">Iniciando a instalação</string>
+    <string name="dev_suite_apt_failed">Falha na instalação do apt (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Etapa falhou (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Instalação concluída, mas o teste de prontidão não passou</string>
+    <string name="dev_suite_interrupted">Instalação interrompida</string>
+    <string name="dev_suite_no_space">Armazenamento insuficiente: são necessários cerca de %1$d GB, %2$d GB disponíveis</string>
+    <string name="dev_suite_skipped_dep">Ignorado: %1$s não foi instalado</string>
+    <string name="dev_suite_uninstall_failed">Falha ao desinstalar (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Remover %1$s do sandbox? Os arquivos baixados e os links de comando serão excluídos; os pacotes apt permanecem instalados.</string>
 </resources>

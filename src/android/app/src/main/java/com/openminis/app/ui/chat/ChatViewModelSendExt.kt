@@ -178,8 +178,14 @@ internal fun ChatViewModel.sendMessage(
         // Ensure session exists in DB (creates on first message for draft sessions)
         val activeSessionId = ensureSession()
 
-        if (editingId != null) {
-            truncateBeforeEdit(editingId)
+        if (editingId != null && !truncateBeforeEdit(editingId)) {
+            // [T-anchor-lookup-fail-closed] The truncation anchor could not be
+            // read, so the rows this edit would replace are still live in the
+            // DB. Persisting the edited text anyway would stack a duplicate
+            // turn on top of them (and the next history rebuild would show the
+            // model both). Drop the send; truncateBeforeEdit mutated nothing on
+            // this path and already raised _error with the reason.
+            return@launch
         }
 
         val prepared = prepareUserAttachments(currentAttachments, activeSessionId)

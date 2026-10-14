@@ -109,7 +109,7 @@ class MinisNotifyOffloadHandler(private val context: Context) : NativeOffloadHan
     }
 
     private fun ensureChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // minSdk 26 (O): the old `< O` early-return was dead.
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel(CHANNEL) == null) {
             nm.createNotificationChannel(

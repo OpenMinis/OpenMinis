@@ -97,6 +97,42 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.sp
 import com.openminis.app.ui.theme.ChatColors
 
+/**
+ * The page URL a `browser_use` block points at: [block]'s live `browserURL` →
+ * its own `url` argument ([argsUrl]) → the nearest PRECEDING `browser_use`
+ * block's URL, which is what a `click` / `screenshot` / `scroll` action that
+ * carries no url falls back to (mirrors iOS `resolvedBrowserURL`).
+ *
+ * The sheet header's "open in browser" action and the body's URL bar used to
+ * hand-maintain two copies of this walk, and the body's copy was missing the
+ * `browser_use` filter on the back-scan — so for the same block the pill could
+ * show a file path (any earlier tool's `toolArgs.url`-shaped field) while the
+ * header opened something else, even though the header comment promised they
+ * resolve "the same way". One helper, one rule.
+ */
+private fun resolveBrowserUrl(
+    block: AssistantBlock,
+    toolBlocks: List<AssistantBlock>,
+    argsUrl: String,
+): String =
+    block.browserURL?.takeIf { it.isNotEmpty() }
+        ?: argsUrl.takeIf { it.isNotEmpty() }
+        ?: run {
+            val idx = toolBlocks.indexOfFirst { it.id == block.id }
+            if (idx > 0) {
+                (idx - 1 downTo 0).firstNotNullOfOrNull { i ->
+                    val prev = toolBlocks[i]
+                    if (prev.toolName != "browser_use") return@firstNotNullOfOrNull null
+                    prev.browserURL?.takeIf { it.isNotEmpty() }
+                        ?: try {
+                            org.json.JSONObject(prev.toolArgs)
+                                .optString("url", "")
+                                .takeIf { it.isNotEmpty() }
+                        } catch (_: Exception) { null }
+                }
+            } else null
+        } ?: ""
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ToolDetailSheet(
@@ -194,31 +230,16 @@ internal fun ToolDetailSheet(
                 val toolArgsForAction = remember(block.toolArgs) {
                     try { org.json.JSONObject(block.toolArgs) } catch (_: Exception) { org.json.JSONObject() }
                 }
-                // Resolve the browser URL the same way the inline preview does
-                // (block.browserURL → args.url → most-recent prior browser_use
-                // block) so the top-right action lines up with the URL pill
-                // shown below.
+                // Resolve the browser URL through [resolveBrowserUrl], the SAME
+                // helper the URL pill below uses, so the top-right action and
+                // the pill can never name two different pages.
                 val browserActionUrl = remember(block.id, block.browserURL, block.toolArgs, toolBlocks) {
                     if (!isBrowserTool) ""
-                    else {
-                        val direct = block.browserURL?.takeIf { it.isNotEmpty() }
-                        val argsUrl = toolArgsForAction.optString("url", "").takeIf { it.isNotEmpty() }
-                        direct ?: argsUrl ?: run {
-                            val idx = toolBlocks.indexOfFirst { it.id == block.id }
-                            if (idx > 0) {
-                                (idx - 1 downTo 0).firstNotNullOfOrNull { i ->
-                                    val prev = toolBlocks[i]
-                                    if (prev.toolName != "browser_use") return@firstNotNullOfOrNull null
-                                    prev.browserURL?.takeIf { it.isNotEmpty() }
-                                        ?: try {
-                                            org.json.JSONObject(prev.toolArgs)
-                                                .optString("url", "")
-                                                .takeIf { it.isNotEmpty() }
-                                        } catch (_: Exception) { null }
-                                }
-                            } else null
-                        } ?: ""
-                    }
+                    else resolveBrowserUrl(
+                        block,
+                        toolBlocks,
+                        toolArgsForAction.optString("url", ""),
+                    )
                 }
                 val hasBrowserUrl = isBrowserTool && browserActionUrl.isNotEmpty()
                 val spillPath = remember(block.content) {
@@ -673,22 +694,10 @@ internal fun ToolDetailSheet(
                     "browser_use" -> {
                         val action = toolArgsObj.optString("action", "")
                         val argsUrl = toolArgsObj.optString("url", "")
-                        // Resolved URL: prefer block.browserURL (actual page URL), fallback to args URL,
-                        // then inherit from preceding browser block (mirrors iOS resolvedBrowserURL).
-                        val resolvedUrl = block.browserURL?.takeIf { it.isNotEmpty() }
-                            ?: argsUrl.takeIf { it.isNotEmpty() }
-                            ?: run {
-                                val blockIdx = toolBlocks.indexOfFirst { it.id == block.id }
-                                if (blockIdx > 0) {
-                                    (blockIdx - 1 downTo 0).firstNotNullOfOrNull { i ->
-                                        val prev = toolBlocks[i]
-                                        prev.browserURL?.takeIf { it.isNotEmpty() }
-                                            ?: try {
-                                                org.json.JSONObject(prev.toolArgs).optString("url", "").takeIf { it.isNotEmpty() }
-                                            } catch (_: Exception) { null }
-                                    }
-                                } else null
-                            } ?: ""
+                        // [resolveBrowserUrl] — the same resolution the header
+                        // action button uses, including the browser_use-only
+                        // back-scan this site used to skip.
+                        val resolvedUrl = resolveBrowserUrl(block, toolBlocks, argsUrl)
                         // Preview priority (matches iOS): live WebView snapshot while the
                         // tool is running → current block's saved imageFilePath → most
                         // recent preceding browser_use block's screenshot.

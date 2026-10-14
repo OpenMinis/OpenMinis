@@ -910,7 +910,15 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
     private fun handleExec(rest: List<String>, args: OffloadArgs): NativeOffloadResult {
         if (rest.isEmpty() || rest.firstOrNull() in listOf("help", "--help", "-h")) return ok(EXEC_HELP)
         val cmd = rest.joinToString(" ")
-        val timeout = args.getInt("timeout-ms")?.toLong() ?: 30_000L
+        // [T-shizuku-timeout-clamp] android-shizuku is not special-cased in
+        // NativeOffloadServer.handlerDeadlineMs, so its host watchdog is the
+        // default 20s. A --timeout-ms above that made the Shizuku child outrun
+        // the watchdog: the guest got handler_timeout/exit 124 while this thread
+        // kept waiting to the requested timeout and leaked. Clamp the exec
+        // timeout under the watchdog; a longer job must go through a named
+        // deadline in handlerDeadlineMs, not an unbounded --timeout-ms.
+        val timeout = (args.getInt("timeout-ms")?.toLong() ?: 30_000L)
+            .coerceIn(1_000L, MAX_EXEC_TIMEOUT_MS)
         val r = ShizukuManager.runProcess(arrayOf("sh", "-c", cmd), timeoutMs = timeout)
         val data = JSONObject()
             .put("command", cmd)
@@ -1049,6 +1057,10 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
 
     companion object {
         private const val TAG = "ShizukuOffload"
+
+        // [T-shizuku-timeout-clamp] Stays under NativeOffloadServer's default
+        // 20s handler watchdog so the exec never outruns the host reply.
+        private const val MAX_EXEC_TIMEOUT_MS = 18_000L
 
         private const val HELP = """android-shizuku-cli — privileged Android system control via Shizuku.
 

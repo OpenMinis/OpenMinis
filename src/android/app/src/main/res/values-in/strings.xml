@@ -360,18 +360,8 @@
     <string name="memory_file_empty">Kosong</string>
     <string name="common_close">Tutup</string>
     <string name="common_skip">Lewati</string>
-    <string name="common_next">Berikutnya</string>
-    <string name="onboarding_welcome_title">Selamat datang di Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Agen Minis Ultra Anda dengan terminal, peramban, dan akses langsung ke perangkat.</string>
-    <string name="onboarding_get_started">Mulai</string>
-    <string name="onboarding_provider_title">Tambahkan Penyedia</string>
-    <string name="onboarding_provider_subtitle">Masukkan kunci API untuk setidaknya satu penyedia agar dapat memulai.</string>
-    <string name="onboarding_provider_api_key_label">Kunci API %1$s</string>
-    <string name="onboarding_save_api_key">Simpan Kunci API</string>
-    <string name="onboarding_saved">Tersimpan</string>
     <string name="onboarding_select_models_title">Pilih Model</string>
     <string name="onboarding_select_models_subtitle">Pilih hingga 3 model untuk grup bawaan Anda.</string>
-    <string name="onboarding_search_models">Cari model</string>
     <string name="onboarding_filter_models">Filter model</string>
     <string name="onboarding_done_count">Selesai (%1$d/3)</string>
     <string name="onboarding_loading_models">Memuat model…</string>
@@ -633,8 +623,6 @@
     <string name="appearance_auto_grouping_subtitle">Masukkan obrolan baru ke grup yang cocok</string>
     <string name="appearance_auto_grouping_footer">Saat judul sebuah obrolan pertama kali dibuat, obrolan tersebut juga dimasukkan ke grup yang cocok. Berjalan sekali per obrolan, hanya menggunakan grup yang sudah Anda buat, dan membiarkan obrolan tanpa grup jika tidak ada yang cocok.</string>
     <string name="appearance_section_tool_preview">Bilah Status Alat</string>
-    <string name="appearance_tool_preview_footer">Tampilkan pratinjau langsung di samping bilah status alat selama Agen bekerja.</string>
-    <string name="appearance_tool_preview_title">Jendela Pratinjau Alat</string>
     <string name="appearance_section_auto_focus_after_reply">Fokus Otomatis ke Kolom Setelah Balasan</string>
     <string name="appearance_auto_focus_after_reply_title">Fokus Otomatis ke Kolom Setelah Balasan</string>
     <string name="appearance_auto_focus_after_reply_footer">Jika aktif, keyboard muncul otomatis setelah model selesai membalas sehingga kolom input siap untuk pertanyaan lanjutan. Aktif secara bawaan; nonaktifkan jika Anda lebih suka membaca balasan tanpa keyboard yang muncul tiba-tiba.</string>
@@ -1802,4 +1790,13 @@
     <string name="dev_suite_not_installed">Belum terpasang</string>
     <string name="dev_suite_required">wajib</string>
     <string name="dev_suite_assemble">Rakit</string>
+    <string name="dev_suite_start_install">Memulai instalasi</string>
+    <string name="dev_suite_apt_failed">Instalasi apt gagal (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Langkah gagal (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Instalasi selesai tetapi pemeriksaan kesiapan tidak lulus</string>
+    <string name="dev_suite_interrupted">Instalasi terputus</string>
+    <string name="dev_suite_no_space">Penyimpanan tidak cukup: butuh sekitar %1$d GB, tersedia %2$d GB</string>
+    <string name="dev_suite_skipped_dep">Dilewati: %1$s gagal dipasang</string>
+    <string name="dev_suite_uninstall_failed">Gagal melepas (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Hapus %1$s dari sandbox? Berkas unduhan dan tautan perintah dihapus; paket apt tetap terpasang.</string>
 </resources>

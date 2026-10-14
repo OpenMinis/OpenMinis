@@ -7,6 +7,8 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -106,15 +108,55 @@ class MCPRepository(private val context: Context) {
     private val serversFile: File
         get() = File(mcpDir, "servers.json")
 
+    // -- Load / Save (servers.json is the source of truth) --
+
+    private val warmupScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+
+    @Volatile
+    private var loaded = false
+
+    /** Guards the one-time blocking fallback in [ensureLoaded]. */
+    private val loadLock = Any()
+
     init {
+        // [T-android-startup-repo-io] The constructor used to parse servers.json
+        // INLINE while MinisApp.onCreate() was still on the main thread — the same
+        // miss #753 closed for ProviderRepository (and the sibling of the
+        // SkillRepository fix; MinisApp already moved the rest of startup off Main
+        // "so a large library never blocks the first frame"). The first read now
+        // runs on this repository's own IO scope, and [ensureLoaded] keeps the
+        // observable read semantics for anything that touches the list before the
+        // warm-up lands.
+        warmupScope.launch {
+            runCatching { load() }.onFailure {
+                Log.e(TAG, "deferred MCP load failed: ${it.message}", it)
+            }
+        }
+    }
+
+    /**
+     * [T-android-startup-repo-io] Suspend entry point for startup / IO callers —
+     * what MinisApp should call instead of relying on the constructor.
+     */
+    suspend fun loadSuspending() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         load()
     }
 
-    // -- Load / Save (servers.json is the source of truth) --
+    /** Blocks only while the very first read is still outstanding. */
+    private fun ensureLoaded() {
+        if (loaded || Thread.holdsLock(loadLock)) return
+        synchronized(loadLock) {
+            if (loaded) return
+            runCatching { load() }.onFailure { Log.e(TAG, "ensureLoaded read failed: ${it.message}") }
+        }
+    }
 
     /** Re-read `servers.json` from disk and re-publish [servers]. */
     fun load() {
         _servers.value = readServersFile()
+        loaded = true
     }
 
     /** Alias matching SkillRepository.reloadFromDisk() so callers read symmetrically. */
@@ -330,36 +372,57 @@ class MCPRepository(private val context: Context) {
     /** Add or overwrite a server (rename/overwrite is last-write-wins by id). */
     fun add(server: MCPServerConfig): Boolean {
         if (server.id.isBlank()) return false
-        _servers.value = _servers.value.filter { it.id != server.id } + server
+        ensureLoaded()
+        _servers.update { list -> list.filter { it.id != server.id } + server }
         if (!save()) return false
         Log.i(TAG, "Added MCP server: ${server.id}")
         return true
     }
 
     fun update(server: MCPServerConfig): Boolean {
+        ensureLoaded()
         if (_servers.value.none { it.id == server.id }) return false
-        _servers.value = _servers.value.map { if (it.id == server.id) server else it }
+        _servers.update { list -> list.map { if (it.id == server.id) server else it } }
         return save()
     }
 
+    /**
+     * Delete a server.
+     *
+     * [T-android-startup-repo-io] The `mcp_session_overrides` purge opened mcp.db
+     * (`McpDbHelper.writableDatabase`, i.e. CREATE TABLE + PRAGMA on first touch)
+     * on the CALLER thread — which for a UI swipe-to-delete is the main thread. The
+     * row cleanup, the OAuth secret purge and the file save now run on the
+     * repository's IO scope; the in-memory list drops the server immediately so
+     * every reader sees the delete at once.
+     */
     fun delete(id: String) {
-        db.execSQL("DELETE FROM mcp_session_overrides WHERE mcp_id=?", arrayOf(id))
+        ensureLoaded()
+        _servers.update { list -> list.filter { it.id != id } }
         overrideRevision++
-        // Secrets + guest bridge must not outlive the server entry.
-        com.openminis.app.mcp.oauth.MCPOAuthStore.purge(context, id)
-        _servers.value = _servers.value.filter { it.id != id }
-        save()
+        warmupScope.launch {
+            runCatching {
+                db.execSQL("DELETE FROM mcp_session_overrides WHERE mcp_id=?", arrayOf(id))
+            }.onFailure { Log.w(TAG, "session-override purge for $id failed: ${it.message}") }
+            // Secrets + guest bridge must not outlive the server entry.
+            runCatching {
+                com.openminis.app.mcp.oauth.MCPOAuthStore.purge(context, id)
+            }.onFailure { Log.w(TAG, "oauth purge for $id failed: ${it.message}") }
+            save()
+        }
         Log.i(TAG, "Deleted MCP server: $id")
     }
 
     fun setEnabled(id: String, enabled: Boolean) {
-        _servers.value = _servers.value.map {
-            if (it.id == id) it.copy(enabled = enabled) else it
+        ensureLoaded()
+        _servers.update { list ->
+            list.map { if (it.id == id) it.copy(enabled = enabled) else it }
         }
         save()
     }
 
     fun toggle(id: String) {
+        ensureLoaded()
         val current = _servers.value.find { it.id == id } ?: return
         setEnabled(id, !current.enabled)
     }

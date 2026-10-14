@@ -1,5 +1,15 @@
 pluginManagement {
     includeBuild("build-logic")
+    // [T-gradle-script-plugin-mgmt-scope] The shared minisCollectMavenMirrors()
+    // at the bottom of this file CANNOT be called from here: Gradle compiles the
+    // `pluginManagement` block into its own script body that is evaluated before
+    // the rest of settings.gradle.kts, so a top-level `fun` declared later is an
+    // Unresolved reference and the whole build fails at configuration time
+    // ("Script compilation errors", before any task even runs). The de-dup is
+    // therefore only possible on the dependencyResolutionManagement side (line ~18),
+    // which is part of the main script body. If this ever moves to build-logic as a
+    // plugin, both call sites can share it; until then the two copies must be kept
+    // in step — the comment below is the only thing preventing silent drift.
     val extraMirrors = run {
         val mode = (System.getenv("MINIS_BUILD_MIRRORS") ?: "auto").lowercase()
         val extra = mutableListOf<String>()
@@ -91,6 +101,11 @@ include(":benchmark")
  *
  * MINIS_BUILD_MIRRORS=auto|cn|off
  * MINIS_MAVEN_URLS=https://...,https://...
+ *
+ * Shared by every NON-pluginManagement repository block in this script
+ * (dependencyResolutionManagement today). The pluginManagement block keeps its
+ * own inline copy because Gradle cannot see this function from there — see
+ * [T-gradle-script-plugin-mgmt-scope] above; change one, change both.
  */
 fun minisCollectMavenMirrors(): List<String> {
     val mode = (System.getenv("MINIS_BUILD_MIRRORS") ?: "auto").lowercase()

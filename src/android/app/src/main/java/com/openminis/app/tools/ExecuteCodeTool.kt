@@ -126,7 +126,13 @@ object ExecuteCodeTool {
                 val prelude = buildString {
                     for (t in SANDBOX_TOOLS) {
                         append("function $t(p){")
-                        append("if(typeof p==='string'){var k={file_read:'path',list_dir:'path',grep:'pattern',glob:'pattern',web_search:'query',web_fetch:'url',memory_get:'name',grep_source:'pattern'};")
+                        // [T-execute-code-memory-get] memory_get takes `keywords`,
+                        // not `name`: mapping a keyword search to a parameter the
+                        // executor never reads made every memory_get("python") call
+                        // look like an unfiltered request, i.e. a FULL memory dump
+                        // (capped only at 500 lines) pushed into the JS bridge
+                        // instead of the handful of matching lines asked for.
+                        append("if(typeof p==='string'){var k={file_read:'path',list_dir:'path',grep:'pattern',glob:'pattern',web_search:'query',web_fetch:'url',memory_get:'keywords',grep_source:'pattern'};")
                         append("var o={};o[k['$t']||'query']=p;return __minis_call('$t', JSON.stringify(o));}")
                         append("if(p==null||typeof p!=='object'){return 'Error: $t expects an object like {path:\\\"...\\\"} or a string, got '+(typeof p);}")
                         append("return __minis_call('$t', JSON.stringify(p));}\n")

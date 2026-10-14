@@ -8,11 +8,19 @@
 # documentation must not be baked into a release artifact. AGP merges
 # src/debug/assets only for debug variants — no extra Gradle config needed.
 #
-# Why a separate script from gen_debug_skill.sh (iOS): iOS embeds base64 into a
-# generated Swift source file; Android just needs plain files on disk. And the
-# CLIENT differs — Android's debug server uses plaintext JSON-RPC + an optional
-# X-Minis-Token header, NOT the iOS protocol-v1 encrypted envelope, so shipping
-# the iOS envelope clients here would actively mislead.
+# NOTE ON REACHABILITY: app/build.gradle.kts currently disables every `debug`
+# variant via androidComponents.beforeVariants, and CI builds release only, so
+# the merge*DebugAssets tasks this script is wired to never fire in the default
+# configuration. See the "调试变体已停用" note in BUILDING.md. Re-enabling a
+# debug variant is what makes this generator run again.
+#
+# This is the only debug-skill generator in the tree. The iOS counterpart
+# (scripts/gen_debug_skill.sh, which base64-embedded the same SKILL.md into a
+# generated DebugSkillGenerated.swift under the non-existent src/ios) was
+# removed as dead: this repo has no iOS project and no Xcode build phase to run
+# it. The CLIENT differs anyway — Android's debug server uses plaintext JSON-RPC
+# + an optional X-Minis-Token header, NOT the iOS protocol-v1 encrypted
+# envelope, so shipping the iOS envelope clients here would actively mislead.
 #
 # DO NOT COMMIT the output (src/debug/ is gitignored).
 set -eu

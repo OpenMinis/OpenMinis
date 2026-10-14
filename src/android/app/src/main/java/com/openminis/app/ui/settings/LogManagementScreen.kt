@@ -263,15 +263,28 @@ private fun LogsBody(
         }
 
         if (showStreamTraces) {
-            val tracesDir = com.openminis.app.provider.StreamTraceRecorder.dir(context)
-            val traceFiles = remember(showStreamTraces) {
-                tracesDir.listFiles()?.sortedByDescending { it.lastModified() }?.take(30) ?: emptyList()
+            // [T-android-sessionlist-prefs-io] listFiles() plus a lastModified()
+            // stat for every candidate is disk IO, and it used to run in the
+            // composition body the instant the sheet opened. Empty first frame,
+            // real list from Dispatchers.IO.
+            var traceFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+            var traceFilesLoaded by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                traceFiles = withContext(Dispatchers.IO) {
+                    val tracesDir = com.openminis.app.provider.StreamTraceRecorder.dir(context)
+                    tracesDir.listFiles()
+                        ?.sortedByDescending { it.lastModified() }?.take(30)
+                        ?: emptyList()
+                }
+                traceFilesLoaded = true
             }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showStreamTraces = false },
                 title = { Text("轨迹回放（最近 30 条）") },
                 text = {
-                    if (traceFiles.isEmpty()) {
+                    if (!traceFilesLoaded) {
+                        CircularProgressIndicator()
+                    } else if (traceFiles.isEmpty()) {
                         Text("暂无轨迹。打开「录制流式轨迹」后发一次消息即开始录制。")
                     } else {
                         Column(
@@ -298,42 +311,53 @@ private fun LogsBody(
         }
 
         selectedTraceFile?.let { f ->
+            // [T-android-sessionlist-prefs-io] readLines() + JSON parsing of up
+            // to 400 chunk frames per open, previously a `remember(f)` in the
+            // dialog body — i.e. on the main thread inside a Compose frame.
+            var traceBody by remember(f) { mutableStateOf<String?>(null) }
+            LaunchedEffect(f) {
+                traceBody = withContext(Dispatchers.IO) {
+                    runCatching {
+                        f.readLines()
+                            .takeLast(400)
+                            .joinToString("\n") { line ->
+                                runCatching {
+                                    val obj = org.json.JSONObject(line)
+                                    when (obj.optString("kind")) {
+                                        "text" -> "text: ${obj.optString("text").take(120)}"
+                                        "thinking" -> "thinking: ${obj.optString("text").take(120)}"
+                                        "reasoning" -> "reasoning: ${obj.optString("content").take(120)}"
+                                        "tool_use_start" -> "tool_use_start: ${obj.optString("name")}"
+                                        "tool_call_complete" -> "tool_call_complete: ${obj.optString("name")}"
+                                        "finished" -> "finished: ${obj.optString("stopReason")}"
+                                        else -> obj.optString("kind")
+                                    }
+                                }.getOrDefault(line.take(120))
+                            }
+                    }.getOrDefault("读取失败")
+                }
+            }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { selectedTraceFile = null },
                 title = { Text(f.name) },
                 text = {
-                    val body = remember(f) {
-                        runCatching {
-                            f.readLines()
-                                .takeLast(400)
-                                .joinToString("\n") { line ->
-                                    runCatching {
-                                        val obj = org.json.JSONObject(line)
-                                        when (obj.optString("kind")) {
-                                            "text" -> "text: ${obj.optString("text").take(120)}"
-                                            "thinking" -> "thinking: ${obj.optString("text").take(120)}"
-                                            "reasoning" -> "reasoning: ${obj.optString("content").take(120)}"
-                                            "tool_use_start" -> "tool_use_start: ${obj.optString("name")}"
-                                            "tool_call_complete" -> "tool_call_complete: ${obj.optString("name")}"
-                                            "finished" -> "finished: ${obj.optString("stopReason")}"
-                                            else -> obj.optString("kind")
-                                        }
-                                    }.getOrDefault(line.take(120))
-                                }
-                        }.getOrDefault("读取失败")
-                    }
+                    val body = traceBody
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 420.dp)
                             .verticalScroll(rememberScrollState()),
                     ) {
-                        Text(
-                            body,
-                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(
-                                fontFamily = FontFamily.Monospace,
-                            ),
-                        )
+                        if (body == null) {
+                            CircularProgressIndicator()
+                        } else {
+                            Text(
+                                body,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                ),
+                            )
+                        }
                     }
                 },
                 confirmButton = {
@@ -364,15 +388,26 @@ private fun LogsBody(
         }
 
         if (showAnswerVersions) {
-            val versionsDir = java.io.File("/var/minis/workspace/offloads/answer-versions")
-            val files = remember(showAnswerVersions) {
-                versionsDir.listFiles()?.sortedByDescending { it.lastModified() }?.take(30) ?: emptyList()
+            // [T-android-sessionlist-prefs-io] Directory scan off the
+            // composition body — same reasoning as the trace list above.
+            var versionFiles by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
+            var versionFilesLoaded by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                versionFiles = withContext(Dispatchers.IO) {
+                    val versionsDir = java.io.File("/var/minis/workspace/offloads/answer-versions")
+                    versionsDir.listFiles()
+                        ?.sortedByDescending { it.lastModified() }?.take(30)
+                        ?: emptyList()
+                }
+                versionFilesLoaded = true
             }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showAnswerVersions = false },
                 title = { Text("旧回答归档（最近 30 条）") },
                 text = {
-                    if (files.isEmpty()) {
+                    if (!versionFilesLoaded) {
+                        CircularProgressIndicator()
+                    } else if (versionFiles.isEmpty()) {
                         Text("暂无归档。重试某条回答后，被覆盖的上一版会出现在这里。")
                     } else {
                         Column(
@@ -381,7 +416,7 @@ private fun LogsBody(
                                 .heightIn(max = 420.dp)
                                 .verticalScroll(rememberScrollState()),
                         ) {
-                            files.forEach { f ->
+                            versionFiles.forEach { f ->
                                 TextButton(onClick = { selectedVersionFile = f }) {
                                     Text(
                                         f.name,
@@ -399,26 +434,38 @@ private fun LogsBody(
         }
 
         selectedVersionFile?.let { f ->
+            // [T-android-sessionlist-prefs-io] The old code read the file TWICE
+            // (once for the JSON probe, once for the fallback) inside a
+            // `remember(f)` in the dialog body — a whole-archive readText on the
+            // main thread, in composition. Now one read, on IO.
+            var versionBody by remember(f) { mutableStateOf<String?>(null) }
+            LaunchedEffect(f) {
+                versionBody = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val raw = f.readText()
+                        org.json.JSONObject(raw).optString("partsJson", raw).take(3_000)
+                    }.getOrDefault("读取失败")
+                }
+            }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { selectedVersionFile = null },
                 title = { Text(f.name) },
                 text = {
-                    val body = remember(f) {
-                        runCatching {
-                            val obj = org.json.JSONObject(f.readText())
-                            obj.optString("partsJson", f.readText()).take(3_000)
-                        }.getOrDefault("读取失败")
-                    }
+                    val body = versionBody
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 420.dp)
                             .verticalScroll(rememberScrollState()),
                     ) {
-                        Text(
-                            body,
-                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
-                        )
+                        if (body == null) {
+                            CircularProgressIndicator()
+                        } else {
+                            Text(
+                                body,
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                            )
+                        }
                     }
                 },
                 confirmButton = {

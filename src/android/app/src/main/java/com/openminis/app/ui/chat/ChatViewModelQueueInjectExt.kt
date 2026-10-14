@@ -11,9 +11,10 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     finishedAccumulatedText: String,
     finishedAllToolBlocks: List<AssistantBlock>,
 ): ChatViewModel.InjectedTurn? {
-    if (_promptQueue.value.isEmpty()) return null
-    val queued = _promptQueue.value
-    _promptQueue.value = emptyList()
+    // [T-android-queue-atomic-mutation] CAS claim shared with drainQueuedPrompts
+    // — see the note there for why a read-then-clear lost prompts (and re-sent
+    // drained ones) across the Main/IO boundary.
+    val queued = claimPromptQueue() ?: return null
 
     // [T-android-queued-message-duplicated-on-inject] REMOVE the queued
     // placeholder bubbles (the ones enqueuePrompt added with

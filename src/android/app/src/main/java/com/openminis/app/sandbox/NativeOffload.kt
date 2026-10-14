@@ -367,9 +367,30 @@ object NativeOffloadServer {
             val raw = if (idx >= 0) argv.getOrNull(idx + 1)?.toIntOrNull() else null
             return (raw ?: defaultSec).coerceIn(1, capSec)
         }
+        // The a11y watch sub-commands (event/notify/dialog watch) take their
+        // wait in MILLISECONDS (--duration / --timeout), clamped to 120s inside
+        // AccessibilityOffloadHandler — so the deadline reads ms, not flagSec.
+        fun flagMs(flag: String, defaultMs: Long, capMs: Long): Long {
+            val idx = argv.indexOf("--$flag")
+            val raw = if (idx >= 0) argv.getOrNull(idx + 1)?.toLongOrNull() else null
+            return (raw ?: defaultMs).coerceIn(1_000L, capMs)
+        }
         return when (name) {
             "minis-browser-use" -> 100_000L
-            "android-a11y-cli" -> 75_000L
+            // [T-a11y-deadline-duration] `android-a11y-cli event watch
+            // --duration 90000` blocks up to `duration` AFTER a grant prompt of
+            // up to AccessibilityRecoveryManager.PROMPT_TIMEOUT_MS. A fixed 75s
+            // watchdog fired handler_timeout/exit 124 while the handler kept
+            // running to 150s+, leaking an abandoned thread per call — the exact
+            // "false timeout, real result dropped" the KDoc above forbids.
+            // Derive the deadline from the request the way android-speech does,
+            // and outlast prompt + watch + reply overhead.
+            "android-a11y-cli" -> {
+                val watchMs = if ("--duration" in argv) flagMs("duration", 30_000L, 120_000L)
+                    else flagMs("timeout", 30_000L, 120_000L)
+                com.openminis.app.accessibility.AccessibilityRecoveryManager.PROMPT_TIMEOUT_MS +
+                    watchMs + 15_000L
+            }
             "android-speech" -> {
                 val listen = if ("--duration" in argv) flagSec("duration", 30, 120) else flagSec("timeout", 30, 120)
                 15_000L + listen * 1_000L + 10_000L

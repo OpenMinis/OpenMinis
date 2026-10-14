@@ -101,6 +101,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -1282,7 +1283,7 @@ class ChatViewModel(
      * list reference at turn *boundaries* — at start (message added) and
      * end (final content synced back).
      *
-     * Renderers that need streaming content (AssistantText, Thinking,
+     * Renderers that need streaming content (markdown blocks, Thinking,
      * tool pills, etc.) read this flow per-item inside their composable
      * scope so Compose's stable-skip restricts the recompose blast radius
      * to that one item.
@@ -1724,7 +1725,17 @@ class ChatViewModel(
             providerRepository.config.value.instances.find { it.id == iid }?.label
         }
 
-    /** Prompts enqueued while the agent loop is running. Drained after the loop finishes. */
+    /**
+     * Prompts enqueued while the agent loop is running. Drained after the loop finishes.
+     *
+     * [T-android-queue-atomic-mutation] This list is written from TWO threads:
+     * `enqueuePrompt` / the withdraw + remove helpers run on Main, while the
+     * drain + mid-loop inject claim it from the agent loop on Dispatchers.IO.
+     * A `_promptQueue.value = _promptQueue.value + x` read-modify-write is not
+     * atomic across that boundary — so every mutation here goes through
+     * `update { }` (CAS loop) and every claim through `compareAndSet`, which
+     * takes a snapshot atomically or retries on the value that won the race.
+     */
     internal val _promptQueue = MutableStateFlow<List<QueuedPrompt>>(emptyList())
     val promptQueue: StateFlow<List<QueuedPrompt>> = _promptQueue.asStateFlow()
 
@@ -3452,8 +3463,10 @@ class ChatViewModel(
      *   - network/offline — the request never reached a model, so payload size
      *     is irrelevant and splitting just doubles the failed round-trips.
      *
-     * This deliberately REPLACES [isContextTooLargeError] on the split path.
-     * That substring allow-list tried to enumerate how every provider words an
+     * This deliberately REPLACES the old substring allow-list on the split
+     * path (the iOS `isContextTooLargeError` port, removed once
+     * T-compact-segment-retry-any-error made it dead code). That list tried to
+     * enumerate how every provider words an
      * over-length refusal and was provably incomplete — OpenMinis#133's
      * `[context_length_exceeded] Your input exceeds the context window of this
      * model` slipped past several variants — and every miss silently disabled
@@ -3480,29 +3493,6 @@ class ChatViewModel(
      */
     internal fun isSegmentRetryableError(error: Throwable): Boolean =
         shouldSplitOnError(error)
-
-    /**
-     * Match provider error text against the substring set iOS
-     * `isContextTooLargeError` used before T-compact-segment-retry-any-error.
-     *
-     * NO LONGER gates segment retry — [isSegmentRetryableError] does, for the
-     * reasons documented there. Retained only for user-facing wording, where
-     * guessing wrong costs a less specific message rather than a failed
-     * compaction.
-     */
-    @Suppress("unused")
-    private fun isContextTooLargeError(error: Throwable): Boolean {
-        val desc = (error.message ?: error.toString()).lowercase()
-        return desc.contains("too many tokens") ||
-            desc.contains("context length") ||
-            desc.contains("max_tokens") ||
-            desc.contains("content is too long") ||
-            desc.contains("exceeds the model") ||
-            desc.contains("request too large") ||
-            desc.contains("prompt is too long") ||
-            desc.contains("token limit") ||
-            desc.contains("context window")
-    }
 
 
     /** What the pre-send context check decided. Mirrors iOS's send() branch. */
@@ -4178,11 +4168,34 @@ class ChatViewModel(
                 val loaded = chatRepository.loadSessionTail(sid)
                 chatRepository.hydrateDisplayRows(loaded.messages)
             }
-            val painted = tail.toChatMessages()
-            _messages.value = painted
-            timeline.reset()
-            timeline.noteBounds(tail)
-            refreshHistoryEdges(scheduleTail = false)
+            // [T-android-restore-paint-mutex] Hold the ledger's mutation mutex
+            // around the paint, exactly like loadOlderPage (see its
+            // T-android-timeline-ledger note): this is a WHOLESALE `_messages`
+            // swap plus a `timeline.reset()`, so an older-page splice or
+            // tail-attach that interleaved with the two IO hops above would be
+            // erased along with it.
+            //
+            // The second `_isStreaming` check is the point of the lock. The
+            // click-time gate only covers the moment of the tap; a send (or a
+            // loadOlderPage) that started during the restore would otherwise
+            // have its optimistic user row dropped from the UI while its stream
+            // keeps writing to a row that is no longer painted. The rows are
+            // already restored on disk at this point, so skipping the paint only
+            // defers the refresh — the next open (or any later paint) shows them.
+            timeline.mutationMutex.withLock {
+                if (_isStreaming.value) {
+                    AppLogger.info(
+                        TAG,
+                        "restoreArchivedMessages: a turn started during the restore — " +
+                            "skipping the paint so its rows survive (${result.restoredCount} restored)",
+                    )
+                } else {
+                    _messages.value = tail.toChatMessages()
+                    timeline.reset()
+                    timeline.noteBounds(tail)
+                    refreshHistoryEdges(scheduleTail = false)
+                }
+            }
         }
     }
 
@@ -4218,7 +4231,7 @@ class ChatViewModel(
         toolLoopDetector.reset()
         _canResume.value = false
         _attachments.value = emptyList()
-        _promptQueue.value = emptyList()
+        _promptQueue.update { emptyList() }
         _hasInjectedShareContent.value = false
         // T261: tool-detail sheet is per-session UI state — clear it so a
         // newly cleared chat doesn't briefly flash a stale tool's sheet
@@ -4557,7 +4570,12 @@ class ChatViewModel(
         val message = messages[index]
         // [T-android-tool-autoscroll] Start-of-turn snap — see resume().
         _forceScrollToBottom.tryEmit(Unit)
-        if (message.role != "user" || message.content.isBlank()) return
+        // [T-delete-anchor-by-id] A VISIBLE user turn, not merely one with
+        // text — same predicate deleteFromMessage anchors with. A pure-image
+        // prompt has blank `content` but is a real user bubble the model was
+        // answering; refusing it left the only way to re-ask a photo turn to
+        // deleting and re-typing it.
+        if (!message.isRenderedUserBubble) return
 
         val initialProvider = currentProvider
         if (initialProvider == null) {
@@ -4581,7 +4599,7 @@ class ChatViewModel(
         val retainedHead = messages.subList(0, index + 1).map { m ->
             if (m.id == messageId && m.isQueued) {
                 m.queuedPromptId?.let { pid ->
-                    _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
+                    _promptQueue.update { queue -> queue.filterNot { it.id == pid } }
                 }
                 m.copy(isQueued = false, queuedPromptId = null)
             } else m
@@ -4627,9 +4645,29 @@ class ChatViewModel(
             // entity.id 1:1), so this lookup is exact. sourceDbIds covers
             // the merged-assistant case; a user message is never merged.
             val anchorIds = listOf(message.id) + message.sourceDbIds
-            val anchorSortOrder = anchorIds.firstNotNullOfOrNull { anchorId ->
-                runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }.getOrNull()
+            val anchor = resolveAnchorSortOrder(anchorIds)
+            if (anchor.isFailure) {
+                // [T-anchor-lookup-fail-closed] A thrown lookup is NOT the
+                // same thing as "this row was never persisted". The old code
+                // folded both into a null and logged "skipping DB truncation
+                // (UI already truncated)", so the retry carried on with a DB
+                // that still held the rows the user just retried away — the
+                // next `rebuildAgentHistoryFromDatabase` reloaded them into
+                // `agentHistory`, keeping deleted content in model context AND
+                // repainting it on the next open. That is the exact leak the
+                // `llmDigestLines.clear()` note below argues against, so this
+                // path aborts instead: no DB write, no rerun stream, visible
+                // error. Nothing was destroyed, so reopening the session shows
+                // the surviving rows.
+                AppLogger.error(
+                    TAG,
+                    "retryFromMessage: anchor lookup FAILED for ${message.id.take(8)} — retry " +
+                        "aborted, DB untouched: ${anchor.exceptionOrNull()?.message}",
+                )
+                _error.value = "Couldn't read the message history — the retry was not applied. Please try again."
+                return@launch
             }
+            val anchorSortOrder = anchor.getOrNull()
             if (anchorSortOrder != null) {
                 chatRepository.deleteMessagesAfter(sid, anchorSortOrder + 1)
             } else {
@@ -4660,6 +4698,38 @@ class ChatViewModel(
 
 
     /**
+     * [T-anchor-lookup-fail-closed] Resolve a truncation anchor's `sort_order`
+     * from its candidate row ids, reporting a DAO failure as a failure instead
+     * of folding it into "row not found".
+     *
+     * Every destructive rewind (retry / delete-from-here / edit) truncates the
+     * DB from this number, and they all used
+     * `ids.firstNotNullOfOrNull { runCatching { dao.sortOrderForMessageId(it) }.getOrNull() }`
+     * — a transient Room error and an un-persisted bubble produced the same
+     * null, and the callers then logged "skipping DB truncation (UI already
+     * truncated)" and carried on. On the exception that conclusion was wrong
+     * twice over: the rows are still live, so the "deleted" content stays in
+     * model context (the next rebuild reads it back into `agentHistory`) and
+     * reappears when the session is reopened.
+     *
+     * [Result.success] with a null therefore now means ONLY "every lookup ran
+     * cleanly and found nothing" — a bubble that was never persisted (an
+     * optimistic or queued row), where skipping the DB write really is right.
+     * A failed lookup is returned as [Result.failure] so the caller can abort
+     * loudly rather than silently desynchronise UI, DB and model context.
+     */
+    internal suspend fun resolveAnchorSortOrder(anchorIds: List<String>): Result<Int?> {
+        var lastError: Throwable? = null
+        for (anchorId in anchorIds) {
+            val outcome = runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }
+            val sortOrder = outcome.getOrNull()
+            if (sortOrder != null) return Result.success(sortOrder)
+            if (outcome.isFailure) lastError = outcome.exceptionOrNull()
+        }
+        return lastError?.let { Result.failure(it) } ?: Result.success(null)
+    }
+
+    /**
      * [T-android-delete-from-here] Resolve the DB `sort_order` to cut at so
      * that [index] and everything after it is removed.
      *
@@ -4677,7 +4747,9 @@ class ChatViewModel(
      * turn it belongs to: we find the last visible user message at or before
      * [index], cut just after it, and thereby drop the assistant reply and
      * everything following. Returns -1 when no anchor can be resolved, which
-     * the caller treats as "leave the DB alone".
+     * the caller treats as "leave the DB alone" — and also -1 when the lookup
+     * itself failed, in which case it raises [_error] first so the user learns
+     * the delete did not land ([resolveAnchorSortOrder]).
      */
     internal suspend fun resolveDeleteCutoffSortOrder(
         sid: String,
@@ -4701,9 +4773,20 @@ class ChatViewModel(
         }
         val anchor = anchorMessage ?: return -1
         val anchorIds = listOf(anchor.id) + anchor.sourceDbIds
-        val anchorSortOrder = anchorIds.firstNotNullOfOrNull { anchorId ->
-            runCatching { chatRepository.dao.sortOrderForMessageId(anchorId) }.getOrNull()
-        } ?: return -1
+        val resolved = resolveAnchorSortOrder(anchorIds)
+        if (resolved.isFailure) {
+            // [T-anchor-lookup-fail-closed] -1 here means the caller leaves the
+            // DB alone; say so on screen too, because the UI has already been
+            // truncated and the rows the user deleted are still on disk.
+            AppLogger.error(
+                TAG,
+                "resolveDeleteCutoffSortOrder: anchor lookup FAILED for ${anchor.id.take(8)}: " +
+                    resolved.exceptionOrNull()?.message,
+            )
+            _error.value = "Couldn't read the message history — the delete was not applied. Please try again."
+            return -1
+        }
+        val anchorSortOrder = resolved.getOrNull() ?: return -1
         return if (target.role == "user") anchorSortOrder else anchorSortOrder + 1
     }
 
@@ -4750,7 +4833,7 @@ class ChatViewModel(
             text = trimmed,
             attachments = pendingAttachments,
         )
-        _promptQueue.value = _promptQueue.value + prompt
+        _promptQueue.update { it + prompt }
 
         val attachmentNames = pendingAttachments.map { it.fileName }
         val imageUris = pendingAttachments.filter { it.isImage }.map { it.uri }
@@ -4772,7 +4855,7 @@ class ChatViewModel(
 
     /** Remove a queued prompt and its chat message by prompt id. */
     fun removeQueuedPrompt(promptId: String) {
-        _promptQueue.value = _promptQueue.value.filterNot { it.id == promptId }
+        _promptQueue.update { queue -> queue.filterNot { it.id == promptId } }
         _messages.value = _messages.value.filterNot { it.queuedPromptId == promptId }
     }
 
@@ -4781,7 +4864,7 @@ class ChatViewModel(
         val msg = _messages.value.firstOrNull { it.id == messageId } ?: return
         if (!msg.isQueued) return
         val pid = msg.queuedPromptId ?: return
-        _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
+        _promptQueue.update { queue -> queue.filterNot { it.id == pid } }
         _messages.value = _messages.value.filterNot { it.id == messageId }
         Log.i(TAG, "Withdrew queued message, queue=${_promptQueue.value.size}")
     }

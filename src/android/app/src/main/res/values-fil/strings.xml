@@ -355,18 +355,8 @@
     <string name="memory_file_empty">Walang laman</string>
     <string name="common_close">Isara</string>
     <string name="common_skip">Laktawan</string>
-    <string name="common_next">Susunod</string>
-    <string name="onboarding_welcome_title">Maligayang pagdating sa Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Ang iyong Minis Ultra Agent na may terminal, browser, at direktang access sa device.</string>
-    <string name="onboarding_get_started">Magsimula</string>
-    <string name="onboarding_provider_title">Magdagdag ng Provider</string>
-    <string name="onboarding_provider_subtitle">Maglagay ng API key para sa kahit isang provider para makapagsimula.</string>
-    <string name="onboarding_provider_api_key_label">API Key ng %1$s</string>
-    <string name="onboarding_save_api_key">I-save ang API Key</string>
-    <string name="onboarding_saved">Na-save</string>
     <string name="onboarding_select_models_title">Pumili ng Mga Model</string>
     <string name="onboarding_select_models_subtitle">Pumili ng hanggang 3 model para sa iyong default group.</string>
-    <string name="onboarding_search_models">Maghanap ng model</string>
     <string name="onboarding_filter_models">I-filter ang mga model</string>
     <string name="onboarding_done_count">Tapos (%1$d/3)</string>
     <string name="onboarding_loading_models">Nilo-load ang mga model…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">Ilagay ang bagong chat sa tugmang group</string>
     <string name="appearance_auto_grouping_footer">Kapag unang nabuo ang pamagat ng isang chat, inilalagay din ito sa umiiral na group na tumutugma. Isang beses lang ito tumatakbo bawat chat, ginagamit lamang ang mga group na ginawa mo na, at iniiwang walang group ang chat kung walang tumutugma.</string>
     <string name="appearance_section_tool_preview">Status Bar ng Tool</string>
-    <string name="appearance_tool_preview_footer">Magpakita ng live na preview sa tabi ng status bar ng tool habang gumagana ang Agent.</string>
-    <string name="appearance_tool_preview_title">Preview Window ng Tool</string>
     <string name="appearance_section_auto_focus_after_reply">Awtomatikong Pumunta sa Input Pagkatapos Sumagot</string>
     <string name="appearance_auto_focus_after_reply_title">Awtomatikong Pumunta sa Input Pagkatapos Sumagot</string>
     <string name="appearance_auto_focus_after_reply_footer">Kapag naka-on, awtomatikong lumalabas ang keyboard matapos tumugon ang model para handa na agad ang input sa susunod na tanong. Naka-on bilang default; i-off kung mas gusto mong basahin ang sagot nang walang biglang lumalabas na keyboard.</string>
@@ -1797,4 +1785,13 @@
     <string name="dev_suite_not_installed">Hindi naka-install</string>
     <string name="dev_suite_required">kinakailangan</string>
     <string name="dev_suite_assemble">I-assemble</string>
+    <string name="dev_suite_start_install">Sinisimulan ang pag-install</string>
+    <string name="dev_suite_apt_failed">Nabigo ang pag-install ng apt (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Nabigo ang hakbang (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Tapos na ang pag-install ngunit hindi pumasa sa pagsusulit ng pagkahanda</string>
+    <string name="dev_suite_interrupted">Naantala ang pag-install</string>
+    <string name="dev_suite_no_space">Kulang ang storage: kailangan mga %1$d GB, available %2$d GB</string>
+    <string name="dev_suite_skipped_dep">Laktawan: hindi na-install ang %1$s</string>
+    <string name="dev_suite_uninstall_failed">Nabigo ang pag-aalis (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Alisin ang %1$s sa sandbox? Tatanggalin ang mga na-download na file at link ng command; mananatili ang mga apt package.</string>
 </resources>

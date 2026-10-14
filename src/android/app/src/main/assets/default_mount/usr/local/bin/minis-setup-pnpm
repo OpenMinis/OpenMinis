@@ -1,6 +1,12 @@
 #!/bin/sh
 # Enable pnpm + yarn global package managers (idempotent).
 # Part of the dev-suite "nodejs-pkg" component. Requires node/npm first.
+#
+# [T-devsuite-verify] No URL payload is fetched here: npm resolves each
+# tarball through the registry metadata, which carries an integrity hash npm
+# checks, so the registry (npmmirror first, npmjs after) is the attesting
+# source. Keep it that way — anything added later that curls a file straight
+# onto PATH needs a digest gate (see /usr/local/lib/minis/offline.sh).
 set -eu
 export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
 

@@ -7,7 +7,15 @@ export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
 
 FLUTTER_ROOT=/opt/flutter
 FLUTTER_VERSION="${FLUTVER:-3.24.5}"
-TAR="flutter_linux_${FLUTTER_VERSION}.tar.xz"
+# [T-devsuite-verify] Flutter's current release bucket is flutter_infra_release
+# and the archive name carries the channel suffix; the legacy
+# flutter_infra/releases/.../flutter_linux_<ver>.tar.xz path is gone (404).
+TAR="flutter_linux_${FLUTTER_VERSION}-stable.tar.xz"
+REL_PATH="stable/linux/$TAR"
+# Integrity comes from the publisher: releases_linux.json lists a sha256 per
+# archive, so the tarball is only extracted after it matches.
+META_ORIGIN="https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json"
+META_MIRROR="https://mirrors.sjtug.sjtu.edu.cn/flutter_infra_release/releases/releases_linux.json"
 
 if [ -x "$FLUTTER_ROOT/bin/flutter" ]; then
   echo "flutter already present: $FLUTTER_ROOT"
@@ -23,20 +31,47 @@ command -v xz >/dev/null 2>&1 || {
   apt-get install -y --no-install-recommends xz-utils
 }
 
-# Offline-first + resumable: a copy in /var/minis/shared/offline/ skips
-# the network; an interrupted download resumes from the .part cache
-# (/var/minis/shared/cache/devsuite) across app kills and reboots.
+# Offline-first + resumable: a copy in /var/minis/shared/offline/ skips the
+# network (only when the user opted in with MINIS_ALLOW_OFFLINE=1 and the file
+# matches the published sha256); an interrupted download resumes from the
+# .part cache (/var/minis/shared/cache/devsuite) across app kills/reboots.
 tmp="/tmp/flutter-$$.tar.xz"
 . /usr/local/lib/minis/offline.sh
+
+# Resolve the publisher's sha256 for exactly this archive. Origin first: a
+# mirror's metadata is only used when the origin is unreachable, and it is
+# still a different host from the download proxies below.
+meta="/tmp/flutter-meta-$$.json"
+digest=""
+if curl -fsSL --connect-timeout 12 --max-time 30 -o "$meta" "$META_ORIGIN" ||
+   curl -fsSL --connect-timeout 12 --max-time 30 -o "$meta" "$META_MIRROR"; then
+  digest=$(tr -d '\r\n' < "$meta" | sed 's/},{/}\n{/g' \
+    | grep -F "\"archive\":\"$REL_PATH\"" \
+    | grep -o '"sha256":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4)
+fi
+rm -f "$meta"
+if [ -z "$digest" ]; then
+  # Flutter DOES publish a digest; not resolving one means the metadata was
+  # unreachable. Fail closed rather than extract an unverifiable tarball:
+  # pin it by hand with MINIS_DEVSUITE_SHA256="$TAR=<sha256>" if you must
+  # install from a network where the release JSON is blocked.
+  echo "could not resolve the published sha256 for $TAR (releases_linux.json unreachable) — refusing to download an unverifiable archive" >&2
+  echo "Offline path: see minis-devsuite-offline-list." >&2
+  exit 1
+fi
+echo "expected sha256: $digest"
+_MINIS_EXPECTED="sha256 $digest"
+
 if ! resume_fetch "$tmp" "$TAR" \
-  "https://mirrors.sjtug.sjtu.edu.cn/flutter_infra/releases/stable/linux/$TAR" \
-  "https://mirrors.tuna.tsinghua.edu.cn/flutter/flutter_infra/releases/stable/linux/$TAR" \
-  "https://storage.googleapis.com/flutter_infra/releases/stable/linux/$TAR"
+  "https://storage.googleapis.com/flutter_infra_release/releases/$REL_PATH" \
+  "https://mirrors.sjtug.sjtu.edu.cn/flutter_infra_release/releases/$REL_PATH"
 then
-  echo "flutter download failed (all mirrors). Offline fallback: put $TAR in /var/minis/shared/offline/" >&2
+  echo "flutter download failed (all mirrors) or checksum mismatch. Offline fallback: put $TAR in /var/minis/shared/offline/" >&2
   exit 1
 fi
 
+# resume_fetch only returns 0 with the payload verified against $digest when a
+# digest is known, which is always the case here (checked above, fail closed).
 stage="/tmp/flutter-unpack-$$"
 mkdir -p "$stage"
 echo "extracting $TAR — PRoot 解大量小文件比较慢，没有新行也在继续"

@@ -47,6 +47,24 @@ class KernelContractTest {
         assertEquals(512L * 1024L, service.outputRateBytesPerSec)
     }
 
+    /**
+     * [T-setup-family] A `/usr/local/bin/minis-setup-<tool>` Dev Suite install
+     * is SETUP class, and its 30-minute wall survives a short caller request
+     * instead of being capped to the NORMAL 10-minute wall.
+     */
+    @Test
+    fun minisSetupFamilyIsSetupClassAndKeepsAThirtyMinuteWall() {
+        val cmd = "/usr/local/bin/minis-setup-llama-cpp"
+        assertEquals(WorkClass.SETUP, BudgetClassifier.classify(cmd).workClass)
+        // A 30-minute request is honoured, not shortened to NORMAL_WALL_MS.
+        assertEquals(ShellTimeoutPolicy.LONG_RUNNING_TIMEOUT_MS, BudgetClassifier.armMs(cmd, 30 * 60_000L))
+        // The setup floor survives a short request, like the named scripts.
+        assertEquals(
+            ShellTimeoutPolicy.LONG_RUNNING_TIMEOUT_MS,
+            BudgetClassifier.armMs(cmd, 60_000L),
+        )
+    }
+
     @Test
     fun callerTimeoutShortensButNeverExtends() {
         // Extension is still blocked: the class ceiling stays the authority

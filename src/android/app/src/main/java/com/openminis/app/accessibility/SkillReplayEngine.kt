@@ -46,8 +46,12 @@ interface A11yActor {
  *   node actions via [com.openminis.app.accessibility.AccessibilityQueryGuard]
  * - tap/swipe → [MinisAccessibilityService.dispatchSimpleGesture]
  * - back → [AccessibilityService.performGlobalAction(GLOBAL_ACTION_BACK)]
- * - openApp → `android-shizuku-cli launch <pkg>` via the app process shell
- *   (same route UiActionTool.open_app takes).
+ * - openApp → `android-shizuku-cli launch <pkg>` executed in the PRoot GUEST
+ *   via [com.openminis.app.sandbox.ExecutionCoordinator] — the same route
+ *   `UiActionTool.open_app` takes since the host-shell migration (see
+ *   mcp/server/McpToolDispatcher.executeInGuest: stock Android has no
+ *   /bin/bash on the host and the CLI stubs live in the guest rootfs, so a
+ *   host ProcessBuilder could never work on a real device).
  */
 class ServiceA11yActor(private val svc: MinisAccessibilityService) : A11yActor {
 
@@ -119,11 +123,24 @@ class ServiceA11yActor(private val svc: MinisAccessibilityService) : A11yActor {
 
     override fun openApp(packageName: String): Boolean = runCatching {
         val cmd = "android-shizuku-cli launch '" + packageName.replace("'", "'\\''") + "'"
-        val p = ProcessBuilder("/bin/bash", "-c", cmd).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        p.waitFor()
-        AppLogger.info(TAG, "openApp $packageName → exit=${p.exitValue()} ${out.take(120)}")
-        p.exitValue() == 0
+        // [T-a11y-host-shell] Was ProcessBuilder("/bin/bash","-c",cmd) on the
+        // host — stock Android has no /bin/bash host-side and the CLI stub is
+        // installed in the guest rootfs, so the recorded skill's open_app step
+        // silently failed on every real device. Execute through the same
+        // guest path McpToolDispatcher migrated to
+        // (executeInGuest → ExecutionCoordinator.execute): the offload stub
+        // bridges to ShizukuOffloadHandler in-process, and a missing/denied
+        // Shizuku surfaces as a typed error with non-zero exit instead of an
+        // IOException swallowed by getOrDefault(false).
+        val result = kotlinx.coroutines.runBlocking {
+            com.openminis.app.sandbox.ExecutionCoordinator.execute(
+                sessionId = SKILL_SESSION_ID,
+                command = cmd,
+                timeout = LAUNCH_TIMEOUT_MS,
+            )
+        }
+        AppLogger.info(TAG, "openApp $packageName → exit=${result.exitCode} ${result.output.take(120)}")
+        result.exitCode == 0
     }.getOrDefault(false)
 
     override fun sleep(ms: Long) {
@@ -165,6 +182,15 @@ class ServiceA11yActor(private val svc: MinisAccessibilityService) : A11yActor {
     companion object {
         private const val TAG = "A11yReplay"
         private const val MAX_DUMP_DEPTH = 30
+
+        /**
+         * Fixed internal lane for skill-replay guest commands. Skill replay is
+         * not driven from a chat session (UiSkillTool hands us only the a11y
+         * service), so — like the mcp server's "mcp-server" lane — it owns a
+         * stable id; ExecutionCoordinator materializes its bind dirs on demand.
+         */
+        private const val SKILL_SESSION_ID = "a11y-skill-replay"
+        private const val LAUNCH_TIMEOUT_MS = 15_000L
     }
 }
 

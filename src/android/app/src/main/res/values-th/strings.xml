@@ -355,18 +355,8 @@
     <string name="memory_file_empty">ว่างเปล่า</string>
     <string name="common_close">ปิด</string>
     <string name="common_skip">ข้าม</string>
-    <string name="common_next">ถัดไป</string>
-    <string name="onboarding_welcome_title">ยินดีต้อนรับสู่ Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Minis Ultra Agent ของคุณ พร้อมเทอร์มินัล เบราว์เซอร์ และการเข้าถึงอุปกรณ์โดยตรง</string>
-    <string name="onboarding_get_started">เริ่มต้นใช้งาน</string>
-    <string name="onboarding_provider_title">เพิ่มผู้ให้บริการ</string>
-    <string name="onboarding_provider_subtitle">กรอก API key ของผู้ให้บริการอย่างน้อยหนึ่งรายเพื่อเริ่มต้น</string>
-    <string name="onboarding_provider_api_key_label">API Key ของ %1$s</string>
-    <string name="onboarding_save_api_key">บันทึก API Key</string>
-    <string name="onboarding_saved">บันทึกแล้ว</string>
     <string name="onboarding_select_models_title">เลือกโมเดล</string>
     <string name="onboarding_select_models_subtitle">เลือกได้สูงสุด 3 โมเดลสำหรับกลุ่มเริ่มต้นของคุณ</string>
-    <string name="onboarding_search_models">ค้นหาโมเดล</string>
     <string name="onboarding_filter_models">กรองโมเดล</string>
     <string name="onboarding_done_count">เสร็จสิ้น (%1$d/3)</string>
     <string name="onboarding_loading_models">กำลังโหลดโมเดล…</string>
@@ -628,8 +618,6 @@
     <string name="appearance_auto_grouping_subtitle">จัดแชทใหม่เข้ากลุ่มที่ตรงกัน</string>
     <string name="appearance_auto_grouping_footer">เมื่อระบบสร้างชื่อแชทเป็นครั้งแรก จะจัดแชทนั้นเข้ากลุ่มที่มีอยู่แล้วซึ่งตรงกันด้วย ทำงานครั้งเดียวต่อแชท ใช้เฉพาะกลุ่มที่คุณสร้างไว้แล้ว และหากไม่มีกลุ่มใดตรงกันก็จะปล่อยแชทไว้โดยไม่จัดกลุ่ม</string>
     <string name="appearance_section_tool_preview">แถบสถานะเครื่องมือ</string>
-    <string name="appearance_tool_preview_footer">แสดงตัวอย่างแบบสดข้างแถบสถานะเครื่องมือขณะที่ Agent ทำงาน</string>
-    <string name="appearance_tool_preview_title">หน้าต่างตัวอย่างเครื่องมือ</string>
     <string name="appearance_section_auto_focus_after_reply">โฟกัสช่องพิมพ์อัตโนมัติหลังตอบ</string>
     <string name="appearance_auto_focus_after_reply_title">โฟกัสช่องพิมพ์อัตโนมัติหลังตอบ</string>
     <string name="appearance_auto_focus_after_reply_footer">เมื่อเปิดใช้ คีย์บอร์ดจะขึ้นมาเองหลังจากโมเดลตอบเสร็จ เพื่อให้พร้อมพิมพ์คำถามต่อไปทันที เปิดไว้เป็นค่าเริ่มต้น ปิดได้หากคุณต้องการอ่านคำตอบโดยไม่มีคีย์บอร์ดขึ้นมากะทันหัน</string>
@@ -1797,4 +1785,13 @@
     <string name="dev_suite_not_installed">ยังไม่ติดตั้ง</string>
     <string name="dev_suite_required">จำเป็น</string>
     <string name="dev_suite_assemble">ติดตั้ง</string>
+    <string name="dev_suite_start_install">เริ่มการติดตั้ง</string>
+    <string name="dev_suite_apt_failed">ติดตั้งด้วย apt ไม่สำเร็จ (exit %1$d)</string>
+    <string name="dev_suite_step_failed">ขั้นตอนล้มเหลว (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">ติดตั้งเสร็จแล้วแต่ผ่านการตรวจสอบความพร้อมไม่สำเร็จ</string>
+    <string name="dev_suite_interrupted">การติดตั้งถูกขัดจังหวะ</string>
+    <string name="dev_suite_no_space">พื้นที่เก็บข้อมูลไม่พอ: ต้องใช้ประมาณ %1$d GB ว่างอยู่ %2$d GB</string>
+    <string name="dev_suite_skipped_dep">ข้าม: %1$s ติดตั้งไม่สำเร็จ</string>
+    <string name="dev_suite_uninstall_failed">ถอนการติดตั้งไม่สำเร็จ (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">ลบ %1$s จากแซนด์บ็อกซ์? ไฟล์ที่ดาวน์โหลดและลิงก์คำสั่งจะถูกลบ ส่วนแพ็กเกจ apt จะคงอยู่</string>
 </resources>

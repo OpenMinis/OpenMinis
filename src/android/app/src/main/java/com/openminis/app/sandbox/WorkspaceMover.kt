@@ -50,8 +50,12 @@ object WorkspaceMover {
         val alreadyInPlace: List<String>,
         val conflicts: List<String> = emptyList(),
         val refused: Boolean = false,
+        // [T-per-subdir-isolation] Subdirs whose staging copy threw. Each is
+        // handled independently so one failing tree does not strand the others;
+        // a failed move keeps that source intact.
+        val failed: List<String> = emptyList(),
     ) {
-        val succeeded: Boolean get() = !refused && conflicts.isEmpty()
+        val succeeded: Boolean get() = !refused && conflicts.isEmpty() && failed.isEmpty()
     }
 
     data class CopyResult(
@@ -60,10 +64,13 @@ object WorkspaceMover {
         val skippedEmpty: List<String>,
         val conflicts: List<String>,
         val refused: Boolean = false,
+        // [T-per-subdir-isolation] Copy-back subdirs whose staging copy threw;
+        // the source project tree is untouched for them.
+        val failed: List<String> = emptyList(),
     ) {
         /** True iff this session no longer needs the project tree to keep its files. */
         val independent: Boolean
-            get() = !refused && conflicts.isEmpty()
+            get() = !refused && conflicts.isEmpty() && failed.isEmpty()
     }
 
     /**
@@ -90,6 +97,7 @@ object WorkspaceMover {
         val moved = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         val conflicts = mutableListOf<String>()
+        val failed = mutableListOf<String>()
         var bytes = 0L
 
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
@@ -113,8 +121,20 @@ object WorkspaceMover {
                 conflicts.add(sub)
                 continue
             }
-            bytes += moveTree(src, dst)
-            moved.add(sub)
+            // [T-per-subdir-isolation] One failing subdir must not strand the
+            // others: moveTree throws after discarding its own staging copy and
+            // keeping the source, so catch per subdir and continue.
+            try {
+                bytes += moveTree(src, dst)
+                moved.add(sub)
+            } catch (t: Throwable) {
+                AppLogger.warning(
+                    TAG,
+                    "move of $sub failed (session=$sessionId folder=$folderId): ${t.message}; " +
+                        "source kept, other subdirs unaffected",
+                )
+                failed.add(sub)
+            }
         }
 
         if (conflicts.isNotEmpty()) {
@@ -128,10 +148,10 @@ object WorkspaceMover {
             AppLogger.info(
                 TAG,
                 "moved session=$sessionId into folder=$folderId subdirs=$moved " +
-                    "bytes=$bytes skipped=$skipped",
+                    "bytes=$bytes skipped=$skipped failed=$failed",
             )
         }
-        return MoveResult(moved, bytes, skipped, conflicts)
+        return MoveResult(moved, bytes, skipped, conflicts, failed = failed)
     }
 
     private fun writeConflictRecord(
@@ -194,6 +214,7 @@ object WorkspaceMover {
         val copied = mutableListOf<String>()
         val skippedEmpty = mutableListOf<String>()
         val conflicts = mutableListOf<String>()
+        val failed = mutableListOf<String>()
         var bytes = 0L
 
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
@@ -212,21 +233,34 @@ object WorkspaceMover {
                 conflicts.add(sub)
                 continue
             }
-            bytes += copyTreeVerified(src, dst)
-            copied.add(sub)
+            // [T-per-subdir-isolation] A failed copy-back of one subdir keeps
+            // the shared project tree untouched and does not block the others.
+            try {
+                bytes += copyTreeVerified(src, dst)
+                copied.add(sub)
+            } catch (t: Throwable) {
+                AppLogger.warning(
+                    TAG,
+                    "copy-back of $sub failed (session=$sessionId folder=$folderId): ${t.message}; " +
+                        "shared tree untouched, other subdirs unaffected",
+                )
+                failed.add(sub)
+            }
         }
 
         AppLogger.info(
             TAG,
             "copy-back folder=$folderId to session=$sessionId subdirs=$copied " +
-                "bytes=$bytes skippedEmpty=$skippedEmpty conflicts=$conflicts",
+                "bytes=$bytes skippedEmpty=$skippedEmpty conflicts=$conflicts failed=$failed",
         )
-        return CopyResult(copied, bytes, skippedEmpty, conflicts)
+        return CopyResult(copied, bytes, skippedEmpty, conflicts, failed = failed)
     }
 
     /**
-     * Copy [src] to [dst] via a sibling `.staging` dir, verified by byte count.
-     * Never touches the source.
+     * Copy [src] to [dst] via a sibling `.staging` dir. Never touches the source.
+     * [T-symlink-expansion] Verification no longer re-walks the live source; the
+     * copy is the single walk, so a per-entry failure (not a byte-count mismatch)
+     * is what discards staging and keeps the source.
      */
     private fun copyTreeVerified(src: File, dst: File): Long {
         val parent = dst.parentFile ?: error("no parent for $dst")
@@ -234,12 +268,11 @@ object WorkspaceMover {
         val staging = File(parent, dst.name + STAGING_SUFFIX)
         if (staging.exists()) staging.deleteRecursively()
 
-        val bytes = copyTree(src, staging)
-        val srcBytes = treeSize(src)
-        if (bytes != srcBytes) {
+        val outcome = copyTree(src, staging)
+        if (outcome.failures > 0) {
             staging.deleteRecursively()
             throw IllegalStateException(
-                "staging copy incomplete for ${src.name}: copied $bytes of $srcBytes bytes",
+                "staging copy incomplete for ${src.name}: ${outcome.failures} entry(ies) failed to copy",
             )
         }
         if (dst.exists() && !dst.deleteRecursively()) {
@@ -250,28 +283,28 @@ object WorkspaceMover {
             // Leave staging in place for [recoverInterrupted]; the source is intact.
             throw IllegalStateException("could not move ${src.name} into place")
         }
-        return bytes
+        return outcome.bytes
     }
 
     /**
      * Move one tree via staging. [src] is deleted only after [dst] has a
-     * verified copy.
+     * complete copy.
      */
     private fun moveTree(src: File, dst: File): Long {
         val parent = dst.parentFile ?: error("no parent for $dst")
         val staging = File(parent, dst.name + STAGING_SUFFIX)
         if (staging.exists()) staging.deleteRecursively()
 
-        val bytes = copyTree(src, staging)
-        val srcBytes = treeSize(src)
-        if (bytes != srcBytes) {
-            // A short copy means the source changed under us or the disk is
-            // full. Keep the source, drop the partial copy.
+        val outcome = copyTree(src, staging)
+        if (outcome.failures > 0) {
+            // A failed copy means the staging tree is not a faithful mirror.
+            // Keep the source, drop the partial copy.
             staging.deleteRecursively()
             throw IllegalStateException(
-                "staging copy incomplete for ${src.name}: copied $bytes of $srcBytes bytes",
+                "staging copy incomplete for ${src.name}: ${outcome.failures} entry(ies) failed to copy",
             )
         }
+        val bytes = outcome.bytes
 
         // ensureProjectDirs leaves an empty destination. renameTo will not
         // replace it, and deleting the source first hides the only copy behind
@@ -303,33 +336,73 @@ object WorkspaceMover {
         }
     }
 
-    private fun copyTree(src: File, dst: File): Long {
-        var total = 0L
-        src.walkTopDown().forEach { f ->
-            val rel = f.relativeTo(src)
-            val target = File(dst, rel.path)
-            if (f.isDirectory()) {
-                target.mkdirs()
-            } else {
-                target.parentFile?.mkdirs()
-                f.inputStream().use { input ->
-                    target.outputStream().use { output ->
-                        val buf = ByteArray(COPY_BUFFER)
-                        while (true) {
-                            val n = input.read(buf)
-                            if (n <= 0) break
-                            output.write(buf, 0, n)
-                            total += n
-                        }
-                    }
-                }
-            }
-        }
-        return total
+    /**
+     * [T-symlink-expansion] Copy [src] into [dst] as links, never following.
+     *
+     * The old walker copied regular files via `File.inputStream()`, which
+     * FOLLOWS symlinks: a guest `ln -s <another-session>/memory …` inside its
+     * workspace had the LINKED-TO CONTENT copied into `minis-workspaces/<folder>`,
+     * a tree every other filed session mounts — a cross-session leak. A symlinked
+     * DIRECTORY made `walkTopDown` descend and eventually throw, aborting the
+     * whole move. And because the byte verification re-walked the live,
+     * guest-writable source afterwards, any concurrent write guaranteed a spurious
+     * "staging copy incomplete".
+     *
+     * Now: one top-down pass, symlinks recreated as symlinks via
+     * `Files.createSymbolicLink` (the recorded target string is preserved, its
+     * content is never materialised); real directories are descended, special
+     * files (fifo/socket/device) are skipped rather than opened. The returned
+     * byte total is accumulated DURING that same pass, so there is no second walk
+     * to race. A per-entry IO error is recorded in [failed] and the caller
+     * discards the staging copy, keeping the source intact.
+     */
+    private class CopyOutcome {
+        var bytes: Long = 0L
+        var failures: Int = 0
     }
 
-    private fun treeSize(root: File): Long =
-        root.walkTopDown().filter { it.isFile() }.sumOf { it.length() }
+    private fun copyTree(src: File, dst: File): CopyOutcome {
+        val outcome = CopyOutcome()
+        dst.mkdirs()
+        copyInto(src, dst, outcome)
+        return outcome
+    }
+
+    private fun copyInto(dir: File, dstDir: File, outcome: CopyOutcome) {
+        val children = dir.listFiles() ?: return
+        for (child in children) {
+            val target = File(dstDir, child.name)
+            try {
+                val path = child.toPath()
+                when {
+                    java.nio.file.Files.isSymbolicLink(path) -> {
+                        // Copy as a link — do NOT follow, do NOT descend.
+                        target.parentFile?.mkdirs()
+                        java.nio.file.Files.createSymbolicLink(target.toPath(), java.nio.file.Files.readSymbolicLink(path))
+                    }
+                    child.isDirectory() -> copyInto(child, target, outcome)
+                    child.isFile() -> {
+                        target.parentFile?.mkdirs()
+                        child.inputStream().use { input ->
+                            target.outputStream().use { output ->
+                                val buf = ByteArray(COPY_BUFFER)
+                                while (true) {
+                                    val n = input.read(buf)
+                                    if (n <= 0) break
+                                    output.write(buf, 0, n)
+                                    outcome.bytes += n
+                                }
+                            }
+                        }
+                    }
+                    else -> Unit // special file: skip (never open)
+                }
+            } catch (t: Throwable) {
+                outcome.failures++
+                AppLogger.warning(TAG, "copyTree: could not copy ${child.absolutePath}: ${t.message}")
+            }
+        }
+    }
 
     /**
      * Find `.staging` trees left behind by an interrupted move or copy-back.

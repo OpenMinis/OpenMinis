@@ -2,6 +2,7 @@ package com.openminis.app.config
 
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -71,12 +72,23 @@ class ChatConfigPrefsBindingTest {
     }
 
     @Test
-    fun `chat_toolPreview stays correct`() {
-        // This one was already right and is the pattern the others now follow;
-        // it must not regress the other way.
-        val reg = registrationFor("chat.toolPreview")
-        assertTrue(reg.contains("prefs = appearancePrefs"))
-        assertTrue(reg.contains("KEY_TOOL_PREVIEW"))
+    fun `dead chat_toolPreview is not registered`() {
+        // [T-android-config-dead-key] `chat.toolPreview` mirrored
+        // appearance_prefs/KEY_TOOL_PREVIEW, whose ONLY reader — the
+        // "Tool Preview Window" switch — was deleted from AppearanceScreen ([P0-4]).
+        // Registering it made `minis-config set/get chat.toolPreview` operate on a
+        // preference nothing honours, which is the same class of silent no-op this
+        // file exists to catch. It must stay unregistered until a reader returns.
+        assertFalse(
+            "chat.toolPreview has no reader left and must not be exposed",
+            builtins.contains("path = \"chat.toolPreview\""),
+        )
+        // The constant itself stays (older persisted values are ignored by design).
+        assertTrue(
+            "KEY_TOOL_PREVIEW is still declared for persistence compatibility",
+            source("ui/settings/AppearanceScreen.kt")
+                .contains(Regex("""const val KEY_TOOL_PREVIEW""")),
+        )
     }
 
     // ─── The general rule ────────────────────────────────────────────────

@@ -147,7 +147,9 @@ object StopWords {
 
     /** Chinese matched exactly; English matched case-insensitively. */
     fun contains(term: String): Boolean =
-        chinese.contains(term) || english.contains(term.lowercase())
+        // Locale.ROOT — key matching against a fixed set; the device locale
+        // must not change which terms are stopwords ([T-android-turkish-dotted-i]).
+        chinese.contains(term) || english.contains(term.lowercase(java.util.Locale.ROOT))
 }
 
 /**

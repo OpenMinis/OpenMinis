@@ -10,6 +10,7 @@ import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -42,7 +43,7 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         val initialProvider = currentProvider
         if (initialProvider == null) {
             AppLogger.warning(ChatViewModel.TAG, "resumeQueueAfterCancel: no provider, dropping queue")
-            _promptQueue.value = emptyList()
+            _promptQueue.update { emptyList() }
             _messages.value = _messages.value.filterNot { it.isQueued }
             return@launch
         }

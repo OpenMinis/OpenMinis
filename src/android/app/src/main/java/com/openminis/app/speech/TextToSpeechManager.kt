@@ -241,8 +241,21 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
         val rc = tts?.speak(text, TextToSpeech.QUEUE_ADD, params, generateUtteranceId())
         if (rc != TextToSpeech.SUCCESS) {
             Log.w(TAG, "speakQueued rejected by engine (rc=$rc len=${text.length})")
+            // [T-android-tts-rom-compat] Mirror speak()'s rejection guard, but
+            // the order matters here: the text was already appended to
+            // pendingTexts above. It must come back OUT before the flag is
+            // decided — a rejected entry never gets an onDone, so leaving the
+            // phantom made `pausedAtIndex >= pendingTexts.size` unreachable and
+            // wedged _isSpeaking at true for the rest of the session (the very
+            // consumer this guard exists to protect). Remove by position, not
+            // by value: an earlier queued sentence may be identical text, and
+            // remove(text) would drop the real entry and keep the phantom.
+            // pendingTexts is main-thread owned (see [T-android-tts-init-thread]
+            // on onInit), so lastIndex is still this utterance.
+            pendingTexts.removeAt(pendingTexts.lastIndex)
             // Only clear the flag when nothing else is in flight — a QUEUE_ADD
             // rejection must not mark an ongoing earlier utterance as done.
+            // "In flight" now means actually-spoken entries only.
             if (pendingTexts.isEmpty()) _isSpeaking.value = false
             return
         }

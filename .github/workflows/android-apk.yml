@@ -22,6 +22,9 @@ env:
   ANDROID_CMAKE: "3.22.1"
   # Must match ndkVersion and minis-android-sdk-setup NDK_REV.
   ANDROID_NDK: "29.0.14206865"
+  # Build number of the command-line tools zip. Was inline in the download URL;
+  # exposed so the SDK cache key invalidates when it changes.
+  ANDROID_CMDLINE_TOOLS: "11076708"
   GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g"
 
 jobs:
@@ -40,7 +43,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # No submodule is fetched here, deliberately:
+          #  * deps/ish (OpenMinis/ish-arm64, branch master) is the iOS iSH fork.
+          #    It is built only by deps/build_ish.sh for the Xcode target described
+          #    in deps/ISH_INTEGRATION.md, which this repo does not compile at all
+          #    (BUILDING.md: "本仓库没有 iOS 工程"). `submodules: recursive` was
+          #    cloning it into every Android run. It stays registered in
+          #    .gitmodules for whoever still needs the iOS branch.
+          #  * deps/proot is not needed either: the PRoot binaries this job uses
+          #    arrive from the native-deps.yml artifact (see "Install native
+          #    dependencies"), where the submodule IS checked out.
+          submodules: false
+          # Full history: the versioned-release job runs `git describe` /
+          # `git log PREV..TAG` on the tag to build the release body.
           fetch-depth: 0
 
       - name: Set up JDK
@@ -56,6 +71,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/configuration-cache
+            ~/.gradle/wrapper/dists
           key: gradle-${{ runner.os }}-${{ hashFiles('src/android/**/*.gradle.kts', 'src/android/gradle.properties', 'src/android/gradle/wrapper/gradle-wrapper.properties', 'src/android/build-logic/**/*.kt') }}
           restore-keys: |
             gradle-${{ runner.os }}-
@@ -65,14 +81,41 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar unzip make gawk sed file python3 cmake ninja-build g++ git
 
+      # Every run used to re-download the platform, build-tools, CMake and the
+      # whole NDK (~2.5 GB) even though only the Gradle home was cached. The key
+      # names every pinned component version, so bumping ANDROID_NDK /
+      # ANDROID_BUILD_TOOLS / ANDROID_PLATFORM / ANDROID_CMAKE in `env` misses
+      # instead of restoring a stale toolchain. sdkmanager below stays
+      # unconditional: it is a no-op against restored packages, so the build
+      # semantics are unchanged.
+      - name: Restore Android SDK cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/cmdline-tools
+            /usr/local/lib/android/sdk/platform-tools
+            /usr/local/lib/android/sdk/platforms
+            /usr/local/lib/android/sdk/build-tools
+            /usr/local/lib/android/sdk/cmake
+            /usr/local/lib/android/sdk/ndk
+            /usr/local/lib/android/sdk/licenses
+          key: android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-cmake-${{ env.ANDROID_CMAKE }}-ndk-${{ env.ANDROID_NDK }}-cmdline-${{ env.ANDROID_CMDLINE_TOOLS }}
+          restore-keys: |
+            android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-cmake-${{ env.ANDROID_CMAKE }}-ndk-${{ env.ANDROID_NDK }}-
+            android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-
+
       - name: Install Android SDK commandline tools
         run: |
           mkdir -p /usr/local/lib/android/sdk/cmdline-tools
-          cd /tmp
-          curl -sL -o cmdline-tools.zip \
-            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-          unzip -q cmdline-tools.zip -d /tmp/sdk
-          mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          # `mv` would nest into a restored cmdline-tools/ and hide sdkmanager,
+          # so only download when the cache did not bring it back.
+          if [ ! -x /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager ]; then
+            cd /tmp
+            curl -sL -o cmdline-tools.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-${{ env.ANDROID_CMDLINE_TOOLS }}_latest.zip"
+            unzip -q cmdline-tools.zip -d /tmp/sdk
+            mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          fi
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true

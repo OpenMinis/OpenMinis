@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 
@@ -277,6 +278,79 @@ class ProviderRepository(private val context: Context) {
      */
     internal val configLock = Any()
 
+    // ── [T-android-save-off-main-thread] Single-threaded persistence pipeline ──
+    //
+    // `saveConfig` used to run the whole serialize → 5-table clear+bulk-upsert →
+    // `prefs.edit().commit()` sequence inside `synchronized(configLock)` ON THE
+    // CALLER THREAD. Every one of those callers is a Compose callback
+    // (ui/settings/ModelGroupsScreen.kt slot picks, ui/onboarding/OnboardingScreen.kt),
+    // so each model-slot pick paid a full config encode — [T-android-startup-
+    // config-stall] #753 measured ~8 s for the decode of a large config on the
+    // READ side — plus a synchronous disk commit. Writes now publish
+    // in-memory under the lock and hand the durable part to ONE worker
+    // coroutine, which keeps the serialisation [configLock] bought (writes
+    // still never interleave, one snapshot at a time) without blocking Main.
+    //
+    // FIFO is deliberate: a slot pick that landed after another must not
+    // overwrite it in the store, so the queue is consumed by a single worker
+    // rather than dispatched onto a multi-threaded pool.
+    internal val persistRequests = kotlinx.coroutines.channels.Channel<ProviderPersistRequest>(
+        capacity = kotlinx.coroutines.channels.Channel.UNLIMITED,
+    )
+    internal val writeScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+    )
+    /** Monotonic id of the queued snapshot the worker is publishing. */
+    internal val saveGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+    private val persistWorkerStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Starts the persistence worker on the first save. Idempotent. */
+    internal fun ensurePersistWorker() {
+        if (!persistWorkerStarted.compareAndSet(false, true)) return
+        writeScope.launch { drainPersistQueue() }
+    }
+
+    /**
+     * Suspends until every save queued before this call has reached the store.
+     * Backup/restore and any other "durability before returning" path should
+     * await it — the fire-and-forget `saveConfig` no longer implies the write
+     * landed.
+     */
+    internal suspend fun awaitPersisted() {
+        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
+        persistRequests.send(ProviderPersistRequest.Flush(done))
+        done.await()
+    }
+
+    /**
+     * Blocking config read. [T-android-save-off-main-thread] caller audit (this is
+     * the ONLY two call sites it has, and the audit is what decides whether the
+     * `runBlocking` is allowed):
+     *
+     *  1. the `init { loadScope.launch { … } }` loader above — that scope is
+     *     `SupervisorJob() + Dispatchers.IO`, so genuinely off-main;
+     *  2. [ensureConfigLoaded], i.e. every non-suspend mutator/reader in this
+     *     class (add/update/removeInstance, add/removeEntry, group + agent-loop +
+     *     voice/vision slot setters, resolve*Candidates…). Those ARE reachable from
+     *     the composition thread — ui/settings/AddProviderScreen.kt:640
+     *     (`addInstance`), ProviderListScreen.kt:407/524,
+     *     ProviderDetailScreen.kt:777 (`removeInstance`),
+     *     ModelGroupsScreen.kt:402 / OnboardingModelSelectionScreen.kt:226
+     *     (`addGroup`) all call it directly from a click/confirm lambda —
+     *     alongside genuinely off-main ones (the config/collections adapters run on
+     *     minis-config bridge's background pool, debug/ handlers,
+     *     provider/agent paths).
+     *
+     * The stall is therefore real but BOUNDED to the cold-start window: the very
+     * first line of [ensureConfigLoaded] returns the moment [_configLoaded] is
+     * true, which the IO loader set during Application startup, so a main-thread
+     * caller only pays the decode when it acts before that load lands. Removing
+     * even that window means giving the public mutators themselves suspend
+     * variants (and moving their Room/keystore work off the lock), which changes
+     * the signature of every one of the ~18 Compose call sites listed above —
+     * files outside this workstream's scope. Kept as-is on purpose; see the
+     * matching note on [ensureConfigLoaded].
+     */
     private fun loadConfig(): ProviderConfig = runBlocking { loadConfigSuspending() }
 
     /**
@@ -304,6 +378,12 @@ class ProviderRepository(private val context: Context) {
      * placeholder, mutate it, and persist — WIPING the user's real config.
      * Idempotent and cheap once loaded (just a volatile read). Synchronized on
      * [configLock] so it can't race the async loader's emit.
+     *
+     * [T-android-save-off-main-thread] When [_configLoaded] is still false this
+     * blocks the CALLER thread through [loadConfig] — see that function's KDoc for
+     * the caller audit and why the cold-start-only window is left as it is. Once
+     * the initial load has landed this is a volatile read and costs nothing, so
+     * main-thread mutators never wait on I/O after startup.
      */
     // internal (was private): the debug server's read-only provider.* handlers
     // read `config.value` directly and must be able to force the lazy load —
@@ -718,10 +798,28 @@ class ProviderRepository(private val context: Context) {
         }
         // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
         // rules from Room and the resolver cache (they can never fire again).
-        runCatching {
-            runBlocking { providerDao.deleteThinkingRulesForInstance(instanceId) }
-            ThinkingRuleResolver.setCustomRules(instanceId, emptyList())
-        }
+        // [T-android-save-off-main-thread] The DAO DELETE used to be
+        // `runBlocking { … }` HERE, on the thread that pressed Delete. This is a
+        // public, non-suspend mutator and its callers are Compose confirm
+        // dialogs — ui/settings/ProviderListScreen.kt:524 and
+        // ui/settings/ProviderDetailScreen.kt:777 call `removeInstance` straight
+        // from `onConfirm`, i.e. the main thread, so a cold/hot provider.db write
+        // stalled the frame that was supposed to close the dialog. The durable
+        // half now rides the same FIFO persistence worker as the config save
+        // queued above (ordered behind it, on Dispatchers.IO); the in-memory
+        // clears stay synchronous so no reader can resurrect the rules this turn.
+        ThinkingRuleResolver.setCustomRules(instanceId, emptyList())
+        thinkingRulesCache = thinkingRulesCache - instanceId
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            runCatching { providerDao.deleteThinkingRulesForInstance(instanceId) }
+                .onFailure {
+                    android.util.Log.w(
+                        "ProviderRepo",
+                        "[ThinkingRules] delete for removed instance $instanceId failed: ${it.message}",
+                    )
+                }
+        })
     }
 
     /**
@@ -1122,8 +1220,11 @@ class ProviderRepository(private val context: Context) {
             val pinned = com.openminis.app.data.model.ModelSlotRef.entryId(current)
             return if (current in removedIds || pinned in removedIds) null else current
         }
-        // Retained only so old configs round-trip. Translation reads TranslationPrefs.
-        config.defaultTranslationModelId = clearSlot(config.defaultTranslationModelId)
+        // [T-android-translation-single-source] `defaultTranslationModelId` is NOT
+        // scrubbed any more: nothing reads the field at all (live translation uses
+        // TranslationPrefs), so nulling a dead slot on every provider delete was
+        // the second half of a second source of truth. The field itself stays on
+        // ProviderConfig so older persisted JSON mirrors keep decoding.
         config.defaultPrimaryGroupId = clearSlot(config.defaultPrimaryGroupId)
         config.defaultSubGroupId = clearSlot(config.defaultSubGroupId)
         val last = prefs.getString(KEY_LAST_USED_ENTRY, null)
@@ -1135,14 +1236,35 @@ class ProviderRepository(private val context: Context) {
      * Clearing the provider list must not leave those copies resolving to a
      * missing row. Null the binding so the existing fallback (app default)
      * runs instead of crashing or sending to a deleted model.
+     *
+     * [T-android-save-off-main-thread] One queued unit of work instead of a
+     * per-id round-trip on the caller's thread: this used to run
+     * `clearBindingReferencing` once per removed id INSIDE the config-lock
+     * critical path, i.e. N full-table `UPDATE sessions` scans while every
+     * Compose mutator was blocked behind the lock. The whole set now goes to the
+     * persistence worker as a single task, ordered behind the save that removed
+     * the entries (which is what publishes the removal in memory anyway).
+     *
+     * COORDINATION: the DAO updates the row whose binding literally contains
+     * `"entryId":"<id>"` (ChatDao.clearBindingReferencing, `instr` not `LIKE`),
+     * and [com.openminis.app.scheduled.ScheduledTaskStore.dropEntryRefs] parses
+     * the same JSON before comparing. Both used to substring-match, which
+     * un-pinned `inst/gpt-4o` whenever `inst/gpt-4` was removed; keep the two
+     * call sites exact if either is touched again.
      */
-    private suspend fun scrubExternalEntryRefs(removedIds: Set<String>) {
+    private fun scrubExternalEntryRefs(removedIds: Set<String>) {
         if (removedIds.isEmpty()) return
-        val dao = com.openminis.app.data.db.AppDatabase.getInstance(context).chatDao()
-        for (id in removedIds) {
-            dao.clearBindingReferencing(id)
-        }
-        com.openminis.app.scheduled.ScheduledTaskStore(context).dropEntryRefs(removedIds)
+        val ids = removedIds.toList()
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val dao = com.openminis.app.data.db.AppDatabase.getInstance(context).chatDao()
+                for (id in ids) {
+                    dao.clearBindingReferencing(id)
+                }
+                com.openminis.app.scheduled.ScheduledTaskStore(context).dropEntryRefs(ids.toSet())
+            }
+        })
     }
 
     // --- Model Entry management ---
@@ -1171,6 +1293,17 @@ class ProviderRepository(private val context: Context) {
             // Explicit label: a bare `return` in an expression body reads as if
             // it might only leave the synchronized lambda.
             if (exists) return@addEntry
+            // [T-android-composite-key-collision] The check deliberately does NOT
+            // run for custom entries: two custom entries on one instance sharing
+            // a base-model id are the legitimate "same model, different overrides"
+            // case, and refusing the second one would delete the feature. What
+            // broke instead was storage — ProviderConfigMapping keyed the row on
+            // compositeEntryKey(instanceId, baseModel.id), so both entries mapped
+            // to ONE row (@Insert(REPLACE) kept one) and, until the id was
+            // canonicalised, the UI rendered both with the SAME id: the duplicate
+            // LazyColumn key [T-android-agentloop-dup-key-crash] warns about.
+            // Fixed at the mapping level, where the row id is minted (colliding
+            // entries get their uuid appended); see ProviderConfigMappingRoundTripTest.
         }
         config.modelEntries.add(entry)
         saveConfig(config)
@@ -1636,16 +1769,32 @@ class ProviderRepository(private val context: Context) {
     // never stored. On every mutation we publish the instance's rules into the
     // ThinkingRuleResolver cache so the (sync) request-builder can read them.
 
-    /** Load one instance's custom rules from Room, in stored order. */
-    fun thinkingRules(instanceId: String): List<ThinkingRule> = runBlocking {
-        runCatching { providerDao.loadThinkingRules(instanceId).map { it.toRule() } }
-            .getOrDefault(emptyList())
-    }
+    /**
+     * Load one instance's custom rules.
+     *
+     * [T-android-save-off-main-thread] Reads the warm [thinkingRulesCache] when
+     * available: this is called straight from `remember { }` during composition
+     * (ui/settings/ThinkingRulesSection.kt), and the old `runBlocking { DAO }`
+     * shape froze the frame on every recomposition. Callers on a suspend path
+     * should use [thinkingRulesSuspending], which always reads the store.
+     */
+    fun thinkingRules(instanceId: String): List<ThinkingRule> =
+        thinkingRulesCache[instanceId] ?: runBlocking { thinkingRulesSuspending(instanceId) }
+
+    /** Suspend variant of [thinkingRules] — reads provider.db on IO, never the caller's thread. */
+    suspend fun thinkingRulesSuspending(instanceId: String): List<ThinkingRule> =
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { providerDao.loadThinkingRules(instanceId).map { it.toRule() } }
+                .getOrDefault(emptyList())
+        }
 
     /** The persisted ids for one instance's custom rules, parallel to [thinkingRules]. */
-    fun thinkingRuleIds(instanceId: String): List<String> = runBlocking {
-        runCatching { providerDao.loadThinkingRules(instanceId).map { it.id } }.getOrDefault(emptyList())
-    }
+    fun thinkingRuleIds(instanceId: String): List<String> =
+        thinkingRules(instanceId).map { it.id }
+
+    /** Suspend variant of [thinkingRuleIds]. */
+    suspend fun thinkingRuleIdsSuspending(instanceId: String): List<String> =
+        thinkingRulesSuspending(instanceId).map { it.id }
 
     /** First model id served by [instanceId], for the resolution-trace sample. Null if none. */
     fun firstModelId(instanceId: String): String? {
@@ -1653,18 +1802,64 @@ class ProviderRepository(private val context: Context) {
         return _config.value.modelEntries.firstOrNull { it.providerInstanceId == instanceId }?.model?.id
     }
 
-    /** Warm the resolver cache with every instance's custom rules (called on config load). */
+    /**
+     * [T-android-thinking-rules-phase2] Warm the resolver's custom-rule cache once
+     * config is available, so the (sync) request builder can read user rules.
+     *
+     * [T-android-save-off-main-thread] The read itself is queued to the persistence
+     * worker: this used to run `runBlocking { providerDao.loadAllThinkingRules() }`
+     * inline, and `ensureConfigLoaded()` — which is called from Compose mutators on
+     * the main thread — reached it on the very first access, so a cold provider.db
+     * read stalled the first frame. The rules screen reads
+     * [thinkingRules] from the cache this fills.
+     */
     fun loadAllThinkingRulesIntoCache() {
-        runCatching {
-            val rows = runBlocking { providerDao.loadAllThinkingRules() }
-            val byInstance = rows.groupBy { it.providerInstanceId }
-                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { it.toRule() } }
-            ThinkingRuleResolver.setAllCustomRules(byInstance)
-        }
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            runCatching {
+                val rows = providerDao.loadAllThinkingRules()
+                val byInstance = rows.groupBy { it.providerInstanceId }
+                    .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { it.toRule() } }
+                thinkingRulesCache = byInstance
+                ThinkingRuleResolver.setAllCustomRules(byInstance)
+            }.onFailure {
+                android.util.Log.w("ProviderRepo", "[ThinkingRules] cache warm failed: ${it.message}")
+            }
+        })
     }
 
-    private fun republishThinkingCache(instanceId: String) {
-        ThinkingRuleResolver.setCustomRules(instanceId, thinkingRules(instanceId))
+    /**
+     * [T-android-save-off-main-thread] Last-warm snapshot of `provider_thinking_rules`
+     * by instance id, filled off-thread by [loadAllThinkingRulesIntoCache] and kept
+     * current by every rule mutation. Lets the non-suspend [thinkingRules] read be a
+     * map lookup instead of a `runBlocking` DAO query on the composition thread.
+     */
+    @Volatile
+    private var thinkingRulesCache: Map<String, List<ThinkingRule>> = emptyMap()
+
+    /**
+     * Re-warm the rule cache after a mutation. Reloads every instance's rows
+     * rather than just [instanceId] so a rename/reorder can never leave a stale
+     * entry behind; the table is small (user-authored rules only).
+     *
+     * [T-android-save-off-main-thread] suspend because the DAO read is a
+     * suspend query — every caller is already on the persistence worker
+     * ([saveThinkingRuleSuspending] / [deleteThinkingRuleSuspending] /
+     * [reorderThinkingRulesSuspending]).
+     */
+    private suspend fun republishThinkingCache(instanceId: String) {
+        runCatching {
+            val rows = providerDao.loadAllThinkingRules()
+                .groupBy { it.providerInstanceId }
+                .mapValues { (_, rs) -> rs.sortedBy { it.sortOrder }.map { it.toRule() } }
+            thinkingRulesCache = rows
+            ThinkingRuleResolver.setAllCustomRules(rows)
+        }.onFailure {
+            android.util.Log.w(
+                "ProviderRepo",
+                "[ThinkingRules] republish after $instanceId failed: ${it.message}",
+            )
+        }
     }
 
     /**
@@ -1672,45 +1867,86 @@ class ProviderRepository(private val context: Context) {
      * list (position 0) — a rule overriding a built-in is useless below it; existing
      * rules shift down. A non-null [id] updates in place, preserving position.
      * Returns the rule id.
+     *
+     * [T-android-save-off-main-thread] Used to be `runBlocking { load → replace →
+     * republish }` on the Compose callback thread (called from
+     * ui/settings/ThinkingRulesSection.kt). The id is still minted synchronously so
+     * the caller can key its own state on it; the three DAO round-trips move to the
+     * persistence worker, where they stay ordered with config saves. Await the
+     * durable write with [saveThinkingRuleSuspending].
      */
-    fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String = runBlocking {
-        val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
+    fun saveThinkingRule(instanceId: String, rule: ThinkingRule, id: String? = null): String {
         val ruleId = id ?: java.util.UUID.randomUUID().toString()
-        val idx = existing.indexOfFirst { it.id == ruleId }
-        if (idx >= 0) {
-            // Update in place at its current sort_order.
-            existing[idx] = rule.toEntity(ruleId, instanceId, existing[idx].sortOrder)
-        } else {
-            // New rule at the top; everything else shifts down.
-            existing.add(0, rule.toEntity(ruleId, instanceId, 0))
-        }
-        val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
-        providerDao.replaceThinkingRules(instanceId, renumbered)
-        republishThinkingCache(instanceId)
-        ruleId
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            runCatching { saveThinkingRuleSuspending(instanceId, rule, ruleId) }
+                .onFailure { android.util.Log.e("ProviderRepo", "[ThinkingRules] save failed: ${it.message}", it) }
+        })
+        return ruleId
     }
+
+    /** Suspend variant of [saveThinkingRule]; returns the rule id it persisted. */
+    suspend fun saveThinkingRuleSuspending(instanceId: String, rule: ThinkingRule, id: String? = null): String =
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val existing = providerDao.loadThinkingRules(instanceId).toMutableList()
+            val ruleId = id ?: java.util.UUID.randomUUID().toString()
+            val idx = existing.indexOfFirst { it.id == ruleId }
+            if (idx >= 0) {
+                // Update in place at its current sort_order.
+                existing[idx] = rule.toEntity(ruleId, instanceId, existing[idx].sortOrder)
+            } else {
+                // New rule at the top; everything else shifts down.
+                existing.add(0, rule.toEntity(ruleId, instanceId, 0))
+            }
+            val renumbered = existing.mapIndexed { i, e -> e.copy(sortOrder = i) }
+            providerDao.replaceThinkingRules(instanceId, renumbered)
+            republishThinkingCache(instanceId)
+            ruleId
+        }
 
     /** Delete a custom rule by id. Hard delete — Android provider config is local-only,
      *  so there is no sync channel that could resurrect it (no tombstone needed). */
-    fun deleteThinkingRule(instanceId: String, id: String) = runBlocking {
-        providerDao.deleteThinkingRule(id)
-        // Renumber survivors so sort_order stays dense.
-        val survivors = providerDao.loadThinkingRules(instanceId)
-            .sortedBy { it.sortOrder }
-            .mapIndexed { i, e -> e.copy(sortOrder = i) }
-        providerDao.replaceThinkingRules(instanceId, survivors)
-        republishThinkingCache(instanceId)
+    fun deleteThinkingRule(instanceId: String, id: String) {
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            runCatching { deleteThinkingRuleSuspending(instanceId, id) }
+                .onFailure { android.util.Log.e("ProviderRepo", "[ThinkingRules] delete failed: ${it.message}", it) }
+        })
+    }
+
+    /** Suspend variant of [deleteThinkingRule]. */
+    suspend fun deleteThinkingRuleSuspending(instanceId: String, id: String) {
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            providerDao.deleteThinkingRule(id)
+            // Renumber survivors so sort_order stays dense.
+            val survivors = providerDao.loadThinkingRules(instanceId)
+                .sortedBy { it.sortOrder }
+                .mapIndexed { i, e -> e.copy(sortOrder = i) }
+            providerDao.replaceThinkingRules(instanceId, survivors)
+            republishThinkingCache(instanceId)
+        }
     }
 
     /** Reorder an instance's custom rules to match [orderedIds] (a permutation). */
-    fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) = runBlocking {
-        val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
-        val reordered = orderedIds.mapNotNull { byId[it] }
-            .mapIndexed { i, e -> e.copy(sortOrder = i) }
-        // Keep any id the caller omitted (defensive against a partial list) appended.
-        val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
-        providerDao.replaceThinkingRules(instanceId, reordered + omitted)
-        republishThinkingCache(instanceId)
+    fun reorderThinkingRules(instanceId: String, orderedIds: List<String>) {
+        ensurePersistWorker()
+        persistRequests.trySend(ProviderPersistRequest.Task {
+            runCatching { reorderThinkingRulesSuspending(instanceId, orderedIds) }
+                .onFailure { android.util.Log.e("ProviderRepo", "[ThinkingRules] reorder failed: ${it.message}", it) }
+        })
+    }
+
+    /** Suspend variant of [reorderThinkingRules]. */
+    suspend fun reorderThinkingRulesSuspending(instanceId: String, orderedIds: List<String>) {
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val byId = providerDao.loadThinkingRules(instanceId).associateBy { it.id }
+            val reordered = orderedIds.mapNotNull { byId[it] }
+                .mapIndexed { i, e -> e.copy(sortOrder = i) }
+            // Keep any id the caller omitted (defensive against a partial list) appended.
+            val omitted = byId.values.filter { it.id !in orderedIds }.map { it }
+            providerDao.replaceThinkingRules(instanceId, reordered + omitted)
+            republishThinkingCache(instanceId)
+        }
     }
 
     /**

@@ -1,71 +1,165 @@
 #!/bin/sh
 # List every network payload the dev-suite recipes may fetch, so a
 # network-restricted user can download them elsewhere and drop them into
-# /var/minis/shared/offline/ (host-visible shared folder). Installers check
-# that directory FIRST and skip the network entirely on a hit.
+# /var/minis/shared/offline/ (host-visible shared folder).
 #
-# Usage: minis-devsuite-offline-list [bundle-id]
+# KEEP THIS IN SYNC WITH THE DOWNLOAD SITES — it is the manifest a human
+# reads to pre-fetch by hand, and a stale name silently turns an offline
+# install into a network failure. The single source of truth for each entry
+# is the script that fetches it:
+#   minis-setup-flutter        -> FLUTTER_VERSION/TAR + flutter_infra_release
+#   minis-setup-jadx           -> JADX_VERSION/ZIP
+#   minis-setup-rust           -> TARGET + $DIST_ORIGIN/rustup-init(.sha256)
+#   minis-setup-llama-cpp      -> LLAMA_TAG (resolved at run time)
+#   minis-android-sdk-setup    -> BUILD_TOOLS_REV / ct_ver / CMAKE_VER /
+#                                 NDK_TAG, install_platform()'s candidate list
+#   minis-setup-{qemu,pnpm}    -> apt / npm only, NO payload to pre-fetch
+# and the offline key each one passes as the resume_fetch/curl_first <name>.
+#
+# Using an offline copy takes TWO gates (see usr/local/lib/minis/offline.sh):
+# the file must be listed here, and the user must opt in with
+# MINIS_ALLOW_OFFLINE=1 — /var/minis/shared is writable by every command the
+# agent runs in the guest, so a file found there is not trusted until the
+# user says so. The copy must also match the CHECKSUM column below; for a
+# payload marked "none published", pin what you downloaded yourself:
+#   MINIS_DEVSUITE_SHA256="<file>=<sha256>"
+# Both variables are set in Settings -> Environment Variables (user-set
+# state, not guest-writable).
+#
+# Usage: minis-devsuite-offline-list [bundle-id|component-id]
 set -eu
 
 OFFLINE_DIR=/var/minis/shared/offline
+. /usr/local/lib/minis/offline.sh
+
+FLUTVER="${FLUTVER:-3.24.5}"
+JADX_VERSION="${JADX_VERSION:-1.5.1}"
+CMAKE_VER="${MINIS_CMAKE_VER:-3.31.6}"
+NDK_TAG=r29
+CT_VER=11076708
+BUILD_TOOLS_REV=35.0.2
 
 emit() {
   # emit <file-name> <primary-url> [extra-urls...]
+  # The CHECKSUM line is what offline_pick verifies against; "none published"
+  # means the publisher ships no digest and the fetch is origin-only.
   name=$1; shift
   printf '%s\n' "FILE: $name"
   for u in "$@"; do printf '  URL: %s\n' "$u"; done
+  _cat=$(minis_catalog_digest "$name" || true)
+  if [ -n "$_cat" ]; then
+    printf '  CHECKSUM: %s\n' "$_cat"
+  else
+    printf '  CHECKSUM: none published by the publisher — pin it yourself (MINIS_DEVSUITE_SHA256="%s=<sha256>") to use a mirror or an offline copy\n' "$name"
+  fi
   printf '  PUT: %s/%s\n' "$OFFLINE_DIR" "$name"
 }
 
-case "${1:-all}" in
-  all|android-core|android-suite)
-    emit android-sdk-tools-static-aarch64.zip \
-      "https://github.com/lzhiyong/android-sdk-tools/releases/download/35.0.2/android-sdk-tools-static-aarch64.zip"
-    emit commandlinetools-linux-11076708_latest.zip \
-      "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
-    emit platform-36_r02.zip \
-      "https://dl.google.com/android/repository/platform-36_r02.zip"
-    emit platform-35-ext7_r03.zip \
-      "https://dl.google.com/android/repository/platform-35-ext7_r03.zip"
-    emit cmake-3.31.6-linux-aarch64.tar.gz \
-      "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz"
-    emit android-ndk-r29-aarch64.tar.xz \
-      "https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.tar.xz"
-    [ "${1:-}" = "android-core" ] && exit 0
-    [ "${1:-}" = "android-suite" ] || exit 0
-    ;;
-esac
+wants() {
+  # wants <requested-arg> <id> [more ids...]
+  _w_req=$1; shift
+  if [ "$_w_req" = "all" ]; then return 0; fi
+  for _w_id in "$@"; do
+    if [ "$_w_req" = "$_w_id" ]; then return 0; fi
+  done
+  return 1
+}
 
-case "${1:-all}" in
-  all|flutter)
-    emit flutter_linux_3.24.5.tar.xz \
-      "https://storage.googleapis.com/flutter_infra/releases/stable/linux/flutter_linux_3.24.5.tar.xz"
-    ;;
-esac
+sel="${1:-all}"
 
-case "${1:-all}" in
-  all|android-re)
-    emit jadx-1.5.1.zip \
-      "https://github.com/skylot/jadx/releases/download/v1.5.1/jadx-1.5.1.zip"
-    ;;
-esac
+if wants "$sel" all android-suite android-core; then
+  echo "== android-core (minis-android-sdk-setup) =="
+  emit android-sdk-tools-static-aarch64.zip \
+    "https://github.com/lzhiyong/android-sdk-tools/releases/download/${BUILD_TOOLS_REV}/android-sdk-tools-static-aarch64.zip"
+  emit "commandlinetools-linux-${CT_VER}_latest.zip" \
+    "https://dl.google.com/android/repository/commandlinetools-linux-${CT_VER}_latest.zip"
+  # install_platform() walks this candidate list per API level; the names are
+  # the ones dl.google.com actually still serves (platform-35-ext7_r03.zip is
+  # not in repository2-3.xml — it used to be listed here and silently 404'd).
+  emit platform-36_r02.zip \
+    "https://dl.google.com/android/repository/platform-36_r02.zip"
+  emit platform-35_r02.zip \
+    "https://dl.google.com/android/repository/platform-35_r02.zip"
+  emit platform-35-ext15_r01.zip \
+    "https://dl.google.com/android/repository/platform-35-ext15_r01.zip"
+  emit platform-35-ext14_r01.zip \
+    "https://dl.google.com/android/repository/platform-35-ext14_r01.zip"
+  emit "cmake-${CMAKE_VER}-linux-aarch64.tar.gz" \
+    "https://cmake.org/files/v${CMAKE_VER%.*}/cmake-${CMAKE_VER}-linux-aarch64.tar.gz" \
+    "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-aarch64.tar.gz"
+  echo "  DIGEST SOURCE: https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-SHA-256.txt"
+  # Fallback CMake (CMAKE_FALLBACK in minis-android-sdk-setup) if the above fails:
+  emit cmake-3.22.1-linux-aarch64.tar.gz \
+    "https://cmake.org/files/v3.22/cmake-3.22.1-linux-aarch64.tar.gz" \
+    "https://github.com/Kitware/CMake/releases/download/v3.22.1/cmake-3.22.1-linux-aarch64.tar.gz"
+  # NDK lives in the optional "C/C++ & NDK 原生构建链" component
+  # (android-core runs the setup script with MINIS_SKIP_NDK=1).
+  emit "android-ndk-${NDK_TAG}-aarch64.tar.xz" \
+    "https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-${NDK_TAG}-aarch64.tar.xz"
+fi
 
-case "${1:-all}" in
-  all|rust-dev)
-    emit rustup-init.sh \
-      "https://rsproxy.cn/rustup-init.sh" \
-      "https://sh.rustup.rs"
-    ;;
-esac
+if wants "$sel" all android-suite flutter; then
+  echo
+  echo "== flutter (minis-setup-flutter) =="
+  # [T-devsuite-verify] the archive name carries the channel and lives under
+  # flutter_infra_release; its sha256 is published in releases_linux.json,
+  # which minis-setup-flutter reads before downloading (a FLUTVER override
+  # changes both the file name and the digest it must match).
+  emit "flutter_linux_${FLUTVER}-stable.tar.xz" \
+    "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTVER}-stable.tar.xz" \
+    "https://mirrors.sjtug.sjtu.edu.cn/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTVER}-stable.tar.xz"
+  echo "  DIGEST SOURCE: https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json"
+fi
 
-case "${1:-all}" in
-  all|llama-cpp)
-    emit llama.cpp-master.tar.gz \
-      "https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz"
-    ;;
-esac
+if wants "$sel" all android-suite android-re; then
+  echo
+  echo "== android-re (minis-setup-jadx) =="
+  emit "jadx-${JADX_VERSION}.zip" \
+    "https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/jadx-${JADX_VERSION}.zip"
+fi
+
+if wants "$sel" all android-suite rust-dev; then
+  echo
+  echo "== rust-dev (minis-setup-rust) =="
+  # rustup-init is now the checksummed bootstrap BINARY (dist/<target>/
+  # rustup-init + rustup-init.sha256), not the curl-then-sh script: the
+  # offline key embeds the target triple. Fetch the .sha256 too and keep it
+  # beside the file, or pin it via MINIS_DEVSUITE_SHA256.
+  for t in aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+    emit "rustup-init-$t" \
+      "https://static.rust-lang.org/rustup/dist/$t/rustup-init" \
+      "https://rsproxy.cn/rustup/dist/$t/rustup-init"
+    echo "  DIGEST SOURCE: https://static.rust-lang.org/rustup/dist/$t/rustup-init.sha256"
+  done
+fi
+
+if wants "$sel" all llama-cpp; then
+  echo
+  echo "== llama-cpp (minis-setup-llama-cpp, source build) =="
+  # LLAMA_TAG is resolved from the GitHub API at run time; the recipe pins the
+  # tag AND checks the resulting commit object against api.github.com, so an
+  # archive has to be named for the tag you actually want to build.
+  emit "llama.cpp-master.tar.gz" \
+    "https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz"
+  echo "  NOTE: prefer a release tag — put llama.cpp-<tag>.tar.gz in $OFFLINE_DIR"
+  echo "        (the offline path needs MINIS_ALLOW_OFFLINE=1 plus its sha256 in MINIS_DEVSUITE_SHA256,"
+  echo "        because a source archive carries no commit object to verify)."
+fi
+
+if wants "$sel" all qemu-x86-64-compat nodejs-pkg code-search-toolkit python-core python-ai-dev nodejs-core go-toolchain; then
+  echo
+  echo "== apt / npm components =="
+  echo "  qemu-user-static, rg/fd/fzf/bat, python3, nodejs/npm, golang-go come from the guest's apt"
+  echo "  sources (apt verifies the repository signature + per-package checksum itself), and pnpm/yarn"
+  echo "  from the npm registry (integrity hashes in the package metadata). Nothing to pre-fetch here:"
+  echo "  on a restricted network switch the mirror with 'minis-mirror set tuna|ustc|sjtu|...' instead."
+fi
 
 echo
-echo "把下载好的文件原样放进 $OFFLINE_DIR/（宿主侧同路径），"
-echo "再回到插件市场点装配——安装器检测到本地文件会完全跳过网络。"
-echo "apt 组件（rg/fd/nodejs/python3 等）走 apt 源，请用 minis-mirror 切国内源。"
+echo "用法："
+echo "  1) 把下载好的文件原样放进 $OFFLINE_DIR/（宿主侧同路径，目录会在第一次装配时自动创建）。"
+echo "  2) 在 设置 → 环境变量 里设 MINIS_ALLOW_OFFLINE=1 —— /var/minis/shared 沙箱内任意命令都可写，"
+echo "     所以离线文件默认不被采信。"
+echo "  3) 文件必须匹配上表的 CHECKSUM；没有发布的校验和时，用"
+echo "     MINIS_DEVSUITE_SHA256=\"<文件名>=<sha256>\" 自己钉一个。"
+echo "  4) 回到插件市场点装配——安装器检测到本地文件会完全跳过网络。"

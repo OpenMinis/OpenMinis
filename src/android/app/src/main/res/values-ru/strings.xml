@@ -357,18 +357,8 @@
     <string name="memory_file_empty">Пусто</string>
     <string name="common_close">Закрыть</string>
     <string name="common_skip">Пропустить</string>
-    <string name="common_next">Далее</string>
-    <string name="onboarding_welcome_title">Добро пожаловать в Minis Ultra</string>
-    <string name="onboarding_welcome_subtitle">Ваш Minis Ultra Agent с Терминалом, браузером и доступом к функциям устройства.</string>
-    <string name="onboarding_get_started">Начать</string>
-    <string name="onboarding_provider_title">Добавить Провайдера</string>
-    <string name="onboarding_provider_subtitle">Чтобы начать, введите Ключ API хотя бы для одного Провайдера.</string>
-    <string name="onboarding_provider_api_key_label">Ключ API %1$s</string>
-    <string name="onboarding_save_api_key">Сохранить Ключ API</string>
-    <string name="onboarding_saved">Сохранено</string>
     <string name="onboarding_select_models_title">Выбрать Модели</string>
     <string name="onboarding_select_models_subtitle">Выберите до 3 Моделей для группы по умолчанию.</string>
-    <string name="onboarding_search_models">Поиск Моделей</string>
     <string name="onboarding_filter_models">Фильтр Моделей</string>
     <string name="onboarding_done_count">Готово (%1$d/3)</string>
     <string name="onboarding_loading_models">Загрузка Моделей…</string>
@@ -630,8 +620,6 @@
     <string name="appearance_auto_grouping_subtitle">Помещать новые чаты в подходящую группу</string>
     <string name="appearance_auto_grouping_footer">Когда название чата создаётся впервые, чат также помещается в подходящую существующую группу. Выполняется один раз для каждого чата, использует только созданные вами группы и оставляет чат без группы, если ничего не подходит.</string>
     <string name="appearance_section_tool_preview">Строка состояния инструмента</string>
-    <string name="appearance_tool_preview_footer">Показывать живую миниатюру предпросмотра рядом со строкой состояния инструмента во время работы Minis Ultra Agent.</string>
-    <string name="appearance_tool_preview_title">Окно предпросмотра инструмента</string>
     <string name="appearance_section_auto_focus_after_reply">Автофокус ввода после ответа</string>
     <string name="appearance_auto_focus_after_reply_title">Автофокус ввода после ответа</string>
     <string name="appearance_auto_focus_after_reply_footer">Когда включено, клавиатура появляется автоматически после того, как модель завершит ответ, чтобы поле ввода было готово для продолжения. Включено по умолчанию; отключите, если предпочитаете читать ответ без неожиданного появления клавиатуры.</string>
@@ -1807,4 +1795,13 @@
     <string name="dev_suite_not_installed">Не установлено</string>
     <string name="dev_suite_required">обязательно</string>
     <string name="dev_suite_assemble">Собрать</string>
+    <string name="dev_suite_start_install">Начало установки</string>
+    <string name="dev_suite_apt_failed">Сбой установки через apt (exit %1$d)</string>
+    <string name="dev_suite_step_failed">Шаг завершился с ошибкой (exit %1$d): %2$s</string>
+    <string name="dev_suite_probe_failed">Установка завершена, но проверка готовности не пройдена</string>
+    <string name="dev_suite_interrupted">Установка прервана</string>
+    <string name="dev_suite_no_space">Недостаточно памяти: требуется около %1$d ГБ, доступно %2$d ГБ</string>
+    <string name="dev_suite_skipped_dep">Пропущено: %1$s не установлен</string>
+    <string name="dev_suite_uninstall_failed">Сбой удаления (exit %1$d)</string>
+    <string name="dev_suite_remove_confirm">Удалить %1$s из песочницы? Загруженные файлы и ссылки команд будут удалены, пакеты apt останутся установленными.</string>
 </resources>

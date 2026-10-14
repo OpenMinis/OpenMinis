@@ -28,6 +28,14 @@ object AppLogger {
     private const val PREF_NAME = "logging_prefs"
     private const val KEY_ENABLED = "logging_enabled"
 
+    // [T-android-log-write-amp] Flush-policy bounds for the daily file writer.
+    // Flushing every line cost a write syscall per logcat line; buffering
+    // unboundedly would break `adb shell tail -f` and the in-app log reader.
+    // Compromise: flush on every priority line and at most FLUSH_LINES lines /
+    // FLUSH_IDLE_MS seconds of staleness in between.
+    private const val FLUSH_LINES = 32
+    private const val FLUSH_IDLE_MS = 2_000L
+
     private var logDir: File? = null
 
     /**
@@ -69,9 +77,16 @@ object AppLogger {
 
     private var currentDate: String = ""
     private var writer: PrintWriter? = null
-    private var currentFile: File? = null
     private var logFileCapped: Boolean = false
     private var enabled: Boolean = false
+
+    // [T-android-log-write-amp] Incremental size of the open day file, so
+    // appendFileLine no longer stats it per line. Set once by getWriter when a
+    // day file opens, then bumped by the written byte count. Guarded by the
+    // same monitor as appendFileLine/getWriter (both @Synchronized).
+    private var currentFileSize: Long = 0L
+    private var unflushedLines: Int = 0
+    private var lastFlushAtMs: Long = 0L
 
     // Saved references to the JVM's original stdout/stderr. Captured on the
     // first startCapture() so stopCapture() can restore them — without this we
@@ -162,9 +177,10 @@ object AppLogger {
             writer?.close()
         } catch (_: Exception) {}
         writer = null
-        currentFile = null
         logFileCapped = false
         currentDate = ""
+        currentFileSize = 0L
+        unflushedLines = 0
     }
 
     /**
@@ -311,26 +327,72 @@ object AppLogger {
     private fun appendFileLine(today: String, line: String, quiet: Boolean = false) {
         if (!enabled) return
         try {
+            // [T-android-log-write-amp] Per line this used to pay a stat syscall
+            // (file.length()), a full UTF-8 encode purely to measure the byte
+            // count, and a flush() — and the LogcatTailer sink feeds it EVERY
+            // logcat line while logging is enabled, which is the busiest path
+            // during streaming replies. Now: the day-file size is tracked
+            // incrementally (one stat when getWriter opens it), the byte count
+            // is computed by a char scan with no byte[] allocation (the line is
+            // already clamped to MAX_LOG_LINE_CHARS by clampLogLine before any
+            // measuring), and the flush is bounded (priority lines flush
+            // immediately; the rest at most FLUSH_LINES/FLUSH_IDLE_MS late, so
+            // `adb shell tail` and the in-app reader stay near-real-time).
+            // Rotation limits and redaction behaviour are unchanged.
             val clipped = BoundedText.clampLogLine(line)
+            val priorityLine = BoundedText.isPriorityLogLine(clipped)
             val w = getWriter(today)
-            val file = currentFile
-            val size = file?.length() ?: 0L
-            val lineBytes = clipped.toByteArray(Charsets.UTF_8).size + 1
+            val size = currentFileSize
+            val lineBytes = utf8ByteLength(clipped) + 1 // println appends the line separator
             if (!BoundedText.canAppendLog(size, lineBytes)) {
                 if (!logFileCapped) {
                     logFileCapped = true
-                    w.println("[AppLogger] daily log reached ${BoundedText.MAX_LOG_FILE_BYTES} bytes; info/debug dropped, ERROR/WARN kept")
+                    val marker = "[AppLogger] daily log reached ${BoundedText.MAX_LOG_FILE_BYTES} bytes; info/debug dropped, ERROR/WARN kept"
+                    w.println(marker)
+                    currentFileSize += utf8ByteLength(marker) + 1
                     w.flush()
+                    unflushedLines = 0
+                    lastFlushAtMs = System.currentTimeMillis()
                 }
-                val keepPriority = !quiet && BoundedText.isPriorityLogLine(clipped) &&
+                val keepPriority = !quiet && priorityLine &&
                     BoundedText.canAppendPriorityLog(size, lineBytes)
                 if (!keepPriority) return
             }
             w.println(clipped)
-            w.flush()
+            currentFileSize += lineBytes
+            unflushedLines++
+            val now = System.currentTimeMillis()
+            if (priorityLine || unflushedLines >= FLUSH_LINES ||
+                now - lastFlushAtMs >= FLUSH_IDLE_MS
+            ) {
+                w.flush()
+                unflushedLines = 0
+                lastFlushAtMs = now
+            }
         } catch (e: Exception) {
             if (!quiet) Log.w(TAG, "Failed to write log: ${e.message}")
         }
+    }
+
+    /**
+     * UTF-8 byte length of [s] computed by scanning its code points — the same
+     * math the encoder does, without allocating (and throwing away) the byte[]
+     * just to measure it.
+     */
+    private fun utf8ByteLength(s: String): Int {
+        var n = 0
+        var i = 0
+        while (i < s.length) {
+            val cp = s.codePointAt(i)
+            n += when {
+                cp < 0x80 -> 1
+                cp < 0x800 -> 2
+                cp < 0x10000 -> 3
+                else -> 4
+            }
+            i += Character.charCount(cp)
+        }
+        return n
     }
 
     @Synchronized
@@ -339,10 +401,13 @@ object AppLogger {
             writer?.close()
             val dir = logDir ?: throw IllegalStateException("AppLogger not initialized")
             val file = File(dir, "minis-$date.log")
-            currentFile = file
-            logFileCapped = file.length() >= BoundedText.MAX_LOG_FILE_BYTES
+            // The single per-day stat; appendFileLine tracks the size from here.
+            currentFileSize = file.length()
+            logFileCapped = currentFileSize >= BoundedText.MAX_LOG_FILE_BYTES
             writer = PrintWriter(FileWriter(file, true))
             currentDate = date
+            unflushedLines = 0
+            lastFlushAtMs = System.currentTimeMillis()
         }
         return writer!!
     }
@@ -442,9 +507,10 @@ object AppLogger {
         // @Synchronized shares getWriter()'s monitor so this can't race a write.
         writer?.close()
         writer = null
-        currentFile = null
         logFileCapped = false
         currentDate = ""
+        currentFileSize = 0L
+        unflushedLines = 0
     }
 
     /**

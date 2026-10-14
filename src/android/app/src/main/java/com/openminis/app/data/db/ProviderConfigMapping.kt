@@ -47,6 +47,11 @@ object ProviderConfigMetaKeys {
     // [T-android-vision-group / GH#182] Vision Group pointer (per-device meta KV).
     const val VISION_GROUP_ID = "vision_group_id"
     const val COMPACT_FALLBACK_GROUP_ID = "compact_fallback_group_id"
+    /**
+     * [T-android-translation-single-source] LEGACY: no longer written or read (see
+     * [toSnapshot] / [toProviderConfig]). Kept as the name of the row that may still
+     * exist in an upgraded device's provider_config_meta table.
+     */
     const val DEFAULT_TRANSLATION_MODEL_ID = "default_translation_model_id"
     const val JSON_SYNC_HASH = "json_sync_hash"
 }
@@ -68,13 +73,21 @@ fun ProviderConfig.toSnapshot(
     jsonSyncHash: String? = null,
 ): ProviderConfigSnapshot {
     // Map every legacy entry uuid → composite "{instanceId}/{modelId}".
-    // Duplicate composite keys are theoretically impossible (one entry
-    // per (instance, model)) — if we see one, last-write-wins on the
-    // map, but both legacy uuids point at the same composite, so group /
-    // agent-loop references converge harmlessly.
+    // [T-android-composite-key-collision] Two entries on the SAME instance with
+    // the SAME base-model id are legitimate — the common "same model, different
+    // overrides" custom entry — but the composite key is (instance, model), so
+    // both would land on one `provider_model_entries.id` row and
+    // @Insert(REPLACE) would silently keep only one. The survivors' in-memory
+    // ids would also be identical, which is exactly the duplicate LazyColumn
+    // key [T-android-agentloop-dup-key-crash] warns about. Only the COLLIDING
+    // entries get the uuid appended, so the overwhelmingly common single-entry
+    // case keeps its stable "{instanceId}/{modelId}" id and every persisted
+    // session binding keeps resolving.
     val idMap = HashMap<String, String>(modelEntries.size)
+    val takenKeys = HashSet<String>(modelEntries.size)
     for (entry in modelEntries) {
-        idMap[entry.uuid] = compositeEntryKey(entry.providerInstanceId, entry.baseModel.id)
+        val base = compositeEntryKey(entry.providerInstanceId, entry.baseModel.id)
+        idMap[entry.uuid] = if (takenKeys.add(base)) base else "$base#${entry.uuid}"
     }
 
     val instanceRows = instances.mapIndexed { idx, inst ->
@@ -187,9 +200,12 @@ fun ProviderConfig.toSnapshot(
     compactFallbackGroupId?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.COMPACT_FALLBACK_GROUP_ID, it))
     }
-    defaultTranslationModelId?.let {
-        metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.DEFAULT_TRANSLATION_MODEL_ID, it))
-    }
+    // [T-android-translation-single-source] defaultTranslationModelId is no longer
+    // written as a meta row. Nothing reads ProviderConfig.defaultTranslationModelId
+    // — live translation resolves TranslationPrefs — so persisting it in provider.db
+    // made a second, never-consulted copy of a setting that already has one source of
+    // truth (and a delete path that scrubbed a slot nobody resolved). Old snapshots
+    // that still carry the row simply stop being read.
     jsonSyncHash?.let {
         metaRows.add(ProviderConfigMetaEntity(ProviderConfigMetaKeys.JSON_SYNC_HASH, it))
     }
@@ -207,8 +223,11 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         ProviderInstance(
             id = row.id,
             label = row.label,
-            providerType = ProviderType.valueOf(row.providerType),
-            credentialType = ProviderCredential.valueOf(row.credentialType),
+            // [T-android-provider-enum-decode] decoded, not valueOf(): a type or
+            // credential name this build doesn't know degrades to `unsupported`
+            // / `apiKey` instead of throwing and killing the whole provider load.
+            providerType = ProviderType.decoded(row.providerType),
+            credentialType = decodePersistedEnum(row.credentialType, ProviderCredential.apiKey),
             isEnabled = row.isEnabled != 0,
             pinned = row.pinned != 0,
             createdAt = row.createdAt,
@@ -253,8 +272,11 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
             memberEntryIds = jsonForBlobs
                 .decodeFromString(stringListSerializer, row.memberEntryIdsJson)
                 .toMutableList(),
-            strategy = RoutingStrategy.valueOf(row.strategy),
-            fallbackStrategy = FallbackStrategy.valueOf(row.fallbackStrategy),
+            // [T-android-provider-enum-decode] Both routing enums degrade to the
+            // safe default rather than throwing on a name a newer build wrote —
+            // see the helper's KDoc for why a throw here costs every provider.
+            strategy = decodePersistedEnum(row.strategy, RoutingStrategy.fallback),
+            fallbackStrategy = decodePersistedEnum(row.fallbackStrategy, FallbackStrategy.default),
             // [T-android-thinking-level-arch] decoded() (not valueOf()) so a
             // level string a NEWER build persisted (e.g. "MAX"/"ULTRA") can't
             // throw and blow up the whole DB load — which would fall back to the
@@ -286,7 +308,10 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
         voiceOutputGroupId = metaMap[ProviderConfigMetaKeys.VOICE_OUTPUT_GROUP_ID],
         visionGroupId = metaMap[ProviderConfigMetaKeys.VISION_GROUP_ID],
         compactFallbackGroupId = metaMap[ProviderConfigMetaKeys.COMPACT_FALLBACK_GROUP_ID],
-        defaultTranslationModelId = metaMap[ProviderConfigMetaKeys.DEFAULT_TRANSLATION_MODEL_ID],
+        // [T-android-translation-single-source] Deliberately NOT read any more:
+        // the field keeps its default (null) so the config still loads; the value
+        // is not consulted anywhere (translation resolves TranslationPrefs), and
+        // loading it made an abandoned DB row look like live state.
         agentLoopModelEntryIds = entryLoopIds,
         agentLoopGroupIds = groupLoopIds,
     )
@@ -294,3 +319,20 @@ fun ProviderConfigSnapshot.toProviderConfig(jsonForBlobs: Json): ProviderConfig 
 
 /** Composite key shape used as ModelEntry id in DB and forward in JSON mirror. */
 fun compositeEntryKey(instanceId: String, modelId: String): String = "$instanceId/$modelId"
+
+/**
+ * [T-android-provider-enum-decode] Name-based decode of an enum that came from
+ * persisted storage, which NEVER throws.
+ *
+ * `Enum.valueOf` on a value THIS build doesn't know — a `ProviderType` /
+ * `RoutingStrategy` / `FallbackStrategy` / `ProviderCredential` case a NEWER
+ * build wrote — threw out of [toProviderConfig] mid-load. `loadConfigSuspending`
+ * deliberately refuses to fall back to the JSON mirror once a DB snapshot read
+ * fails ([T-android-provider-empty-load-wipe]), and the mirror decode throws on
+ * the very same value, so one future enum case made EVERY provider feature dead
+ * until provider.db was repaired by hand. `ThinkingLevel.decoded()` and
+ * `ImageEndpointMode` were already hardened for exactly this; the four remaining
+ * `valueOf` calls were not.
+ */
+private inline fun <reified T : Enum<T>> decodePersistedEnum(raw: String, fallback: T): T =
+    enumValues<T>().firstOrNull { it.name == raw } ?: fallback

@@ -254,9 +254,16 @@ object SessionWorkspace {
     fun acceptsResolved(filesDir: File, sessionId: String, candidate: File): Boolean {
         val owner = ownerSessionId(sessionId)
         if (!isSafeId(owner)) return false
-        val canon = lexicalNormalize(candidate)
-        val sessions = lexicalNormalize(File(filesDir, SESSIONS_DIR))
-        val projects = lexicalNormalize(File(filesDir, WORKSPACES_DIR))
+        // [T-branch-uses-canonical-view] The branch below is chosen from the
+        // same CANONICAL view that staysInside() later enforces — not the
+        // lexical one. `lexicalNormalize` collapses `..`/`.` but does not
+        // resolve symlinks, so a candidate that lexically reads as inside the
+        // sessions tree but canonically escapes (or vice-versa) used to enter
+        // the wrong branch: the branch gate was lexical, the containment gate
+        // canonical, and they could disagree about which tree owns the path.
+        val canon = normalized(candidate)
+        val sessions = normalized(File(filesDir, SESSIONS_DIR))
+        val projects = normalized(File(filesDir, WORKSPACES_DIR))
         if (staysInside(sessions, canon)) {
             return staysInside(File(sessions, owner), canon)
         }
@@ -265,6 +272,12 @@ object SessionWorkspace {
             if (!isSafeId(folder)) return false
             return staysInside(File(projects, folder), canon)
         }
+        // Documented default, not an oversight: a path that lives OUTSIDE both
+        // the per-session (minis-sessions) and per-project (minis-workspaces)
+        // trees is admitted. The jail only fences those two trees against each
+        // other — the rootfs, the global skills/shared/mcp-servers dirs, and a
+        // user SAF mount are legitimately reachable and must resolve. Owner vs
+        // project semantics above are unchanged.
         return true
     }
 

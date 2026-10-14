@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -54,6 +55,8 @@ import com.openminis.app.backup.remote.RcloneBackendCatalog
 import com.openminis.app.ui.settings.SettingsScaffold
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SettingsSwitchRow
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * [T-android-rclone-ui] Backup destinations — the Android peer of iOS
@@ -70,17 +73,34 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
     val error by vm.error.collectAsState()
     val browse by vm.browse.collectAsState()
     val context = LocalContext.current
-    val phoneStore = remember { PhoneBackupFolderStore(context) }
-    var phoneFolders by remember { mutableStateOf(phoneStore.folders) }
+    // [T-android-sessionlist-prefs-io] PhoneBackupFolderStore's constructor
+    // touches SharedPreferences — a synchronous XML parse the first time the
+    // file is seen in the process — and its `folders` getter reads and
+    // JSON-decodes the stored tree URIs. Both used to run in this composition
+    // body on every entry to the screen. The store is lazy, the first read is on
+    // Dispatchers.IO, and the empty first frame is the same list a device with
+    // no saved folder would show, so nothing has to "load" visually.
+    val phoneStore = remember {
+        lazy { PhoneBackupFolderStore(context.applicationContext) }
+    }
+    var phoneFolders by remember {
+        mutableStateOf<List<PhoneBackupFolderStore.Folder>>(emptyList())
+    }
+    LaunchedEffect(Unit) {
+        phoneFolders = withContext(Dispatchers.IO) { phoneStore.value.folders }
+    }
     val pickPhoneFolder = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         if (uri != null) {
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            // Kept on the callback thread: the persistable grant is only
+            // available while the picker's transient permission is still live,
+            // and this is one binder call, not disk IO.
             runCatching { context.contentResolver.takePersistableUriPermission(uri, flags) }
-            phoneStore.add(uri, PhoneBackupFolderStore.treeDisplayName(context, uri))
-            phoneFolders = phoneStore.folders
+            phoneStore.value.add(uri, PhoneBackupFolderStore.treeDisplayName(context, uri))
+            phoneFolders = phoneStore.value.folders
         }
     }
 
@@ -135,8 +155,8 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
                         subtitle = stringResource(R.string.backup_dest_phone_subtitle),
                         checked = f.enabled,
                         onCheckedChange = {
-                            phoneStore.setEnabled(f.id, it)
-                            phoneFolders = phoneStore.folders
+                            phoneStore.value.setEnabled(f.id, it)
+                            phoneFolders = phoneStore.value.folders
                         },
                         showDivider = i < phoneFolders.lastIndex,
                     )
@@ -187,8 +207,8 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
                 phoneFolders.forEach { f ->
                     MinisOutlinedButton(
                         onClick = {
-                            phoneStore.remove(f.id)
-                            phoneFolders = phoneStore.folders
+                            phoneStore.value.remove(f.id)
+                            phoneFolders = phoneStore.value.folders
                         },
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     ) { Text(stringResource(R.string.backup_dest_remove, f.name)) }

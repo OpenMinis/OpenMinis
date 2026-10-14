@@ -8,6 +8,7 @@ import com.openminis.app.session.ChatRuntime
 import com.openminis.app.session.InputAttachment
 import org.json.JSONObject
 import java.io.File
+import java.util.Locale
 
 /**
  * Mutation handlers for `chat.*` RPC methods — Phase 2.
@@ -434,7 +435,10 @@ internal object ChatMutationMethods {
      */
     private fun parseThinkingLevel(params: JSONObject): ThinkingLevel? {
         if (!params.has("thinkingLevel") || params.isNull("thinkingLevel")) return null
-        val raw = params.optString("thinkingLevel", "").trim().lowercase()
+        // [T-android-turkish-dotted-i] Locale-invariant: this is a protocol
+        // token compared against fixed literals (bare lowercase() turns "HIGH"
+        // into "hıgh" on a Turkish/Azeri default locale).
+        val raw = params.optString("thinkingLevel", "").trim().lowercase(Locale.ROOT)
         if (raw.isEmpty()) return null
         return when (raw) {
             "off" -> ThinkingLevel.OFF
@@ -452,7 +456,9 @@ internal object ChatMutationMethods {
     }
 
     private fun guessMime(name: String): String {
-        val ext = name.substringAfterLast('.', "").lowercase()
+        // Locale-invariant: extension matched against fixed literals —
+        // ".TIFF" folds to "tıff" under a Turkish default locale (bare lowercase()).
+        val ext = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return when (ext) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"

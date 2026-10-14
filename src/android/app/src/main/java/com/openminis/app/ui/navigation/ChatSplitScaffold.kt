@@ -99,8 +99,6 @@ import java.util.UUID
  */
 private const val LIST_PANE_DEFAULT_FRACTION = 0.28f
 
-private val LIST_PANE_WIDTH = 340.dp
-
 /**
  * [T-android-empty-state-soul-identity] Upper bound for the empty-state Soul
  * icon. A custom image is capped at its own stored pixel size so it is never
@@ -501,6 +499,26 @@ fun ChatSplitScaffold(
             }
         }
 
+        // [T-android-session-select-one-place] One owner for "the user picked a
+        // session". The same four lines were written out three times — the
+        // drawer row, the list pane (full screen and two-pane sidebar share the
+        // one slot) and the detail pane's move-to — with only the drawer copy
+        // closing the sheet. Duplicated, they drift: a future change to how a
+        // selection is committed (persistence, pane-history semantics, adding a
+        // RouteFuse note) would have to be made in three places and silently
+        // apply to only some of the three presentations.
+        //
+        // A local function rather than a value lambda so the drawer variant can
+        // pass the one difference as an argument instead of carrying its own
+        // copy of the navigation.
+        fun selectSession(sessionId: String, fromDrawer: Boolean = false) {
+            selectedSessionId = sessionId
+            scope.launch {
+                navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, sessionId)
+                if (fromDrawer) sessionDrawerState.close()
+            }
+        }
+
     // [T-android-tablet-split-resizable] The scaffold is wrapped so the drag
     // handle can be OVERLAID on it (below) rather than living inside a pane.
     //
@@ -564,16 +582,7 @@ fun ChatSplitScaffold(
                                     .rememberPersistedId(currentSessionId),
                             )
                         ) currentSessionId else null,
-                        { sessionId ->
-                            selectedSessionId = sessionId
-                            scope.launch {
-                                navigator.navigateTo(
-                                    ListDetailPaneScaffoldRole.Detail,
-                                    sessionId,
-                                )
-                                sessionDrawerState.close()
-                            }
-                        },
+                        { sessionId -> selectSession(sessionId, fromDrawer = true) },
                         // [P1-6] Drawer presentation — positional args: the
                         // listPane slot is a function TYPE, whose call sites
                         // cannot use named arguments.
@@ -633,12 +642,7 @@ fun ChatSplitScaffold(
                                 .rememberPersistedId(currentSessionId),
                         )
                     ) currentSessionId else null,
-                    { sessionId ->
-                        selectedSessionId = sessionId
-                        scope.launch {
-                            navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, sessionId)
-                        }
-                    },
+                    { sessionId -> selectSession(sessionId) },
                     // Full screen / sidebar presentation — own top bar.
                     // Positional: the listPane slot is a function TYPE, whose
                     // call sites cannot use named arguments.
@@ -709,15 +713,7 @@ fun ChatSplitScaffold(
                         // screen over both panes on a tablet — the phone
                         // behaviour, in the one layout that exists to avoid it.
                         openNewDraft,
-                        { targetId ->
-                            selectedSessionId = targetId
-                            scope.launch {
-                                navigator.navigateTo(
-                                    ListDetailPaneScaffoldRole.Detail,
-                                    targetId,
-                                )
-                            }
-                        },
+                        { targetId -> selectSession(targetId) },
                         // [T-android-tablet-sidebar-collapse] Only offered in
                         // two-pane: in single-pane this slot is the back arrow,
                         // and there is no second pane to collapse anyway.

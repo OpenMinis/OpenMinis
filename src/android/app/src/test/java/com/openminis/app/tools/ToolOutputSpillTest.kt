@@ -23,4 +23,22 @@ class ToolOutputSpillTest {
         assertFalse(preview.contains("M".repeat(100)))
         assertTrue(preview.length < output.length)
     }
+
+    /**
+     * [T-tool-output-single-mechanism] A spill that cannot happen (no session,
+     * mkdirs refused, write threw) must still cost the context window a bounded
+     * preview — the duplicated `ToolOutputPolicy` path used to `return text`
+     * uncapped on write failure, which is how megabytes reached the model.
+     */
+    @Test
+    fun `capped preview is bounded and admits there is no file`() {
+        val output = "H".repeat(8_000) + "M".repeat(20_000) + "T".repeat(5_000)
+        val preview = ToolOutputSpill.cappedPreview("shell_execute", output)
+        assertTrue(preview.contains("could not be saved"))
+        assertFalse(preview.contains("minis://workspace"))
+        assertTrue(preview.contains("H".repeat(32)))
+        assertTrue(preview.contains("T".repeat(32)))
+        assertFalse(preview.contains("M".repeat(100)))
+        assertTrue(preview.length < output.length)
+    }
 }

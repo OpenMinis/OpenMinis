@@ -66,6 +66,36 @@ class GuestWorkloadPolicyTest {
         )
     }
 
+    /**
+     * [T-setup-family] The Dev Suite installer runs
+     * `/usr/local/bin/minis-setup-<tool>` through ExecutionCoordinator with a
+     * documented 10–30 minute build/unpack and a 30-minute request. Before the
+     * fix the family matched neither isSetup nor the "minis-dev-setup" string,
+     * classified NORMAL (600s wall), and armMs capped the caller's 30 minutes
+     * to 10 — every llama.cpp build / Flutter unpack died at ~10 min and the
+     * component was marked FAILED.
+     */
+    @Test
+    fun setupFamilyKeepsAThirtyMinuteWall() {
+        val cmd = "/usr/local/bin/minis-setup-llama-cpp"
+        val thirtyMin = 30 * 60_000L
+        assertTrue(GuestWorkloadPolicy.isSetup(cmd))
+        assertEquals(WorkClass.SETUP, BudgetClassifier.classify(cmd).workClass)
+        // A 30-minute request is honoured, not capped to the NORMAL wall.
+        assertEquals(thirtyMin, BudgetClassifier.armMs(cmd, thirtyMin))
+        // The SETUP floor survives a short request, same as the named scripts.
+        assertEquals(
+            ShellTimeoutPolicy.LONG_RUNNING_TIMEOUT_MS,
+            ShellTimeoutPolicy.effectiveMs(cmd, 60_000L),
+        )
+        // The whole family shares one predicate — a future minis-setup-* is
+        // setup-class the moment it ships, and takes the host apt mutex.
+        for (tool in listOf("flutter", "jadx", "rust", "pnpm", "qemu")) {
+            assertTrue("minis-setup-$tool", GuestWorkloadPolicy.isSetup("/usr/local/bin/minis-setup-$tool"))
+            assertTrue("apt mutex for minis-setup-$tool", SandboxResourceGate.isPackageManager("minis-setup-$tool"))
+        }
+    }
+
     @Test
     fun findIsNormalAndACallerMayShortenIt() {
         // Class ceiling: a broad find walk is NORMAL (600s), not INTERACTIVE
@@ -103,7 +133,6 @@ class GuestWorkloadPolicyTest {
         assertTrue(GuestWorkloadPolicy.diskRefusal(stressed, total, "echo hi > /tmp/x")!!.contains("exit 126"))
         assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, "echo hi"))
         assertNull(GuestWorkloadPolicy.diskRefusal(stressed, total, "git status"))
-        assertEquals(300, GuestWorkloadPolicy.cpuSeconds("python3 -m http.server"))
     }
 
     /**
@@ -203,10 +232,11 @@ class GuestWorkloadPolicyTest {
     }
 
     @Test
-    fun extremeStallKillsOnTheFirstHangAndAShortStutterDoesNot() {
-        assertFalse(GuestWorkloadPolicy.shouldKillLiveWork(1, 3_000L))
-        assertTrue(GuestWorkloadPolicy.shouldKillLiveWork(1, 8_000L))
-        assertTrue(GuestWorkloadPolicy.shouldKillLiveWork(2, 3_000L))
+    fun processCapTripsOneAboveTheLimit() {
+        // [T-dead-hangpolicy] The shouldKillLiveWork(hang, duration) arms that
+        // used to live here were deleted with the dead helper: the hang/kill
+        // decision is now ShellIdleSafety's, and GuestWorkloadPolicy keeps only
+        // the owned-pid cap.
         assertTrue(GuestWorkloadPolicy.exceedsProcessCap(GuestWorkloadPolicy.PROCESS_LIMIT + 1))
         assertFalse(GuestWorkloadPolicy.exceedsProcessCap(GuestWorkloadPolicy.PROCESS_LIMIT))
     }
@@ -243,9 +273,10 @@ class GuestWorkloadPolicyTest {
         assertEquals(120_000L, GuestWorkloadPolicy.clampHostTimeout(999_000L))
         assertEquals(15_000L, GuestWorkloadPolicy.clampHostTimeout(15_000L))
         assertTrue(GuestWorkloadPolicy.requiresFreshConfirm("su -c id"))
-        // Still described honestly, but not a refusal: the brakes are the
-        // clock, the output rate and the resident window.
-        assertTrue(GuestWorkloadPolicy.isBroadFind("find /var/minis /tmp /root /home /data -maxdepth 3"))
+        // [T-dead-hangpolicy] The isBroadFind() predicate that used to be
+        // asserted here was deleted (no main-code reader — a broad find is slow,
+        // not irreversible). The behaviour it described still holds: the brakes
+        // are the clock, the output rate and the resident window, NOT a refusal.
         assertNull(GuestWorkloadPolicy.hostRefusal("find /var/minis /tmp /root /home /data -maxdepth 3"))
         assertNull(GuestWorkloadPolicy.hostRefusal("find /var/minis/workspace -maxdepth 4"))
     }

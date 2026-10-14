@@ -31,10 +31,18 @@ Independent slices: one spawn_agent call with a tasks[] array. Dependent phases:
     ): String {
         val body = rawPrompt.trim()
         val roleLine = role?.trim()?.takeIf { it.isNotEmpty() }?.let { "- Assigned role: $it\n" } ?: ""
-        val writeLine = if (writePaths.isNotEmpty()) {
-            "- You may only file_write/file_edit under: ${writePaths.joinToString()}\n"
-        } else {
-            ""
+        // [T-write-guard-fail-closed] `writePaths` can be the poison state
+        // (write_paths supplied but every entry unusable). Show the USABLE
+        // prefixes only — WritePathGuard.INVALID is a control-char state flag and
+        // must never be pasted into a prompt — and tell the worker it is locked
+        // out, otherwise every denied write looks like a bug in the tool.
+        val writeLine = when {
+            WritePathGuard.usablePrefixes(writePaths).isNotEmpty() ->
+                "- You may only file_write/file_edit under: ${WritePathGuard.usablePrefixes(writePaths).joinToString()}\n"
+            WritePathGuard.isPoisoned(writePaths) ->
+                "- Your write_paths contained no usable absolute prefix, so file_write/file_edit are " +
+                "DENIED for this worker. Do not retry writes; report what you could do without them.\n"
+            else -> ""
         }
         val collaboration = """$COLLABORATION
 You are a sub-agent (kind=$kind), not the session coordinator. You cannot see the parent chat. Complete ONLY this slice and return a report.

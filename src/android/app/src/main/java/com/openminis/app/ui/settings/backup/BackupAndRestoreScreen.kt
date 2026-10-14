@@ -67,8 +67,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -234,6 +238,7 @@ private fun BackupTab(
     // Re-read destinations every time this tab appears: the user may have just
     // added one via "Manage Destinations…" and navigated back, and a stale
     // empty list would keep the Start button disabled with no way to recover.
+    val ioScope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
         // [T-android-backup-transient-success] Drop a PREVIOUS visit's success
         // card on the way IN, not on the way out. Clearing on dispose would
@@ -245,15 +250,28 @@ private fun BackupTab(
         // Only a settled, fully-delivered run is dropped — a failure is the
         // one result worth coming back to.
         vm.clearSettledSuccess()
-        vm.refreshDestinations()
-        vm.refreshHistory()
+        // [T-android-sessionlist-prefs-io] Both refreshes are pure disk work:
+        // refreshDestinations() constructs RcloneRemoteStore (first touch parses
+        // + decrypts the prefs file) and refreshHistory() reads and JSON-decodes
+        // records.json. They used to run on the main dispatcher — once on entry
+        // and again on EVERY ON_RESUME, i.e. every time the user came back from
+        // Manage Destinations. StateFlow writes from an IO thread are safe; the
+        // collectors receive them on their own dispatcher.
+        withContext(Dispatchers.IO) {
+            vm.refreshDestinations()
+            vm.refreshHistory()
+        }
     }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                vm.refreshDestinations()
-                vm.refreshHistory()
+                ioScope.launch {
+                    withContext(Dispatchers.IO) {
+                        vm.refreshDestinations()
+                        vm.refreshHistory()
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -661,11 +679,36 @@ private fun backupHistorySubtitle(record: BackupHistory.Record): String {
 }
 
 
-/** Local date-time for a history row. Locale-aware via the platform formatter. */
-internal fun formatTimestamp(millis: Long): String =
-    java.text.DateFormat.getDateTimeInstance(
-        java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT,
-    ).format(java.util.Date(millis))
+/**
+ * Local date-time for a history row. Locale-aware via the platform formatter.
+ *
+ * [T-android-dateformat-per-call] Used to build a fresh java.text.DateFormat on
+ * EVERY call — including once per row inside the history LazyColumn, so a
+ * re-composed list paid the full locale-lookup + pattern-parse per row per
+ * frame. java.time's DateTimeFormatter is immutable and thread-safe, so it can
+ * be cached; keyed by locale so a runtime language switch (per-app languages on
+ * Android 13+) still picks up the new pattern.
+ */
+private val timestampFormatters =
+    java.util.concurrent.ConcurrentHashMap<java.util.Locale, java.time.format.DateTimeFormatter>()
+
+internal fun formatTimestamp(millis: Long): String {
+    val locale = java.util.Locale.getDefault()
+    val formatter = timestampFormatters.getOrPut(locale) {
+        // No ofLocalizedDateTime(.., Locale) overload exists — the locale is
+        // applied with withLocale(), which is safe here: a style-based formatter
+        // resolves its pattern against ITS locale at format time, and this
+        // instance is built once per locale and cached under that same key.
+        java.time.format.DateTimeFormatter
+            .ofLocalizedDateTime(
+                java.time.format.FormatStyle.MEDIUM,
+                java.time.format.FormatStyle.SHORT,
+            )
+            .withLocale(locale)
+            .withZone(java.time.ZoneId.systemDefault())
+    }
+    return formatter.format(java.time.Instant.ofEpochMilli(millis))
+}
 
 /** Max Per-File Size dropdown row (iOS: the `doc.zipper` menu Picker). */
 @Composable
@@ -789,7 +832,11 @@ private fun RestoreTab(
     val phoneFolders by vm.phoneFolders.collectAsState()
     val phoneRestoreFolder by vm.phoneRestoreFolder.collectAsState()
     val phoneRestoreItems by vm.phoneRestoreItems.collectAsState()
-    LaunchedEffect(Unit) { vm.refreshDestinations() }
+    // [T-android-sessionlist-prefs-io] Same rclone-prefs parse as the backup
+    // tab; off the main dispatcher for the same reason.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { vm.refreshDestinations() }
+    }
 
     val pickLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
@@ -1730,10 +1777,23 @@ private fun categoryCountLabel(
     else -> stringResource(R.string.backup_count_items, stat.entries, humanBytes(stat.bytes))
 }
 
+/**
+ * The ONE byte-size formatter for this feature (UI rows and ViewModel log /
+ * note lines alike — BackupViewModel used to carry a second private copy with
+ * the same divisors but `kB` and a hard-coded US locale).
+ *
+ * `String.format` is pinned to Locale.US on purpose: the VM's copy formats
+ * numbers that are then embedded in a persisted AppLogger line, where "32,0 MB"
+ * from a comma-locale is worse than a stable decimal point. Labels follow SI
+ * (`kB` = 1000 bytes), matching the divisors actually used here.
+ */
 internal fun humanBytes(bytes: Long): String = when {
-    bytes >= 1_000_000_000 -> String.format("%.1f GB", bytes / 1e9)
-    bytes >= 1_000_000 -> String.format("%.1f MB", bytes / 1e6)
-    bytes >= 1_000 -> String.format("%.0f KB", bytes / 1e3)
+    bytes >= 1_000_000_000 ->
+        String.format(java.util.Locale.US, "%.1f GB", bytes / 1e9)
+    bytes >= 1_000_000 ->
+        String.format(java.util.Locale.US, "%.1f MB", bytes / 1e6)
+    bytes >= 1_000 ->
+        String.format(java.util.Locale.US, "%.0f kB", bytes / 1e3)
     else -> "$bytes B"
 }
 

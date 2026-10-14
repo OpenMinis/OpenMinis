@@ -24,9 +24,13 @@ import com.openminis.app.data.db.CodeEdgeEntity
     ],
     version = 22, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
-    // validate every migration (and its downgrade counterpart) against the
-    // committed schema json. Without it the upgrade/downgrade chain has no
-    // automated check at all and only a real device install can catch a break.
+    // validate migrations against the committed schema json. Note the honest
+    // scope: src/android/app/schemas/…AppDatabase/ currently holds 12, 14, 15,
+    // 16, 18-22 — 13.json and 17.json were never committed, so the 12→13
+    // (code_symbols/code_edges) and 16→17 (permission_mode) steps have no
+    // baseline to validate against. Room only exports the schema of the version
+    // being compiled, so those two can't be recovered retro; the entity
+    // declarations plus the in-code comments are the spec for them.
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -262,55 +266,6 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
-        /**
-         * [T-android-downgrade-compat] Downgrade 12 → 11. Deliberately a NO-OP.
-         *
-         * ## Why this exists
-         *
-         * Room resolves a downgrade by calling `onUpgrade(from, to)` and
-         * looking for a migration path; when none exists it consults
-         * `isMigrationRequired`, which either throws or — with a destructive
-         * fallback enabled — calls `dropAllTables`. We enable no fallback, so
-         * before this migration existed, installing an older build on top of a
-         * newer database threw `IllegalStateException` at first DB access and
-         * the app could not start at all. Data survived on disk, but the user
-         * experience was "the app is broken".
-         *
-         * Registering any 12 → 11 path is enough for Room to proceed; it does
-         * not inspect what the migration does. So the cheapest correct answer
-         * is to do nothing and let the four extra columns stay.
-         *
-         * ## Why NOT `DROP COLUMN`
-         *
-         * Dropping would genuinely delete the attribution captured by the
-         * newer build, so a user who downgrades to look at something and then
-         * upgrades back would silently lose it — violating the "no data loss"
-         * constraint this whole mechanism exists to uphold. Keeping the
-         * columns costs a few dozen bytes per row and makes the round trip
-         * lossless. (`ALTER TABLE ... DROP COLUMN` also needs SQLite 3.35+ /
-         * API 34+, and a full table rebuild below that.)
-         *
-         * ## Why leaving the columns is safe for the older build
-         *
-         * - Room's generated DAOs bind by column NAME, never by position.
-         * - Room's schema validation checks that every column the entity
-         *   REQUIRES exists; extra columns in the table are ignored.
-         * - `SELECT *` is likewise resolved by name.
-         * - The one place this codebase reads a cursor positionally
-         *   (`VoiceCorrectionDb`, `ConfigAuditLog`) uses explicit column lists
-         *   in separate databases, so the projection is fixed regardless.
-         * - Old `INSERT` statements omit the new columns, which is fine
-         *   precisely because they are nullable with no DEFAULT.
-         *
-         * ## Scope
-         *
-         * This pattern generalises to ADD COLUMN / ADD TABLE / ADD INDEX. It
-         * does NOT cover renames, drops, type changes, or changes to the
-         * MEANING of existing data (Room cannot detect the last one at all).
-         * Those need a real reverse migration — or the version pre-check in
-         * [com.openminis.app.data.db.DatabaseVersionGuard], which is the
-         * backstop for exactly this case.
-         */
         /**
          * [T-code-graph] Adds the code_symbols and code_edges tables for the
          * lightweight code index used by CodeGraphTool. Pure additive — no
@@ -603,6 +558,56 @@ abstract class AppDatabase : RoomDatabase() {
                 // Keep the column. Older builds ignore extra fields.
             }
         }
+
+        /**
+         * [T-android-downgrade-compat] Downgrade 12 → 11. Deliberately a NO-OP.
+         *
+         * ## Why this exists
+         *
+         * Room resolves a downgrade by calling `onUpgrade(from, to)` and
+         * looking for a migration path; when none exists it consults
+         * `isMigrationRequired`, which either throws or — with a destructive
+         * fallback enabled — calls `dropAllTables`. We enable no fallback, so
+         * before this migration existed, installing an older build on top of a
+         * newer database threw `IllegalStateException` at first DB access and
+         * the app could not start at all. Data survived on disk, but the user
+         * experience was "the app is broken".
+         *
+         * Registering any 12 → 11 path is enough for Room to proceed; it does
+         * not inspect what the migration does. So the cheapest correct answer
+         * is to do nothing and let the four extra columns stay.
+         *
+         * ## Why NOT `DROP COLUMN`
+         *
+         * Dropping would genuinely delete the attribution captured by the
+         * newer build, so a user who downgrades to look at something and then
+         * upgrades back would silently lose it — violating the "no data loss"
+         * constraint this whole mechanism exists to uphold. Keeping the
+         * columns costs a few dozen bytes per row and makes the round trip
+         * lossless. (`ALTER TABLE ... DROP COLUMN` also needs SQLite 3.35+ /
+         * API 34+, and a full table rebuild below that.)
+         *
+         * ## Why leaving the columns is safe for the older build
+         *
+         * - Room's generated DAOs bind by column NAME, never by position.
+         * - Room's schema validation checks that every column the entity
+         *   REQUIRES exists; extra columns in the table are ignored.
+         * - `SELECT *` is likewise resolved by name.
+         * - The one place this codebase reads a cursor positionally
+         *   (`VoiceCorrectionDb`, `ConfigAuditLog`) uses explicit column lists
+         *   in separate databases, so the projection is fixed regardless.
+         * - Old `INSERT` statements omit the new columns, which is fine
+         *   precisely because they are nullable with no DEFAULT.
+         *
+         * ## Scope
+         *
+         * This pattern generalises to ADD COLUMN / ADD TABLE / ADD INDEX. It
+         * does NOT cover renames, drops, type changes, or changes to the
+         * MEANING of existing data (Room cannot detect the last one at all).
+         * Those need a real reverse migration — or the version pre-check in
+         * [com.openminis.app.data.db.DatabaseVersionGuard], which is the
+         * backstop for exactly this case.
+         */
 
         val MIGRATION_12_11 = object : Migration(12, 11) {
             override fun migrate(db: SupportSQLiteDatabase) {

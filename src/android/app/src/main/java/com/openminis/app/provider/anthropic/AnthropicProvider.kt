@@ -182,7 +182,15 @@ class AnthropicProvider(
                     )
                 )
             }
-            android.util.Log.e("AnthropicProvider", "Stream failed: ${response.code} isOAuth=$isOAuth body=${errorBody.take(300)}")
+            // [T-llm-error-secret-mask] This line goes to logcat, which
+            // AppLogger's LogcatTailer copies into filesDir/logs/*.log — the very
+            // files CONTRIBUTING.md asks users to attach to GitHub issues. The
+            // upstream body is not ours to trust, so it is masked like the
+            // LLMError message is.
+            android.util.Log.e(
+                "AnthropicProvider",
+                "Stream failed: ${response.code} isOAuth=$isOAuth body=${com.openminis.app.util.SecretMasking.mask(errorBody.take(300))}",
+            )
             throw mapHttpError(response.code, errorBody, response.header("Retry-After"))
         }
 
@@ -211,8 +219,19 @@ class AnthropicProvider(
             var line: String?
             while (reader.readLine().also { line = it } != null) {
                 val l = line ?: continue
-                if (!l.startsWith("data: ")) continue
-                val payload = l.removePrefix("data: ")
+                // [T-sse-data-prefix-tolerance] Tolerate `data:` with or without
+                // the optional space, exactly as OpenAIRawStream does: the SSE
+                // spec treats only ONE leading space as part of the field
+                // separator, and Anthropic-compatible relays behind a custom
+                // base (DeepSeek / GLM / Kimi — a core routing path here) emit
+                // `data:{...}` with no space. Strict `data: ` matching dropped
+                // EVERY chunk on those relays, which surfaced as the generic
+                // "Server returned an empty response" TransientError from
+                // failOnSilentEmptyCompletion rather than as a parse problem.
+                if (!l.startsWith("data:")) continue
+                val payload = l.removePrefix("data:").let {
+                    if (it.startsWith(" ")) it.removePrefix(" ") else it
+                }
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
@@ -225,6 +244,19 @@ class AnthropicProvider(
                 val eventType = event.safeOptString("type", "")
 
                 when (eventType) {
+                    // [T-anthropic-sse-error-event] `data: {"type":"error",
+                    // "error":{"type":"overloaded_error","message":…}}` is how
+                    // Anthropic (and every Anthropic-compatible relay) reports a
+                    // mid-stream refusal. There was no branch for it, so the
+                    // event was silently discarded, the stream then completed
+                    // with no content and no finish reason, and
+                    // failOnSilentEmptyCompletion re-labelled the whole turn as
+                    // a generic "empty response" TransientError — wrong retry
+                    // budget (an authentication_error got retried), wrong group
+                    // fallback trigger and a hint that points at the network
+                    // instead of the credential. Map it through the SAME mapper
+                    // the HTTP path uses.
+                    "error" -> throw mapStreamErrorEvent(event)
                     "message_start" -> {
                         send(LLMStreamChunk.Started)
                         event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
@@ -1129,6 +1161,42 @@ class AnthropicProvider(
         )
     }
 
+    /**
+     * [T-anthropic-sse-error-event] Turn an SSE `error` event into the same
+     * [LLMError] the HTTP path would have produced for the equivalent failure.
+     *
+     * An SSE error event carries no status code, so the classification input is
+     * synthesized: the event's `error.type` maps onto the status Anthropic itself
+     * returns for that condition (overloaded_error → 529, authentication_error →
+     * 401, rate_limit_error → 429, …), and the ORIGINAL event object is handed to
+     * [mapHttpError] as the body. That keeps one mapping source for both paths —
+     * message extraction, [T-llm-error-secret-mask] masking, the
+     * [T-llm-error-401-model-scope] credential-acceptance gate, the 429
+     * Retry-After handling and the [T-llm-error-classification] context-filter /
+     * content-filter splits all apply to stream errors exactly as they do to HTTP
+     * ones. Unknown / absent types default to 500 (transient upstream trouble),
+     * which is what an unclassified mid-stream refusal actually is.
+     */
+    private fun mapStreamErrorEvent(event: JSONObject): LLMError {
+        val error = event.optJSONObject("error")
+        val type = error?.safeOptString("type", "").orEmpty()
+        val status = when (type) {
+            "authentication_error" -> 401
+            "permission_error", "billing_error" -> 403
+            "rate_limit_error" -> 429
+            "invalid_request_error", "not_supported_error" -> 400
+            "not_found_error" -> 404
+            "overloaded_error" -> 529
+            "api_error", "server_error", "external_unauthorized_error" -> 500
+            else -> 500
+        }
+        android.util.Log.w(
+            "AnthropicProvider",
+            "SSE error event (type=${type.ifEmpty { "unset" }}) → classified as HTTP $status",
+        )
+        return mapHttpError(status, event.toString())
+    }
+
     private fun mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
         if (statusCode == 401 || statusCode == 403) {
             // [T-llm-error-401-model-scope] See OpenAIProviderErrors: an
@@ -1149,9 +1217,15 @@ class AnthropicProvider(
             val error = json.optJSONObject("error")
             val errorType = error?.safeOptString("type", "") ?: "error"
             val errorMessage = error?.safeOptString("message", "") ?: body
-            "[$errorType] $errorMessage"
+            // [T-llm-error-secret-mask] Both strings below are UPSTREAM-CONTROLLED
+            // and reach LLMError.message, which the chat UI renders and AppLogger
+            // persists. Relays occasionally echo request material in their message
+            // (and a non-JSON body is embedded verbatim), so key-shaped material
+            // rides along unless masked. OpenAI's mapper has masked here from the
+            // start (OpenAIProviderErrors) — Anthropic was the drifting copy.
+            "[$errorType] ${com.openminis.app.util.SecretMasking.mask(errorMessage)}"
         } catch (_: Exception) {
-            "HTTP $statusCode: ${body.take(500)}"
+            "HTTP $statusCode: ${com.openminis.app.util.SecretMasking.mask(body.take(500))}"
         }
 
         // [T-llm-error-classification] 细分 provider 错误，不再笼统地归 ProviderError。

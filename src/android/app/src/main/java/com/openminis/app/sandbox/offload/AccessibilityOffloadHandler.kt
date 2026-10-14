@@ -144,6 +144,15 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         // `handle` is not a suspend fun. The prompt self-cancels after
         // AccessibilityRecoveryManager.PROMPT_TIMEOUT_MS so this can never
         // block the worker indefinitely.
+        //
+        // [T-a11y-deadline-duration] That prompt cap is exactly the headroom the
+        // server budgets for this tool: NativeOffloadServer.handlerDeadlineMs
+        // derives the android-a11y-cli deadline as PROMPT_TIMEOUT_MS + the
+        // requested --duration/--timeout (clamped to 120s below) + reply
+        // overhead, so neither the prompt nor a watch outruns the watchdog. A
+        // fixed 75s cap used to fire a false handler_timeout while this thread
+        // kept waiting; that is why the prompt path and the watch clamps stay
+        // under the two constants above.
         if (sub != "service" && sub != "--version") {
             val usable = kotlinx.coroutines.runBlocking {
                 AccessibilityRecoveryManager.ensureGrantOrPrompt(context)

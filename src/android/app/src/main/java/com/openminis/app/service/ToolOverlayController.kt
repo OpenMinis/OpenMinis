@@ -13,7 +13,6 @@ import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -147,8 +146,8 @@ class ToolOverlayController(private val context: Context) {
     var isShown: Boolean = false
         private set
 
-    fun hasOverlayPermission(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+    // minSdk 26 > M(23): the pre-M "no permission needed" branch was unreachable.
+    fun hasOverlayPermission(): Boolean = Settings.canDrawOverlays(context)
 
     /**
      * Show or update the overlay. Safe to call repeatedly — content
@@ -229,12 +228,9 @@ class ToolOverlayController(private val context: Context) {
 
     private fun attach() {
         val container = buildView()
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+        // minSdk 26 (O): the pre-O TYPE_APPLICATION_OVERLAY check and the
+        // deprecated TYPE_PHONE fallback were unreachable branches.
+        val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         val width = fixedCapsuleWidthPx()
         val height = dpToPx(CAPSULE_HEIGHT_DP)
         val params = WindowManager.LayoutParams(

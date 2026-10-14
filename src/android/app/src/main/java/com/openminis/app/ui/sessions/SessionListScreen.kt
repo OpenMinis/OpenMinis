@@ -517,7 +517,19 @@ fun SessionListScreen(
     // empty search state. Mirrors iOS where ContentView's `@State searchText`
     // survives a NavigationLink push because the parent view never unmounts.
     val viewModel: SessionListViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
-        factory = SessionListViewModel.factory(chatRepository, providerRepository, context),
+        // [T-android-activity-leak-sessionlist-vm] applicationContext, NOT the
+        // composition context. The VM keeps the Context it is handed (prefs at
+        // SessionListViewModel.uiPrefs, OAuthManager, ProviderFactory, filesDir)
+        // and is deliberately NavBackStackEntry-scoped to survive navigation —
+        // and the SESSION_LIST entry lives for the whole app lifetime, so an
+        // Activity instance passed here was pinned (view tree included) forever,
+        // re-pinned on every recreation. Peers already pass the application
+        // context (ScheduledTasksViewModel.kt:203, GitPanelScreen.kt:501).
+        factory = SessionListViewModel.factory(
+            chatRepository,
+            providerRepository,
+            context.applicationContext,
+        ),
     )
     val persistedSessions by viewModel.displayedSessions.collectAsState()
     // [T-android-draft-placeholder-row] Prepend the synthetic draft row. Built
@@ -1002,6 +1014,13 @@ fun SessionListScreen(
                                     isRegenerating = session.id in regeneratingIds,
                                     searchQuery = activeQuery,
                                     searchSnippet = searchSnippets[session.id],
+                                    // [T-android-sessionrow-hoisted-flows] Read
+                                    // from the lists' own collectors (hoisted
+                                    // above the LazyColumn) rather than letting
+                                    // each row subscribe to the two global
+                                    // flows itself.
+                                    isActive = session.id in activeSessionIds,
+                                    badgeHead = sessionBadges[session.id]?.firstOrNull(),
                                     // Transparent so the folder container's
                                     // surface shows through member rows.
                                     //
@@ -1728,6 +1747,12 @@ private fun SessionItemContent(
     searchQuery: String = "",
     searchSnippet: String? = null,
     /**
+     * [T-android-sessionrow-hoisted-flows] Running state + badge queue head,
+     * read once by the list and passed down rather than collected per row.
+     */
+    isActive: Boolean = false,
+    badgeHead: com.openminis.app.service.SessionBadgeStore.SessionBadgeState? = null,
+    /**
      * [T-android-folder-card-ios-parity] Overrides the row's own surface
      * background. Folder members pass Transparent so the group container's
      * welded fill shows through; null keeps the default surface.
@@ -1764,6 +1789,8 @@ private fun SessionItemContent(
             onClick = { onSessionClick(session.id) },
             searchQuery = searchQuery,
             searchSnippet = searchSnippet,
+            isActive = isActive,
+            badgeHead = badgeHead,
             rowBackground = rowBackground,
             isFolderMember = isFolderMember,
             onLongClick = { offsetPx ->
@@ -2406,6 +2433,24 @@ private fun SessionRow(
     leadingIcon: (@Composable () -> Unit)? = null,
     searchQuery: String = "",
     searchSnippet: String? = null,
+    /**
+     * [T-android-sessionrow-hoisted-flows] Whether this session is currently
+     * running, and the head of its badge queue. Hoisted by the caller instead
+     * of being collected here: this composable runs once per visible row, and
+     * each row used to attach its OWN collector to SessionActivityTracker /
+     * SessionBadgeStore. One badge push then fan-out-recomposed EVERY visible
+     * row — including the per-frame SpinningRing canvases — and left N
+     * collectors registered against two process-wide flows. Same shape as
+     * [isRegenerating] / [searchSnippet] above, which the list already hoists.
+     */
+    isActive: Boolean = false,
+    /**
+     * [T-android-session-paused-badge] Head of this session's badge queue —
+     * null for the common case. Renders as an overlay in the icon's
+     * bottom-right corner, mirroring where iOS's iCloud badge sits so future
+     * ICLOUD_SYNCING uses the same anchor.
+     */
+    badgeHead: com.openminis.app.service.SessionBadgeStore.SessionBadgeState? = null,
     /** See SessionItemContent — Transparent inside a folder container. */
     rowBackground: Color? = null,
     /**
@@ -2616,14 +2661,9 @@ private fun SessionRow(
         }
 
         // Category icon in colored circle (18% opacity matching iOS)
-        val activeSessions by SessionActivityTracker.activeSessions.collectAsState()
-        val isActive = session.id in activeSessions
-        // [T-android-session-paused-badge] Head of this session's badge queue
-        // — null for the common case. Renders as an overlay in the icon's
-        // bottom-right corner, mirroring where iOS's iCloud badge sits so
-        // future ICLOUD_SYNCING uses the same anchor.
-        val badgeMap by com.openminis.app.service.SessionBadgeStore.byId.collectAsState()
-        val badgeHead = badgeMap[session.id]?.firstOrNull()
+        // isActive / badgeHead arrive as parameters — see their KDoc. The
+        // per-row collectAsState() calls that used to sit here are hoisted to
+        // the list (activeSessionIds, sessionBadges).
         Box(
             modifier = Modifier.size(44.dp),
         ) {
@@ -3101,7 +3141,10 @@ internal fun SessionEditSheet(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.height(240.dp),
             ) {
-                items(allCategories) { cat ->
+                // Keyed by the (unique) category name so a selection change
+                // rebinds the affected cells instead of recomposing the whole
+                // grid from index 0.
+                items(allCategories, key = { it }) { cat ->
                     val isSelected = selectedCategory?.equals(cat, ignoreCase = true) == true
                     val style = categoryStyle(cat.lowercase())
                     Box(

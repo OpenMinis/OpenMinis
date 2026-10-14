@@ -1,5 +1,7 @@
 package com.openminis.app.speech.correction
 
+import java.util.Locale
+
 /**
  * [T-android-voice-correction] Maps a term to a phonetic key so homophone
  * confusions collapse to one lookup key. Port of iOS
@@ -36,7 +38,10 @@ object PhoneticNormalizerRegistry {
      * Traditional users share one dictionary instead of fragmenting it.
      */
     fun normalizedLocaleKey(locale: String): String {
-        val lower = locale.lowercase()
+        // Locale.ROOT: this key is compared against fixed literals ("zh") and
+        // persisted — under a Turkish device default "hi-IN".lowercase() folds
+        // to "hı-ın", corrupting key matching ([T-android-turkish-dotted-i]).
+        val lower = locale.lowercase(Locale.ROOT)
         val base = lower.split('-', '_').firstOrNull() ?: return lower
         return base
     }
@@ -88,8 +93,10 @@ object PinyinNormalizer : PhoneticNormalizer {
         val t = transliterator ?: return ""
         val latin = runCatching { t.transliterate(trimmed) }.getOrNull() ?: return ""
         // Collapse the whitespace ICU inserts between syllables so "zhang san"
-        // and "zhangsan" key identically.
-        return latin.lowercase().split(' ', '\t', '\n')
+        // and "zhangsan" key identically. Locale.ROOT: the result is the
+        // persisted phonetic key — it must be byte-stable across device locales
+        // (a Turkish default must not poison keys, and iOS parity is byte-exact).
+        return latin.lowercase(Locale.ROOT).split(' ', '\t', '\n')
             .filter { it.isNotEmpty() }
             .joinToString("")
     }

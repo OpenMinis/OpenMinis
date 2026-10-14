@@ -168,6 +168,22 @@ internal object SuCommand {
 
     const val DEFAULT_TIMEOUT_MS = 60_000L
 
+    /**
+     * [T-su-exec-quoting] `exec` re-joins its remaining argv tokens into one
+     * command string that is then handed to `su -c`. The guest shell already
+     * stripped the user's quotes, so a token like `/data/x a.txt` arrives as ONE
+     * argv slot; a bare `joinToString(" ")` re-split it on the space into two
+     * wrong paths on a PRIVILEGED host command. Quote each token when it needs
+     * it — POSIX single-quote escaping — so the host re-tokenises exactly the
+     * way the guest did. Safe words (no metacharacters) stay unquoted for
+     * readability and to match the documented `exec getprop <key>` shape.
+     */
+    private val SHELL_SAFE_TOKEN = Regex("""[A-Za-z0-9_@%+=:,./-]+""")
+
+    internal fun quoteArg(token: String): String =
+        if (token.isNotEmpty() && SHELL_SAFE_TOKEN.matches(token)) token
+        else "'" + token.replace("'", "'\\''") + "'"
+
     val SU_CANDIDATES: List<String> = listOf(
         "/system/bin/su",
         "/system/xbin/su",
@@ -208,7 +224,7 @@ internal object SuCommand {
                     else Parsed(Kind.EXEC, command = cmd, timeoutMs = timeoutMs)
                 }
                 "exec" -> {
-                    val cmd = args.drop(i + 1).joinToString(" ").trim()
+                    val cmd = args.drop(i + 1).joinToString(" ") { quoteArg(it) }.trim()
                     return if (cmd.isEmpty()) Parsed(Kind.INVALID, timeoutMs = timeoutMs)
                     else Parsed(Kind.EXEC, command = cmd, timeoutMs = timeoutMs)
                 }
@@ -217,7 +233,7 @@ internal object SuCommand {
                         i++
                         continue
                     }
-                    val cmd = args.drop(i).joinToString(" ").trim()
+                    val cmd = args.drop(i).joinToString(" ") { quoteArg(it) }.trim()
                     return if (cmd.isEmpty()) Parsed(Kind.INVALID, timeoutMs = timeoutMs)
                     else Parsed(Kind.EXEC, command = cmd, timeoutMs = timeoutMs)
                 }

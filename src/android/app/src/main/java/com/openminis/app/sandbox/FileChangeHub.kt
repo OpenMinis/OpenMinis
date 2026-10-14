@@ -120,16 +120,20 @@ object FileChangeHub {
         flowFor(sessionId).asSharedFlow()
 
     private fun flowFor(sessionId: String): MutableSharedFlow<FileChangeEvent> {
-        flows[sessionId]?.let { return it }
-        // putIfAbsent, not getOrPut: the ticker (Default) and eventsFor()
-        // (Main) race here — a last-writer-wins put could strand a collector
-        // on a flow instance the ticker never emits into.
-        val created = MutableSharedFlow<FileChangeEvent>(
-            replay = 0,
-            extraBufferCapacity = 128,
-            onBufferOverflow = BufferOverflow.DROP_OLDEST,
-        )
-        return flows.putIfAbsent(sessionId, created) ?: created
+        // [T-computeifabsent-agreement] computeIfAbsent (atomic) rather than
+        // getOrPut (get→compute→put, NOT atomic) or putIfAbsent (which forces
+        // an eager allocation even when the key is already present): the ticker
+        // (Default) and eventsFor() (Main) race here — a last-writer-wins put
+        // could strand a collector on a flow instance the ticker never emits
+        // into. Same guarantee ExecutionCoordinator's mutex map relies on, so
+        // the two files now agree on one primitive.
+        return flows.computeIfAbsent(sessionId) {
+            MutableSharedFlow<FileChangeEvent>(
+                replay = 0,
+                extraBufferCapacity = 128,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
+        }
     }
 
     // ------------------------------------------------------------ internals

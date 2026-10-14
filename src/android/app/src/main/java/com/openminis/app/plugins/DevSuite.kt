@@ -34,11 +34,12 @@ data class DevComponent(
     val purgeLinks: List<String> = emptyList(),
     /**
      * Conservative free-space reservation for this component: downloaded payload
-     * PLUS build output, in bytes. 0 for apt-only components (dpkg is small and
-     * the guest apt path is not the concern here). [DevSuiteInstaller] refuses
-     * an assembly whose total exceeds what the device can actually free — the
-     * runtime disk gate only fires below 2 GiB, i.e. after a multi-GB download
-     * has already filled the volume mid-transfer.
+     * PLUS build output, in bytes. apt-backed components carry a real estimate
+     * too — [DevSuiteInstaller] refuses an assembly whose total exceeds what the
+     * device can actually free, and a 0 here meant an apt-heavy suite (go, node,
+     * python) was never gated at all. The number is the unpacked footprint, not
+     * the download size, because dpkg holds both halves on disk while installing.
+     * [DevSuiteInstaller] adds a bounded reserve for the resumable `.part` cache.
      */
     val estimatedBytes: Long = 0L,
 )
@@ -64,13 +65,21 @@ object DevSuiteCatalog {
                 DevComponent(
                     id = "android-core",
                     name = "Android 核心基础环境",
-                    description = "OpenJDK 17 + aapt2/adb/sdkmanager + android.jar(35/36) + CMake + NDK r29，全部按需下载（aarch64）",
+                    description = "OpenJDK 17 + aapt2/adb/sdkmanager + android.jar(35/36) + CMake（NDK r29 由「C/C++ & NDK 原生构建链」单独安装）",
                     isRequired = true,
                     aptPackages = listOf("openjdk-17-jdk-headless", "ca-certificates-java", "curl", "ca-certificates", "unzip"),
-                    postInstallSteps = listOf("/usr/local/bin/minis-android-sdk-setup"),
+                    // [T-devsuite-ndk-split] minis-android-sdk-setup installs the
+                    // ~1 GB NDK unless MINIS_SKIP_NDK=1 and exits 1 when its NDK
+                    // tail check fails — running it unflagged here meant (a) a
+                    // "core only" assembly still pulled the NDK, so the optional
+                    // component was fictional, and (b) an NDK hiccup marked core
+                    // FAILED although aapt2/sdkmanager had landed (its probe
+                    // below only checks those two). The NDK leg belongs to
+                    // android-ndk, which runs the same script without the flag.
+                    postInstallSteps = listOf("MINIS_SKIP_NDK=1 /usr/local/bin/minis-android-sdk-setup"),
                     checkCommand = "test -x /opt/android-sdk/build-tools/35.0.2/aapt2 && test -x /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager",
                     purgePaths = listOf("/opt/android-sdk"),
-                    estimatedBytes = 3_000_000_000L,
+                    estimatedBytes = 2_200_000_000L,
                 ),
                 DevComponent(
                     id = "flutter",
@@ -88,6 +97,9 @@ object DevSuiteCatalog {
                     name = "C/C++ & NDK 原生构建链",
                     description = "cmake/ninja/clang + NDK r29 aarch64（minis-android-sdk-setup 幂等补齐）",
                     aptPackages = listOf("cmake", "ninja-build", "gcc", "g++", "clang", "make", "pkg-config"),
+                    // The NDK leg of the shared setup script — android-core ran
+                    // the same script with MINIS_SKIP_NDK=1 (see above), so this
+                    // is the only place the ~1 GB NDK is fetched.
                     postInstallSteps = listOf("/usr/local/bin/minis-android-sdk-setup"),
                     checkCommand = "test -x /opt/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-aarch64/bin/clang",
                     dependsOn = listOf("android-core"),
@@ -129,6 +141,7 @@ object DevSuiteCatalog {
                     isRequired = true,
                     aptPackages = listOf("ripgrep", "fd-find", "fzf", "bat"),
                     checkCommand = "command -v rg && command -v fzf && command -v batcat",
+                    estimatedBytes = 120_000_000L,
                 ),
             ),
         ),
@@ -144,6 +157,7 @@ object DevSuiteCatalog {
                     isRequired = true,
                     aptPackages = listOf("python3", "python3-pip", "python3-venv"),
                     checkCommand = "command -v python3 && command -v pip3",
+                    estimatedBytes = 250_000_000L,
                 ),
                 DevComponent(
                     id = "python-ai-dev",
@@ -152,6 +166,7 @@ object DevSuiteCatalog {
                     aptPackages = listOf("python3-dev", "build-essential", "pkg-config", "libffi-dev"),
                     checkCommand = "test -f /usr/include/Python.h || ls /usr/include/python3*/Python.h >/dev/null 2>&1",
                     dependsOn = listOf("python-core"),
+                    estimatedBytes = 200_000_000L,
                 ),
             ),
         ),
@@ -167,6 +182,7 @@ object DevSuiteCatalog {
                     isRequired = true,
                     aptPackages = listOf("nodejs", "npm"),
                     checkCommand = "command -v node && command -v npm",
+                    estimatedBytes = 250_000_000L,
                 ),
                 DevComponent(
                     id = "nodejs-pkg",
@@ -174,6 +190,7 @@ object DevSuiteCatalog {
                     description = "pnpm + yarn（npmmirror 回退）",
                     postInstallSteps = listOf("/usr/local/bin/minis-setup-pnpm"),
                     checkCommand = "command -v pnpm",
+                    estimatedBytes = 80_000_000L,
                     dependsOn = listOf("nodejs-core"),
                     purgeLinks = listOf("pnpm", "yarn"),
                 ),
@@ -191,6 +208,7 @@ object DevSuiteCatalog {
                     isRequired = true,
                     aptPackages = listOf("golang-go"),
                     checkCommand = "command -v go",
+                    estimatedBytes = 700_000_000L,
                 ),
             ),
         ),
@@ -207,6 +225,7 @@ object DevSuiteCatalog {
             description = "qemu-user-static：在 ARM64 沙箱里显式运行 x86_64 Linux 二进制（PRoot 无 binfmt，需显式调用 qemu-x86_64 <bin>）",
             aptPackages = listOf("qemu-user-static"),
             checkCommand = "command -v qemu-x86_64",
+            estimatedBytes = 60_000_000L,
         ),
         DevComponent(
             id = "llama-cpp",
@@ -224,10 +243,31 @@ object DevSuiteCatalog {
     fun bundleById(id: String): DevBundle? = bundles.firstOrNull { it.id == id }
     fun onlineToolById(id: String): DevComponent? = onlineTools.firstOrNull { it.id == id }
 
+    /**
+     * [T-devsuite-tool-link] What `minis://devsuite/install/<id>` points at:
+     * a bundle OR a standalone online tool. Resolving only bundles made an
+     * online-tool link (the prompt advertises `/install/llama-cpp`) a silent
+     * no-op — the market opened, the pending link was consumed, nothing
+     * installed and no error was shown. A tool is wrapped in a one-component
+     * bundle so the link still lands on the SAME explicit confirmation dialog;
+     * the tool is pre-checked because tapping the link is already a choice,
+     * but 装配 remains the only thing that starts a download.
+     */
+    fun installTargetById(id: String): DevBundle? = bundleById(id) ?: onlineToolById(id)?.let {
+        DevBundle(id = it.id, name = it.name, summary = it.description, components = listOf(it))
+    }
+
+    /** True when [id] names a standalone online tool rather than a bundle. */
+    fun isOnlineToolId(id: String): Boolean = onlineToolById(id) != null
+
     /** All components across bundles + online tools, for id uniqueness checks. */
     fun allComponents(): List<DevComponent> =
         bundles.flatMap { it.components } + onlineTools
 
-    /** Deep link target for the agent: minis://devsuite/install/<bundleId> */
+    /**
+     * Deep link target for the agent: minis://devsuite/install/<bundleId>.
+     * Also used for online tools (see [installTargetById]); every bundle and
+     * tool id is `[a-z0-9-]+` so it is deep-link safe by construction.
+     */
     fun installLink(bundleId: String): String = "minis://devsuite/install/$bundleId"
 }

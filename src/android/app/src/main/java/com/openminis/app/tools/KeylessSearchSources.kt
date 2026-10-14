@@ -91,8 +91,7 @@ internal object KeylessSearchSources {
         val out = ArrayList<WebSearchTool.Result>(max)
         val seen = HashSet<String>()
         for (chunk in splitH3(html)) {
-            val a = Regex("""<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-                .find(chunk) ?: continue
+            val a = ANCHOR_RE.find(chunk) ?: continue
             var url = unescape(a.groupValues[1]).trim()
             if (url.startsWith("/")) url = "https://www.sogou.com$url"
             if (!url.startsWith("http")) continue
@@ -122,7 +121,7 @@ internal object KeylessSearchSources {
     fun parseBingRss(xml: String, max: Int): List<WebSearchTool.Result> {
         val out = ArrayList<WebSearchTool.Result>(max)
         val seen = HashSet<String>()
-        for (item in Regex("""<item>([\s\S]*?)</item>""", RegexOption.IGNORE_CASE).findAll(xml)) {
+        for (item in ITEM_RE.findAll(xml)) {
             val body = item.groupValues[1]
             val title = tag(body, "title") ?: continue
             val link = tag(body, "link") ?: continue
@@ -137,11 +136,22 @@ internal object KeylessSearchSources {
 
     /** First `<name>…</name>` inside [block], CDATA unwrapped, tags stripped. */
     private fun tag(block: String, name: String): String? {
-        val m = Regex("""<$name>([\s\S]*?)</$name>""", RegexOption.IGNORE_CASE).find(block) ?: return null
+        val m = tagRegex(name).find(block) ?: return null
         val raw = m.groupValues[1].trim()
             .removePrefix("<![CDATA[").removeSuffix("]]>")
         val text = stripTags(raw)
         return text.ifEmpty { null }
+    }
+
+    /**
+     * [T-hoisted-regex] `<name>…</name>` is built per call, but the name set is
+     * tiny (title/link/description) and fixed by the RSS shape, so the compiled
+     * patterns are cached instead of rebuilt for every item of every response.
+     */
+    private val tagRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+
+    private fun tagRegex(name: String): Regex = tagRegexCache.getOrPut(name) {
+        Regex("""<$name>([\s\S]*?)</$name>""", RegexOption.IGNORE_CASE)
     }
 
     // ------------------------------------------------------------------
@@ -160,8 +170,7 @@ internal object KeylessSearchSources {
         val out = ArrayList<WebSearchTool.Result>(max)
         val seen = HashSet<String>()
         for (chunk in splitH3(html)) {
-            val a = Regex("""<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
-                .find(chunk) ?: continue
+            val a = ANCHOR_RE.find(chunk) ?: continue
             val url = unescape(a.groupValues[1]).trim()
             if (!url.startsWith("http")) continue
             // Baidu's own chrome (news tabs, passport, tieba promos) leaks
@@ -195,8 +204,17 @@ internal object KeylessSearchSources {
         RegexOption.IGNORE_CASE,
     )
 
+    // [T-hoisted-regex] Constant patterns were compiled per call — once per
+    // <h3> chunk of every search page. Compiled once, reused.
+    private val ANCHOR_RE = Regex("""<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+    private val ITEM_RE = Regex("""<item>([\s\S]*?)</item>""", RegexOption.IGNORE_CASE)
+    private val HTML_TAG_RE = Regex("<[^>]*>")
+    private val WS_RE = Regex("\\s+")
+    private val DECIMAL_ENTITY_RE = Regex("&#(\\d+);")
+    private val HEX_ENTITY_RE = Regex("&#x([0-9a-fA-F]+);")
+
     fun stripTags(raw: String): String =
-        unescape(raw.replace(Regex("<[^>]*>"), " ")).replace(Regex("\\s+"), " ").trim()
+        unescape(HTML_TAG_RE.replace(raw, " ")).let { WS_RE.replace(it, " ").trim() }
 
     /** Common named entities + decimal/hex numeric ones. */
     fun unescape(raw: String): String {
@@ -211,12 +229,12 @@ internal object KeylessSearchSources {
             .replace("&mdash;", "—")
             .replace("&hellip;", "…")
             .replace("&middot;", "·")
-        s = Regex("&#(\\d+);").replace(s) { m ->
+        s = DECIMAL_ENTITY_RE.replace(s) { m ->
             m.groupValues[1].toIntOrNull()?.let { cp ->
                 runCatching { String(Character.toChars(cp)) }.getOrNull()
             } ?: m.value
         }
-        s = Regex("&#x([0-9a-fA-F]+);").replace(s) { m ->
+        s = HEX_ENTITY_RE.replace(s) { m ->
             m.groupValues[1].toIntOrNull(16)?.let { cp ->
                 runCatching { String(Character.toChars(cp)) }.getOrNull()
             } ?: m.value

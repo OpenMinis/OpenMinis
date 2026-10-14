@@ -11,14 +11,14 @@ import com.openminis.app.data.model.AgentToolParam
  */
 object AgentTools {
 
-    /**
-     * [T-a11y-skill] System-prompt guidance for the recorded-skill loop.
-     * Assembled by ChatViewModelPromptExt into the "Available tools" section —
-     * the fragment lives here (next to the tool registration it describes) so
-     * the prompt text cannot drift from the schema.
-     */
-    const val UI_SKILL_PROMPT_FRAGMENT: String =
-        "- ui_skill: Repetitive device operations (固定的打开→搜索→点击流程) — first ui_skill match/replay a previously recorded skill; fall back to ui_read + ui_action only when replay fails. Record new flows via Settings → Accessibility → 录制场景 then ui_skill save."
+    // [T-ui-skill-prompt-fragment-dead] `UI_SKILL_PROMPT_FRAGMENT` (the
+    // `- ui_skill: …` system-prompt guidance) was deleted here: it had ZERO
+    // readers. ChatViewModelPromptExt never assembled it into the "Available
+    // tools" section its KDoc promised, so the ui_skill workflow text the model
+    // was supposed to see was simply never sent — a constant that looks like it
+    // is doing something. ui/** owns whether that guidance gets re-added to the
+    // prompt (it has to be, to be of any use); until then keeping the dead
+    // string here only invites someone to assume it is wired up.
 
     fun makeAgentTools(
         supportsImageInput: Boolean = true,
@@ -338,7 +338,13 @@ background=true detaches the wave: this call returns a dispatch_id at once inste
             "Returns matching lines with surrounding context. Use this to recall previous knowledge, user preferences, or past notes.",
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Recall user preferences', 'Search past notes'). Use the same language as the user."),
-            "scope" to AgentToolParam("string", "Memory scope to search: 'daily' for daily logs only, 'all' for daily logs + GLOBAL.md.", enumValues = listOf("daily", "all")),
+            // [T-memory-scope-drift] The enum has to match what the EXECUTOR
+            // (MemoryTools.executeMemoryGet) implements: `daily`, `all`, plus a
+            // distinct `evolution` branch. Only the first two were advertised while
+            // EvolutionTool's own description instructs the model to call
+            // `memory_get scope=evolution` — an enum-forbidden value. The deleted
+            // MemoryTools schema factories were the copy that stayed correct.
+            "scope" to AgentToolParam("string", "Memory scope to search: 'daily' for daily logs only, 'all' for daily logs + GLOBAL.md, 'evolution' for the self-evolution proposal summary (accept/reject with the evolution tool).", enumValues = listOf("daily", "all", "evolution")),
             "keywords" to AgentToolParam("string", "Space-separated keywords for fuzzy matching (e.g. 'python preference' or 'API key setup'). All keywords must appear in a line or its surrounding context for a match. Leave empty to return full memory files."),
         ),
         required = listOf("tool_title"),

@@ -7,14 +7,9 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,7 +22,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -39,30 +33,9 @@ import com.openminis.app.ui.theme.ChatColors
 // [T-android-split-chat] Self-contained "thinking / streaming" dot indicators
 // extracted verbatim from ChatScreen.kt. `internal` so the chat package can
 // still reference them. No logic change — code moved as-is.
-
-@Composable
-internal fun BouncingDots(color: Color) {
-    val infiniteTransition = rememberInfiniteTransition(label = "bounce")
-    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        repeat(3) { i ->
-            val offset by infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = -2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(350, delayMillis = i * 120),
-                    repeatMode = RepeatMode.Reverse,
-                ),
-                label = "dot_$i",
-            )
-            Box(
-                modifier = Modifier
-                    .size(4.dp)
-                    .padding(top = (-offset).dp.coerceAtLeast(0.dp))
-                    .background(color, CircleShape),
-            )
-        }
-    }
-}
+// (`BouncingDots` was dropped from this file: zero callers, the live indicator
+// is `TypingIndicator` below. The stale [T-android-split-chat] note in
+// ChatAssistantMessageUI.kt that still names it is just a comment.)
 
 // iOS-style streaming "..." after tool title — 3 dots bouncing inline with text
 @Composable

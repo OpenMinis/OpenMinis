@@ -464,13 +464,35 @@ internal suspend fun ChatViewModel.runAgentLoop(
         val turnStartedAtMs = System.currentTimeMillis()
         val turnStartBlockIndex = allToolBlocks.size
         // T307: per-delta StringBuilder for the running turn text + the
-        // currently-open trailing text block. `turnText` snapshots are
-        // taken (via .toString()) at flush boundaries only, never per
-        // delta. `currentTextBlockSb` mirrors the trailing text block's
-        // growing content; reset to a fresh builder whenever a new text
-        // block opens (which happens after a tool_use / thinking break
-        // interrupts the text run).
+        // currently-open trailing text block, so GROWTH is amortised — the
+        // snapshot itself is still an O(message length) String per publish
+        // (see `messageTextSnapshot` below for the exact cadence and what
+        // would be needed to get rid of it). `currentTextBlockSb` mirrors the
+        // trailing text block's growing content; reset to a fresh builder
+        // whenever a new text block opens (which happens after a tool_use /
+        // thinking break interrupts the text run).
         val turnTextSb = StringBuilder()
+        // [T-android-stream-snapshot-helper] The single source for the bubble
+        // text published mid-turn: the cross-turn prefix + THIS turn's streamed
+        // text. Every publish site below routes through it so the sites cannot
+        // drift apart, and it skips the O(prefix) copy while the turn has no
+        // text yet — during a long thinking phase `turnTextSb` is empty, so
+        // `accumulatedText` ALREADY is the snapshot and concatenating it with
+        // "" only allocated a fresh full-size String per reasoning delta.
+        //
+        // Cadence, stated honestly: the `_messages` publishes are gated by the
+        // T256 length-aware throttle, but the active-run overlay update is NOT
+        // (it must stay current for the stop path), so on a long reply that one
+        // still costs a full copy per text delta. Making it O(1) would need a
+        // persistent cross-turn prefix builder — which every rollback /
+        // fallback / inject site (turnTextSb.setLength(0) ×2, accumulatedText =
+        // "") would have to reseed in lock-step, i.e. a second accumulator to
+        // keep in sync through the most reset-prone path in this range — or
+        // publishing the turn text on its own and joining it in the UI, which
+        // lives in ChatModels/ChatScreen. Neither is worth the regression risk
+        // for one String copy, so this helper is the whole optimisation.
+        fun messageTextSnapshot(): String =
+            if (turnTextSb.isEmpty()) accumulatedText else accumulatedText + turnTextSb.toString()
         // [T-stall-echo-strip] Armed only when the previous attempt stalled
         // mid-stream (see the retry-rollback path); the retried attempt's
         // text deltas route through it before reaching any consumer.
@@ -674,7 +696,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
                     }
                     withContext(Dispatchers.Main) {
-                        updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                        updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                     }
                 }
                 is LLMStreamChunk.Text -> {
@@ -711,10 +733,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     if (strippedDelta.isEmpty() && stallEchoStripper != null) {
                         return@collect
                     }
-                    // T307: append-only on the StringBuilder; .toString()
-                    // is taken once below at flush time, not per delta.
+                    // T307: append-only on the StringBuilder; the snapshot the
+                    // overlay reads is taken by `messageTextSnapshot()`.
                     turnTextSb.append(strippedDelta)
-                    activeRun?.updateAssistantText(accumulatedText + turnTextSb.toString())
+                    activeRun?.updateAssistantText(messageTextSnapshot())
                     // Append to the trailing text block — or open a new one if the last
                     // block isn't a text block (i.e. a tool call or thinking was in between).
                     // This preserves the chronological interleaving of text and tool calls
@@ -796,15 +818,15 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         lastUiUpdateMs = nowMs
                         lastFlushedLen = len
                         pendingChunkSb.setLength(0)
-                        // Materialise SB → String for both the active block's
-                        // content (so Compose sees an immutable snapshot) and
-                        // for the assistant message body. These are O(n) calls
-                        // but happen at throttled cadence, not per delta.
+                        // Materialise SB → String for the active block's
+                        // content (so Compose sees an immutable snapshot); the
+                        // message body itself comes from
+                        // `messageTextSnapshot()`. Both are O(n) calls but
+                        // happen at throttled cadence, not per delta.
                         // (activeSb === currentTextBlockSb by construction.)
                         materializeActiveTextBlock()
-                        val turnSnap = turnTextSb.toString()
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
+                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                         }
                     }
                 }
@@ -841,7 +863,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         lastUiUpdateMs = System.currentTimeMillis()
                         lastFlushedLen = turnTextSb.length
                         // T307: pre-tool-use flush also materialises the
-                        // active text block + a turn-text snapshot.
+                        // active text block + the message snapshot.
                         materializeActiveTextBlock()
                         // [T-android-tool-splits-reply-fix] Ordered mode:
                         // the tool block breaks the text run, so the next
@@ -852,9 +874,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         if (!currentProvider.streamTextIsMonolithic) {
                             currentTextBlockSb = null
                         }
-                        val turnSnap = turnTextSb.toString()
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
+                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                         }
                         yield()
                     }
@@ -876,7 +897,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             startTimeMs = System.currentTimeMillis(),
                         ))
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                         }
                     }
                 }
@@ -938,7 +959,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             if (isHeavyFileTool) lastFileToolInputMs = nowMs
                             else lastOtherToolInputMs = nowMs
                             withContext(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                                updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                             }
                         }
                     }
@@ -985,7 +1006,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             thoughtSignature = chunk.thoughtSignature ?: allToolBlocks[idx].thoughtSignature,
                         )
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                         }
                     }
                 }
@@ -1086,11 +1107,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 if (pendingChunkSb.isNotEmpty()) {
                     pendingChunkSb.setLength(0)
                     // T307: also flush the active text block's pending
-                    // tail and snapshot turnText.
+                    // tail and publish the message snapshot.
                     materializeActiveTextBlock()
-                    val turnSnap = turnTextSb.toString()
                     withContext(Dispatchers.Main) {
-                        updateAssistantMessage(assistantId, accumulatedText + turnSnap, true, allToolBlocks)
+                        updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                     }
                 }
                 // T256: reset throttle bookkeeping for the next turn so the
@@ -1194,7 +1214,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         // `accumulatedText + newTurnText`, so this transient
                         // value is overwritten cleanly (no duplication).
                         withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                         }
                     }
                     // T307: SB-based per-turn accumulators reset.
@@ -1350,7 +1370,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // provider streams into a fresh `turnTextSb` (reset just
                     // below) and re-publishes `accumulatedText + newTurnText`.
                     withContext(Dispatchers.Main) {
-                        updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                        updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
                     }
                     // Reset turn state for retry with new provider
                     turnTextSb.setLength(0)

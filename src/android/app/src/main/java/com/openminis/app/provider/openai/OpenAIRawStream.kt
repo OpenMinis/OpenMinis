@@ -223,7 +223,13 @@ internal fun OpenAIProvider.rawStreamMessage(
         }
         var request = buildRequest(bodyStr)
         if (com.openminis.app.provider.ZenDisguise.isZenHost(basePath)) {
-            request = ZenDisguise.applyToBody(request.newBuilder(), bodyStr).build()
+            // [T-zen-disguise-single-serialize] applyToBody re-parsed the ENTIRE
+            // serialised body just to recover the first user message for the
+            // session id — a multi-MB JSONObject parse on every Zen turn, which is
+            // exactly the memory pressure T302 removed above (and it sat on top of
+            // the deliberate single `body.toString()`). `messages` is already in
+            // hand and is what the body was built from, so derive the id from it.
+            request = ZenDisguise.apply(request.newBuilder(), messages).build()
         }
         val headerMap = mutableMapOf<String, String>()
         for (name in request.headers.names()) {
@@ -346,11 +352,17 @@ internal fun OpenAIProvider.rawStreamMessage(
         }
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
-            // T321: full error body — debug-only, but kept unconditional here
-            // since non-2xx is rare and the body is critical for diagnosis.
+            // T321: full error body. [T-llm-error-secret-mask] masked at every
+            // site now, and the FULL body is DEBUG-only: AppLogger writes into
+            // filesDir/logs/*.log and CONTRIBUTING.md asks users to attach those
+            // logs to GitHub issues, so an unmasked/unbounded upstream echo was a
+            // credential spill path. Release builds keep a bounded masked excerpt
+            // so "why did the relay refuse" is still triageable from a report.
+            val maskedErrorBody = maskSecrets(errorBody)
             com.openminis.app.logging.AppLogger.error(
                 "OpenAIProvider",
-                "[T321] ← HTTP ${response.code} error body: $errorBody"
+                "[T321] ← HTTP ${response.code} error body: " +
+                    (if (com.openminis.app.BuildConfig.DEBUG) maskedErrorBody else maskedErrorBody.take(500))
             )
             response.close()
             // T302: skip the LLMRequestLog write entirely on release builds —
@@ -735,9 +747,11 @@ internal fun OpenAIProvider.rawStreamMessage(
                             if (code == "server_error" || code == "rate_limit_exceeded") {
                                 // Transient family: retry on the same model
                                 // rather than falling back through the group.
-                                throw LLMError.TransientError("[$code] $message")
+                                // [T-llm-error-secret-mask] `message` is
+                                // upstream-controlled text inside LLMError.message.
+                                throw LLMError.TransientError("[$code] ${maskSecrets(message)}")
                             }
-                            throw LLMError.ProviderError("[$code] $message")
+                            throw LLMError.ProviderError("[$code] ${maskSecrets(message)}")
                         }
                         type == "response.incomplete" -> {
                             // [T-responses-terminal-events] The server ended the

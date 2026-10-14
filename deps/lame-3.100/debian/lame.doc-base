@@ -1,9 +1,0 @@
-Document: lame
-Abstract: This manual describes the LAME MP3 encoder and concepts behind audio compression.
-Author: The LAME Development Team
-Section: Sound
-Title: LAME MP3 encoder manual
-
-Format: HTML
-Index: /usr/share/doc/lame/html/index.html
-Files: /usr/share/doc/lame/html/*

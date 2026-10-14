@@ -48,14 +48,12 @@ object LocaleWrap {
         val locale = parseLocale(code) ?: return base
         val config = Configuration(base.resources.configuration)
         Locale.setDefault(locale)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val list = LocaleList(locale)
-            LocaleList.setDefault(list)
-            config.setLocales(list)
-        } else {
-            @Suppress("DEPRECATION")
-            config.locale = locale
-        }
+        // No pre-N fallthrough: minSdk is 26 (app/build.gradle.kts), so
+        // `config.setLocales` is always available and the deprecated
+        // `config.locale` branch was unreachable dead code.
+        val list = LocaleList(locale)
+        LocaleList.setDefault(list)
+        config.setLocales(list)
         return base.createConfigurationContext(config)
     }
 

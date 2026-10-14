@@ -467,6 +467,11 @@ class OpenAIProvider private constructor(
         // network-transition eviction reaches THIS client's connections —
         // a per-client pool was never evicted, and a dead h2 tunnel through
         // a local proxy got reused on every retry (silent infinite hang).
+        // The eviction is NetworkMonitor.evictSharedPoolOnReconnect(), which
+        // calls evictAll() on the SHARED pool when a callback actually flips
+        // the merged status to CONNECTED; the per-call watchdog in
+        // OpenAIRawStream only ever closes its own socket, so this pool-level
+        // pass is what clears tunnels that died with the previous interface.
         .connectionPool(com.openminis.app.network.NetworkMonitor.sharedLLMConnectionPool)
         .eventListenerFactory { OkHttpNetTraceListener() }
         .build()
@@ -1164,7 +1169,19 @@ class OpenAIProvider private constructor(
             } catch (_: Exception) {
                 throw LLMError.ProviderError("Video create: not JSON (${contentType.take(40)})")
             }
-            return resolveVideoJob(json, token, path)
+            // [T-video-poll-url-from-create] Poll under the mount point that ACTUALLY
+            // answered 2xx, not under basePath. The candidate list above deliberately
+            // tries host-root URLs (`https://host/videos`, the absolute override) for
+            // relays that do not mount the videos API under `/v1`; rebuilding the poll
+            // URL from `basePath` then asked `https://host/v1/videos/<id>` for a job
+            // created at `https://host/videos` — a 404 on exactly the relays that had
+            // required the host-root create, and only AFTER the user had spent the
+            // quota. Stripping the create path off the create URL is the identity
+            // mapping for every candidate shape (`$basePath$path` and `hostRootURL$path`
+            // both end in `path`); an override that does not end in it falls back to
+            // basePath, which is the historical behaviour.
+            val pollBase = url.removeSuffix(path).let { if (it == url) basePath else it }
+            return resolveVideoJob(json, token, path, pollBase)
             }
         }
         throw lastError ?: LLMError.ProviderError("No video endpoint on this provider")
@@ -1174,6 +1191,10 @@ class OpenAIProvider private constructor(
         json: org.json.JSONObject,
         token: String,
         createPath: String,
+        // [T-video-poll-url-from-create] Origin (scheme://host[:port] + any mount
+        // prefix) taken from the create URL that returned 2xx. Defaults to basePath
+        // so any other caller keeps its historical behaviour.
+        pollBase: String = basePath,
     ): LLMResponse {
         extractVideoAttachment(json)?.let { return it }
         val err = json.optJSONObject("error")?.safeOptString("message", "")
@@ -1196,7 +1217,10 @@ class OpenAIProvider private constructor(
         repeat(120) { attempt ->
             kotlinx.coroutines.delay(if (attempt == 0) videoFirstPollMillis else videoPollMillis)
             val pollReq = Request.Builder()
-                .url("$basePath$pollPath")
+                // [T-video-poll-url-from-create] `pollBase`, not `basePath`: a job
+                // created at a host-root URL must be polled there, or the very
+                // relays that needed the host-root create 404 the poll.
+                .url("$pollBase$pollPath")
                 .get()
                 .applyKeyAuth(token)
                 .apply {
@@ -1225,7 +1249,7 @@ class OpenAIProvider private constructor(
                 throw LLMError.ProviderError(msg)
             }
             if (st.equals("completed", true) || st.equals("success", true) || st.equals("succeeded", true)) {
-                downloadVideoContent(token, id)?.let { return it }
+                downloadVideoContent(token, id, pollBase)?.let { return it }
                 throw LLMError.ProviderError("Video completed but no file/url")
             }
         }
@@ -1284,8 +1308,15 @@ class OpenAIProvider private constructor(
         }
     }
 
-    private suspend fun downloadVideoContent(token: String, id: String): LLMResponse? {
-        val url = "$basePath/videos/$id/content"
+    private suspend fun downloadVideoContent(
+        token: String,
+        id: String,
+        // [T-video-poll-url-from-create] Same origin the CREATE (and therefore the
+        // poll) succeeded against — a host-root relay 404s here too, which used to
+        // surface as "Video completed but no file/url" after the quota was spent.
+        pollBase: String = basePath,
+    ): LLMResponse? {
+        val url = "$pollBase/videos/$id/content"
         val req = Request.Builder()
             .url(url)
             .get()

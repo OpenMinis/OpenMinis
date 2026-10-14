@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import com.openminis.app.logging.AppLogger
 
 /**
@@ -73,9 +72,10 @@ class ScheduledTaskManager(private val context: Context) {
 
     fun delete(taskId: String): Boolean {
         val id = store.resolveId(taskId) ?: return false
+        // One cancel is enough: cancelAlarm is idempotent (PendingIntent
+        // equality), the second back-to-back call was pure noise.
         cancelAlarm(id)
         val removed = store.delete(id)
-        cancelAlarm(id)
         return removed && store.get(id) == null
     }
 
@@ -182,7 +182,7 @@ class ScheduledTaskManager(private val context: Context) {
     }
 
     private fun ensureNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        // minSdk 26 (O): the SDK_INT guard was unreachable.
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (nm.getNotificationChannel(CHANNEL_ID) != null) return
         val channel = NotificationChannel(

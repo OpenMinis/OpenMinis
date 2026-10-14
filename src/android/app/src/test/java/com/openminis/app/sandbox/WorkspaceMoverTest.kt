@@ -121,4 +121,38 @@ class WorkspaceMoverTest {
             SessionWorkspace.rememberFolder(sid, null)
         }
     }
+
+    @Test
+    fun moveSymlinkIsCopiedAsLinkNotExpandedIntoSharedTree() {
+        // [T-symlink-expansion] A guest `ln -s <other-session>/file` inside its
+        // workspace used to be copied by FOLLOWING the link, so its target's
+        // CONTENT landed in the shared minis-workspaces tree other sessions
+        // mount; a symlinked directory aborted the whole move. Copy as a link.
+        val filesDir = tmp.root
+        val sid = "sess-sym"
+        val folder = "folder-sym"
+        val secret = File(tmp.root, "elsewhere-secret.txt")
+        secret.writeText("PRIVATE")
+        val sessionWorkspace = File(SessionWorkspace.base(filesDir, sid), "workspace").apply { mkdirs() }
+        File(sessionWorkspace, "regular.txt").writeText("plain")
+        val link = File(sessionWorkspace, "link.txt")
+        // Symlink creation needs the privilege/dev-mode the JVM host may lack;
+        // if the filesystem refuses, there is nothing to prove and we skip.
+        runCatching { java.nio.file.Files.createSymbolicLink(link.toPath(), secret.toPath()) }
+            .onFailure { return }
+        SessionWorkspace.rememberFolder(sid, folder)
+        try {
+            val result = WorkspaceMover.moveSessionIntoProject(filesDir, sid, folder)
+            assertTrue(result.movedSubdirs.contains("workspace"))
+            assertTrue(result.succeeded)
+            val moved = File(SessionWorkspace.projectBase(filesDir, folder), "workspace")
+            assertEquals("plain", File(moved, "regular.txt").readText())
+            assertTrue(
+                "link copied as a link, not expanded",
+                java.nio.file.Files.isSymbolicLink(File(moved, "link.txt").toPath()),
+            )
+        } finally {
+            SessionWorkspace.rememberFolder(sid, null)
+        }
+    }
 }

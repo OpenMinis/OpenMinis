@@ -23,32 +23,6 @@ import com.openminis.app.util.IsoTime
 internal fun formatStepTimestamp(epochMs: Long): String =
     IsoTime.formatHms(epochMs)
 
-// [T-step-timestamp v2 aa8b1128] Short "elapsed-or-final duration"
-// label for the tool detail header. Cross-platform format contract:
-//   < 60s   → "3s"
-//   < 1h    → "2m30s" (drops the seconds suffix when seconds == 0)
-//   ≥ 1h    → "1h12m"
-// When `stillRunning` is true the result is suffixed "…" so the
-// header reads "12s…" while the tool is in flight.
-// Negative / non-positive values clamp to 0.
-internal fun formatStepDuration(seconds: Long, stillRunning: Boolean): String {
-    val safe = seconds.coerceAtLeast(0L)
-    val base = when {
-        safe < 60L -> "${safe}s"
-        safe < 3600L -> {
-            val m = safe / 60L
-            val s = safe % 60L
-            if (s == 0L) "${m}m" else "${m}m${s}s"
-        }
-        else -> {
-            val h = safe / 3600L
-            val m = (safe % 3600L) / 60L
-            if (m == 0L) "${h}h" else "${h}h${m}m"
-        }
-    }
-    return if (stillRunning) "$base…" else base
-}
-
 // Helper: tool accent color
 internal fun toolAccentColor(toolName: String): Color = when (toolName) {
     "shell_execute" -> Color(0xFF34C759)

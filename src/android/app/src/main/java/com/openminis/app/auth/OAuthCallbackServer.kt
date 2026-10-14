@@ -20,6 +20,37 @@ class OAuthCallbackServer(
         private const val TAG = "OAuthCallbackServer"
         private const val MAX_REQUEST_LINE = 4096
         private const val MAX_RESPONSE_BYTES = 1024
+
+        /**
+         * [T-oauth-loopback-binding] RFC 8252 §7.3: a native-app loopback
+         * listener must reject requests whose `Host` is not a loopback name.
+         * Without it, anything on the LAN that can route to this device's
+         * listening socket could probe the callback port (and, before the bind
+         * fix below, actually reach it) — probing for a live OAuth listener and
+         * interference with the redirect are the exact things §7.3 exists to stop.
+         * PKCE + state still decide code theft; this closes the extra surface.
+         *
+         * Pure + internal so the unit test can pin the table without a socket.
+         */
+        internal fun isLoopbackHostHeader(header: String?): Boolean {
+            val raw = header?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return false
+            // Tolerate an absolute-form authority ("http://localhost:54545") and
+            // strip the port. IPv6 literals keep their brackets ("[::1]:1234").
+            val authority = raw.substringAfterLast("://").substringBefore('#').substringBefore('/')
+            val host = if (authority.startsWith("[")) {
+                authority.substringBefore(']').ifEmpty { return false } + "]"
+            } else {
+                authority.substringBefore(':')
+            }
+            if (host.isEmpty()) return false
+            if (host == "localhost" || host == "::1" || host == "[::1]") return true
+            // The whole 127/8 block is loopback, not just 127.0.0.1 — the xAI
+            // redirect URI registers 127.0.0.1 explicitly, so that spelling has
+            // to pass.
+            val parts = host.split('.')
+            return parts.size == 4 && parts.firstOrNull() == "127" &&
+                parts.all { it.toIntOrNull()?.let { n -> n in 0..255 } == true }
+        }
     }
 
     private var serverSocket: ServerSocket? = null
@@ -50,7 +81,14 @@ class OAuthCallbackServer(
                 var bound = false
                 for (p in portsToTry) {
                     try {
-                        serverSocket = ServerSocket(p)
+                        // [T-oauth-loopback-binding] Bind EXPLICITLY to 127.0.0.1.
+                        // `ServerSocket(p)` binds the wildcard address (0.0.0.0),
+                        // which put the OAuth callback listener on every interface:
+                        // a device on the same Wi-Fi/lan could reach the port, probe
+                        // it, and race the real browser for the redirect. Every other
+                        // loopback server in this app already binds this way
+                        // (McpHttpServer, SandboxHttpProxy) — this was the outlier.
+                        serverSocket = ServerSocket(p, 10, java.net.InetAddress.getByName("127.0.0.1"))
                         boundPort = p
                         bound = true
                         break
@@ -75,12 +113,30 @@ class OAuthCallbackServer(
                         if (parts[0] != "GET") { writeResponse(socket, 405, "Method not allowed"); continue }
                         val requestTarget = parts[1]
                         var headerBytes = 0
+                        // [T-oauth-loopback-binding] Capture `Host` while draining
+                        // the headers (they used to be read and thrown away, so the
+                        // check below had nothing to look at).
+                        var hostHeader: String? = null
                         while (true) {
                             val header = reader.readLine() ?: break
                             headerBytes += header.length
                             if (header.isEmpty() || headerBytes > MAX_REQUEST_LINE) break
+                            if (hostHeader == null && header.length > 5 &&
+                                header.substring(0, 5).equals("host:", ignoreCase = true)
+                            ) {
+                                hostHeader = header.substring(5).trim()
+                            }
                         }
                         if (headerBytes > MAX_REQUEST_LINE) { writeResponse(socket, 431, "Headers too large"); continue }
+                        // [T-oauth-loopback-binding] RFC 8252 §7.3 — reject a Host
+                        // that is not loopback before touching the auth code, so a
+                        // peer on the LAN (or a misbehaving proxy that rewrote the
+                        // request) cannot consume or probe this callback.
+                        if (!isLoopbackHostHeader(hostHeader)) {
+                            Log.w(TAG, "Rejected callback request with non-loopback Host: '${hostHeader ?: "<absent>"}'")
+                            writeResponse(socket, 400, "Bad request")
+                            continue
+                        }
 
                         // Parse only the exact loopback callback path.
                         val uri = URI("http://localhost$requestTarget")

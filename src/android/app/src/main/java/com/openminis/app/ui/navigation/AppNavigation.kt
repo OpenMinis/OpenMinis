@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -31,6 +32,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.dialog
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.ui.chat.ChatScreen
@@ -233,10 +236,68 @@ object Routes {
     fun addCustomModel(instanceId: String) = "add_custom_model/$instanceId"
 }
 
-/** Holder for file preview navigation state (not serializable via nav args). */
+/**
+ * Holder for file preview navigation state (not serializable via nav args).
+ *
+ * [T-android-filepreview-holder-lifetime] Both slots are released by the
+ * destination that consumes them (see the DisposableEffect in FILE_BROWSER /
+ * FILE_PREVIEW): this object is process-static and the browser VM it carries is
+ * hand-built by the navigating screen — it is attached to no ViewModelStore, so
+ * onCleared() never runs and without the clear the last browsed
+ * FileBrowserViewModel (plus its FileItem and every listed FileItem) lived for
+ * the rest of the process. The CHAT_FILES destination builds its VM with
+ * remember() and had a different lifetime for the same class; clearing on
+ * dispose makes the two converge on "only while the destination is on the
+ * stack".
+ */
 internal object FilePreviewHolder {
     var currentItem: FileItem? = null
     var fileBrowserViewModel: FileBrowserViewModel? = null
+}
+
+/**
+ * One resolver for the two "browse a remote's backups" destinations
+ * (BACKUP_DESTINATION_BROWSE and RESTORE_BROWSE), which held byte-identical
+ * load-and-pop plumbing apart from where their ViewModel was scoped and what
+ * they rendered.
+ *
+ * [T-android-sessionlist-prefs-io] Resolving a remote is the FIRST plain +
+ * Encrypted SharedPreferences load of the process and it used to sit in a
+ * `remember {}` in the composition body. Now: sane first-frame default (render
+ * nothing), the read on Dispatchers.IO, and a pop when the destination has
+ * since been removed.
+ */
+@Composable
+private fun RcloneRemoteBrowseDestination(
+    remoteName: String,
+    navController: NavHostController,
+    content: @Composable (
+        remote: com.openminis.app.backup.remote.RcloneRemoteStore.Remote,
+    ) -> Unit,
+) {
+    val ctx = LocalContext.current
+    var remote by remember(remoteName) {
+        mutableStateOf<com.openminis.app.backup.remote.RcloneRemoteStore.Remote?>(null)
+    }
+    var loaded by remember(remoteName) { mutableStateOf(false) }
+    LaunchedEffect(remoteName) {
+        remote = withContext(Dispatchers.IO) {
+            runCatching {
+                com.openminis.app.backup.remote.RcloneRemoteStore(ctx.applicationContext)
+                    .remote(remoteName)
+            }.getOrNull()
+        }
+        loaded = true
+    }
+    val resolved = remote
+    if (loaded) {
+        if (resolved == null) {
+            // The destination was removed since the record was written.
+            LaunchedEffect(remoteName) { navController.safePopBackStack() }
+        } else {
+            content(resolved)
+        }
+    }
 }
 
 @Composable
@@ -338,29 +399,40 @@ fun AppNavigation(
         if (hasDeepLink) return@LaunchedEffect
         val hasPendingShare =
             com.openminis.app.share.ShareCoordinator.bufferVersion.value > 0
-        val rawMode = getAppearancePrefs(context).getInt(KEY_LAUNCH_SESSION, 0)
-        // Hang-detector circuit breaker: if the previous launches racked up
-        // ≥3 main-thread hangs, force mode = 3 (home) so we don't reopen
-        // the session/chat that was hanging. The user clears this either
-        // by completing a chat session quietly (HangDetector.markHealthyTick
-        // on ChatScreen) or by tapping the manual reset in Settings.
-        //
-        // Crash-frequency circuit breaker: same effect, different trigger.
-        // When CrashFrequencyDetector tripped on the previous boot it set
-        // a 1-hour force-home grace window — within that window every
-        // launch lands on Home regardless of the user's Launch Session
-        // preference, even after they dismissed the share dialog. Avoids
-        // re-entering the session that may have been the crash trigger.
-        //
-        // An auto-entered route that did not survive a 60s healthy tick is not
-        // entered again. silent_kill and a tombstone-less reboot do not clear
-        // that fuse, and there is no "wait for 3 restarts" exception.
-        val mode = if (
-            com.openminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(context) ||
-            com.openminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(context) ||
-            com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch() ||
-            com.openminis.app.diagnostics.RouteFuse.blocksAnyUnhealthy(context)
-        ) 3 else rawMode
+        // [T-android-sessionlist-prefs-io] The Launch Session preference plus
+        // all four circuit breakers are plain SharedPreferences files, and every
+        // one of them was loaded synchronously on the main dispatcher — in the
+        // effect that decides the first screen the user ever sees. Same storage-
+        // stall shape the note measures at 119s; the reads move to
+        // Dispatchers.IO and the application context (this coroutine can outlive
+        // the Activity it was composed in).
+        val (rawMode, mode) = withContext(Dispatchers.IO) {
+            val app = context.applicationContext
+            val raw = getAppearancePrefs(app).getInt(KEY_LAUNCH_SESSION, 0)
+            // Hang-detector circuit breaker: if the previous launches racked up
+            // ≥3 main-thread hangs, force mode = 3 (home) so we don't reopen
+            // the session/chat that was hanging. The user clears this either
+            // by completing a chat session quietly (HangDetector.markHealthyTick
+            // on ChatScreen) or by tapping the manual reset in Settings.
+            //
+            // Crash-frequency circuit breaker: same effect, different trigger.
+            // When CrashFrequencyDetector tripped on the previous boot it set
+            // a 1-hour force-home grace window — within that window every
+            // launch lands on Home regardless of the user's Launch Session
+            // preference, even after they dismissed the share dialog. Avoids
+            // re-entering the session that may have been the crash trigger.
+            //
+            // An auto-entered route that did not survive a 60s healthy tick is not
+            // entered again. silent_kill and a tombstone-less reboot do not clear
+            // that fuse, and there is no "wait for 3 restarts" exception.
+            val effective = if (
+                com.openminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(app) ||
+                com.openminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(app) ||
+                com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch() ||
+                com.openminis.app.diagnostics.RouteFuse.blocksAnyUnhealthy(app)
+            ) 3 else raw
+            raw to effective
+        }
         val autoThresholdMs = 15L * 60 * 1000
         // [T-android-startup-splash-hang] The workspace-owner warmup no longer
         // blocks Application.onCreate, so the ordering guarantee it used to
@@ -487,40 +559,53 @@ fun AppNavigation(
      // chat so ChatScreen's LaunchedEffect consumes the pending state on
      // first composition — no sessions-list flash, no launch-session
      // preference detour.
-    val htmlShortcut = initialDeepLink as? DeepLinkAction.OpenHtmlPreview
     // App-icon quick action cold start: mount NavHost directly at a fresh
     // draft chat, seeding the pending action so ChatScreen consumes it on
     // its first LaunchedEffect tick. Mirrors the htmlShortcut path —
     // avoids a sessions-list flash and a duplicate back-stack entry.
-    val quickActionStart: String? = when (initialDeepLink) {
-        is DeepLinkAction.NewVoiceChat -> {
-            DeepLinkCoordinator.setPendingChatAction(
-                DeepLinkCoordinator.ChatAction.START_VOICE,
-            )
-            Routes.chat("__new__${java.util.UUID.randomUUID()}")
+    //
+    // [T-android-deeplink-reseed] Both seeds used to run in the COMPOSITION
+    // BODY. DeepLinkCoordinator's pending slots are one-shot — consume*() puts
+    // them back to null — so once ChatScreen drained one, any later
+    // recomposition of AppNavigation RE-SEEDED it and the preview sheet (or a
+    // seeded quick-action) popped open again by itself. AppNavigation
+    // recomposes readily: `htmlBrowserUrl` flips when an in-app file preview
+    // opens/closes, and ShareCoordinator.bufferVersion ticks on every share.
+    // remember(initialDeepLink) runs the block exactly once per deep link,
+    // which also freezes the `__new__<uuid>` draft id (a recompute used to mint
+    // a second id, harmless only because NavHost reads startDestination once).
+    val startDestination = remember(initialDeepLink) {
+        val htmlShortcut = initialDeepLink as? DeepLinkAction.OpenHtmlPreview
+        val quickActionStart: String? = when (initialDeepLink) {
+            is DeepLinkAction.NewVoiceChat -> {
+                DeepLinkCoordinator.setPendingChatAction(
+                    DeepLinkCoordinator.ChatAction.START_VOICE,
+                )
+                Routes.chat("__new__${java.util.UUID.randomUUID()}")
+            }
+            is DeepLinkAction.NewCameraChat -> {
+                DeepLinkCoordinator.setPendingChatAction(
+                    DeepLinkCoordinator.ChatAction.OPEN_CAMERA,
+                )
+                Routes.chat("__new__${java.util.UUID.randomUUID()}")
+            }
+            is DeepLinkAction.NewChat -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
+            else -> null
         }
-        is DeepLinkAction.NewCameraChat -> {
-            DeepLinkCoordinator.setPendingChatAction(
-                DeepLinkCoordinator.ChatAction.OPEN_CAMERA,
-            )
-            Routes.chat("__new__${java.util.UUID.randomUUID()}")
+        when {
+            htmlShortcut != null -> {
+                // Seed coordinator before NavHost composition so ChatScreen sees
+                // the pending state on its very first LaunchedEffect tick.
+                DeepLinkCoordinator.setPendingHtmlPreview(
+                    htmlShortcut.sessionId,
+                    htmlShortcut.resourcePath,
+                    htmlShortcut.title,
+                )
+                Routes.chat(htmlShortcut.sessionId)
+            }
+            quickActionStart != null -> quickActionStart
+            else -> Routes.SESSION_LIST
         }
-        is DeepLinkAction.NewChat -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        else -> null
-    }
-    val startDestination = when {
-        htmlShortcut != null -> {
-            // Seed coordinator before NavHost composition so ChatScreen sees
-            // the pending state on its very first LaunchedEffect tick.
-            DeepLinkCoordinator.setPendingHtmlPreview(
-                htmlShortcut.sessionId,
-                htmlShortcut.resourcePath,
-                htmlShortcut.title,
-            )
-            Routes.chat(htmlShortcut.sessionId)
-        }
-        quickActionStart != null -> quickActionStart
-        else -> Routes.SESSION_LIST
     }
     var htmlBrowserUrl by remember { mutableStateOf<String?>(null) }
     NavHost(
@@ -633,6 +718,9 @@ fun AppNavigation(
                 onSoulClick = { navController.safeNavigate(Routes.SOUL) },
                 onEvolutionClick = { navController.safeNavigate(Routes.EVOLUTION) },
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
+                // [T-android-system-permissions-entry] The route was registered
+                // since T323 with nothing navigating to it.
+                onSystemPermissionsClick = { navController.safeNavigate(Routes.SYSTEM_PERMISSIONS) },
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
                 onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
@@ -671,24 +759,60 @@ fun AppNavigation(
         ) { entry ->
             val id = entry.arguments?.getString("recordId").orEmpty()
             val ctx = androidx.compose.ui.platform.LocalContext.current
-            val history = remember { com.openminis.app.backup.BackupHistory.get(ctx) }
-            val record = remember(id) { history.records().firstOrNull { it.id == id } }
-            if (record == null) {
+            // [T-android-sessionlist-prefs-io] Reading the record used to happen
+            // in the composition body: BackupHistory.get() prunes + rewrites
+            // records.json on first construction and records() reads the whole
+            // file — synchronous disk IO on the main thread inside a Compose
+            // frame, the exact stall shape that note measures at 119s. Sane
+            // first-frame default (nothing loaded, render nothing) + IO.
+            var record by remember(id) {
+                mutableStateOf<com.openminis.app.backup.BackupHistory.Record?>(null)
+            }
+            var recordLoaded by remember(id) { mutableStateOf(false) }
+            LaunchedEffect(id) {
+                val loaded = withContext(Dispatchers.IO) {
+                    runCatching {
+                        com.openminis.app.backup.BackupHistory.get(ctx.applicationContext)
+                            .records().firstOrNull { it.id == id }
+                    }.getOrNull()
+                }
+                record = loaded
+                recordLoaded = true
+            }
+            val loadedRecord = record
+            if (recordLoaded && loadedRecord == null) {
                 // The record was removed (or pruned) while this screen was on
                 // the stack; there is nothing to show, so leave rather than
                 // render an empty shell.
                 LaunchedEffect(Unit) { navController.safePopBackStack() }
-            } else {
+            } else if (loadedRecord != null) {
                 // The screen needs a ViewModel for the delete-with-files path
-                // (it talks to rclone); scoped to this entry so it dies with
-                // the screen.
+                // (it talks to rclone).
+                //
+                // [T-android-backup-delete-cancelled-scope] Scoped to the BACKUP
+                // entry, not this one — the same parent-sharing shape the
+                // RESTORE_BROWSE destination below uses. A bare viewModel()
+                // attached it to the BACKUP_HISTORY_DETAIL store, so the
+                // safePopBackStack() that follows the delete call cleared that
+                // store and cancelled viewModelScope; the deletion now runs on an
+                // application-scoped coroutine (see
+                // BackupViewModel.removeHistoryRecordWithFiles) so it survives
+                // either way, and sharing the parent additionally means the row
+                // disappears from the list the moment it finishes rather than on
+                // the next ON_RESUME refresh.
+                val vmParent = remember(entry) {
+                    runCatching { navController.getBackStackEntry(Routes.BACKUP) }
+                        .getOrDefault(entry)
+                }
                 val vm: com.openminis.app.ui.settings.backup.BackupViewModel =
-                    androidx.lifecycle.viewmodel.compose.viewModel()
+                    androidx.lifecycle.viewmodel.compose.viewModel(vmParent)
                 com.openminis.app.ui.settings.backup.BackupHistoryDetailScreen(
-                    record = record,
+                    record = loadedRecord,
                     onBack = { navController.safePopBackStack() },
                     onRemove = {
-                        history.remove(id)
+                        // Through the shared VM so the list's observed StateFlow
+                        // updates alongside the on-disk record.
+                        vm.removeHistoryRecord(id)
                         navController.safePopBackStack()
                     },
                     onRemoveWithFiles = {
@@ -710,16 +834,10 @@ fun AppNavigation(
             arguments = listOf(navArgument("remoteName") { type = NavType.StringType }),
         ) { entry ->
             val name = entry.arguments?.getString("remoteName").orEmpty()
-            val ctx = androidx.compose.ui.platform.LocalContext.current
-            val remote = remember(name) {
-                com.openminis.app.backup.remote.RcloneRemoteStore(ctx).remote(name)
-            }
-            if (remote == null) {
-                // The destination was removed since the record was written.
-                LaunchedEffect(Unit) { navController.safePopBackStack() }
-            } else {
+            RcloneRemoteBrowseDestination(name, navController) { remote ->
+                // Scoped to this destination: read-only browsing of one remote.
                 val vm: com.openminis.app.ui.settings.backup.BackupViewModel =
-                    androidx.lifecycle.viewmodel.compose.viewModel()
+                    androidx.lifecycle.viewmodel.compose.viewModel(entry)
                 com.openminis.app.ui.settings.backup.BackupDestinationBrowseScreen(
                     remote = remote,
                     vm = vm,
@@ -747,13 +865,7 @@ fun AppNavigation(
             arguments = listOf(navArgument("remoteName") { type = NavType.StringType }),
         ) { entry ->
             val name = entry.arguments?.getString("remoteName").orEmpty()
-            val ctx = androidx.compose.ui.platform.LocalContext.current
-            val remote = remember(name) {
-                com.openminis.app.backup.remote.RcloneRemoteStore(ctx).remote(name)
-            }
-            if (remote == null) {
-                LaunchedEffect(Unit) { navController.safePopBackStack() }
-            } else {
+            RcloneRemoteBrowseDestination(name, navController) { remote ->
                 // Scoped to the BACKUP entry so the browser and the restore
                 // screen share one ViewModel — the picked package has to be
                 // visible to the screen that restores it.
@@ -1023,10 +1135,15 @@ fun AppNavigation(
             // %2F-encoded composite ids so ModelEntryDetailScreen can match
             // entry.id == "<instanceId>/<modelId>" (which carries a literal '/')
             // against the repo. Mirrors the encode in Routes.modelEntryDetail.
+            //
+            // NavType.StringType.parseValue() ALREADY runs Uri.decode on the raw
+            // segment, so a second manual decode here was redundant: an entryId
+            // carrying a real '%' (a literal, e.g. "gpt-4o%20") came back
+            // mangled or dropped. Left as the plain argument read.
             val instanceId = backStackEntry.arguments?.getString("instanceId")
-                ?.let { android.net.Uri.decode(it) } ?: return@composable
+                ?: return@composable
             val entryId = backStackEntry.arguments?.getString("entryId")
-                ?.let { android.net.Uri.decode(it) } ?: return@composable
+                ?: return@composable
             ModelEntryDetailScreen(
                 instanceId = instanceId,
                 entryId = entryId,
@@ -1122,20 +1239,33 @@ fun AppNavigation(
             )
         }
 
-        composable(Routes.FILE_BROWSER) {
-            val vm = FilePreviewHolder.fileBrowserViewModel ?: return@composable
-            FileBrowserScreen(
-                viewModel = vm,
-                onBack = { navController.safePopBackStack() },
-                onPreviewFile = { item ->
-                    if (item.isHtmlFile) {
-                        htmlBrowserUrl = "file://${item.file.absolutePath}"
-                    } else {
-                        FilePreviewHolder.currentItem = item
-                        navController.safeNavigate(Routes.FILE_PREVIEW)
-                    }
-                },
-            )
+        composable(Routes.FILE_BROWSER) { entry ->
+            // [T-android-filepreview-holder-lifetime] Released when this
+            // destination leaves the stack — see FilePreviewHolder.
+            DisposableEffect(entry) {
+                onDispose { FilePreviewHolder.fileBrowserViewModel = null }
+            }
+            // A null VM here means the process was recreated with this entry
+            // already on the stack (process statics do not survive); leave
+            // rather than park the user on a blank screen, matching the other
+            // destinations that depend on a handed-over argument.
+            val vm = FilePreviewHolder.fileBrowserViewModel
+            if (vm == null) {
+                LaunchedEffect(Unit) { navController.safePopBackStack() }
+            } else {
+                FileBrowserScreen(
+                    viewModel = vm,
+                    onBack = { navController.safePopBackStack() },
+                    onPreviewFile = { item ->
+                        if (item.isHtmlFile) {
+                            htmlBrowserUrl = "file://${item.file.absolutePath}"
+                        } else {
+                            FilePreviewHolder.currentItem = item
+                            navController.safeNavigate(Routes.FILE_PREVIEW)
+                        }
+                    },
+                )
+            }
         }
 
         // Browse Chat Files (iOS parity: open FileBrowser rooted at the full
@@ -1208,12 +1338,23 @@ fun AppNavigation(
                 usePlatformDefaultWidth = false,
                 decorFitsSystemWindows = false,
             ),
-        ) {
-            val item = FilePreviewHolder.currentItem ?: return@dialog
-            FilePreviewScreen(
-                item = item,
-                onBack = { navController.safePopBackStack() },
-            )
+        ) { entry ->
+            // [T-android-filepreview-holder-lifetime] Same release rule as
+            // FILE_BROWSER: the FileItem is a process-static hand-off, so it is
+            // dropped when the preview leaves — otherwise the last previewed
+            // file (and everything it references) is pinned for the process.
+            DisposableEffect(entry) {
+                onDispose { FilePreviewHolder.currentItem = null }
+            }
+            val item = FilePreviewHolder.currentItem
+            if (item == null) {
+                LaunchedEffect(Unit) { navController.safePopBackStack() }
+            } else {
+                FilePreviewScreen(
+                    item = item,
+                    onBack = { navController.safePopBackStack() },
+                )
+            }
         }
 
         composable(Routes.ENV_VARS) {
@@ -1276,8 +1417,14 @@ fun AppNavigation(
             ),
         ) { backStackEntry ->
             val skillId = backStackEntry.arguments?.getString("skillId") ?: return@composable
-            val rawPath = backStackEntry.arguments?.getString("relativePath") ?: "SKILL.md"
-            val relativePath = java.net.URLDecoder.decode(rawPath, "UTF-8")
+            // [T-android-double-decode-percent-crash] java.net.URLDecoder throws
+            // IllegalArgumentException on a bare '%'. Routes.skillFile URL-encodes
+            // the path once, but NavType.StringType.parseValue() already decodes
+            // the segment back, so this value is the plain relative path — a
+            // second decode was both redundant and a guaranteed crash on a
+            // legitimately named file ("100%_done.md" came back as a composable
+            // exception on every open, since URLDecoder rejects the stray '%').
+            val relativePath = backStackEntry.arguments?.getString("relativePath") ?: "SKILL.md"
             if (skillRepository != null) {
                 SkillFileViewerScreen(
                     skillId = skillId,
@@ -1373,7 +1520,11 @@ fun AppNavigation(
             arguments = listOf(navArgument("serverId") { type = NavType.StringType }),
         ) { entry ->
             val repo = mcpRepository
-            val serverId = android.net.Uri.decode(entry.arguments?.getString("serverId").orEmpty())
+            // StringType already Uri.decode()s the segment (see
+            // [T-android-double-decode-percent-crash] above), so the second
+            // manual Uri.decode here only mangled server ids carrying a real
+            // '%'. Routes.mcpTools' Uri.encode is undone by the nav argument.
+            val serverId = entry.arguments?.getString("serverId").orEmpty()
             if (repo == null) {
                 LaunchedEffect(serverId) { navController.safePopBackStack() }
             } else {
@@ -1459,9 +1610,15 @@ fun AppNavigation(
         }
 
         composable(Routes.USAGE_STATS) {
+            // collectAsState, NOT `.value`: this reads a StateFlow inside the
+            // composition body, so nothing observes it and the screen kept
+            // showing the config that happened to be loaded when it first
+            // composed — usually the empty one, since the async config load is
+            // exactly what [T-android-startup-config-stall] describes.
+            val providerConfig by providerRepository.config.collectAsState()
             UsageStatsScreen(
                 chatDao = chatRepository.dao,
-                providerConfig = providerRepository.config.value,
+                providerConfig = providerConfig,
                 onBack = { navController.safePopBackStack() },
             )
         }

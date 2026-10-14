@@ -9,6 +9,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.ArrayDeque
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
@@ -21,6 +22,14 @@ object SandboxHttpProxy {
 
     const val PORT = 17890
     private const val TAG = "SandboxHttpProxy"
+
+    // [T-proxy-tunnel-leak] Idle read timeout for BOTH ends of a tunnel. The
+    // client socket already had a 20s soTimeout but the remote socket did not,
+    // so on an idle HTTPS tunnel one pump thread hit the client timeout and
+    // exited while the other blocked forever on a silent remote — the latch
+    // never reached zero and leaked one handler thread + two pump threads + two
+    // sockets per idle connection. Symmetric soTimeout + a bounded await fixes it.
+    private const val IDLE_TIMEOUT_MS = 20_000
     private val running = AtomicBoolean(false)
     private val denyAll = AtomicBoolean(false)
     private val recent = ArrayDeque<JSONObject>()
@@ -98,7 +107,7 @@ object SandboxHttpProxy {
 
     private fun handle(client: Socket) {
         try {
-            client.soTimeout = 20_000
+            client.soTimeout = IDLE_TIMEOUT_MS
             val input = client.getInputStream()
             val header = readHeaders(input) ?: return
             val first = header.lineSequence().firstOrNull().orEmpty()
@@ -122,6 +131,11 @@ object SandboxHttpProxy {
                 val host = hp[0]
                 val port = hp.getOrNull(1)?.toIntOrNull() ?: 443
                 Socket(host, port).use { remote ->
+                    // [T-proxy-tunnel-leak] Match the client's idle timeout so
+                    // BOTH pump threads self-terminate on an idle tunnel and the
+                    // latch reaches zero, instead of one blocking forever on a
+                    // silent remote while the other already exited.
+                    remote.soTimeout = IDLE_TIMEOUT_MS
                     client.getOutputStream().write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
                     tunnel(client, remote)
                 }
@@ -130,6 +144,7 @@ object SandboxHttpProxy {
                 val host = hp[0].trim()
                 val port = hp.getOrNull(1)?.toIntOrNull() ?: 80
                 Socket(host, port).use { remote ->
+                    remote.soTimeout = IDLE_TIMEOUT_MS
                     remote.getOutputStream().write(header.toByteArray())
                     tunnel(client, remote)
                 }
@@ -172,7 +187,18 @@ object SandboxHttpProxy {
                 done.countDown()
             }
         }
-        done.await()
+        // [T-proxy-tunnel-leak] The pumps now have an idle soTimeout on BOTH
+        // sockets, so a stalled tunnel trips them and the latch falls to zero.
+        // This await is still bounded as a backstop: on expiry close BOTH
+        // sockets so any still-blocked copyTo throws and its thread unwinds,
+        // instead of an untimed await() leaking a handler thread + two pump
+        // threads + two sockets per idle connection forever.
+        val finished = done.await((IDLE_TIMEOUT_MS + 5_000L).toLong(), TimeUnit.MILLISECONDS)
+        if (!finished) {
+            runCatching { a.close() }
+            runCatching { b.close() }
+            done.await(2_000L, TimeUnit.MILLISECONDS)
+        }
     }
 
     private fun logHit(method: String, host: String, denied: Boolean) {

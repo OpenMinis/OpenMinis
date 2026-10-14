@@ -128,11 +128,31 @@ fun SkillsManagementScreen(
 
     // Sort preference — persisted like the file browser's (SharedPreferences,
     // default name ascending). Mirrors iOS skillsList.sortKey/sortAscending.
+    //
+    // [T-android-sessionlist-prefs-io] getSharedPreferences() PARSES the prefs
+    // XML synchronously on first touch, and both reads used to sit in a
+    // `remember {}` in the composition body: a cold-process main-thread stall on
+    // every entry to this screen. The handle is lazy, the first touch happens on
+    // Dispatchers.IO, and the first frame shows the same defaults the file
+    // stores (name / ascending) so nothing has to be "loaded" visually.
     val sortPrefs = remember {
-        context.getSharedPreferences("skills_prefs", android.content.Context.MODE_PRIVATE)
+        lazy {
+            context.applicationContext.getSharedPreferences(
+                "skills_prefs",
+                android.content.Context.MODE_PRIVATE,
+            )
+        }
     }
-    var sortByModified by remember { mutableStateOf(sortPrefs.getBoolean("sort_by_modified", false)) }
-    var sortAscending by remember { mutableStateOf(sortPrefs.getBoolean("sort_ascending", true)) }
+    var sortByModified by remember { mutableStateOf(false) }
+    var sortAscending by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        val stored = withContext(Dispatchers.IO) {
+            val prefs = sortPrefs.value
+            prefs.getBoolean("sort_by_modified", false) to prefs.getBoolean("sort_ascending", true)
+        }
+        sortByModified = stored.first
+        sortAscending = stored.second
+    }
 
     val filteredSkills by remember(skills) {
         derivedStateOf {
@@ -183,7 +203,7 @@ fun SkillsManagementScreen(
                         },
                         onClick = {
                             sortByModified = false
-                            sortPrefs.edit().putBoolean("sort_by_modified", false).apply()
+                            sortPrefs.value.edit().putBoolean("sort_by_modified", false).apply()
                             sortMenuExpanded = false
                         },
                     )
@@ -195,7 +215,7 @@ fun SkillsManagementScreen(
                         },
                         onClick = {
                             sortByModified = true
-                            sortPrefs.edit().putBoolean("sort_by_modified", true).apply()
+                            sortPrefs.value.edit().putBoolean("sort_by_modified", true).apply()
                             sortMenuExpanded = false
                         },
                     )
@@ -215,7 +235,7 @@ fun SkillsManagementScreen(
                         },
                         onClick = {
                             sortAscending = !sortAscending
-                            sortPrefs.edit().putBoolean("sort_ascending", sortAscending).apply()
+                            sortPrefs.value.edit().putBoolean("sort_ascending", sortAscending).apply()
                             sortMenuExpanded = false
                         },
                     )
@@ -424,43 +444,56 @@ private fun SkillImportSheet(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        try {
-            // [T-android-skill-import-zip] Read raw bytes so we can branch on
-            // file magic. The previous code piped the InputStream straight
-            // through `bufferedReader().readText()`, which corrupted any
-            // .zip / .skill bundle into garbage UTF-8 and surfaced as
-            // "Invalid SKILL.md content". Skills shared as bundles
-            // (scripts/, references/, assets/) are the common case on iOS;
-            // matching here aligns Android with iOS
-            // `SkillsManagementView.documentPicker` + `SkillStore.importFromArchive`.
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            if (bytes == null) {
-                errorText = "Failed to read file"
-                return@rememberLauncherForActivityResult
+        // [T-android-sessionlist-prefs-io] Same shape as the skill-detail file
+        // update below: a picker callback runs on the MAIN thread, and this body
+        // read the whole bundle into memory, inflated the zip and wrote the DB
+        // row. Only the state writes stay on main.
+        isLoading = true
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) {
+                try {
+                    // [T-android-skill-import-zip] Read raw bytes so we can branch on
+                    // file magic. The previous code piped the InputStream straight
+                    // through `bufferedReader().readText()`, which corrupted any
+                    // .zip / .skill bundle into garbage UTF-8 and surfaced as
+                    // "Invalid SKILL.md content". Skills shared as bundles
+                    // (scripts/, references/, assets/) are the common case on iOS;
+                    // matching here aligns Android with iOS
+                    // `SkillsManagementView.documentPicker` + `SkillStore.importFromArchive`.
+                    val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    if (bytes == null) {
+                        "Failed to read file"
+                    } else {
+                        // PK\x03\x04 = standard ZIP local file header; PK\x05\x06 is the
+                        // empty-archive EOCD; PK\x07\x08 is a spanned/split archive. Accept
+                        // all three so split exports from less-common zip tools don't fall
+                        // into the text path. URI may not preserve the filename extension
+                        // (some DocumentsProviders / share targets strip it), so magic-byte
+                        // sniffing is more reliable than `.zip` / `.skill` checks.
+                        val isZip = bytes.size >= 4 &&
+                            bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
+                            (bytes[2] == 0x03.toByte() || bytes[2] == 0x05.toByte() || bytes[2] == 0x07.toByte())
+                        if (isZip) {
+                            val result = skillRepository.importFromArchive(
+                                java.io.ByteArrayInputStream(bytes),
+                            )
+                            if (result != null) null
+                            else "Invalid skill archive — no SKILL.md found at the root or one directory deep"
+                        } else {
+                            val content = String(bytes, Charsets.UTF_8)
+                            val result = skillRepository.importFromContent(
+                                content,
+                                SkillRepository.ImportSource.FILE,
+                            )
+                            if (result != null) null else "Invalid SKILL.md content"
+                        }
+                    }
+                } catch (e: Exception) {
+                    "Failed to read file: ${e.message}"
+                }
             }
-            // PK\x03\x04 = standard ZIP local file header; PK\x05\x06 is the
-            // empty-archive EOCD; PK\x07\x08 is a spanned/split archive. Accept
-            // all three so split exports from less-common zip tools don't fall
-            // into the text path. URI may not preserve the filename extension
-            // (some DocumentsProviders / share targets strip it), so magic-byte
-            // sniffing is more reliable than `.zip` / `.skill` checks.
-            val isZip = bytes.size >= 4 &&
-                bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
-                (bytes[2] == 0x03.toByte() || bytes[2] == 0x05.toByte() || bytes[2] == 0x07.toByte())
-            if (isZip) {
-                val result = skillRepository.importFromArchive(
-                    java.io.ByteArrayInputStream(bytes),
-                )
-                if (result != null) onDismiss()
-                else errorText = "Invalid skill archive — no SKILL.md found at the root or one directory deep"
-            } else {
-                val content = String(bytes, Charsets.UTF_8)
-                val result = skillRepository.importFromContent(content, SkillRepository.ImportSource.FILE)
-                if (result != null) onDismiss()
-                else errorText = "Invalid SKILL.md content"
-            }
-        } catch (e: Exception) {
-            errorText = "Failed to read file: ${e.message}"
+            isLoading = false
+            if (failure == null) onDismiss() else errorText = failure
         }
     }
 
@@ -573,21 +606,6 @@ private fun SkillImportSheet(
     }
 }
 
-private fun downloadSkillFromUrl(url: String): String? {
-    val rawUrl = if (url.contains("github.com") && url.contains("/blob/")) {
-        url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
-    } else if (url.contains("github.com") && !url.contains("raw.githubusercontent.com")) {
-        val withFile = if (!url.endsWith("SKILL.md")) "$url/SKILL.md" else url
-        withFile.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/").replace("/tree/", "/")
-    } else url
-
-    val connection = java.net.URL(rawUrl).openConnection() as java.net.HttpURLConnection
-    connection.connectTimeout = 15_000
-    connection.readTimeout = 15_000
-    return try { if (connection.responseCode == 200) connection.inputStream.bufferedReader().readText() else null }
-    finally { connection.disconnect() }
-}
-
 // ─── Skill Detail Sheet ─────────────────────────────────────────────────────
 
 // ─── Skill Detail Screen (full page, matching iOS) ──────────────────────────
@@ -635,31 +653,44 @@ fun SkillDetailScreen(
         contract = ActivityResultContracts.GetContent(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
+        // [T-android-sessionlist-prefs-io] An ActivityResult callback runs on the
+        // MAIN thread, and this body streamed the picked SKILL.md, parsed it and
+        // wrote the new row — synchronous disk + DB on the UI thread behind the
+        // system picker's own resume. Off to Dispatchers.IO; only the status
+        // writes, which drive composition, stay on main.
         updateStatus = UpdateStatus.InProgress(context.getString(R.string.skill_detail_status_reading))
-        try {
-            val content = context.contentResolver.openInputStream(uri)
-                ?.bufferedReader()?.use { it.readText() }
-            if (content.isNullOrBlank()) {
-                updateStatus = UpdateStatus.Failed(context.getString(R.string.skill_detail_error_empty))
-            } else {
-                // Re-parse the supplied SKILL.md so we can push name +
-                // description + body into the existing skill record without
-                // creating a new entry.
-                val parsed = skillRepository.parseSkillMdPublic(content)
-                if (parsed == null) {
-                    updateStatus = UpdateStatus.Failed(context.getString(R.string.skill_detail_error_invalid))
-                } else {
-                    val ok = skillRepository.update(
-                        id = skill.id,
-                        name = parsed.name,
-                        description = parsed.description,
-                        body = parsed.body,
-                    )
-                    updateStatus = if (ok) UpdateStatus.Done else UpdateStatus.Failed(context.getString(R.string.skill_detail_error_update_failed))
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                try {
+                    val content = context.contentResolver.openInputStream(uri)
+                        ?.bufferedReader()?.use { it.readText() }
+                    if (content.isNullOrBlank()) {
+                        UpdateStatus.Failed(context.getString(R.string.skill_detail_error_empty))
+                    } else {
+                        // Re-parse the supplied SKILL.md so we can push name +
+                        // description + body into the existing skill record without
+                        // creating a new entry.
+                        val parsed = skillRepository.parseSkillMdPublic(content)
+                        when {
+                            parsed == null -> UpdateStatus.Failed(
+                                context.getString(R.string.skill_detail_error_invalid),
+                            )
+                            skillRepository.update(
+                                id = skill.id,
+                                name = parsed.name,
+                                description = parsed.description,
+                                body = parsed.body,
+                            ) -> UpdateStatus.Done
+                            else -> UpdateStatus.Failed(
+                                context.getString(R.string.skill_detail_error_update_failed),
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    UpdateStatus.Failed("Failed to read file: ${e.message ?: "unknown"}")
                 }
             }
-        } catch (e: Exception) {
-            updateStatus = UpdateStatus.Failed("Failed to read file: ${e.message ?: "unknown"}")
+            updateStatus = outcome
         }
     }
 

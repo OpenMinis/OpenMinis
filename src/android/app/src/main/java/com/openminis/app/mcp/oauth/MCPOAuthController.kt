@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import com.openminis.app.auth.OAuthCallbackServer
+import com.openminis.app.auth.OAuthManager
 import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -163,8 +164,19 @@ class MCPOAuthController(private val context: Context) {
             http.newCall(request).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 if (!resp.isSuccessful) {
-                    AppLogger.error(TAG, "[Authorize] '$server' token exchange HTTP ${resp.code}")
-                    return Result.Failed("Token exchange failed (${resp.code}): ${text.take(200)}")
+                    // [T-android-oauth-log-redaction] `Result.Failed.message` is
+                    // surfaced in the MCP settings UI AND logged through AppLogger,
+                    // which persists to filesDir/logs. A malformed SUCCESS body
+                    // arriving on this error path would otherwise dump live
+                    // credentials (access_token / id_token / client_secret echo).
+                    // OAuthManager.sanitizeBody is the app-wide rule — same as the
+                    // OpenAI / Claude / Gemini / xAI token failure logs — so it goes
+                    // through it instead of a bare take().
+                    AppLogger.error(
+                        TAG,
+                        "[Authorize] '$server' token exchange HTTP ${resp.code}: ${OAuthManager.sanitizeBody(text)}",
+                    )
+                    return Result.Failed("Token exchange failed (${resp.code}): ${OAuthManager.sanitizeBody(text)}")
                 }
                 val json = JSONObject(text)
                 val access = json.optString("access_token", "")
