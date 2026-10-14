@@ -404,7 +404,7 @@ private class ChatRound(
  * card's step rows so they render inside the card instead of in the list.
  */
 private class ProcessSegment(
-    val messageIdx: Int,
+    val lastMessageIdx: Int,
     val firstBlockId: String,
     val lastBlockId: String,
     val blockIds: Set<String>,
@@ -496,7 +496,10 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
     val processTools = mutableListOf<ProcessToolRef>()
     val segments = mutableListOf<ProcessSegment>()
     // The open process run: blocks accumulated since the last reply text.
-    var segMessageIdx = -1
+    // segLastMessageIdx is the message holding the run's LAST block — the
+    // card is emitted there, which is not where the run started when a
+    // resume continuation keeps adding steps in the next message.
+    var segLastMessageIdx = -1
     var segFirstId = ""
     var segLastId = ""
     val segIds = mutableSetOf<String>()
@@ -510,10 +513,18 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
     var segActivityTitle = ""
     var segStartedAt = 0L
 
-    fun flushSegment() {
-        if (segSteps.size >= SEGMENT_MIN_STEPS && segMessageIdx >= 0) {
+    /**
+     * [P-process-card] [closedByReplyText] says why the run ended. Its reply
+     * text settles the card at once — a step still marked in flight is
+     * history the moment the answer starts. A run the round closed instead
+     * (next user turn, end of list) stays live while the round does, because
+     * it can still take steps.
+     */
+    fun flushSegment(closedByReplyText: Boolean) {
+        if (segSteps.size >= SEGMENT_MIN_STEPS) {
+            val live = !closedByReplyText && (segRunning || running)
             segments.add(ProcessSegment(
-                messageIdx = segMessageIdx,
+                lastMessageIdx = segLastMessageIdx,
                 firstBlockId = segFirstId,
                 lastBlockId = segLastId,
                 blockIds = segIds.toSet(),
@@ -522,13 +533,13 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
                 hasFailure = segFailure,
                 totalMs = segMs,
                 steps = segSteps.toList(),
-                running = segRunning,
+                running = live,
                 activity = segActivity,
                 activityTitle = segActivityTitle,
                 startedAtMs = segStartedAt,
             ))
         }
-        segMessageIdx = -1
+        segLastMessageIdx = -1
         segFirstId = ""
         segLastId = ""
         segIds.clear()
@@ -544,7 +555,7 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
     }
 
     fun closeRound(endExclusive: Int) {
-        flushSegment()
+        flushSegment(closedByReplyText = false)
         if (lastAssistantIdx < 0) return // no assistant payload: nothing to fold
         val round = ChatRound(
             key = messages[lastAssistantIdx].id,
@@ -604,13 +615,11 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
                 // process run: the card summarises what happened BEFORE the
                 // text, which is where the reference puts it.
                 if (!isProcess && block.kind == "text" && block.content.isNotEmpty()) {
-                    flushSegment()
+                    flushSegment(closedByReplyText = true)
                 }
                 if (!isProcess) continue
-                if (segMessageIdx < 0) {
-                    segMessageIdx = idx
-                    segFirstId = block.id
-                }
+                if (segSteps.isEmpty()) segFirstId = block.id
+                segLastMessageIdx = idx
                 segLastId = block.id
                 segIds += block.id
                 segMs += block.durationMs
@@ -958,7 +967,7 @@ internal fun buildFlatChatItems(
             // reverseLayout it sits visually ABOVE the reply that comes next.
             if (round != null && !isSystem) {
                 val segment = round.segments.firstOrNull {
-                    it.messageIdx == idx && it.lastBlockId == block.id
+                    it.lastMessageIdx == idx && it.lastBlockId == block.id
                 }
                 if (segment != null) {
                     // The card's own key, so collapsing one card never

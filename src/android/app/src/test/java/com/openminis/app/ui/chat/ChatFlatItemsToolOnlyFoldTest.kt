@@ -71,7 +71,7 @@ class ChatFlatItemsToolOnlyFoldTest {
             assistant(id = "a2", blocks = listOf(tool("t4"), tool("t5"), tool("t6"))),
         )
         val k = kinds(items)
-        assertTrue("summary expected, got $k", k.contains("summary"))
+        assertEquals("rows: $k", listOf("user", "summary"), k.filter { it in setOf("user", "header", "summary") })
         assertFalse("headers must be hidden, got $k", k.contains("header"))
         // Every tool of the run is inside the card.
         assertEquals(0, k.count { it.startsWith("tool:") })
