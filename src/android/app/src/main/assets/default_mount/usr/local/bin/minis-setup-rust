@@ -24,18 +24,14 @@ export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
 export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
 
 sh="/tmp/rustup-init-$$.sh"
-ok=0
-for url in \
+. /usr/local/lib/minis/offline.sh
+if ! resume_fetch "$sh" rustup-init.sh \
   "https://rsproxy.cn/rustup-init.sh" \
   "https://sh.rustup.rs"
-do
-  [ -n "$url" ] || continue
-  echo "  downloading $url"
-  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
-       -o "$sh" "$url"; then ok=1; break; fi
-  rm -f "$sh"
-done
-[ "$ok" = 1 ] || { echo "rustup-init download failed" >&2; exit 1; }
+then
+  echo "rustup-init download failed. Offline fallback: put rustup-init.sh in /var/minis/shared/offline/" >&2
+  exit 1
+fi
 
 sh "$sh" -y --default-toolchain stable --profile minimal --no-modify-path
 rm -f "$sh"

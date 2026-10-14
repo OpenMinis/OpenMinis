@@ -191,6 +191,12 @@
     <string name="settings_memory_subtitle">跨工作階段的持續性知識</string>
     <string name="settings_mcp">MCP 整合</string>
     <string name="settings_mcp_subtitle">連接 Model Context Protocol 伺服器</string>
+    <string name="mcp_status_running">執行中（連接埠 %1$d），已處理 %2$d 個請求</string>
+    <string name="mcp_status_running_shifted">執行中（實際連接埠 %1$d · 設定 %2$d 被佔用已順延），已處理 %3$d 個請求</string>
+    <string name="mcp_status_error">錯誤：%1$s</string>
+    <string name="mcp_status_stopped">已停止 · 監聽 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">啟動失敗：%1$s</string>
+    <string name="mcp_error_unknown">未知原因</string>
     <string name="mcp_title">MCP 整合</string>
     <string name="mcp_add">新增 MCP 伺服器</string>
     <string name="mcp_edit">編輯 MCP 伺服器</string>
@@ -1868,8 +1874,9 @@
     <string name="appearance_show_mic_button_title">顯示麥克風按鈕</string>
     <string name="appearance_show_mic_button_subtitle">輸入框的語音輸入按鈕。語音模式本身始終可從應用圖示進入。</string>
     <string name="chat_process_step_view">查看</string>
+    <string name="plugin_market_subtitle">開發環境套件、本地工具與線上 OpenAPI 工具</string>
     <string name="dev_suite_section_header">開發環境套件</string>
-    <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。</string>
+    <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。 網路受限可執行 minis-devsuite-offline-list 產生離線匯入清單。</string>
     <string name="dev_suite_online_header">線上工具</string>
     <string name="dev_suite_online_footer">獨立工具，點擊即裝。</string>
     <string name="dev_suite_progress">%1$d/%2$d 已就緒</string>

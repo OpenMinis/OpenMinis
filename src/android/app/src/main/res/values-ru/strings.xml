@@ -145,6 +145,12 @@
     <string name="settings_memory_subtitle">Постоянные знания между сессиями</string>
     <string name="settings_mcp">Интеграции MCP</string>
     <string name="settings_mcp_subtitle">Подключение серверов Model Context Protocol</string>
+    <string name="mcp_status_running">Работает (порт %1$d), обработано запросов: %2$d</string>
+    <string name="mcp_status_running_shifted">Работает (фактический порт %1$d · настроенный %2$d занят, смещён), обработано: %3$d</string>
+    <string name="mcp_status_error">Ошибка: %1$s</string>
+    <string name="mcp_status_stopped">Остановлен · слушает 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Не удалось запустить: %1$s</string>
+    <string name="mcp_error_unknown">неизвестная причина</string>
     <string name="mcp_title">Интеграции MCP</string>
     <string name="mcp_add">Добавить сервер MCP</string>
     <string name="mcp_edit">Изменить сервер MCP</string>
@@ -1787,8 +1793,9 @@
     <string name="compact_progress">Сжатие… прошло %1$d с</string>
     <string name="compact_progress_split">Сжатие… %1$d с · сводка по частям (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Наборы для разработки, локальные и онлайн OpenAPI-инструменты</string>
     <string name="dev_suite_section_header">Наборы сред разработки</string>
-    <string name="dev_suite_section_footer">Рецепты устанавливают тулчейны по требованию внутри песочницы — полезная нагрузка больше не вшита в приложение, первая сборка требует сеть.</string>
+    <string name="dev_suite_section_footer">Рецепты устанавливают тулчейны по требованию внутри песочницы — полезная нагрузка больше не вшита в приложение, первая сборка требует сеть. Ограниченная сеть? Запустите minis-devsuite-offline-list — он выведет список для офлайн-импорта.</string>
     <string name="dev_suite_online_header">Онлайн-инструменты</string>
     <string name="dev_suite_online_footer">Автономные инструменты, установка одним касанием.</string>
     <string name="dev_suite_progress">%1$d/%2$d готово</string>

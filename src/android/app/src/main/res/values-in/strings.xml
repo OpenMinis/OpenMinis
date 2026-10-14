@@ -148,6 +148,12 @@
     <string name="settings_memory_subtitle">Pengetahuan permanen lintas sesi</string>
     <string name="settings_mcp">Integrasi MCP</string>
     <string name="settings_mcp_subtitle">Hubungkan server Model Context Protocol</string>
+    <string name="mcp_status_running">Berjalan (port %1$d), %2$d permintaan ditangani</string>
+    <string name="mcp_status_running_shifted">Berjalan (port aktual %1$d · port terkonfigurasi %2$d terpakai, digeser), %3$d ditangani</string>
+    <string name="mcp_status_error">Kesalahan: %1$s</string>
+    <string name="mcp_status_stopped">Berhenti · mendengarkan 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Gagal memulai: %1$s</string>
+    <string name="mcp_error_unknown">penyebab tidak diketahui</string>
     <string name="mcp_title">Integrasi MCP</string>
     <string name="mcp_add">Tambah Server MCP</string>
     <string name="mcp_edit">Edit Server MCP</string>
@@ -1782,8 +1788,9 @@
     <string name="selection_copy_as_plain_text">Salin sebagai Teks Biasa</string>
     <string name="chat_input_placeholder_hint_5">Tombol Enter bisa diatur: kirim atau baris baru</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Suit dev, alat lokal, dan alat OpenAPI daring</string>
     <string name="dev_suite_section_header">Suite lingkungan pengembangan</string>
-    <string name="dev_suite_section_footer">Resep memasang toolchain sesuai permintaan di dalam sandbox — payload tidak lagi dibundel di aplikasi, pemasangan pertama butuh jaringan.</string>
+    <string name="dev_suite_section_footer">Resep memasang toolchain sesuai permintaan di dalam sandbox — payload tidak lagi dibundel di aplikasi, pemasangan pertama butuh jaringan. Jaringan terbatas? Jalankan minis-devsuite-offline-list untuk daftar impor offline.</string>
     <string name="dev_suite_online_header">Alat daring</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan sekali ketuk.</string>
     <string name="dev_suite_progress">%1$d/%2$d siap</string>

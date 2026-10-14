@@ -40,16 +40,37 @@ echo "cloning llama.cpp @ $LLAMA_TAG"
 if [ ! -d "$LLAMA_ROOT/.git" ]; then
   rm -rf "$LLAMA_ROOT"
   ok=0
-  for u in \
-    "https://ghfast.top/https://github.com/ggml-org/llama.cpp" \
-    "https://ghproxy.net/https://github.com/ggml-org/llama.cpp" \
-    "https://mirror.ghproxy.com/https://github.com/ggml-org/llama.cpp" \
-    "https://github.com/ggml-org/llama.cpp"
-  do
-    if git clone --depth 1 --branch "$LLAMA_TAG" "$u" "$LLAMA_ROOT" 2>/dev/null; then ok=1; break; fi
+  # Offline-first: a source tarball in /var/minis/shared/offline/ replaces
+  # the git clone entirely (minis-devsuite-offline-list names it
+  # llama.cpp-<tag>.tar.gz; "master" maps to llama.cpp-master.tar.gz).
+  . /usr/local/lib/minis/offline.sh
+  offline_name="llama.cpp-${LLAMA_TAG}.tar.gz"
+  offline_src="/var/minis/shared/offline/$offline_name"
+  # Fixed-name fallback: the tag is resolved dynamically, so the manifest
+  # tells users to save the master tarball as llama.cpp-master.tar.gz.
+  if [ ! -s "$offline_src" ] && [ -s "/var/minis/shared/offline/llama.cpp-master.tar.gz" ]; then
+    offline_name="llama.cpp-master.tar.gz"
+    offline_src="/var/minis/shared/offline/$offline_name"
+  fi
+  if [ -s "$offline_src" ]; then
+    echo "  using offline source: $offline_src"
+    mkdir -p "$(dirname "$LLAMA_ROOT")"
     rm -rf "$LLAMA_ROOT"
-  done
-  [ "$ok" = 1 ] || { echo "llama.cpp clone failed (all mirrors)" >&2; exit 1; }
+    mkdir -p "$LLAMA_ROOT"
+    tar -xzf "$offline_src" -C "$LLAMA_ROOT" --strip-components=1
+    ok=1
+  else
+    for u in \
+      "https://ghfast.top/https://github.com/ggml-org/llama.cpp" \
+      "https://ghproxy.net/https://github.com/ggml-org/llama.cpp" \
+      "https://mirror.ghproxy.com/https://github.com/ggml-org/llama.cpp" \
+      "https://github.com/ggml-org/llama.cpp"
+    do
+      if git clone --depth 1 --branch "$LLAMA_TAG" "$u" "$LLAMA_ROOT" 2>/dev/null; then ok=1; break; fi
+      rm -rf "$LLAMA_ROOT"
+    done
+  fi
+  [ "$ok" = 1 ] || { echo "llama.cpp clone failed (all mirrors). Offline fallback: download https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz and put it in /var/minis/shared/offline/$offline_name" >&2; exit 1; }
 else
   git -C "$LLAMA_ROOT" fetch --depth 1 origin "$LLAMA_TAG" || true
   git -C "$LLAMA_ROOT" checkout -q "FETCH_HEAD" 2>/dev/null || true

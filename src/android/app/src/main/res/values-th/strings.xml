@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">ความรู้ถาวรที่คงอยู่ข้ามเซสชัน</string>
     <string name="settings_mcp">การเชื่อมต่อ MCP</string>
     <string name="settings_mcp_subtitle">เชื่อมต่อเซิร์ฟเวอร์ Model Context Protocol</string>
+    <string name="mcp_status_running">กำลังทำงาน (พอร์ต %1$d) จัดการแล้ว %2$d คำขอ</string>
+    <string name="mcp_status_running_shifted">กำลังทำงาน (พอร์ตจริง %1$d · พอร์ตที่ตั้ง %2$d ถูกใช้งานจึงเลื่อน) จัดการแล้ว %3$d คำขอ</string>
+    <string name="mcp_status_error">ข้อผิดพลาด: %1$s</string>
+    <string name="mcp_status_stopped">หยุดแล้ว · รับฟังที่ 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">เริ่มทำงานไม่สำเร็จ: %1$s</string>
+    <string name="mcp_error_unknown">สาเหตุไม่ทราบ</string>
     <string name="mcp_title">การเชื่อมต่อ MCP</string>
     <string name="mcp_add">เพิ่มเซิร์ฟเวอร์ MCP</string>
     <string name="mcp_edit">แก้ไขเซิร์ฟเวอร์ MCP</string>
@@ -1777,8 +1783,9 @@
     <string name="selection_copy_as_plain_text">คัดลอกเป็นข้อความธรรมดา</string>
     <string name="chat_input_placeholder_hint_5">ตั้งปุ่ม Enter ให้ส่งหรือขึ้นบรรทัดใหม่ได้</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">ชุดพัฒนา เครื่องมือภายใน และเครื่องมือ OpenAPI ออนไลน์</string>
     <string name="dev_suite_section_header">ชุดสภาพแวดล้อมสำหรับพัฒนา</string>
-    <string name="dev_suite_section_footer">สูตรติดตั้ง toolchain ตามความต้องการภายในแซนด์บ็อกซ์ — เพย์โหลดไม่ถูกฝังในแอปอีกต่อไป การติดตั้งครั้งแรกต้องใช้เน็ตเวิร์ก</string>
+    <string name="dev_suite_section_footer">สูตรติดตั้ง toolchain ตามความต้องการภายในแซนด์บ็อกซ์ — เพย์โหลดไม่ถูกฝังในแอปอีกต่อไป การติดตั้งครั้งแรกต้องใช้เน็ตเวิร์ก เน็ตเวิร์กจำกัด? เรียก minis-devsuite-offline-list เพื่อสร้างรายการนำเข้าแบบออฟไลน์</string>
     <string name="dev_suite_online_header">เครื่องมือออนไลน์</string>
     <string name="dev_suite_online_footer">เครื่องมือแบบสแตนด์อโลน ติดตั้งด้วยการแตะครั้งเดียว</string>
     <string name="dev_suite_progress">%1$d/%2$d พร้อม</string>

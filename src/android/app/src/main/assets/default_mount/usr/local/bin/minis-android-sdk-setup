@@ -52,21 +52,37 @@ case "$HOST_ARCH" in
 esac
 
 curl_first() {
-  # POSIX sh has no function scope. A bare dest= here used to overwrite
-  # install_one_cmake's dest, so the tree was moved onto the tarball path.
+  # $1 = dest, $2 = logical name (offline/resume cache key), rest = urls.
+  # [T-devsuite-resume] Downloads land in a FIXED .part under
+  # /var/minis/shared/cache/devsuite (not /tmp/$$) so an interrupted
+  # download — app killed, reboot, dead mirror — resumes on the next run
+  # with curl -C - instead of starting over. Mirrors proxy the same
+  # release bytes, so a .part may be resumed by a different mirror.
   _curl_dest=$1
-  shift
+  _curl_name=$2
+  shift 2
+  . /usr/local/lib/minis/offline.sh
+  if offline_pick "$_curl_dest" "$_curl_name"; then
+    return 0
+  fi
+  _cf_dir=/var/minis/shared/cache/devsuite
+  _cf_part="$_cf_dir/$_curl_name.part"
+  mkdir -p "$_cf_dir" 2>/dev/null || _cf_part="/tmp/$_curl_name.part"
   for url in "$@"; do
     [ -n "$url" ] || continue
-    echo "  downloading $url"
+    if [ -s "$_cf_part" ]; then
+      echo "  resuming $_curl_name from $(( $(wc -c < "$_cf_part") )) bytes via $url"
+    else
+      echo "  downloading $url"
+    fi
     rm -f "$_curl_dest"
     # A mirror that connects and then sends nothing used to sit until the
     # 30-minute shell budget, and curl's meter is CR-only so the chat card
     # stayed blank. Abort only a dead transfer (<100 B/s for 30s). A slow but
     # alive link keeps going, and the byte line below is what the card shows.
-    curl -fL --retry 1 --retry-delay 1 --connect-timeout 12 \
+    curl -fL -C - --retry 1 --retry-delay 1 --connect-timeout 12 \
       --speed-time 30 --speed-limit 100 \
-      -o "$_curl_dest" "$url" &
+      -o "$_cf_part" "$url" &
     _cpid=$!
     _ticks=0
     while kill -0 "$_cpid" 2>/dev/null; do
@@ -75,18 +91,30 @@ curl_first() {
         break
       fi
       _ticks=$((_ticks + 1))
-      if [ -f "$_curl_dest" ]; then
-        _sz=$(wc -c < "$_curl_dest" 2>/dev/null | tr -d ' ' || true)
+      if [ -f "$_cf_part" ]; then
+        _sz=$(wc -c < "$_cf_part" 2>/dev/null | tr -d ' ' || true)
         echo "  …已下载 ${_sz:-0} 字节（$((_ticks * 5))s）"
       else
         echo "  …连接中（$((_ticks * 5))s）"
       fi
     done
     if wait "$_cpid"; then
+      cp "$_cf_part" "$_curl_dest"
       return 0
     fi
-    echo "  failed $url" >&2
-    rm -f "$_curl_dest"
+    _cf_rc=$?
+    if [ "$_cf_rc" = "33" ]; then
+      # Range not supported by this mirror — wipe and retry from zero.
+      rm -f "$_cf_part"
+      if curl -fL --retry 1 --retry-delay 1 --connect-timeout 12 \
+          --speed-time 30 --speed-limit 100 \
+          -o "$_cf_part" "$url"; then
+        cp "$_cf_part" "$_curl_dest"
+        return 0
+      fi
+    fi
+    echo "  failed $url (rc=$_cf_rc)" >&2
+    # Keep the .part for the next mirror / next run.
   done
   return 1
 }
@@ -132,6 +160,7 @@ install_platform() {
   stage="/tmp/minis-plat-$api-$$"
   tmpzip="/tmp/minis-plat-$api-$$.zip"
   mkdir -p "$stage"
+  . /usr/local/lib/minis/offline.sh
   ok=0
   for zip in \
       "platform-${api}_r02.zip" \
@@ -142,13 +171,17 @@ install_platform() {
       "platform-${api}-ext14_r03.zip"
   do
     set +e
-    curl_first "$tmpzip" \
-      ${SDK_MIRROR:+"$SDK_MIRROR/$zip"} \
-      "https://mirrors.cloud.tencent.com/android/repository/$zip" \
-      "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip" \
-      "https://mirrors.ustc.edu.cn/android/repository/$zip" \
-      "https://dl.google.com/android/repository/$zip"
-    cr=$?
+    if offline_pick "$tmpzip" "$zip"; then
+      cr=0
+    else
+      curl_first "$tmpzip" "$zip" \
+        ${SDK_MIRROR:+"$SDK_MIRROR/$zip"} \
+        "https://mirrors.cloud.tencent.com/android/repository/$zip" \
+        "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip" \
+        "https://mirrors.ustc.edu.cn/android/repository/$zip" \
+        "https://dl.google.com/android/repository/$zip"
+      cr=$?
+    fi
     set -e
     [ "$cr" -eq 0 ] || continue
     unzip -qo "$tmpzip" -d "$stage" || { rm -f "$tmpzip"; continue; }
@@ -220,11 +253,16 @@ install_one_cmake() {
   tgz="/tmp/cmake-${ver}-linux-aarch64.tar.gz"
   tarball="cmake-${ver}-linux-aarch64.tar.gz"
   set +e
-  curl_first "$tgz" \
-    "https://cmake.org/files/v${major}.0/$tarball" \
-    "https://cmake.org/files/v${ver%.*}/$tarball" \
-    $(github_urls "https://github.com/Kitware/CMake/releases/download/v${ver}/$tarball")
-  cr=$?
+  . /usr/local/lib/minis/offline.sh
+  if offline_pick "$tgz" "$tarball"; then
+    cr=0
+  else
+    curl_first "$tgz" "$tarball" \
+      "https://cmake.org/files/v${major}.0/$tarball" \
+      "https://cmake.org/files/v${ver%.*}/$tarball" \
+      $(github_urls "https://github.com/Kitware/CMake/releases/download/v${ver}/$tarball")
+    cr=$?
+  fi
   set -e
   if [ "$cr" -ne 0 ]; then
     echo "CMake $ver download failed" >&2
@@ -369,15 +407,18 @@ install_sdk_tools_zip() {
   zip_name="android-sdk-tools-static-aarch64.zip"
   gh="https://github.com/lzhiyong/android-sdk-tools/releases/download/${local_rev}/${zip_name}"
   tmpzip="/tmp/minis-sdk-tools-$$.zip"
-  set +e
-  curl_first "$tmpzip" $(github_urls "$gh")
-  cr=$?
-  set -e
-  if [ "$cr" -ne 0 ]; then
-    echo "SDK host tools download failed." >&2
-    echo "Expected $gh" >&2
-    echo "Bind-mount an SDK named android-sdk, or retry with working network." >&2
-    return 1
+  . /usr/local/lib/minis/offline.sh
+  if ! offline_pick "$tmpzip" "$zip_name"; then
+    set +e
+    curl_first "$tmpzip" "$zip_name" $(github_urls "$gh")
+    cr=$?
+    set -e
+    if [ "$cr" -ne 0 ]; then
+      echo "SDK host tools download failed." >&2
+      echo "Expected $gh" >&2
+      echo "Offline fallback: download $zip_name elsewhere and put it in /var/minis/shared/offline/ (see minis-devsuite-offline-list)." >&2
+      return 1
+    fi
   fi
   stage="/tmp/minis-sdk-tools-$$"
   mkdir -p "$stage"
@@ -411,17 +452,21 @@ install_cmdline_tools() {
   ct_ver="11076708"
   zip_name="commandlinetools-linux-${ct_ver}_latest.zip"
   tmpzip="/tmp/minis-cmdline-tools-$$.zip"
-  set +e
-  curl_first "$tmpzip" \
-    "https://mirrors.cloud.tencent.com/AndroidRepository/$zip_name" \
-    "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip_name" \
-    "https://mirrors.ustc.edu.cn/android/repository/$zip_name" \
-    "https://dl.google.com/android/repository/$zip_name"
-  cr=$?
-  set -e
-  if [ "$cr" -ne 0 ]; then
-    echo "cmdline-tools download failed." >&2
-    return 1
+  . /usr/local/lib/minis/offline.sh
+  if ! offline_pick "$tmpzip" "$zip_name"; then
+    set +e
+    curl_first "$tmpzip" "$zip_name" \
+      "https://mirrors.cloud.tencent.com/AndroidRepository/$zip_name" \
+      "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip_name" \
+      "https://mirrors.ustc.edu.cn/android/repository/$zip_name" \
+      "https://dl.google.com/android/repository/$zip_name"
+    cr=$?
+    set -e
+    if [ "$cr" -ne 0 ]; then
+      echo "cmdline-tools download failed." >&2
+      echo "Offline fallback: download $zip_name elsewhere and put it in /var/minis/shared/offline/ (see minis-devsuite-offline-list)." >&2
+      return 1
+    fi
   fi
   stage="/tmp/minis-cmdline-tools-$$"
   mkdir -p "$stage"
@@ -491,22 +536,27 @@ install_ndk() {
       *.zip) archive="${archive}.zip" ;;
       *) archive="${archive}.bin" ;;
     esac
-    curl_first "$archive" "$MINIS_NDK_URL"
+    curl_first "$archive" "$(basename "${MINIS_NDK_URL%%\?*}")" "$MINIS_NDK_URL"
     cr=$?
   else
     # Published asset is tag "android-ndk", file android-ndk-<rev>-aarch64.tar.xz.
     # releases/download/r29/android-ndk-r29-aarch64.zip is 404.
     archive="${archive}.tar.xz"
     ndk_file="android-ndk-${NDK_TAG}-aarch64.tar.xz"
-    curl_first "$archive" \
-      $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/${ndk_file}")
-    cr=$?
+    . /usr/local/lib/minis/offline.sh
+    if offline_pick "$archive" "$ndk_file"; then
+      cr=0
+    else
+      curl_first "$archive" "$ndk_file" \
+        $(github_urls "https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/${ndk_file}")
+      cr=$?
+    fi
   fi
   set -e
   if [ "$cr" -ne 0 ]; then
     echo "NDK aarch64 download failed." >&2
     echo "Expected https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-${NDK_TAG}-aarch64.tar.xz" >&2
-    echo "Bind-mount an aarch64 NDK or set MINIS_NDK_URL. Do NOT sdkmanager \"ndk;…\" (that package is linux-x86_64)." >&2
+    echo "Offline fallback: download $ndk_file elsewhere and put it in /var/minis/shared/offline/ (see minis-devsuite-offline-list). Bind-mount an aarch64 NDK or set MINIS_NDK_URL. Do NOT sdkmanager \"ndk;…\" (that package is linux-x86_64)." >&2
     return 1
   fi
   stage="/tmp/minis-ndk-$$"

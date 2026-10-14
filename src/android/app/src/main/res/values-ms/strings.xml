@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Pengetahuan kekal merentas sesi</string>
     <string name="settings_mcp">Integrasi MCP</string>
     <string name="settings_mcp_subtitle">Sambungkan pelayan Model Context Protocol</string>
+    <string name="mcp_status_running">Berjalan (port %1$d), %2$d permintaan dikendalikan</string>
+    <string name="mcp_status_running_shifted">Berjalan (port sebenar %1$d · port konfigurasi %2$d terpakai, dialihkan), %3$d dikendalikan</string>
+    <string name="mcp_status_error">Ralat: %1$s</string>
+    <string name="mcp_status_stopped">Berhenti · mendengar 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Gagal dimulakan: %1$s</string>
+    <string name="mcp_error_unknown">sebab tidak diketahui</string>
     <string name="mcp_title">Integrasi MCP</string>
     <string name="mcp_add">Tambah Pelayan MCP</string>
     <string name="mcp_edit">Edit Pelayan MCP</string>
@@ -1777,8 +1783,9 @@
     <string name="selection_copy_as_plain_text">Salin sebagai Teks Biasa</string>
     <string name="chat_input_placeholder_hint_5">Kekunci Enter boleh hantar atau baris baharu</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Suit dev, alat tempatan dan alat OpenAPI dalam talian</string>
     <string name="dev_suite_section_header">Suit persekitaran pembangunan</string>
-    <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian.</string>
+    <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian. Rangkaian terhad? Jalankan minis-devsuite-offline-list untuk senarai import luar talian.</string>
     <string name="dev_suite_online_header">Alat dalam talian</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan satu ketukan.</string>
     <string name="dev_suite_progress">%1$d/%2$d sedia</string>

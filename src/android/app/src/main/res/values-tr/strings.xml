@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Oturumlar arasında kalıcı bilgi</string>
     <string name="settings_mcp">MCP Entegrasyonları</string>
     <string name="settings_mcp_subtitle">Model Context Protocol sunucularını bağlayın</string>
+    <string name="mcp_status_running">Çalışıyor (bağlantı noktası %1$d), %2$d istek işlendi</string>
+    <string name="mcp_status_running_shifted">Çalışıyor (gerçek port %1$d · yapılandırılan %2$d doluydu, kaydırıldı), %3$d istek işlendi</string>
+    <string name="mcp_status_error">Hata: %1$s</string>
+    <string name="mcp_status_stopped">Durduruldu · 127.0.0.1:%1$d dinliyor</string>
+    <string name="mcp_start_failed_toast">Başlatılamadı: %1$s</string>
+    <string name="mcp_error_unknown">bilinmeyen neden</string>
     <string name="mcp_title">MCP Entegrasyonları</string>
     <string name="mcp_add">MCP Sunucusu Ekle</string>
     <string name="mcp_edit">MCP Sunucusunu Düzenle</string>
@@ -1777,8 +1783,9 @@
     <string name="selection_copy_as_plain_text">Düz Metin Olarak Kopyala</string>
     <string name="chat_input_placeholder_hint_5">Enter tuşu gönderebilir ya da satır ekler</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Geliştirme paketleri, yerel araçlar ve çevrimiçi OpenAPI araçları</string>
     <string name="dev_suite_section_header">Geliştirme ortamı paketleri</string>
-    <string name="dev_suite_section_footer">Tarifler, araç zincirlerini gerektiğinde sandbox içinde kurar — yükler artık uygulamaya gömülü değil, ilk kurulum ağ gerektirir.</string>
+    <string name="dev_suite_section_footer">Tarifler, araç zincirlerini gerektiğinde sandbox içinde kurar — yükler artık uygulamaya gömülü değil, ilk kurulum ağ gerektirir. Ağ kısıtlı mı? Çevrimdışı içe aktarma listesi için minis-devsuite-offline-list komutunu çalıştırın.</string>
     <string name="dev_suite_online_header">Çevrimiçi araçlar</string>
     <string name="dev_suite_online_footer">Bağımsız araçlar, tek dokunuşla kurulur.</string>
     <string name="dev_suite_progress">%1$d/%2$d hazır</string>

@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Sitzungsübergreifend persistentes Wissen</string>
     <string name="settings_mcp">MCP-Integrationen</string>
     <string name="settings_mcp_subtitle">Model-Context-Protocol-Server verbinden</string>
+    <string name="mcp_status_running">Läuft (Port %1$d), %2$d Anfragen bearbeitet</string>
+    <string name="mcp_status_running_shifted">Läuft (tatsächlicher Port %1$d · konfigurierter %2$d belegt, verschoben), %3$d Anfragen bearbeitet</string>
+    <string name="mcp_status_error">Fehler: %1$s</string>
+    <string name="mcp_status_stopped">Gestoppt · lauscht auf 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Start fehlgeschlagen: %1$s</string>
+    <string name="mcp_error_unknown">unbekannte Ursache</string>
     <string name="mcp_title">MCP-Integrationen</string>
     <string name="mcp_add">MCP-Server hinzufügen</string>
     <string name="mcp_edit">MCP-Server bearbeiten</string>
@@ -1779,8 +1785,9 @@
     <string name="compact_progress">Wird verdichtet… %1$d s vergangen</string>
     <string name="compact_progress_split">Wird verdichtet… %1$d s · Zusammenfassung in Segmenten (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Dev-Suites, lokale Tools und Online-OpenAPI-Tools</string>
     <string name="dev_suite_section_header">Entwicklungsumgebungen</string>
-    <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz.</string>
+    <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz. Netzwerk eingeschränkt? minis-devsuite-offline-list listet die Dateien für den Offline-Import auf.</string>
     <string name="dev_suite_online_header">Online-Tools</string>
     <string name="dev_suite_online_footer">Eigenständige Tools, per Tipp installiert.</string>
     <string name="dev_suite_progress">%1$d/%2$d bereit</string>

@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Connaissances persistantes entre les sessions</string>
     <string name="settings_mcp">Intégrations MCP</string>
     <string name="settings_mcp_subtitle">Connecter des serveurs Model Context Protocol</string>
+    <string name="mcp_status_running">En cours (port %1$d), %2$d requêtes traitées</string>
+    <string name="mcp_status_running_shifted">En cours (port réel %1$d · port configuré %2$d occupé, décalé), %3$d requêtes traitées</string>
+    <string name="mcp_status_error">Erreur : %1$s</string>
+    <string name="mcp_status_stopped">Arrêté · écoute sur 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Échec du démarrage : %1$s</string>
+    <string name="mcp_error_unknown">raison inconnue</string>
     <string name="mcp_title">Intégrations MCP</string>
     <string name="mcp_add">Ajouter un serveur MCP</string>
     <string name="mcp_edit">Modifier le serveur MCP</string>
@@ -1779,8 +1785,9 @@
     <string name="compact_progress">Compactage… %1$d s écoulées</string>
     <string name="compact_progress_split">Compactage… %1$d s · résumé par segments (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Suites de dev, outils locaux et OpenAPI en ligne</string>
     <string name="dev_suite_section_header">Environnements de développement</string>
-    <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau.</string>
+    <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau. Réseau restreint ? Exécutez minis-devsuite-offline-list pour la liste d\'import hors ligne.</string>
     <string name="dev_suite_online_header">Outils en ligne</string>
     <string name="dev_suite_online_footer">Outils autonomes, installés en un appui.</string>
     <string name="dev_suite_progress">%1$d/%2$d prêts</string>

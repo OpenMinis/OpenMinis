@@ -23,19 +23,16 @@ command -v unzip >/dev/null 2>&1 || {
 }
 
 tmp="/tmp/jadx-$$.zip"
-ok=0
-for url in \
+. /usr/local/lib/minis/offline.sh
+if ! resume_fetch "$tmp" "$ZIP" \
   "https://ghfast.top/$GH" \
   "https://ghproxy.net/$GH" \
   "https://mirror.ghproxy.com/$GH" \
   "$GH"
-do
-  echo "  downloading $url"
-  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
-       -o "$tmp" "$url"; then ok=1; break; fi
-  rm -f "$tmp"
-done
-[ "$ok" = 1 ] || { echo "jadx download failed (all mirrors)" >&2; exit 1; }
+then
+  echo "jadx download failed (all mirrors). Offline fallback: put $ZIP in /var/minis/shared/offline/" >&2
+  exit 1
+fi
 
 stage="/tmp/jadx-unpack-$$"
 mkdir -p "$stage"

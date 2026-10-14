@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Conhecimento permanente entre sessões</string>
     <string name="settings_mcp">Integrações MCP</string>
     <string name="settings_mcp_subtitle">Conecte servidores Model Context Protocol</string>
+    <string name="mcp_status_running">Em execução (porta %1$d), %2$d requisições atendidas</string>
+    <string name="mcp_status_running_shifted">Em execução (porta real %1$d · a configurada %2$d estava ocupada, deslocada), %3$d requisições atendidas</string>
+    <string name="mcp_status_error">Erro: %1$s</string>
+    <string name="mcp_status_stopped">Parado · escutando em 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Falha ao iniciar: %1$s</string>
+    <string name="mcp_error_unknown">motivo desconhecido</string>
     <string name="mcp_title">Integrações MCP</string>
     <string name="mcp_add">Adicionar servidor MCP</string>
     <string name="mcp_edit">Editar servidor MCP</string>
@@ -1777,8 +1783,9 @@
     <string name="selection_copy_as_plain_text">Copiar como texto simples</string>
     <string name="chat_input_placeholder_hint_5">O Enter pode enviar ou quebrar linha</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Suítes de dev, ferramentas locais e OpenAPI on-line</string>
     <string name="dev_suite_section_header">Suítes de ambiente de desenvolvimento</string>
-    <string name="dev_suite_section_footer">As receitas instalam toolchains sob demanda dentro do sandbox — os payloads não vêm mais no app; a primeira montagem precisa de rede.</string>
+    <string name="dev_suite_section_footer">As receitas instalam toolchains sob demanda dentro do sandbox — os payloads não vêm mais no app; a primeira montagem precisa de rede. Rede restrita? Execute minis-devsuite-offline-list para a lista de importação offline.</string>
     <string name="dev_suite_online_header">Ferramentas online</string>
     <string name="dev_suite_online_footer">Ferramentas independentes, instale com um toque.</string>
     <string name="dev_suite_progress">%1$d/%2$d prontos</string>

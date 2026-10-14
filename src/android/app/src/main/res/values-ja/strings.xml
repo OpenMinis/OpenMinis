@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">セッションをまたいで保持される永続的な知識</string>
     <string name="settings_mcp">MCP 連携</string>
     <string name="settings_mcp_subtitle">Model Context Protocol サーバーを接続</string>
+    <string name="mcp_status_running">実行中（ポート %1$d）、%2$d 件のリクエストを処理</string>
+    <string name="mcp_status_running_shifted">実行中（実際のポート %1$d · 設定ポート %2$d が使用中のため繰り下げ）、%3$d 件処理</string>
+    <string name="mcp_status_error">エラー：%1$s</string>
+    <string name="mcp_status_stopped">停止中 · 127.0.0.1:%1$d で待機</string>
+    <string name="mcp_start_failed_toast">起動に失敗：%1$s</string>
+    <string name="mcp_error_unknown">不明な原因</string>
     <string name="mcp_title">MCP 連携</string>
     <string name="mcp_add">MCP サーバーを追加</string>
     <string name="mcp_edit">MCP サーバーを編集</string>
@@ -1776,8 +1782,9 @@
     <string name="compact_progress">圧縮中… %1$d 秒経過</string>
     <string name="compact_progress_split">圧縮中… %1$d 秒 · 分割して要約中（%2$d/%3$d）</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">開発スイート、ローカルツール、オンライン OpenAPI ツール</string>
     <string name="dev_suite_section_header">開発環境スイート</string>
-    <string name="dev_suite_section_footer">レシピはサンドボックス内にオンデマンドでツールチェーンを導入します——ペイロードはアプリに同梱されなくなり、初回のセットアップにはネットワークが必要です。</string>
+    <string name="dev_suite_section_footer">レシピはサンドボックス内にオンデマンドでツールチェーンを導入します——ペイロードはアプリに同梱されなくなり、初回のセットアップにはネットワークが必要です。 ネットワークが制限されている場合は minis-devsuite-offline-list を実行してオフライン取り込み用のリストを生成できます。</string>
     <string name="dev_suite_online_header">オンラインツール</string>
     <string name="dev_suite_online_footer">スタンドアロンのツール、タップで導入。</string>
     <string name="dev_suite_progress">%1$d/%2$d 準備完了</string>

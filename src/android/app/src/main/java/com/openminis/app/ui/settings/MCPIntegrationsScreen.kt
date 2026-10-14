@@ -213,13 +213,24 @@ fun MCPIntegrationsScreen(
                     McpServerManager.Status.RUNNING -> {
                         val actual = mcpState.actualPort ?: builtInPort
                         if (actual != builtInPort) {
-                            "运行中（实际端口 $actual · 配置 $builtInPort 被占用已顺延），已处理 ${mcpState.handledRequests} 个请求"
+                            stringResource(
+                                R.string.mcp_status_running_shifted,
+                                actual, builtInPort, mcpState.handledRequests,
+                            )
                         } else {
-                            "运行中（端口 $actual），已处理 ${mcpState.handledRequests} 个请求"
+                            stringResource(
+                                R.string.mcp_status_running,
+                                actual, mcpState.handledRequests,
+                            )
                         }
                     }
-                    McpServerManager.Status.ERROR -> "错误：${mcpState.error ?: "未知原因"}"
-                    McpServerManager.Status.STOPPED -> "已停止 · 监听 127.0.0.1:$builtInPort"
+                    McpServerManager.Status.ERROR -> stringResource(
+                        R.string.mcp_status_error,
+                        mcpState.error ?: stringResource(R.string.mcp_error_unknown),
+                    )
+                    McpServerManager.Status.STOPPED -> stringResource(
+                        R.string.mcp_status_stopped, builtInPort,
+                    )
                 },
                 icon = Icons.Outlined.Dns,
                 checked = mcpConfig.enabled,
@@ -230,7 +241,11 @@ fun MCPIntegrationsScreen(
                             mcpStore?.setEnabled(false)
                             android.widget.Toast.makeText(
                                 context,
-                                "启动失败：${McpServerManager.state.value.error ?: "未知原因"}",
+                                context.getString(
+                                    R.string.mcp_start_failed_toast,
+                                    McpServerManager.state.value.error
+                                        ?: context.getString(R.string.mcp_error_unknown),
+                                ),
                                 android.widget.Toast.LENGTH_SHORT,
                             ).show()
                         }

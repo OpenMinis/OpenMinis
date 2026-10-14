@@ -23,20 +23,19 @@ command -v xz >/dev/null 2>&1 || {
   apt-get install -y --no-install-recommends xz-utils
 }
 
-# Mirror ladder: SJTU (CN, fastest usually) -> TUNA -> Google storage.
+# Offline-first + resumable: a copy in /var/minis/shared/offline/ skips
+# the network; an interrupted download resumes from the .part cache
+# (/var/minis/shared/cache/devsuite) across app kills and reboots.
 tmp="/tmp/flutter-$$.tar.xz"
-ok=0
-for url in \
+. /usr/local/lib/minis/offline.sh
+if ! resume_fetch "$tmp" "$TAR" \
   "https://mirrors.sjtug.sjtu.edu.cn/flutter_infra/releases/stable/linux/$TAR" \
   "https://mirrors.tuna.tsinghua.edu.cn/flutter/flutter_infra/releases/stable/linux/$TAR" \
   "https://storage.googleapis.com/flutter_infra/releases/stable/linux/$TAR"
-do
-  echo "  downloading $url"
-  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
-       -o "$tmp" "$url"; then ok=1; break; fi
-  rm -f "$tmp"
-done
-[ "$ok" = 1 ] || { echo "flutter download failed (all mirrors)" >&2; exit 1; }
+then
+  echo "flutter download failed (all mirrors). Offline fallback: put $TAR in /var/minis/shared/offline/" >&2
+  exit 1
+fi
 
 stage="/tmp/flutter-unpack-$$"
 mkdir -p "$stage"

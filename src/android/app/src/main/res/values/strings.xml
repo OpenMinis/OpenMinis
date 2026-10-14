@@ -271,12 +271,10 @@
     <string name="settings_mcp">MCP Integrations</string>
     <string name="settings_mcp_subtitle">Connect Model Context Protocol servers</string>
     <string name="plugin_market_title">Plugin market</string>
-    <string name="plugin_market_subtitle">MCP presets and online OpenAPI tools</string>
-    <string name="plugin_market_section_mcp">MCP presets</string>
-    <string name="plugin_market_footer_mcp">One-tap add to MCP Integrations. Skills stay under Settings → Skills.</string>
+    <string name="plugin_market_subtitle">Dev suites, local tools and online OpenAPI tools</string>
     <string name="plugin_market_section_online">Online APIs</string>
     <string name="dev_suite_section_header">Dev environment suites</string>
-    <string name="dev_suite_section_footer">Recipes install toolchains on demand inside the sandbox — payloads are not bundled with the app, so first-time assembly needs network.</string>
+    <string name="dev_suite_section_footer">Recipes install toolchains on demand inside the sandbox — payloads are not bundled with the app, so first-time assembly needs network. Network-restricted? Run minis-devsuite-offline-list for the offline import manifest.</string>
     <string name="dev_suite_online_header">Online tools</string>
     <string name="dev_suite_online_footer">Standalone tools installed on tap.</string>
     <string name="dev_suite_progress">%1$d/%2$d ready</string>
@@ -325,6 +323,12 @@
     <string name="settings_collab_roles_import_overwrite_text">These names already exist: %1$s. Importing will replace their saved custom definitions.</string>
     <string name="settings_collab_roles_import_replace">Replace and import</string>
     <string name="settings_collab_roles_import_done">Imported %1$d roles</string>
+    <string name="mcp_status_running">Running (port %1$d), handled %2$d requests</string>
+    <string name="mcp_status_running_shifted">Running (actual port %1$d · configured %2$d was taken, shifted), handled %3$d requests</string>
+    <string name="mcp_status_error">Error: %1$s</string>
+    <string name="mcp_status_stopped">Stopped · listening 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Start failed: %1$s</string>
+    <string name="mcp_error_unknown">unknown reason</string>
     <string name="mcp_title">MCP Integrations</string>
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>

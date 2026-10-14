@@ -143,6 +143,12 @@
     <string name="settings_memory_subtitle">Conocimiento persistente entre sesiones</string>
     <string name="settings_mcp">Integraciones MCP</string>
     <string name="settings_mcp_subtitle">Conecta servidores Model Context Protocol</string>
+    <string name="mcp_status_running">En ejecución (puerto %1$d), %2$d solicitudes atendidas</string>
+    <string name="mcp_status_running_shifted">En ejecución (puerto real %1$d · el configurado %2$d estaba ocupado, se desplazó), %3$d solicitudes atendidas</string>
+    <string name="mcp_status_error">Error: %1$s</string>
+    <string name="mcp_status_stopped">Detenido · escuchando en 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Fallo al iniciar: %1$s</string>
+    <string name="mcp_error_unknown">causa desconocida</string>
     <string name="mcp_title">Integraciones MCP</string>
     <string name="mcp_add">Agregar servidor MCP</string>
     <string name="mcp_edit">Editar servidor MCP</string>
@@ -1779,8 +1785,9 @@
     <string name="compact_progress">Compactando… %1$d s transcurridos</string>
     <string name="compact_progress_split">Compactando… %1$d s · resumiendo por segmentos (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Suites de desarrollo, herramientas locales y OpenAPI en línea</string>
     <string name="dev_suite_section_header">Entornos de desarrollo</string>
-    <string name="dev_suite_section_footer">Las recetas instalan toolchains bajo demanda en el sandbox — los payloads ya no van en la APK; el primer montaje necesita red.</string>
+    <string name="dev_suite_section_footer">Las recetas instalan toolchains bajo demanda en el sandbox — los payloads ya no van en la APK; el primer montaje necesita red. ¿Red restringida? Ejecute minis-devsuite-offline-list para obtener la lista de importación sin conexión.</string>
     <string name="dev_suite_online_header">Herramientas en línea</string>
     <string name="dev_suite_online_footer">Herramientas independientes que se instalan al tocar.</string>
     <string name="dev_suite_progress">%1$d/%2$d listos</string>

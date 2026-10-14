@@ -145,6 +145,12 @@
     <string name="settings_memory_subtitle">Trwała wiedza między sesjami</string>
     <string name="settings_mcp">Integracje MCP</string>
     <string name="settings_mcp_subtitle">Podłącz serwery Model Context Protocol</string>
+    <string name="mcp_status_running">Działa (port %1$d), obsłużono %2$d żądań</string>
+    <string name="mcp_status_running_shifted">Działa (rzeczywisty port %1$d · skonfigurowany %2$d zajęty, przesunięty), obsłużono %3$d</string>
+    <string name="mcp_status_error">Błąd: %1$s</string>
+    <string name="mcp_status_stopped">Zatrzymany · nasłuchuje na 127.0.0.1:%1$d</string>
+    <string name="mcp_start_failed_toast">Nie udało się uruchomić: %1$s</string>
+    <string name="mcp_error_unknown">nieznany powód</string>
     <string name="mcp_title">Integracje MCP</string>
     <string name="mcp_add">Dodaj serwer MCP</string>
     <string name="mcp_edit">Edytuj serwer MCP</string>
@@ -1785,8 +1791,9 @@
     <string name="selection_copy_as_plain_text">Kopiuj jako zwykły tekst</string>
     <string name="chat_input_placeholder_hint_5">Enter może wysyłać lub dodawać nowy wiersz</string>
     <string name="chat_process_step_view">View</string>
+    <string name="plugin_market_subtitle">Pakiety dev, narzędzia lokalne i online OpenAPI</string>
     <string name="dev_suite_section_header">Pakiety środowisk programistycznych</string>
-    <string name="dev_suite_section_footer">Przepisy instalują toolchainy na żądanie w sandboxie — ładunki nie są już wbudowane w aplikację, pierwsza instalacja wymaga sieci.</string>
+    <string name="dev_suite_section_footer">Przepisy instalują toolchainy na żądanie w sandboxie — ładunki nie są już wbudowane w aplikację, pierwsza instalacja wymaga sieci. Ograniczona sieć? Uruchom minis-devsuite-offline-list, aby uzyskać listę importu offline.</string>
     <string name="dev_suite_online_header">Narzędzia online</string>
     <string name="dev_suite_online_footer">Niezależne narzędzia, instalacja jednym dotknięciem.</string>
     <string name="dev_suite_progress">%1$d/%2$d gotowe</string>
