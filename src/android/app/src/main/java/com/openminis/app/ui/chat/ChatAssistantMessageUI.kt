@@ -973,9 +973,14 @@ internal fun processCardHeader(
         else -> ""
     }
     return when {
+        // Settled (reply text arrived, or a pure-tool/error/timeout round
+        // ended): always the done summary.
         !running -> "✅ · $counts"
-        expanded && state.isNotEmpty() -> state
-        state.isNotEmpty() -> "$state · $counts"
+        // Running + expanded: the steps are on screen, so the header shows
+        // only the live state; fall back to the generic label when idle.
+        expanded -> state.ifEmpty { "AI 过程" }
+        // Running + collapsed: fixed label with ticking duration. The live
+        // state stays out — that is what the expanded header is for.
         else -> "AI 过程 · $counts"
     }
 }
@@ -999,11 +1004,13 @@ internal fun ProcessSummaryBar(
     // listing every step (expanded). Replaces the centred hairline divider:
     // the reference treats a process run as one tappable object sitting
     // between reply paragraphs, not as a section rule.
-    val labelColor = MaterialTheme.colorScheme.onSurface
-    val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val outline = MaterialTheme.colorScheme.outlineVariant
-    val shape = RoundedCornerShape(22.dp)
-    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else muted
+    // [P-process-card] Reuse the thinking card's look so enabling folding is
+    // not a visual break: same blue, same 12dp radius, same 6%/15% tint and
+    // 0.5dp hairline, same 12×8 padding as ThinkingBlock. The old 22dp
+    // backgroundless capsule looked nothing like the blocks it replaced.
+    val thinkingBlue = Color(0xFF007AFF)
+    val shape = RoundedCornerShape(12.dp)
+    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else thinkingBlue
     // A running card ticks once a second so the duration walks. Bounded by
     // the run: the moment it settles, running flips false and the loop ends.
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -1025,16 +1032,17 @@ internal fun ProcessSummaryBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .padding(vertical = 2.5.dp)
+            .background(thinkingBlue.copy(alpha = 0.06f), shape)
+            .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), shape)
             .clip(shape)
-            .border(1.dp, outline, shape)
             .clickable(onClick = onToggle)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (running) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
+                    modifier = Modifier.size(13.dp),
                     strokeWidth = 1.5.dp,
                     color = iconTint,
                 )
@@ -1043,32 +1051,31 @@ internal fun ProcessSummaryBar(
                     imageVector = if (hasFailure) Icons.Default.Error else Icons.Default.CheckCircle,
                     contentDescription = null,
                     tint = iconTint,
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(14.dp),
                 )
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = header,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                color = labelColor,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (hasFailure) MaterialTheme.colorScheme.error else thinkingBlue,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Icon(
-                imageVector = if (expanded) Icons.Default.KeyboardArrowDown
-                    else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                 contentDescription = if (expanded) "Collapse" else "Expand",
-                tint = muted,
-                modifier = Modifier.size(20.dp),
+                tint = thinkingBlue.copy(alpha = 0.5f),
+                modifier = Modifier.size(14.dp),
             )
         }
         if (expanded && steps.isNotEmpty()) {
             HorizontalDivider(
-                modifier = Modifier.padding(top = 10.dp, bottom = 4.dp),
+                modifier = Modifier.padding(top = 8.dp, bottom = 2.dp),
                 thickness = 0.5.dp,
-                color = outline,
+                color = thinkingBlue.copy(alpha = 0.15f),
             )
             steps.forEach { step ->
                 ProcessStepRow(step = step, onOpen = { onOpenStep(step.id) })
@@ -1085,6 +1092,7 @@ internal fun ProcessSummaryBar(
 @Composable
 private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val thinkingBlue = Color(0xFF007AFF)
     val isThinking = step.kind == "thinking"
     val duration = formatProcessDuration(step.durationMs)
     val title = when {
@@ -1098,43 +1106,91 @@ private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
         isThinking -> Icons.Default.Lightbulb
         else -> Icons.Default.Search
     }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(if (isThinking) Modifier else Modifier.clickable(onClick = onOpen))
-            .padding(vertical = 7.dp),
-    ) {
-        Icon(icon, contentDescription = null, tint = muted, modifier = Modifier.size(16.dp))
-        Spacer(modifier = Modifier.width(10.dp))
-        Text(
-            text = title,
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (!isThinking) {
-            Box(
-                modifier = Modifier
-                    .size(7.dp)
-                    .background(Color(0xFF34C759), CircleShape),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(
-                text = stringResource(R.string.chat_process_step_view),
-                fontSize = 13.sp,
-                color = Color(0xFF8E8EFF),
-            )
-            Spacer(modifier = Modifier.width(2.dp))
+    // [P-process-card] Thinking layer, independent of the card layer: a
+    // running thinking step auto-expands while its text streams, and settles
+    // 500ms after it finishes. A step the user collapsed by hand
+    // (userTouched) is never reopened by the card expanding, and never
+    // auto-collapsed over their choice — same rule as ThinkingBlock. State
+    // is keyed on step.id so one step's toggle never leaks to the next.
+    var stepExpanded by remember(step.id) { mutableStateOf(step.running) }
+    var userTouched by remember(step.id) { mutableStateOf(false) }
+    LaunchedEffect(step.id, step.running) {
+        if (!step.running && !userTouched) {
+            delay(500)
+            stepExpanded = false
         }
-        Icon(
-            Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = muted,
-            modifier = Modifier.size(16.dp),
-        )
+    }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    if (isThinking) {
+                        userTouched = true
+                        stepExpanded = !stepExpanded
+                    } else {
+                        onOpen()
+                    }
+                }
+                .padding(vertical = 7.dp),
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = if (isThinking) thinkingBlue else muted,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = title,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (!isThinking) {
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .background(Color(0xFF34C759), CircleShape),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = stringResource(R.string.chat_process_step_view),
+                    fontSize = 13.sp,
+                    color = Color(0xFF8E8EFF),
+                )
+                Spacer(modifier = Modifier.width(2.dp))
+            }
+            Icon(
+                imageVector = if (isThinking) {
+                    if (stepExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown
+                } else {
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight
+                },
+                contentDescription = null,
+                tint = if (isThinking) thinkingBlue.copy(alpha = 0.5f) else muted,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        if (isThinking) {
+            AnimatedVisibility(visible = stepExpanded && step.content.isNotEmpty()) {
+                val scrollState = rememberScrollState()
+                Text(
+                    text = step.content,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 26.dp, top = 2.dp, bottom = 6.dp)
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(scrollState),
+                )
+            }
+        }
     }
 }
 

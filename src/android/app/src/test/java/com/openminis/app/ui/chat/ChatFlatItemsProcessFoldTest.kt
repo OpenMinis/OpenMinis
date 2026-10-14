@@ -568,13 +568,14 @@ class ChatFlatItemsProcessFoldTest {
 
     @Test
     fun `card header switches between live collapsed live expanded and settled`() {
-        // Running, collapsed: current state leads, counts and duration follow.
+        // Running, collapsed: fixed label — the live state belongs to the
+        // expanded header, not the collapsed one.
         assertEquals(
-            "思考中 · 思考 2 · 工具 3 · 12s",
+            "AI 过程 · 思考 2 · 工具 3 · 12s",
             processCardHeader(2, 3, running = true, expanded = false, activity = "thinking", activityTitle = "", duration = "12s"),
         )
         assertEquals(
-            "调用工具 搜索代码 · 思考 1 · 工具 4 · 8s",
+            "AI 过程 · 思考 1 · 工具 4 · 8s",
             processCardHeader(1, 4, running = true, expanded = false, activity = "tool", activityTitle = "搜索代码", duration = "8s"),
         )
         // Running, expanded: the steps are on screen, so only the state remains.

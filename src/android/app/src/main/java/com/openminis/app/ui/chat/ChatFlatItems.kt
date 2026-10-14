@@ -438,6 +438,12 @@ internal data class ProcessStepRef(
     val status: ToolBlockStatus?,
     val durationMs: Long,
     val running: Boolean,
+    /**
+     * [P-process-card] Thinking rows carry their reasoning text so the
+     * expanded card can unfold them inline (the folded card swallowed it).
+     * Empty for tool rows — they open the shared detail sheet instead.
+     */
+    val content: String = "",
 )
 
 /** Rounds with fewer foldable steps than this never fold (rule 1). */
@@ -661,6 +667,7 @@ private fun splitRounds(messages: List<ChatMessage>, activeSubAgentToolIds: Set<
                     status = block.toolStatus,
                     durationMs = block.durationMs,
                     running = stepRunning,
+                    content = if (block.kind == "thinking") block.content else "",
                 )
             }
         }
