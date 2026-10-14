@@ -42,7 +42,6 @@ import androidx.compose.material.icons.filled.VerticalAlignTop
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.FolderZip
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.VideoFile
@@ -910,7 +909,6 @@ fun ChatScreen(
     // backing state without needing fragile scope wiring.
     var showMoveSheet by remember { mutableStateOf(false) }
     var showClearChatDialog by remember { mutableStateOf(false) }
-    var showCardShareDialog by remember { mutableStateOf(false) }
     // [T-android-delete-from-here] Id of the message a pending "Delete From
     // Here" would cut at, or null when no confirmation is open. Holding the
     // id (rather than a boolean plus a separate field) keeps the dialog and
@@ -2689,15 +2687,12 @@ fun ChatScreen(
                                     )
                                 },
                             )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_end_group_chat)) },
-                                enabled = groupChatOn,
-                                onClick = {
-                                    showChatMenu = false
-                                    viewModel.endGroupChat()
-                                },
-                                leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null) },
-                            )
+                            // [P0-6] 结束讨论 lives ONLY on the group-chat
+                            // banner (same endGroupChat(), always visible
+                            // while a group chat runs, one tap away). The
+                            // duplicate overflow-menu entry was two taps to
+                            // reach the same call and only ever enabled in
+                            // the exact state where the banner is on screen.
                             if (restorableCount > 0) {
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.chat_menu_restore_deleted)) },
@@ -2708,16 +2703,6 @@ fun ChatScreen(
                                     leadingIcon = { Icon(Icons.Default.Restore, contentDescription = null) },
                                 )
                             }
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_share_card)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    showCardShareDialog = true
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Share, contentDescription = null)
-                                },
-                            )
                             // [P0-6] 工具段：会话内的扩展面。
                             MinisMenuSectionHeader(stringResource(R.string.chat_menu_section_tools))
                             // [P2-git-panel] Git panel — desktop-style git UI
@@ -7322,18 +7307,6 @@ fun ChatScreen(
                 )
             }
 
-            // T137: Clear Chat confirmation. Wipes messages + agent history +
-            // compact markers; the session row, workspace files, attachments,
-            // and offload payloads are intentionally preserved (iOS parity).
-            if (showCardShareDialog) {
-                com.openminis.app.share.ConversationCardShareDialog(
-                    onDismiss = { showCardShareDialog = false },
-                    onShare = { options ->
-                        showCardShareDialog = false
-                        viewModel.shareConversationCard(options)
-                    },
-                )
-            }
             if (showRestoreDialog) {
                 MinisAlertDialog(
                     onDismissRequest = { showRestoreDialog = false },

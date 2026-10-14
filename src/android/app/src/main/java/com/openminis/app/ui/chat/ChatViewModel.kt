@@ -5383,21 +5383,6 @@ class ChatViewModel(
         SessionActivityTracker.publishLastReply(sessionId, text)
     }
 
-    fun shareConversationCard(options: com.openminis.app.share.ConversationCardOptions = com.openminis.app.share.ConversationCardOptions()) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                com.openminis.app.share.ConversationCardShare.share(
-                    context = context,
-                    title = _sessionTitle.value,
-                    messages = uiMessages.value,
-                    options = options,
-                )
-            }.onFailure {
-                AppLogger.warning(TAG, "shareConversationCard failed: ${it.message}")
-            }
-        }
-    }
-
     override fun cancelStream() {
         val job = streamJob
         if (job == null || stoppedStreamJob === job) return

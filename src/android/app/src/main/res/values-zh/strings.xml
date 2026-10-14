@@ -1560,7 +1560,6 @@
     <string name="git_panel_empty_diff">没有 diff 输出</string>
     <string name="chat_menu_open_browser">打开浏览器</string>
     <string name="chat_menu_browse_chat_files">浏览对话文件</string>
-    <string name="chat_menu_share_card">分享对话卡片</string>
     <string name="chat_menu_enhanced_cache">增强缓存</string>
     <string name="chat_menu_fast_mode">启用高速模式</string>
     <string name="chat_menu_auto_compact">自动压缩</string>
