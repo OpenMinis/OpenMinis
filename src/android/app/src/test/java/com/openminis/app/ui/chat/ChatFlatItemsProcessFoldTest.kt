@@ -516,8 +516,9 @@ class ChatFlatItemsProcessFoldTest {
     @Test
     fun `a running tool is reported by the card instead of the list`() {
         // The card is the only copy: a running tool renders inside it and the
-        // header names it, so nothing teleports when it finishes.
-        val blocks = listOf(thinking(), tool(id = "t2", status = ToolBlockStatus.RUNNING), text())
+        // header names it, so nothing teleports when it finishes. The run has
+        // no reply text yet — text would end the card (see the settle tests).
+        val blocks = listOf(thinking(), tool(id = "t2", status = ToolBlockStatus.RUNNING))
         val running = buildFlatChatItems(
             listOf(assistant(streaming = true, blocks = blocks)),
             showCompletedToolCards = false,
@@ -526,7 +527,7 @@ class ChatFlatItemsProcessFoldTest {
         val k = kinds(running)
         assertFalse("running tool must not duplicate in the list", k.contains("tool:bash"))
         val summary = running.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single()
-        assertTrue(summary.running)
+        assertTrue("card must be live while one of its steps runs", summary.running)
         assertEquals("tool", summary.activity)
         assertTrue(summary.steps.any { it.id == "t2" && it.running })
     }
