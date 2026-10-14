@@ -89,6 +89,12 @@ internal fun ChatViewModel.sendMessage(
     // A fresh send supersedes any pending resume — mirror iOS which clears
     // canResume at the top of send().
     _canResume.value = false
+    // [T-android-resume-banner-race] Claim the epoch BEFORE the run starts
+    // (and before waiting for the old run's concurrency slot): any old-run
+    // tail that reaches its own `_canResume = true` after this point sees a
+    // stale snapshot and drops the raise — the banner must not come back
+    // over the fresh turn this send is about to start.
+    claimResumeEpoch()
     // T185: clear the share-injected flag the moment the user actually
     // sends. Without this, the "Move to…" capsule (gated on
     // hasInjectedShareContent) keeps floating over the user-message row

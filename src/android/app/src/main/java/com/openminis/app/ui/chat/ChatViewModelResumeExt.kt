@@ -30,6 +30,11 @@ fun ChatViewModel.resume() {
     }
     _canResume.value = false
     _error.value = null
+    // [T-android-resume-banner-race] A resume is a fresh claim too: bump the
+    // epoch so any still-winding-down tail from the interrupted run (or a
+    // concurrent loadSession re-detection) cannot re-raise the banner over
+    // the turn this resume is about to start.
+    claimResumeEpoch()
     // [T-error-persist-android] resume() follows finalizeAtTurnLimit's
     // setInlineError (which persisted an error sticker on the last assistant
     // row). Clear it now so a successful resume doesn't merge-resurrect the

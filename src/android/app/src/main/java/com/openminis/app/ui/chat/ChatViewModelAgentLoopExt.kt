@@ -55,6 +55,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
     withContext(Dispatchers.IO) {
         rebuildAgentHistoryFromDatabase(activeSessionId)
     }
+    // [T-android-resume-banner-race] Snapshot the resume epoch at run start:
+    // every `_canResume = true` this loop's tail may emit is only allowed to
+    // land while this snapshot is still current. A newer send bumps the
+    // epoch, so a tail that outlives its replacement drops the raise instead
+    // of re-showing the resume banner over the fresh turn.
+    val loopResumeEpoch = snapshotResumeEpoch()
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
     // 成功时 finish(DONE)；失败路径不落 FINISH，留 RUNNING 由
@@ -441,7 +447,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // unconsumed re-detection mark left by a prior load so it cannot
                 // suppress the re-stamp here.
                 markLiveInterruption()
-                _canResume.value = true
+                raiseCanResume(loopResumeEpoch)
                 // Android's equivalent of iOS's `hitTurnLimit = false`: this
                 // is a deliberate stop, NOT the runaway-ceiling path, so the
                 // post-loop tail must not slap a fake "hit 200 turns" error
@@ -1639,7 +1645,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // unconsumed re-detection mark left by a prior load so it cannot
                 // suppress the re-stamp here.
                 markLiveInterruption()
-                _canResume.value = true
+                raiseCanResume(loopResumeEpoch)
                 // Deliberate stop, not the runaway ceiling — keep the
                 // post-loop tail from adding a fake turn-limit error.
                 loopExitedNormally = true
@@ -2291,7 +2297,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
             "runAgentLoop EXIT — hit MAX_AGENT_TURNS=${ChatViewModel.MAX_AGENT_TURNS}, finalizing as resumable",
         )
         withContext(Dispatchers.Main) {
-            finalizeAtTurnLimit(assistantId, accumulatedText, allToolBlocks)
+            finalizeAtTurnLimit(assistantId, accumulatedText, allToolBlocks, loopResumeEpoch)
         }
     } else {
         AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop EXIT (loop body ended naturally)")

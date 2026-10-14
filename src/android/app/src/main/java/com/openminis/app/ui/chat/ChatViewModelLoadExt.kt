@@ -15,6 +15,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal fun ChatViewModel.loadSession() {
+    // [T-android-resume-banner-race] Snapshot the resume epoch at load
+    // start. loadSession's interrupted-tail re-detection sets
+    // `_canResume = true` after a full DB walk; if the user has sent (or
+    // resumed) something in the meantime, the epoch moved and the stale
+    // detection must not re-show the banner over the fresh turn.
+    val loadResumeEpoch = snapshotResumeEpoch()
     // T-android-crash-detected-halt: when CrashFrequencyDetector
     // tripped (#459, ≥3 crashes in last hour), skip the heavy
     // session-restore path entirely. Re-running the same persisted
@@ -378,7 +384,7 @@ internal fun ChatViewModel.loadSession() {
         // the OS (or app force-quit) leaves agentHistory in one of four
         // tell-tale shapes. Detecting any of them lets the user tap
         // Resume to pick up where the model left off — the in-memory
-        // [_canResume] flag set by [handleUserCancelledCleanup] is lost
+        // [_canResume] flag set by the live interruption paths is lost
         // across cold starts so we have to re-derive it from the DB.
         // Mirrors iOS AIChatViewModel.loadSession lines 3546-3581.
         //   Case A: last entry is user with all-toolResult parts —
@@ -464,7 +470,7 @@ internal fun ChatViewModel.loadSession() {
                 // the assignment (the collector runs asynchronously — see
                 // the field's doc) and consumed by the collector, not here.
                 markRedetectingInterruptedTail()
-                _canResume.value = true
+                raiseCanResume(loadResumeEpoch)
                 // Name the shape, not just the role: Case D (reply-less
                 // user tail) is the one that used to be invisible, so a
                 // field log has to be able to tell it from A/C.

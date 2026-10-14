@@ -87,6 +87,9 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         _isStreaming.value = true
         _canResume.value = false
         _error.value = null
+        // [T-android-resume-banner-race] Queue continuation is a fresh claim
+        // as well — bump so stale tails cannot re-raise the banner.
+        claimResumeEpoch()
 
         streamJob = launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")

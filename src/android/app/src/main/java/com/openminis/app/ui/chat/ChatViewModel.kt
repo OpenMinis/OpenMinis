@@ -1416,6 +1416,49 @@ class ChatViewModel(
     val canResume: StateFlow<Boolean> = _canResume.asStateFlow()
 
     /**
+     * [T-android-resume-banner-race] Monotonic epoch of the LAST send/resume
+     * claim on this VM. The race it closes:
+     *
+     *   1. user stops a run → the OLD loop's tail (context-full break,
+     *      stream-dropped break, turn-limit finalize) is still winding down
+     *      on its own coroutine;
+     *   2. user sends a NEW message → sendMessage sets `_canResume = false`
+     *      and synchronously claims `_isStreaming = true`, then WAITS for
+     *      the old run's concurrency slot;
+     *   3. the old tail finally reaches its `_canResume.value = true` —
+     *      which lands unconditionally and the resume banner is back over
+     *      a conversation that is already running a fresh turn.
+     *
+     * `_isStreaming` cannot gate this: during step 3 the OLD run also has
+     * `_isStreaming = true` (its own), so a naive check would suppress the
+     * banner on every legitimate stop. The epoch can: every send/resume
+     * bumps it, every raiser snapshots it when its run STARTS and only
+     * raises when the snapshot is still current. A tail that outlives its
+     * replacement silently drops its raise.
+     */
+    @Volatile private var resumeEpoch: Long = 0L
+
+    /** Bump the epoch — called by every path that claims a fresh run (send/resume). */
+    internal fun claimResumeEpoch() {
+        resumeEpoch += 1L
+    }
+
+    /** Read the current epoch — called when a run starts, to snapshot its claim. */
+    internal fun snapshotResumeEpoch(): Long = resumeEpoch
+
+    /**
+     * Raise the resume banner only if no newer send/resume has claimed the
+     * conversation since [fromEpoch] was snapshotted. Pure gate over the
+     * epoch; the decision itself is [ResumeBannerRace.mayRaise] so it is
+     * unit-testable without an Android VM.
+     */
+    internal fun raiseCanResume(fromEpoch: Long) {
+        if (ResumeBannerRace.mayRaise(fromEpoch, resumeEpoch)) {
+            _canResume.value = true
+        }
+    }
+
+    /**
      * [T-android-group-pause-badge-restamp] Marks the ONE `_canResume = true`
      * assignment that is a RE-DETECTION of an interruption that already
      * happened (loadSession finding a still-unfinished DB tail, possibly days
@@ -4505,6 +4548,9 @@ class ChatViewModel(
     override fun retryFromMessage(messageId: String) {
         if (_isStreaming.value) return
         _canResume.value = false
+        // [T-android-resume-banner-race] Retry is a fresh claim — bump so
+        // stale tails cannot re-raise the banner over this turn.
+        claimResumeEpoch()
         val messages = _messages.value
         val index = messages.indexOfFirst { it.id == messageId }
         if (index < 0) return
@@ -4967,6 +5013,8 @@ class ChatViewModel(
         assistantId: String,
         text: String,
         blocks: List<AssistantBlock>,
+        /** [T-android-resume-banner-race] The loop's epoch snapshot; see raiseCanResume. */
+        fromResumeEpoch: Long,
     ) {
         updateAssistantMessage(
             assistantId, text, false, blocks,
@@ -4998,7 +5046,7 @@ class ChatViewModel(
         // unconsumed re-detection mark left by a prior load so it cannot
         // suppress the re-stamp here.
         markLiveInterruption()
-        _canResume.value = true
+        raiseCanResume(fromResumeEpoch)
     }
 
     /**
