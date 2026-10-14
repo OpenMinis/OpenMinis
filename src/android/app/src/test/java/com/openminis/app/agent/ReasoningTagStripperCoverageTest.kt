@@ -77,4 +77,19 @@ class ReasoningTagStripperCoverageTest {
         val text = "before\n```\n<think>demo <b>bold"
         assertEquals(text, apply(text))
     }
+
+    @Test
+    fun `fence closing on the final line without trailing newline does not crash`() {
+        // Regression for StringIndexOutOfBoundsException "begin 0, end N,
+        // length N-1": when the closing fence is the last line and the text
+        // has no trailing newline, fenceSegments produced a range with
+        // last = text.length, and substring(range) asked for end = length+1.
+        // DeepSeek/QwQ replies end exactly like this.
+        val fenced = "body\n```kotlin\nval x = 1\n```"
+        assertEquals(fenced, apply(fenced))
+        // Same shape but the closing fence shares content that looks like a
+        // reasoning tag — the crash hit before the tag logic ever ran.
+        val withTag = "```\n<think>demo</think>\n```"
+        assertEquals(withTag, apply(withTag))
+    }
 }

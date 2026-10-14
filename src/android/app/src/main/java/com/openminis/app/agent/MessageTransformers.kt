@@ -48,7 +48,28 @@ object MessageTransformerChain {
     )
 
     /** Clean an assistant reply before it is replayed to the model. */
-    fun apply(text: String): String = transformers.fold(text) { t, tr -> tr.transform(t) }
+    fun apply(text: String): String = transformers.fold(text) { t, tr ->
+        // A transformer that throws on a pathological assistant turn (the
+        // reported StringIndexOutOfBoundsException — begin 0, end N, length
+        // N-1 — surfaces here, inside ReasoningTagStripper's code-fence /
+        // inline-code masking) must not kill the whole agent loop, and must
+        // not leave the exception's own message persisted as the turn's
+        // content (which is what made the crash recur on every replay of that
+        // message). Fall back to the text as it stood BEFORE this transformer
+        // and log the offending shape so the real boundary bug can be found:
+        // the transform is a cosmetic cleanup, the untransformed text is
+        // always safe to send.
+        try {
+            tr.transform(t)
+        } catch (e: Exception) {
+            com.openminis.app.logging.AppLogger.warning(
+                "MsgTransform",
+                "transformer ${tr.id} threw ${e.javaClass.simpleName}: ${e.message} " +
+                    "on text.length=${t.length} head=\"${t.take(120)}\" — using untransformed text",
+            )
+            t
+        }
+    }
 
     /**
      * Enrich a user message before send. Returns the original text when no
@@ -193,7 +214,18 @@ object MessageTransformerChain {
                 } else if (inFence && trimmed.startsWith(fenceMark) &&
                     trimmed.length == fenceMark.length
                 ) {
-                    out += segStart until lineEnd + 1 to true
+                    // The close fence is the last line with no trailing
+                    // newline: nl < 0 makes lineEnd == text.length, and
+                    // `until lineEnd + 1` would set range.last = text.length,
+                    // so the downstream text.substring(range) asks for
+                    // end = length + 1 → StringIndexOutOfBoundsException
+                    // (the reported "begin 0, end 376, length 375"; an
+                    // assistant turn whose closing ``` sits on the final
+                    // line without a trailing newline — DeepSeek/QwQ do
+                    // this). Coerce the upper bound to the text end: with a
+                    // real newline we keep it (lineEnd + 1 == nl + 1), without
+                    // one there is nothing past lineEnd to include anyway.
+                    out += segStart until (lineEnd + 1).coerceAtMost(text.length) to true
                     segStart = lineEnd + 1
                     inFence = false
                 }
