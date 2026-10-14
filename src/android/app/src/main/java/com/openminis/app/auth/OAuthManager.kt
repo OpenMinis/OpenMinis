@@ -105,6 +105,76 @@ abstract class OAuthManager(
             return !prefs.getString("oauth_${KEY_MANUAL_BEARER}_$instanceId", null).isNullOrEmpty()
         }
 
+        /**
+         * [T-oauth-keep-credentials] OAuth `error` codes that mean the refresh
+         * token itself is dead (revoked / expired / reused). Anything else is
+         * treated as transient and never costs the user their login.
+         */
+        val DEFAULT_FATAL_REFRESH_CODES = setOf(
+            "invalid_grant", "invalid_token", "invalid_request",
+            "unauthorized_client", "refresh_token_reused",
+        )
+
+        /**
+         * [T-oauth-keep-credentials] Whether the stored token bundle was
+         * REJECTED by the token endpoint (refresh got an `invalid_grant`-class
+         * answer) and is waiting for a fresh interactive login. The credential
+         * itself is kept — a rejected refresh must never cost the user their
+         * login.
+         *
+         * The mark is a SHA-256 fingerprint of the rejected bundle, never the
+         * credential, and it only applies while that exact bundle is stored, so
+         * a new login (or a restored backup) lapses it with no explicit clear.
+         * A stored manual bearer overrides it: that credential is still usable.
+         * Static for the same reason as [hasStoredCredential].
+         */
+        fun needsReauth(context: Context, instanceId: String): Boolean {
+            val prefs = com.openminis.app.util.EncryptedPrefsFactory
+                .safeCreate(context, "oauth_prefs")
+            return evaluateNeedsReauth(
+                mark = prefs.getString(needsReauthKey(instanceId), null),
+                blob = prefs.getString("oauth_tokens_$instanceId", null),
+                manualBearer = prefs.getString("oauth_${KEY_MANUAL_BEARER}_$instanceId", null),
+            )
+        }
+
+        /**
+         * Pure decision core of [needsReauth] (repo convention: framework
+         * entry points delegate to pure functions so the contract is
+         * unit-testable on the JVM):
+         *  - no mark → not flagged;
+         *  - mark but no stored bundle → not flagged (nothing to re-login);
+         *  - fingerprint mismatch → the marked bundle was replaced by a fresh
+         *    login/restore, the mark lapses;
+         *  - a stored manual bearer overrides the mark (still usable);
+         *  - otherwise the stored bundle is the rejected one → flagged.
+         */
+        internal fun evaluateNeedsReauth(mark: String?, blob: String?, manualBearer: String?): Boolean {
+            if (mark == null || blob == null) return false
+            if (tokenFingerprint(blob) != mark) return false
+            // A manual bearer never refreshes and stands in for the bundle.
+            return manualBearer.isNullOrEmpty()
+        }
+
+        private fun needsReauthKey(instanceId: String) = "oauth_needs_reauth_$instanceId"
+
+        private fun tokenFingerprint(blob: String): String =
+            MessageDigest.getInstance("SHA-256").digest(blob.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+
+        /**
+         * [T-oauth-keep-credentials] Structured "the token endpoint rejected
+         * this refresh token" test: an auth-rejection status, or an exact
+         * OAuth `error` code from the JSON body. No substring matching — a
+         * body that merely mentions `refresh_token` (e.g.
+         * `refresh_token_expiry_ms`) is not a rejection.
+         */
+        fun isRefreshRejected(status: Int, body: String, fatalErrorCodes: Set<String>): Boolean {
+            if (status == 400 || status == 401 || status == 403) return true
+            val code = try { JSONObject(body).optString("error", "") } catch (_: Exception) { "" }
+            return code.lowercase() in fatalErrorCodes
+        }
+
         /** Create the appropriate OAuthManager for a provider instance. */
         fun forInstance(context: Context, instance: com.openminis.app.data.model.ProviderInstance): OAuthManager? {
             return when (instance.providerType) {
@@ -320,6 +390,11 @@ abstract class OAuthManager(
 
             if (responseCode !in 200..299) {
                 Log.e(TAG, "Token refresh failed: $responseCode")
+                // [T-oauth-keep-credentials] A rejected refresh token marks the
+                // bundle for re-login; it never deletes the credential.
+                if (isRefreshRejected(responseCode, responseBody, DEFAULT_FATAL_REFRESH_CODES)) {
+                    markNeedsReauth(refreshToken)
+                }
                 return@withContext false
             }
 
@@ -365,11 +440,12 @@ abstract class OAuthManager(
                 Log.i(TAG, "Refresh reported failure but a non-expired token is stored — keeping it")
                 return currentToken
             }
-            // Refresh failed — if the token CURRENTLY stored is expired too, the
-            // credential really is dead: clear it.
+            // [T-oauth-keep-credentials] Refresh failed and the stored token is
+            // expired too: nothing usable to return — but the credential is
+            // KEPT. A rejection was already marked inside refreshToken(); a
+            // transient failure (network, 5xx) must never cost the login.
             if (currentExpireAt > 0 && System.currentTimeMillis() >= currentExpireAt) {
-                Log.w(TAG, "Token expired and refresh failed — clearing credentials")
-                logout()
+                Log.w(TAG, "Token expired and refresh failed — keeping credentials")
                 return null
             }
             return currentToken.ifEmpty { token }
@@ -387,7 +463,37 @@ abstract class OAuthManager(
         getEncryptedPrefs().edit()
             .remove("oauth_tokens_$instanceId")
             .remove("oauth_${KEY_MANUAL_BEARER}_$instanceId")
+            .remove(needsReauthKey(instanceId))
             .apply()
+    }
+
+    /** See the companion [needsReauth]. */
+    fun needsReauth(): Boolean = needsReauth(context, instanceId)
+
+    /**
+     * [T-oauth-keep-credentials] Called INSTEAD of [logout] when the token
+     * endpoint rejects [staleRefreshToken]. Compare-before-mark: when the
+     * stored bundle no longer carries that refresh token, a concurrent
+     * refresh already rotated it and this rejection is stale — marking would
+     * flag a perfectly good fresh login.
+     */
+    protected fun markNeedsReauth(staleRefreshToken: String) {
+        val blob = loadOAuthString("tokens") ?: return
+        val current = try {
+            JSONObject(blob).optString("refresh_token", "")
+        } catch (_: Exception) { "" }
+        if (current != staleRefreshToken) {
+            Log.w(TAG, "Stale refresh rejection ignored — token already rotated; not marking")
+            return
+        }
+        getEncryptedPrefs().edit()
+            .putString(needsReauthKey(instanceId), tokenFingerprint(blob))
+            .apply()
+        Log.w(TAG, "Refresh token rejected — marked for re-login, credentials kept")
+    }
+
+    private fun clearNeedsReauth() {
+        getEncryptedPrefs().edit().remove(needsReauthKey(instanceId)).apply()
     }
 
     // Token storage
@@ -398,6 +504,7 @@ abstract class OAuthManager(
         }
         getEncryptedPrefs().edit()
             .putString("oauth_tokens_$instanceId", json.toString())
+            .remove(needsReauthKey(instanceId))
             .apply()
     }
 
@@ -408,6 +515,9 @@ abstract class OAuthManager(
 
     protected fun saveOAuthString(key: String, value: String) {
         getEncryptedPrefs().edit().putString("oauth_${key}_$instanceId", value).apply()
+        // A new token bundle supersedes any needs-re-login mark (Claude /
+        // Gemini / Kimi persist their bundles through this path).
+        if (key == "tokens") clearNeedsReauth()
     }
 
     protected fun loadOAuthString(key: String): String? {

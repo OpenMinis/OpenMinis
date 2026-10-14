@@ -822,6 +822,11 @@ private fun OAuthCredentialBlock(
     // so the masked token / connected dot refresh together. Mirrors iOS
     // ProviderInstanceDetailView's `oauthRefreshTrigger.toggle()`.
     var displayedKey by remember(instance.id) { mutableStateOf(storedKey) }
+    // [T-oauth-keep-credentials] Rejected refresh → red dot + hint instead of
+    // the green one; cleared automatically when a fresh bundle lands.
+    var needsReauth by remember(instance.id) {
+        mutableStateOf(com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id))
+    }
     var isAuthenticating by remember(instance.id) { mutableStateOf(false) }
     // [T-kimi-oauth] Device-code dialog state for Kimi re-auth (see
     // AddProviderScreen.OAuthConfigSection for the rationale).
@@ -858,8 +863,18 @@ private fun OAuthCredentialBlock(
                 modifier = Modifier
                     .padding(horizontal = 8.dp)
                     .size(8.dp)
-                    .background(Color(0xFF34C759), CircleShape),
+                    .background(
+                        if (needsReauth) Color(0xFFFF3B30) else Color(0xFF34C759),
+                        CircleShape,
+                    ),
             )
+            if (needsReauth) {
+                Text(
+                    "Login expired — sign in again",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         } else {
             Spacer(modifier = Modifier.weight(1f))
             Text(
@@ -930,6 +945,9 @@ private fun OAuthCredentialBlock(
                         // without needing the parent to recompose.
                         if (token != null) {
                             displayedKey = providerRepository.loadApiKey(instance.id) ?: token
+                            // [T-oauth-keep-credentials] Fresh bundle landed —
+                            // clear the re-login flag so the dot turns green.
+                            needsReauth = false
                             AppLogger.info(TAG, "OAuth signed in for ${instance.id}")
                         }
                     } catch (e: Exception) {

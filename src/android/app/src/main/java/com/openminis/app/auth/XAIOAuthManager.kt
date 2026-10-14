@@ -376,6 +376,11 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
             }
             if (code !in 200..299) {
                 Log.e(TAG, "xAI refresh failed: $code")
+                // [T-oauth-keep-credentials] A rejected refresh token marks the
+                // bundle for re-login; it never deletes the credential.
+                if (OAuthManager.isRefreshRejected(code, body, OAuthManager.DEFAULT_FATAL_REFRESH_CODES)) {
+                    markNeedsReauth(refresh)
+                }
                 return@withContext false
             }
             val json = JSONObject(body)

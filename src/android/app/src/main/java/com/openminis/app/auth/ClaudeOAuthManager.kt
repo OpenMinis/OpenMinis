@@ -106,7 +106,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     enum class RefreshOutcome {
         /** New access token is in storage. */
         SUCCESS,
-        /** Refresh token is invalid/revoked (HTTP 400/401/403 or invalid_grant). Credentials cleared; user must log in again. */
+        /** Refresh token is invalid/revoked (HTTP 400/401/403 or invalid_grant). Credentials kept but marked for re-login. */
         INVALID_GRANT,
         /** Transient network/5xx error. Existing token kept; caller may retry later. */
         TRANSIENT,
@@ -242,8 +242,10 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
      * Mirrors iOS `ClaudeOAuthManager.validAccessToken` error handling:
      *
      *  - `INVALID_GRANT` — HTTP 400/401/403 or body mentions `invalid_grant`:
-     *    stored credentials are cleared (iOS parity: `deleteOAuthToken`).
-     *    Caller must re-run the OAuth login flow.
+     *    stored credentials are KEPT but marked for re-login
+     *    ([T-oauth-keep-credentials]; the mark is a bundle fingerprint, so a
+     *    fresh login lapses it automatically). Caller must re-run the OAuth
+     *    login flow.
      *  - `TRANSIENT` — network/timeout/5xx: credentials kept intact; caller
      *    may retry. The still-valid access token (if any) remains usable.
      *  - `NO_TOKEN` — no refresh token stored (not logged in).
@@ -308,14 +310,17 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     return@withLock RefreshOutcome.SUCCESS
                 }
 
-                // Classify failure.
-                val bodyLower = responseBody.lowercase()
-                val isInvalidGrant = responseCode == 400 || responseCode == 401 || responseCode == 403 ||
-                    bodyLower.contains("invalid_grant") ||
-                    bodyLower.contains("refresh_token")
+                // Classify failure. [T-oauth-keep-credentials] Structured
+                // (status + exact `error` code) — the old bare
+                // `refresh_token` substring also fired on benign bodies.
+                val isInvalidGrant = OAuthManager.isRefreshRejected(
+                    responseCode, responseBody,
+                    setOf("invalid_grant", "invalid_token", "invalid_request", "unauthorized_client"),
+                )
                 if (isInvalidGrant) {
-                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — clearing credentials")
-                    logout()
+                    // Never delete: mark for re-login and keep the bundle.
+                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — marking for re-login")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 // 5xx or unexpected code — keep credentials, let caller retry.
@@ -351,7 +356,9 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
             RefreshOutcome.SUCCESS ->
                 loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
             RefreshOutcome.INVALID_GRANT -> {
-                // logout() already ran inside refreshTokenClassified.
+                // [T-oauth-keep-credentials] The credential is kept and marked
+                // for re-login inside refreshTokenClassified; nothing usable
+                // to return until the user signs in again.
                 null
             }
             RefreshOutcome.TRANSIENT -> {

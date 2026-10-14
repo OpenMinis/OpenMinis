@@ -1000,6 +1000,11 @@ class ProviderRepository(private val context: Context) {
         // prefs directly also covers provider types that
         // OAuthManager.forInstance deliberately omits (notably gemini),
         // which would otherwise be misreported as uncredentialed.
+        // [T-oauth-keep-credentials] A token bundle whose refresh was rejected
+        // is kept (never auto-deleted) but is not usable, so routing skips it
+        // just as it skipped the deleted bundle before. (needsReauth is already
+        // false when a manual bearer is stored — that credential still works.)
+        if (com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)) return false
         return com.openminis.app.auth.OAuthManager.hasStoredCredential(context, instance.id)
     }
 

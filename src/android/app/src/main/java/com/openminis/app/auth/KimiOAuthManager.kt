@@ -255,7 +255,6 @@ class KimiOAuthManager(
                     Log.i(TAG, "Token refresh successful (expires in ${expiresIn}s)")
                     return@withLock RefreshOutcome.SUCCESS
                 }
-
                 // Classify like ClaudeOAuthManager: hard 4xx auth failures or
                 // an explicit invalid-grant marker → INVALID_GRANT; 5xx /
                 // anything else → TRANSIENT (credentials kept).
@@ -264,18 +263,19 @@ class KimiOAuthManager(
                     bodyLower.contains("invalid_grant") ||
                     bodyLower.contains("refresh_token_reused")
                 if (isInvalidGrant) {
-                    // [T-oauth-refresh-race] Compare-before-delete: only clear
-                    // credentials when the persisted refresh token is STILL
+                    // [T-oauth-refresh-race] Compare-before-delete: only treat as
+                    // a real rejection when the persisted refresh token is STILL
                     // the one this failed request used. A concurrent winner
-                    // may have rotated it — deleting then would destroy the
-                    // fresh login (iOS 36d506ca).
+                    // may have rotated it — flagging then would mark the
+                    // fresh login as dead (iOS 36d506ca).
                     val currentStored = loadStoredTokens()?.optString("refresh_token", "")
                     if (!KimiDeviceFlow.shouldDeleteAfterInvalidGrant(refreshTokenValue, currentStored)) {
                         Log.w(TAG, "Stale invalid_grant ignored — refresh token was rotated concurrently; keeping new credentials")
                         return@withLock RefreshOutcome.SUCCESS
                     }
-                    Log.e(TAG, "Refresh token invalid — clearing credentials")
-                    logout()
+                    // [T-oauth-keep-credentials] Never delete: mark for re-login.
+                    Log.e(TAG, "Refresh token invalid — marking for re-login, credentials kept")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 Log.w(TAG, "Token refresh transient failure — keeping token")
@@ -302,7 +302,7 @@ class KimiOAuthManager(
         when (refreshTokenClassified()) {
             RefreshOutcome.SUCCESS ->
                 loadStoredTokens()?.optString("access_token", "")?.ifEmpty { null }
-            RefreshOutcome.INVALID_GRANT -> null // logout() already ran
+            RefreshOutcome.INVALID_GRANT -> null // [T-oauth-keep-credentials] kept + marked for re-login
             RefreshOutcome.TRANSIENT -> {
                 // [T-oauth-refresh-race] `expireAt`/`token` are PRE-refresh values
                 // — re-read the store before declaring the credential dead; a

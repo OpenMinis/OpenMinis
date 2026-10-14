@@ -245,18 +245,19 @@ class GeminiOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                     Log.i(TAG, "Gemini token refresh successful. Expires in ${expiresIn}s")
                     return@withLock RefreshOutcome.SUCCESS
                 }
-
                 // Classify non-2xx response. Google's token endpoint returns 400
                 // with `error=invalid_grant` for revoked/expired refresh tokens,
                 // and `error=invalid_token` for truly malformed tokens. Both are
                 // non-recoverable; user must re-auth.
-                val bodyLower = responseBody.lowercase()
-                val isInvalidGrant = responseCode == 400 || responseCode == 401 || responseCode == 403 ||
-                    bodyLower.contains("invalid_grant") ||
-                    bodyLower.contains("invalid_token")
+                // [T-oauth-keep-credentials] Structured classification, and the
+                // rejected bundle is marked for re-login, never deleted.
+                val isInvalidGrant = OAuthManager.isRefreshRejected(
+                    responseCode, responseBody,
+                    setOf("invalid_grant", "invalid_token", "invalid_request"),
+                )
                 if (isInvalidGrant) {
-                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — clearing credentials")
-                    logout()
+                    Log.e(TAG, "Refresh token invalid ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — marking for re-login")
+                    markNeedsReauth(refreshTokenValue)
                     return@withLock RefreshOutcome.INVALID_GRANT
                 }
                 Log.w(TAG, "Gemini token refresh transient failure ($responseCode): ${OAuthManager.sanitizeBody(responseBody)} — keeping token")

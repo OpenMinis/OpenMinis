@@ -357,6 +357,10 @@ fun ProviderListScreen(
                                 // configured-by-definition (mirrors iOS).
                                 !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
                             }
+                            // [T-oauth-keep-credentials] Red dot when the stored
+                            // bundle was rejected and awaits re-login.
+                            val needsReauth = com.openminis.app.auth.OAuthManager
+                                .needsReauth(context, instance.id)
                             // Lift the dragged row above its neighbours so it
                             // reads as "picked up" (matches ModelGroupsScreen).
                             val elevation by animateDpAsState(
@@ -402,6 +406,7 @@ fun ProviderListScreen(
                                         modelCount = modelCount,
                                         apiKey = apiKey,
                                         isConfigured = isConfigured,
+                                        needsReauth = needsReauth,
                                         pinned = instance.pinned,
                                         onTogglePinned = {
                                             providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -550,6 +555,9 @@ private fun ProviderSwipeableRow(
     } else {
         !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
     }
+    // [T-oauth-keep-credentials] Red dot when the stored bundle was rejected
+    // and awaits re-login (static read — covers gemini too).
+    val needsReauth = com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)
     SwipeRowActions(
         actions = listOf(
             SwipeRowAction(
@@ -573,6 +581,7 @@ private fun ProviderSwipeableRow(
             modelCount = modelCount,
             apiKey = apiKey,
             isConfigured = isConfigured,
+            needsReauth = needsReauth,
             pinned = instance.pinned,
             onTogglePinned = {
                 providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -589,6 +598,7 @@ private fun ProviderInstanceRow(
     modelCount: Int,
     apiKey: String?,
     isConfigured: Boolean,
+    needsReauth: Boolean = false,
     pinned: Boolean,
     onTogglePinned: () -> Unit,
     onClick: () -> Unit,
@@ -607,7 +617,13 @@ private fun ProviderInstanceRow(
             modifier = Modifier
                 .size(8.dp)
                 .background(
-                    color = if (isActive) Color(0xFF34C759) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f),
+                    color = when {
+                        // [T-oauth-keep-credentials] Rejected bundle awaiting
+                        // re-login: red, regardless of enabled state.
+                        needsReauth -> Color(0xFFFF3B30)
+                        isActive -> Color(0xFF34C759)
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f)
+                    },
                     shape = CircleShape,
                 ),
         )
