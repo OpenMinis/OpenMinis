@@ -375,6 +375,29 @@ class AgentForegroundService : Service() {
             true
         } catch (t: Throwable) {
             Log.w(TAG, "applyForeground failed: ${t.message}")
+            // The service was launched with startForegroundService(), so the
+            // system has a hard ~5s deadline for a successful startForeground().
+            // That deadline is queued the moment the START call lands — it is
+            // NOT lifted by stopSelf(), which only tears down the component.
+            // If startForeground() threw (a forked SystemUI rejecting the
+            // notification, a missing channel after restore, a transient
+            // DeadObject), swallowing the error and just returning false leaves
+            // the deadline armed against a service that will never anchor: the
+            // caller's stopSelf() destroys it, and the system then fires
+            // ForegroundServiceDidNotStartInTimeException and kills the app.
+            // Dropping out of the foreground state explicitly is the only
+            // call that retracts that pending requirement — it tells the
+            // ActivityManager "this service is no longer expected to go
+            // foreground", so the already-destroyed component has nothing left
+            // to answer for.
+            try {
+                androidx.core.app.ServiceCompat.stopForeground(
+                    this,
+                    androidx.core.app.ServiceCompat.STOP_FOREGROUND_REMOVE,
+                )
+            } catch (t2: Throwable) {
+                Log.w(TAG, "stopForeground after applyForeground failure also failed: ${t2.message}")
+            }
             false
         }
     }

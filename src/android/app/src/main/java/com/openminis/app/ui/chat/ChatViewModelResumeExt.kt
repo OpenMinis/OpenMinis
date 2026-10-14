@@ -43,33 +43,42 @@ fun ChatViewModel.resume() {
     // behind the input bar.
     _forceScrollToBottom.tryEmit(Unit)
 
-    // If history ends with assistant (Case 2: text-cancel committed a
-    // partial assistant turn), append a continue reminder as a user
-    // message. If it ends with user tool_result (Case 1), it's already
-    // a valid starting point for the next API call — no reminder needed.
-    val historyEndsWithAssistant =
-        agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
-    if (historyEndsWithAssistant) {
-        val reminder =
-            "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
-        val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
-        appendBoundedHistory(
-            LLMMessage(
-                role = LLMMessage.Role.USER,
-                content = reminder,
-                contentParts = parts,
+    viewModelScope.launch {
+        // Rebuild agentHistory from the DB before continuing — a fresh
+        // sendMessage() does exactly this (rebuildAgentHistoryFromDatabase),
+        // which is why a normal send never carries stale context while a
+        // Resume could. The in-memory agentHistory lags the DB whenever the
+        // process was killed mid-turn and the ViewModel was restored with a
+        // partial in-memory tail, or any path committed rows the in-memory
+        // list missed. The DB is the authoritative store; trusting memory
+        // here is how a resume picks up an old, pre-interruption context.
+        rebuildAgentHistoryFromDatabase(activeSessionId)
+        // If history ends with assistant (Case 2: text-cancel committed a
+        // partial assistant turn), append a continue reminder as a user
+        // message. If it ends with user tool_result (Case 1), it's already
+        // a valid starting point for the next API call — no reminder needed.
+        val historyEndsWithAssistant =
+            agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT
+        if (historyEndsWithAssistant) {
+            val reminder =
+                "<system-reminder>The user stopped the previous response but now wants to continue. Pick up exactly where you left off.</system-reminder>"
+            val parts = listOf<AgentContentPart>(AgentContentPart.Text(reminder))
+            appendBoundedHistory(
+                LLMMessage(
+                    role = LLMMessage.Role.USER,
+                    content = reminder,
+                    contentParts = parts,
+                )
             )
-        )
-        viewModelScope.launch(Dispatchers.IO) {
-            val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
-            val persisted = chatRepository.appendMessage(activeSessionId, "user", partsJson)
-            withContext(Dispatchers.Main.immediate) {
-                notePersistedUiRow(null, persisted.id)
+            launch(Dispatchers.IO) {
+                val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
+                val persisted = chatRepository.appendMessage(activeSessionId, "user", partsJson)
+                withContext(Dispatchers.Main.immediate) {
+                    notePersistedUiRow(null, persisted.id)
+                }
             }
         }
-    }
 
-    viewModelScope.launch {
         val baseSystemPrompt = buildSystemPrompt()
         val systemPrompt =
             if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
