@@ -732,12 +732,13 @@ object ModelsDevApi {
     private fun loadBundledRegistry(): Map<String, ProviderEntry>? {
         val ctx = appContext ?: return null
         return try {
-            val jsonStr = runCatching {
-                ctx.assets.open("models-dev-api.json.gzip").use { raw ->
-                    java.util.zip.GZIPInputStream(raw).bufferedReader().readText()
-                }
-            }.getOrElse {
-                ctx.assets.open("models-dev-api.json").bufferedReader().use { it.readText() }
+            // [T-apk-size] Only the gzipped catalog ships in the APK
+            // (~416KB vs 4.1MB plaintext). A local asset that fails to
+            // gunzip means the APK is corrupt; there is no second bundled
+            // copy to fall back to — the caller treats null as "use the
+            // network path", which is the real refresh mechanism anyway.
+            val jsonStr = ctx.assets.open("models-dev-api.json.gzip").use { raw ->
+                java.util.zip.GZIPInputStream(raw).bufferedReader().readText()
             }
             val parsed = parseRegistry(jsonStr)
             Log.d(TAG, "Loaded bundled models.dev registry: ${parsed?.size ?: 0} providers")

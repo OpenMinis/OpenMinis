@@ -9,10 +9,11 @@ import java.io.File
  *
  * The native layer reads its dictionaries from a directory path, but the two
  * dict files ship inside the APK's Assets, which have no filesystem path. So on
- * first use we copy `jieba/jieba.dict.utf8` + `jieba/hmm_model.utf8` out of
- * Assets into `filesDir/jieba/` and hand that directory to `nativeInit`. The
- * copy is a one-time cost gated by a version stamp in SharedPreferences — bump
- * [DICT_VERSION] to force a re-extract when the shipped dictionaries change.
+ * first use we gunzip `jieba/jieba.dict.utf8.gz` + `jieba/hmm_model.utf8.gz`
+ * out of Assets into `filesDir/jieba/` and hand that directory to
+ * `nativeInit`. The copy is a one-time cost gated by a version stamp in
+ * SharedPreferences — bump [DICT_VERSION] to force a re-extract when the
+ * shipped dictionaries change.
  *
  * All native calls are serialized inside the C++ layer (a global mutex); on this
  * side [ensureInitialized] is `@Synchronized` so concurrent first-callers race
@@ -101,17 +102,25 @@ internal class JiebaEngine(context: Context) {
             throw java.io.IOException("Cannot create dict dir: $targetDir")
         }
         for (name in DICT_FILES) {
-            copyAsset("jieba/$name", File(targetDir, name))
+            // [T-apk-size] Dictionaries ship gzipped in assets (~5.4MB →
+            // ~2.1MB); they are gunzipped onto disk here so the native side
+            // keeps reading the plain file names. DICT_VERSION stays at 1:
+            // the dictionary *content* is unchanged, and already-extracted
+            // copies in filesDir remain valid (allPresent short-circuits
+            // before assets are touched).
+            copyAsset("jieba/$name.gz", File(targetDir, name))
         }
         prefs.edit().putInt(KEY_DICT_VERSION, DICT_VERSION).apply()
         return targetDir
     }
 
-    /** Stream-copy one Asset to [dest] (Assets can't be read by path). */
+    /** Gunzip one Asset to [dest] (Assets can't be read by path). */
     private fun copyAsset(assetPath: String, dest: File) {
         appContext.assets.open(assetPath).use { input ->
-            dest.outputStream().use { output ->
-                input.copyTo(output, bufferSize = 64 * 1024)
+            java.util.zip.GZIPInputStream(input).use { gz ->
+                dest.outputStream().use { output ->
+                    gz.copyTo(output, bufferSize = 64 * 1024)
+                }
             }
         }
     }
