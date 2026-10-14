@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.outlined.Construction
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Info
@@ -177,13 +178,29 @@ fun MCPIntegrationsScreen(
                     SettingsRow(
                         title = server.id,
                         subtitle = server.transportSummary.takeIf { it.isNotBlank() },
-                        showChevron = true,
                         showDivider = index < servers.size - 1,
-                        // FIX 1: plain tap opens the edit form (was delete-confirm).
-                        // Delete stays reachable from inside the edit sheet.
-                        onClick = { onOpenTools(server) },
+                        // [T-mcp-fix-delete-entry] Plain tap opens the EDIT
+                        // form (delete lives there). A previous change rewired
+                        // this to the tools screen, which left the edit sheet
+                        // — and with it the delete button — with zero entry
+                        // points: editServer was never set anywhere.
+                        onClick = { editServer = server },
                         trailing = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                // Tools list (per-tool enable/disable) stays
+                                // one tap away without stealing the edit entry.
+                                IconButton(
+                                    onClick = { onOpenTools(server) },
+                                    modifier = Modifier.size(32.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.Construction,
+                                        contentDescription = stringResource(R.string.mcp_tools_title, server.id),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                                Spacer(Modifier.width(4.dp))
                                 Icon(
                                     transportIcon,
                                     contentDescription = null,

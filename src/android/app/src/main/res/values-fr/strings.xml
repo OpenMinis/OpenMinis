@@ -1786,6 +1786,8 @@
     <string name="compact_progress_split">Compactage… %1$d s · résumé par segments (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Suites de dev, outils locaux et OpenAPI en ligne</string>
+    <string name="mcp_tools_refresh">Actualiser les outils</string>
+    <string name="mcp_delete_server">Supprimer le serveur</string>
     <string name="dev_suite_section_header">Environnements de développement</string>
     <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau. Réseau restreint ? Exécutez minis-devsuite-offline-list pour la liste d\'import hors ligne.</string>
     <string name="dev_suite_online_header">Outils en ligne</string>

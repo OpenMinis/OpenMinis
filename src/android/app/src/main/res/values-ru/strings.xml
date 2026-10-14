@@ -1794,6 +1794,8 @@
     <string name="compact_progress_split">Сжатие… %1$d с · сводка по частям (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Наборы для разработки, локальные и онлайн OpenAPI-инструменты</string>
+    <string name="mcp_tools_refresh">Обновить инструменты</string>
+    <string name="mcp_delete_server">Удалить сервер</string>
     <string name="dev_suite_section_header">Наборы сред разработки</string>
     <string name="dev_suite_section_footer">Рецепты устанавливают тулчейны по требованию внутри песочницы — полезная нагрузка больше не вшита в приложение, первая сборка требует сеть. Ограниченная сеть? Запустите minis-devsuite-offline-list — он выведет список для офлайн-импорта.</string>
     <string name="dev_suite_online_header">Онлайн-инструменты</string>

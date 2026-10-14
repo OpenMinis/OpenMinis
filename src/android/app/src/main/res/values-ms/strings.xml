@@ -1784,6 +1784,8 @@
     <string name="chat_input_placeholder_hint_5">Kekunci Enter boleh hantar atau baris baharu</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Suit dev, alat tempatan dan alat OpenAPI dalam talian</string>
+    <string name="mcp_tools_refresh">Muat semula alat</string>
+    <string name="mcp_delete_server">Padam pelayan</string>
     <string name="dev_suite_section_header">Suit persekitaran pembangunan</string>
     <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian. Rangkaian terhad? Jalankan minis-devsuite-offline-list untuk senarai import luar talian.</string>
     <string name="dev_suite_online_header">Alat dalam talian</string>

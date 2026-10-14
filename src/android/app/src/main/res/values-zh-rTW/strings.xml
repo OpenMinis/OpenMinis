@@ -1875,6 +1875,8 @@
     <string name="appearance_show_mic_button_subtitle">輸入框的語音輸入按鈕。語音模式本身始終可從應用圖示進入。</string>
     <string name="chat_process_step_view">查看</string>
     <string name="plugin_market_subtitle">開發環境套件、本地工具與線上 OpenAPI 工具</string>
+    <string name="mcp_tools_refresh">重新整理工具清單</string>
+    <string name="mcp_delete_server">刪除伺服器</string>
     <string name="dev_suite_section_header">開發環境套件</string>
     <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。 網路受限可執行 minis-devsuite-offline-list 產生離線匯入清單。</string>
     <string name="dev_suite_online_header">線上工具</string>

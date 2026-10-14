@@ -1789,6 +1789,8 @@
     <string name="chat_input_placeholder_hint_5">Tombol Enter bisa diatur: kirim atau baris baru</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Suit dev, alat lokal, dan alat OpenAPI daring</string>
+    <string name="mcp_tools_refresh">Muat ulang alat</string>
+    <string name="mcp_delete_server">Hapus server</string>
     <string name="dev_suite_section_header">Suite lingkungan pengembangan</string>
     <string name="dev_suite_section_footer">Resep memasang toolchain sesuai permintaan di dalam sandbox — payload tidak lagi dibundel di aplikasi, pemasangan pertama butuh jaringan. Jaringan terbatas? Jalankan minis-devsuite-offline-list untuk daftar impor offline.</string>
     <string name="dev_suite_online_header">Alat daring</string>

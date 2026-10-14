@@ -1786,6 +1786,8 @@
     <string name="compact_progress_split">Wird verdichtet… %1$d s · Zusammenfassung in Segmenten (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Dev-Suites, lokale Tools und Online-OpenAPI-Tools</string>
+    <string name="mcp_tools_refresh">Tools aktualisieren</string>
+    <string name="mcp_delete_server">Server löschen</string>
     <string name="dev_suite_section_header">Entwicklungsumgebungen</string>
     <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz. Netzwerk eingeschränkt? minis-devsuite-offline-list listet die Dateien für den Offline-Import auf.</string>
     <string name="dev_suite_online_header">Online-Tools</string>

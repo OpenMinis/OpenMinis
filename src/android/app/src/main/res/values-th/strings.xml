@@ -1784,6 +1784,8 @@
     <string name="chat_input_placeholder_hint_5">ตั้งปุ่ม Enter ให้ส่งหรือขึ้นบรรทัดใหม่ได้</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">ชุดพัฒนา เครื่องมือภายใน และเครื่องมือ OpenAPI ออนไลน์</string>
+    <string name="mcp_tools_refresh">รีเฟรชเครื่องมือ</string>
+    <string name="mcp_delete_server">ลบเซิร์ฟเวอร์</string>
     <string name="dev_suite_section_header">ชุดสภาพแวดล้อมสำหรับพัฒนา</string>
     <string name="dev_suite_section_footer">สูตรติดตั้ง toolchain ตามความต้องการภายในแซนด์บ็อกซ์ — เพย์โหลดไม่ถูกฝังในแอปอีกต่อไป การติดตั้งครั้งแรกต้องใช้เน็ตเวิร์ก เน็ตเวิร์กจำกัด? เรียก minis-devsuite-offline-list เพื่อสร้างรายการนำเข้าแบบออฟไลน์</string>
     <string name="dev_suite_online_header">เครื่องมือออนไลน์</string>

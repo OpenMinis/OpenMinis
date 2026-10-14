@@ -303,6 +303,8 @@
     <string name="mcp_section_presets">预设</string>
     <string name="mcp_section_presets_footer">点一下就加入。Git 是官方 Python 的 mcp-server-git，提供 status、diff、log、commit、blame。点下面的服务器可查看工具。</string>
     <string name="mcp_manage">管理</string>
+    <string name="mcp_tools_refresh">刷新工具列表</string>
+    <string name="mcp_delete_server">删除服务器</string>
     <string name="mcp_tools_loading">正在读取工具…</string>
     <string name="mcp_empty_title">暂无 MCP 服务器</string>
     <string name="mcp_empty_action">点击 + 按钮添加服务器。</string>

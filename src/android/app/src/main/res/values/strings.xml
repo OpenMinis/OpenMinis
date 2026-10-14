@@ -337,6 +337,8 @@
     <string name="mcp_section_presets">Presets</string>
     <string name="mcp_section_presets_footer">One tap adds a server. Git is the official Python mcp-server-git (status, diff, log, commit, blame). Tap a server below to see its tools.</string>
     <string name="mcp_manage">Manage</string>
+    <string name="mcp_tools_refresh">Refresh tools</string>
+    <string name="mcp_delete_server">Delete server</string>
     <string name="mcp_tools_loading">Loading tools…</string>
     <string name="mcp_empty_title">No MCP servers</string>
     <string name="mcp_empty_action">Add a server with the + button.</string>

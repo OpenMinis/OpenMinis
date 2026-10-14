@@ -582,6 +582,11 @@ class MCPRepository(private val context: Context) {
             append("To use: call the native `mcp` tool — {\"action\":\"tools\",\"server\":\"<server>\"} to list,\n")
             append("{\"action\":\"call\",\"server\":\"<server>\",\"tool\":\"<tool>\",\"arguments\":{…}} to invoke.\n")
             append("Fallback (interactive terminal / unusual cases): `minis-mcp-cli tools <server>`, `minis-mcp-cli call <server> <tool> [args]`.\n")
+            // [T-mcp-builtin-servers] Zero-dependency Python servers bundled in
+            // the sandbox (/usr/local/lib/minis-mcp-servers/, ported from
+            // taixu). Suggest enabling them when the task fits — they need
+            // only python3, no pip/npx/network.
+            append("Zero-dependency built-in servers, one tap to enable in 设置 → MCP: minis_git (git status/diff/log/commit/blame), minis_sqlite (SQLite queries), minis_codegraph (symbol/caller/callee/impact index — far cheaper than grep for code exploration), minis_apktool (APK decompile/audit, needs android-suite), minis_websearch (multi-engine web search + page text, no API key).\n")
             // [T-mcp-dollar-var-systemprompt-android] Document the $$VAR runtime
             // env placeholder (mirrors iOS 5fa9e6a9). Agent-facing English — not
             // localized; wording must match iOS verbatim.

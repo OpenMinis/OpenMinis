@@ -1786,6 +1786,8 @@
     <string name="compact_progress_split">Compactando… %1$d s · resumiendo por segmentos (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Suites de desarrollo, herramientas locales y OpenAPI en línea</string>
+    <string name="mcp_tools_refresh">Actualizar herramientas</string>
+    <string name="mcp_delete_server">Eliminar servidor</string>
     <string name="dev_suite_section_header">Entornos de desarrollo</string>
     <string name="dev_suite_section_footer">Las recetas instalan toolchains bajo demanda en el sandbox — los payloads ya no van en la APK; el primer montaje necesita red. ¿Red restringida? Ejecute minis-devsuite-offline-list para obtener la lista de importación sin conexión.</string>
     <string name="dev_suite_online_header">Herramientas en línea</string>

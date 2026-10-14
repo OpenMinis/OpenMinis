@@ -1783,6 +1783,8 @@
     <string name="compact_progress_split">압축 중… %1$d초 · 분할 요약 중(%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">개발 스위트, 로컬 도구 및 온라인 OpenAPI 도구</string>
+    <string name="mcp_tools_refresh">도구 새로고침</string>
+    <string name="mcp_delete_server">서버 삭제</string>
     <string name="dev_suite_section_header">개발 환경 스위트</string>
     <string name="dev_suite_section_footer">레시피는 필요할 때 샌드박스 안에 툴체인을 설치합니다——페이로드는 더 이상 앱에 포함되지 않으며, 첫 설치에는 네트워크가 필요합니다. 네트워크가 제한된 환경이라면 minis-devsuite-offline-list를 실행해 오프라인 가져오기 목록을 생성하세요.</string>
     <string name="dev_suite_online_header">온라인 도구</string>

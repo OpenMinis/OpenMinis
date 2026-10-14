@@ -1792,6 +1792,8 @@
     <string name="chat_input_placeholder_hint_5">Enter może wysyłać lub dodawać nowy wiersz</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Pakiety dev, narzędzia lokalne i online OpenAPI</string>
+    <string name="mcp_tools_refresh">Odśwież narzędzia</string>
+    <string name="mcp_delete_server">Usuń serwer</string>
     <string name="dev_suite_section_header">Pakiety środowisk programistycznych</string>
     <string name="dev_suite_section_footer">Przepisy instalują toolchainy na żądanie w sandboxie — ładunki nie są już wbudowane w aplikację, pierwsza instalacja wymaga sieci. Ograniczona sieć? Uruchom minis-devsuite-offline-list, aby uzyskać listę importu offline.</string>
     <string name="dev_suite_online_header">Narzędzia online</string>

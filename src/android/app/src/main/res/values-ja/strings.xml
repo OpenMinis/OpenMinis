@@ -1783,6 +1783,8 @@
     <string name="compact_progress_split">圧縮中… %1$d 秒 · 分割して要約中（%2$d/%3$d）</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">開発スイート、ローカルツール、オンライン OpenAPI ツール</string>
+    <string name="mcp_tools_refresh">ツールを更新</string>
+    <string name="mcp_delete_server">サーバーを削除</string>
     <string name="dev_suite_section_header">開発環境スイート</string>
     <string name="dev_suite_section_footer">レシピはサンドボックス内にオンデマンドでツールチェーンを導入します——ペイロードはアプリに同梱されなくなり、初回のセットアップにはネットワークが必要です。 ネットワークが制限されている場合は minis-devsuite-offline-list を実行してオフライン取り込み用のリストを生成できます。</string>
     <string name="dev_suite_online_header">オンラインツール</string>

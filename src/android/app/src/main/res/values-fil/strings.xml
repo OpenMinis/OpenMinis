@@ -1784,6 +1784,8 @@
     <string name="chat_input_placeholder_hint_5">Puwedeng ipadala o mag-bagong linya ang Enter</string>
     <string name="chat_process_step_view">View</string>
     <string name="plugin_market_subtitle">Mga dev suite, lokal na tool, at mga online OpenAPI tool</string>
+    <string name="mcp_tools_refresh">I-refresh ang mga tool</string>
+    <string name="mcp_delete_server">Burahin ang server</string>
     <string name="dev_suite_section_header">Mga dev environment suite</string>
     <string name="dev_suite_section_footer">Nag-i-install ang mga recipe ng toolchains sa loob ng sandbox kapag kailangan — hindi na kasama sa app ang mga payload, kailangan ng internet sa unang pag-setup. May limitasyon sa network? Patakbuhin ang minis-devsuite-offline-list para sa offline import list.</string>
     <string name="dev_suite_online_header">Mga online tool</string>
