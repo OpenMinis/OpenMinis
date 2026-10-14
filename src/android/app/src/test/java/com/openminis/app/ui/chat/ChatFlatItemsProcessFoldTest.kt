@@ -240,7 +240,8 @@ class ChatFlatItemsProcessFoldTest {
     fun `running card settles when the reply text arrives`() {
         // A run with a live step is a live card: it auto-expands, the header
         // names what is happening, the duration ticks. Its reply text ends
-        // the run — the card settles there and reads ✅.
+        // the run — the card settles there and its header shows the
+        // settled counts.
         val live = buildFlatChatItems(
             listOf(assistant(streaming = true, blocks = listOf(thinking(), tool(id = "t1"), tool(id = "t2", status = ToolBlockStatus.RUNNING)))),
             showCompletedToolCards = false,
@@ -275,7 +276,8 @@ class ChatFlatItemsProcessFoldTest {
         assertEquals("live rows: $liveRows", listOf("summary"), liveRows.filter { it in setOf("header", "summary", "thinking", "tool:bash") })
         assertTrue(live.filterIsInstance<FlatChatItem.AssistantProcessSummary>().single().running)
 
-        // The reply text ends the run and the card reads ✅.
+        // The reply text ends the run and the card header shows the
+        // settled counts.
         val settled = buildFlatChatItems(
             listOf(assistant(awaiting = true, blocks = listOf(thinking(), tool(), text()))),
             showCompletedToolCards = false,
@@ -615,12 +617,12 @@ class ChatFlatItemsProcessFoldTest {
         )
         // Settled (reply text arrived, or the round ended): the check mark.
         assertEquals(
-            "✅ · 思考 2 · 工具 3 · 47s",
+            "思考 2 · 工具 3 · 47s",
             processCardHeader(2, 3, running = false, expanded = false, activity = "", activityTitle = "", duration = "47s"),
         )
         // No recorded duration omits the suffix rather than printing "0s".
         assertEquals(
-            "✅ · 思考 1 · 工具 2",
+            "思考 1 · 工具 2",
             processCardHeader(1, 2, running = false, expanded = false, activity = "", activityTitle = "", duration = null),
         )
     }

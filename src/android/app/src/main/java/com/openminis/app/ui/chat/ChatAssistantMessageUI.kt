@@ -958,11 +958,10 @@ internal fun formatProcessDuration(totalMs: Long): String? {
  * [P-process-card] What the card is doing right now. Pure so the header
  * copy is testable without composition.
  *
- *  - a settled run reads "✅ · 思考 N · 工具 M · 时长" — the check mark is
- *    the "done" the reference shows, and the counts stay so a finished run
- *    is still scannable;
- *  - a running run, collapsed, leads with the current state
- *    ("思考中" / "调用工具 ××") in place of "AI 过程", then the same
+ *  - a settled run reads "思考 N · 工具 M · 时长" — the counts stay so a
+ *    finished run is still scannable; no ✅ emoji (user direction: the
+ *    check mark reads as noise next to the status icon);
+ *  - a running run, collapsed, is the fixed "AI 过程" label with the
  *    counts, with the duration ticking;
  *  - a running run, expanded, drops the counts: the steps are on screen,
  *    so the header is only the current state.
@@ -992,7 +991,7 @@ internal fun processCardHeader(
     return when {
         // Settled (reply text arrived, or a pure-tool/error/timeout round
         // ended): always the done summary.
-        !running -> "✅ · $counts"
+        !running -> counts
         // Running + expanded: the steps are on screen, so the header shows
         // only the live state; fall back to the generic label when idle.
         expanded -> state.ifEmpty { "AI 过程" }
@@ -1027,7 +1026,10 @@ internal fun ProcessSummaryBar(
     // backgroundless capsule looked nothing like the blocks it replaced.
     val thinkingBlue = Color(0xFF007AFF)
     val shape = RoundedCornerShape(12.dp)
-    val iconTint = if (hasFailure) MaterialTheme.colorScheme.error else thinkingBlue
+    // [P-process-card] Failure tints ONLY the failed tool rows inside the
+    // card (user direction): the header keeps its normal blue title — the
+    // Error icon shape alone signals that something in the run failed.
+    val iconTint = thinkingBlue
     // A running card ticks once a second so the duration walks. Bounded by
     // the run: the moment it settles, running flips false and the loop ends.
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -1076,7 +1078,7 @@ internal fun ProcessSummaryBar(
                 text = header,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = if (hasFailure) MaterialTheme.colorScheme.error else thinkingBlue,
+                color = thinkingBlue,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1094,22 +1096,154 @@ internal fun ProcessSummaryBar(
                 thickness = 0.5.dp,
                 color = thinkingBlue.copy(alpha = 0.15f),
             )
-            // [P-process-card] Render steps with the SAME components the
-            // unfolded list uses — ThinkingBlock for reasoning, ToolCallPill
-            // for tool calls. Icons, accent colors, duration chips, status
-            // styling and the 500ms thinking auto-collapse all come from the
-            // shared implementations; the card adds no look of its own below
-            // the header. This is what keeps folded and unfolded visually
-            // identical instead of merely similar.
-            steps.forEach { step ->
-                if (step.kind == "thinking") {
-                    ThinkingBlock(block = step.block, isStreaming = step.running)
-                } else {
-                    ToolCallPill(
-                        block = step.block,
-                        onOpenDetail = { onOpenStep(step.id) },
+            // [P-process-card] Compact step rows, NOT the unfolded blocks:
+            // the full ThinkingBlock / ToolCallPill each carry their own
+            // bubble background and 36dp pill height, so an expanded card
+            // was a stack of mismatched bubbles (user: "长短不一、背景颜色
+            // 不统一、卡片过大"). Inside the card every step is one tight
+            // row — icon (from the SAME toolIconFor/toolAccentColor mapping
+            // the unfolded pills use, never invented), title, duration,
+            // 查看 for tools, expand chevron for thinking — separated by
+            // hairlines, no per-row background. The card is the only bubble.
+            steps.forEachIndexed { idx, step ->
+                if (idx > 0) {
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = thinkingBlue.copy(alpha = 0.10f),
                     )
                 }
+                ProcessStepRow(step = step, onOpen = { onOpenStep(step.id) })
+            }
+        }
+    }
+}
+
+/**
+ * [P-process-card] One compact row inside an expanded process card.
+ *
+ * Tool row: the tool's own icon (toolIconFor — the same mapping the
+ * unfolded pill uses) in its accent color, title, duration, and a 查看
+ * link that opens the shared detail sheet. A FAILED tool tints its icon
+ * AND title in the error colour — the only place failure is coloured.
+ *
+ * Thinking row: the Psychology icon, 思考, char count, duration, and a
+ * chevron that unfolds the reasoning text inline (300dp cap, scrollable).
+ * A running thinking step auto-expands and settles 500ms after it
+ * finishes; a step the user collapsed by hand is never reopened by the
+ * card expanding — the two layers are independent, keyed on step.id.
+ */
+@Composable
+private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
+    val thinkingBlue = Color(0xFF007AFF)
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val isThinking = step.kind == "thinking"
+    val isFailed = !isThinking && step.status == ToolBlockStatus.FAILED
+    val block = step.block
+
+    var stepExpanded by remember(step.id) { mutableStateOf(step.running) }
+    var userTouched by remember(step.id) { mutableStateOf(false) }
+    LaunchedEffect(step.id, step.running) {
+        if (!step.running && !userTouched) {
+            delay(500)
+            stepExpanded = false
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    if (isThinking) {
+                        userTouched = true
+                        stepExpanded = !stepExpanded
+                    } else {
+                        onOpen()
+                    }
+                }
+                .padding(vertical = 5.dp),
+        ) {
+            if (isThinking) {
+                Icon(
+                    imageVector = Icons.Default.Psychology,
+                    contentDescription = null,
+                    tint = thinkingBlue,
+                    modifier = Modifier.size(14.dp),
+                )
+            } else {
+                Icon(
+                    imageVector = toolIconFor(block.toolName),
+                    contentDescription = null,
+                    tint = if (isFailed) ToolErrorColor else toolAccentColor(block.toolName),
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (isThinking) stringResource(R.string.chat_thinking_header)
+                    else block.toolTitle.ifEmpty { block.toolName },
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = if (isFailed) ToolErrorColor else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (isThinking) {
+                val charCount = block.content.length
+                if (charCount > 0) {
+                    Text(
+                        text = if (charCount >= 1000) "${charCount / 1000}K" else "$charCount",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = muted,
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+            }
+            formatProcessDuration(step.durationMs)?.let { dur ->
+                Text(
+                    text = dur,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = muted,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+            }
+            if (!isThinking) {
+                Text(
+                    text = stringResource(R.string.chat_process_step_view),
+                    fontSize = 12.sp,
+                    color = thinkingBlue,
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+            Icon(
+                imageVector = if (isThinking) {
+                    if (stepExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown
+                } else {
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight
+                },
+                contentDescription = null,
+                tint = if (isThinking) thinkingBlue.copy(alpha = 0.5f) else muted,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        if (isThinking) {
+            AnimatedVisibility(visible = stepExpanded && block.content.isNotEmpty()) {
+                val scrollState = rememberScrollState()
+                Text(
+                    text = block.content,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = muted,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 22.dp, top = 2.dp, bottom = 6.dp)
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(scrollState),
+                )
             }
         }
     }
