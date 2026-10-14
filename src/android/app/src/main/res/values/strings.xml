@@ -963,6 +963,7 @@
          palette, so wallpaper tinting must not be the default. -->
     <string name="appearance_monet_title">Dynamic color</string>
     <string name="appearance_monet_subtitle">Restyle the whole app from your wallpaper (Material You): surfaces, cards, chat bubbles and icons all follow; semantic colors like red stay put. Requires Android 12+.</string>
+    <string name="chat_process_step_view">View</string>
     <string name="chat_process_summary_title">AI process</string>
     <string name="chat_process_summary_meta">thinking %1$d · tools %2$d%3$s</string>
     <string name="appearance_section_font_size">Font Size</string>

@@ -1772,4 +1772,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra peut régler la touche ↩︎ sur envoyer ou saut de ligne</string>
     <string name="compact_progress">Compactage… %1$d s écoulées</string>
     <string name="compact_progress_split">Compactage… %1$d s · résumé par segments (%2$d/%3$d)</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

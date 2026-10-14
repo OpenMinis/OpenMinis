@@ -3043,6 +3043,56 @@ fun ChatScreen(
                 // turn is expanded, otherwise the layout keeps empty space
                 // reserved for an overlay that no longer renders.
                 var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
+                // [P-process-card] Cards the user collapsed by hand. A manual
+                // collapse suppresses auto-expand for THAT card only; the next
+                // card (born when reply text ends the previous run) starts
+                // fresh and auto-expands again. Re-opening by hand is not
+                // suppressed — the set only blocks the automatic path.
+                val userCollapsedCards = remember(sessionId) { mutableSetOf<String>() }
+                // Derived from the messages rather than flatItems: the row
+                // list is built further down, inside the list's own scope.
+                // A running card auto-expands unless the user collapsed it by
+                // hand; once the run settles the card leaves this set and the
+                // expanded flag drops with it, which is the auto-collapse.
+                // Keyed on the block STRUCTURE, not the streaming text: a card
+                // starts and settles when blocks are added or their status
+                // flips, never when a token arrives. Recomputing the row
+                // projection per token would rebuild the whole list twice.
+                val processStructure = remember(messages, streamingById) {
+                    val merged = if (streamingById.isEmpty()) messages
+                        else mergeStreamingOverlay(messages, streamingById)
+                    merged.joinToString("\u0001") { m ->
+                        m.id + ":" + m.isStreaming + ":" + m.isAwaitingModelResponse + ":" +
+                            m.toolBlocks.joinToString(",") { b ->
+                                b.id + "/" + b.kind + "/" + (b.toolStatus?.name ?: "") + "/" +
+                                    b.content.isNotEmpty()
+                            }
+                    }
+                }
+                val runningCardKeys = remember(processStructure, foldAiProcess, showSubAgentBar, activeSubAgentToolIds) {
+                    if (!foldAiProcess) emptySet() else {
+                        val merged = if (streamingById.isEmpty()) messages
+                            else mergeStreamingOverlay(messages, streamingById)
+                        buildFlatChatItems(
+                            merged,
+                            foldAiProcess = true,
+                            activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
+                        ).filterIsInstance<FlatChatItem.AssistantProcessSummary>()
+                            .filter { it.running }
+                            .map { it.messageId }
+                            .toSet()
+                    }
+                }
+                LaunchedEffect(runningCardKeys) {
+                    // Only ever ADDS a running card the user has not collapsed,
+                    // and only DROPS a card once its run has settled. A card
+                    // the user opened by hand is not in runningCardKeys, so it
+                    // is never touched here.
+                    val auto = runningCardKeys.filterNot { it in userCollapsedCards }
+                    val settled = expandedProcessIds.filter { it in runningCardKeys && it !in auto }.toSet()
+                    val next = (expandedProcessIds - settled) + auto
+                    if (next != expandedProcessIds) expandedProcessIds = next
+                }
                 // [P0-4] The floating surface is the ToolActivityPill (34dp
                 // capsule). Its mount gate and this reserve predicate must be
                 // the SAME decision, so both route through
@@ -4365,12 +4415,22 @@ fun ChatScreen(
                                 expanded = item.expanded,
                                 hasFailure = item.hasFailure,
                                 totalMs = item.totalMs,
+                                steps = item.steps,
+                                running = item.running,
+                                activity = item.activity,
+                                activityTitle = item.activityTitle,
+                                startedAtMs = item.startedAtMs,
+                                onOpenStep = { viewModel.openToolDetail(it) },
                                 onToggle = {
                                     val id = item.messageId
-                                    expandedProcessIds = if (id in expandedProcessIds) {
-                                        expandedProcessIds - id
+                                    if (id in expandedProcessIds) {
+                                        expandedProcessIds = expandedProcessIds - id
+                                        // Collapse by hand: this card stays
+                                        // collapsed for the rest of its run.
+                                        userCollapsedCards += id
                                     } else {
-                                        expandedProcessIds + id
+                                        expandedProcessIds = expandedProcessIds + id
+                                        userCollapsedCards -= id
                                     }
                                 },
                             )

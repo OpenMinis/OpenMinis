@@ -1769,4 +1769,5 @@
     <string name="chat_input_placeholder_hint_5">Minis Ultra なら ↩︎ キーを送信か改行かに変更できます</string>
     <string name="compact_progress">圧縮中… %1$d 秒経過</string>
     <string name="compact_progress_split">圧縮中… %1$d 秒 · 分割して要約中（%2$d/%3$d）</string>
+    <string name="chat_process_step_view">View</string>
 </resources>

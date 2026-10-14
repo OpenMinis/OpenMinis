@@ -883,6 +883,7 @@
     <string name="appearance_fold_ai_process_subtitle">思考和工具一完成就收进摘要，不必等整段回复结束。只有当前进行中的那一块保持展开。点摘要可展开。进行中的工具仍会显示在底部工具条。</string>
     <string name="appearance_monet_title">动态取色</string>
     <string name="appearance_monet_subtitle">整体配色跟随系统壁纸（Material You）：表面、卡片、聊天气泡与图标一起着色，红色等语义色保留。需要 Android 12 及以上。</string>
+    <string name="chat_process_step_view">查看</string>
     <string name="chat_process_summary_title">AI 过程</string>
     <string name="chat_process_summary_meta">思考 %1$d · 工具 %2$d%3$s</string>
     <string name="appearance_section_font_size">字体大小</string>

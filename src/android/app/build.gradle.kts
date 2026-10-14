@@ -509,3 +509,15 @@ dependencies {
     androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     androidTestImplementation("junit:junit:4.13.2")
 }
+
+// JVM unit tests: Gradle's condensed console prints only
+// "AssertionError at FooTest.kt:12", which hides the expected/actual values a
+// red build needs. Full exception output makes a CI failure actionable from
+// the job log alone — no artifact download, no --info noise.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showCauses = true
+        showStackTraces = true
+    }
+}
