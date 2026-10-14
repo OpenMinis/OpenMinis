@@ -50,6 +50,14 @@ import com.openminis.app.ui.navigation.Routes
 sealed class DeepLinkAction {
     data object OpenShare : DeepLinkAction()
     data object OpenAlarmList : DeepLinkAction()
+
+    /**
+     * [T-dev-suite] Agent-emitted one-tap install for a dev-environment
+     * bundle: `minis://devsuite/install/<bundleId>`. Lands on the plugin
+     * market and auto-starts assembly. Bundle ids live in
+     * [com.openminis.app.plugins.DevSuiteCatalog].
+     */
+    data class OpenDevSuiteInstall(val bundleId: String) : DeepLinkAction()
     data class OpenTerminal(val initCommand: String?) : DeepLinkAction()
     data class CreateEnvironmentVariable(val key: String, val value: String, val note: String) : DeepLinkAction()
     data object OpenPermissionSettings : DeepLinkAction()
@@ -111,6 +119,9 @@ object DeepLinkHandler {
                 "/alarm" -> DeepLinkAction.OpenAlarmList
                 else -> DeepLinkAction.Unknown
             }
+            // [T-dev-suite] minis://devsuite/install/<bundleId> — the agent
+            // emits these so the user can one-tap a bundle install.
+            "devsuite" -> parseDevSuitePath(path)
             "open_terminal" -> DeepLinkAction.OpenTerminal(
                 initCommand = uri.getQueryParameter("init_command")
             )
@@ -142,6 +153,23 @@ object DeepLinkHandler {
                 }
             }
             else -> DeepLinkAction.Unknown
+        }
+    }
+
+    /**
+     * [T-dev-suite] Pure parser for the devsuite host (JVM-testable —
+     * Uri.parse returns null under returnDefaultValues). Valid form:
+     * `/install/<bundleId>` with a lowercase id; anything else lands on
+     * the plugin market so an LLM-generated link never dead-ends.
+     */
+    internal fun parseDevSuitePath(path: String): DeepLinkAction {
+        val segments = path.removePrefix("/").split('/').filter { it.isNotEmpty() }
+        return if (segments.size == 2 && segments[0] == "install" &&
+            segments[1].matches(Regex("[a-z0-9-]+"))
+        ) {
+            DeepLinkAction.OpenDevSuiteInstall(segments[1])
+        } else {
+            DeepLinkAction.OpenSettingsScreen(Routes.PLUGIN_MARKET)
         }
     }
 

@@ -25,6 +25,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.data.repository.MCPRepository
+import com.openminis.app.plugins.DevSuiteCatalog
 import com.openminis.app.plugins.LocalToolPluginStore
 import com.openminis.app.plugins.OnlinePluginStore
 import com.openminis.app.plugins.PluginCatalog
@@ -79,6 +80,27 @@ fun PluginMarketScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 32.dp, vertical = 8.dp),
             )
+        }
+
+        // [T-dev-suite] Declarative dev-environment bundles (taixu-style
+        // recipes): apt + setup scripts, downloaded on demand — the payloads
+        // no longer ship in the APK. Also consumes the pending
+        // minis://devsuite/install/<bundleId> deep link the agent can emit.
+        var pendingSuite by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(Unit) {
+            pendingSuite = com.openminis.app.deeplink.DeepLinkCoordinator.consumePendingDevSuiteInstall()
+        }
+        DevSuiteSection()
+        pendingSuite?.let { id ->
+            LaunchedEffect(id) {
+                DevSuiteCatalog.bundleById(id)?.let { bundle ->
+                    val selected = bundle.components.map { it.id }.toSet()
+                    com.openminis.app.plugins.DevSuiteInstaller.assembleBundleAsync(
+                        context, bundle, selected,
+                    )
+                }
+                pendingSuite = null
+            }
         }
 
         SettingsSection(

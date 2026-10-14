@@ -1,0 +1,73 @@
+#!/bin/sh
+# Build llama.cpp from source into /opt/llama.cpp with llama-server exposed
+# on PATH. Part of the dev-suite "llama-cpp" online tool (local inference,
+# OpenAI-compatible API). Idempotent; a full build takes 10-30 min in PRoot.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+LLAMA_ROOT=/opt/llama.cpp
+LLAMA_TAG="${LLAMA_TAG:-b4XXX-stable-placeholder}"
+
+if [ -x /usr/local/bin/llama-server ]; then
+  echo "llama-server already present: $(llama-server --version 2>&1 | head -1)"
+  exit 0
+fi
+
+need_apt=0
+for c in curl tar cmake git make cc c++; do
+  command -v "$c" >/dev/null 2>&1 || need_apt=1
+done
+if [ "$need_apt" = 1 ]; then
+  . /usr/local/lib/minis/apt-lock.sh
+  minis_acquire_apt_lock 1800 || exit 1
+  trap minis_release_apt_lock EXIT
+  apt-get update || true
+  apt-get install -y --no-install-recommends \
+    build-essential cmake git ca-certificates curl
+fi
+
+# Resolve the latest stable tag from the GitHub API (with mirror fallbacks).
+if [ "$LLAMA_TAG" = "b4XXX-stable-placeholder" ]; then
+  api="https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+  tag=$(curl -fsSL --connect-timeout 12 "$api" 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
+  [ -n "$tag" ] || tag="master"
+  LLAMA_TAG="$tag"
+fi
+
+echo "cloning llama.cpp @ $LLAMA_TAG"
+if [ ! -d "$LLAMA_ROOT/.git" ]; then
+  rm -rf "$LLAMA_ROOT"
+  ok=0
+  for u in \
+    "https://ghfast.top/https://github.com/ggml-org/llama.cpp" \
+    "https://ghproxy.net/https://github.com/ggml-org/llama.cpp" \
+    "https://mirror.ghproxy.com/https://github.com/ggml-org/llama.cpp" \
+    "https://github.com/ggml-org/llama.cpp"
+  do
+    if git clone --depth 1 --branch "$LLAMA_TAG" "$u" "$LLAMA_ROOT" 2>/dev/null; then ok=1; break; fi
+    rm -rf "$LLAMA_ROOT"
+  done
+  [ "$ok" = 1 ] || { echo "llama.cpp clone failed (all mirrors)" >&2; exit 1; }
+else
+  git -C "$LLAMA_ROOT" fetch --depth 1 origin "$LLAMA_TAG" || true
+  git -C "$LLAMA_ROOT" checkout -q "FETCH_HEAD" 2>/dev/null || true
+fi
+
+echo "configuring cmake (native off — PRoot safe)…"
+cmake -S "$LLAMA_ROOT" -B "$LLAMA_ROOT/build" \
+  -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF \
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON
+
+echo "building llama-server — PRoot 下编译较慢，没有新行也在继续"
+cmake --build "$LLAMA_ROOT/build" --config Release \
+  --target llama-server -j"$(nproc 2>/dev/null || echo 2)"
+
+bin="$LLAMA_ROOT/build/bin/llama-server"
+[ -x "$bin" ] || bin="$LLAMA_ROOT/build/llama-server"
+[ -x "$bin" ] || { echo "llama-server binary not found after build" >&2; exit 1; }
+ln -sf "$bin" /usr/local/bin/llama-server
+
+echo "llama-server -> /usr/local/bin/llama-server"
+echo "usage: llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8080"

@@ -1776,4 +1776,15 @@
     <string name="compact_progress">압축 중… %1$d초 경과</string>
     <string name="compact_progress_split">압축 중… %1$d초 · 분할 요약 중(%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">개발 환경 스위트</string>
+    <string name="dev_suite_section_footer">레시피는 필요할 때 샌드박스 안에 툴체인을 설치합니다——페이로드는 더 이상 앱에 포함되지 않으며, 첫 설치에는 네트워크가 필요합니다.</string>
+    <string name="dev_suite_online_header">온라인 도구</string>
+    <string name="dev_suite_online_footer">탭하여 설치하는 독립 도구.</string>
+    <string name="dev_suite_progress">%1$d/%2$d 준비됨</string>
+    <string name="dev_suite_installing">설치 중…</string>
+    <string name="dev_suite_failed">실패</string>
+    <string name="dev_suite_ready">준비됨</string>
+    <string name="dev_suite_not_installed">설치 안 됨</string>
+    <string name="dev_suite_required">필수</string>
+    <string name="dev_suite_assemble">설치</string>
 </resources>

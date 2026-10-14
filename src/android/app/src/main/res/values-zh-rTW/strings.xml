@@ -1868,4 +1868,15 @@
     <string name="appearance_show_mic_button_title">顯示麥克風按鈕</string>
     <string name="appearance_show_mic_button_subtitle">輸入框的語音輸入按鈕。語音模式本身始終可從應用圖示進入。</string>
     <string name="chat_process_step_view">查看</string>
+    <string name="dev_suite_section_header">開發環境套件</string>
+    <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。</string>
+    <string name="dev_suite_online_header">線上工具</string>
+    <string name="dev_suite_online_footer">獨立工具，點擊即裝。</string>
+    <string name="dev_suite_progress">%1$d/%2$d 已就緒</string>
+    <string name="dev_suite_installing">安裝中…</string>
+    <string name="dev_suite_failed">失敗</string>
+    <string name="dev_suite_ready">已就緒</string>
+    <string name="dev_suite_not_installed">未安裝</string>
+    <string name="dev_suite_required">必要</string>
+    <string name="dev_suite_assemble">裝配</string>
 </resources>

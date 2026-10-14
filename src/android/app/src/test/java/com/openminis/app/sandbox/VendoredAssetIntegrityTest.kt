@@ -11,6 +11,11 @@ import java.util.zip.ZipInputStream
 /**
  * Integrity guard for the ZIPs vendored under `src/main/assets`.
  *
+ * [T-apk-size] The SDK host-tool zips are no longer vendored (they download
+ * on demand inside minis-android-sdk-setup), so this guard is dormant until
+ * a future change vendors a zip again. The historical damage mode it was
+ * built for:
+ *
  * These archives are fetched verbatim from third-party releases by
  * `scripts/prepare_android_sandbox.sh` and committed to the tree. A damaged
  * blob therefore ships to every device, and it fails in a way that is very
@@ -63,7 +68,11 @@ class VendoredAssetIntegrityTest {
     @Test
     fun everyVendoredZipInflatesUnderRandomAccess() {
         val zips = vendoredZips()
-        assertTrue("no vendored .zip found under ${assetsDir()}", zips.isNotEmpty())
+        // [T-apk-size] No .zip ships in the APK anymore (SDK host tools moved
+        // to on-demand download inside minis-android-sdk-setup). An empty set
+        // is the expected steady state; the guard only bites if a future
+        // change vendors a zip again.
+        if (zips.isEmpty()) return
         for (zip in zips) {
             ZipFile(zip).use { zf ->
                 val entries = zf.entries().toList()

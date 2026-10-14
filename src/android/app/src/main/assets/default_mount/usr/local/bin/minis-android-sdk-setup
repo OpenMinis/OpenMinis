@@ -1,9 +1,11 @@
 #!/bin/sh
 # Android SDK for this Ubuntu 24.04 arm64 PRoot guest.
 #
-# Native tools (aapt2, zipalign, adb, aidl) and Java sdkmanager are vendored
-# in the APK and unpacked to ANDROID_HOME on first boot. sdkmanager is used
-# only to fetch architecture-independent platforms (android.jar).
+# [T-apk-size] Native tools (aapt2, zipalign, adb, aidl) and Java sdkmanager
+# are NO LONGER bundled in the APK — this script downloads them on demand
+# (lzhiyong aarch64 statics + Google cmdline-tools, mirror ladder included).
+# sdkmanager is used only to fetch architecture-independent platforms
+# (android.jar).
 #
 # Do NOT install Google's linux build-tools / cmake / ndk via sdkmanager —
 # those host tools are x86_64 and would overwrite aarch64 binaries or sit
@@ -359,6 +361,88 @@ extract_sdk_archive() {
   esac
 }
 
+# [T-apk-size] On-demand replacement for the APK-bundled SDK host tools.
+# Same source the APK shipped (lzhiyong/android-sdk-tools aarch64 statics),
+# fetched with the standard mirror ladder.
+install_sdk_tools_zip() {
+  local_rev=$BUILD_TOOLS_REV
+  zip_name="android-sdk-tools-static-aarch64.zip"
+  gh="https://github.com/lzhiyong/android-sdk-tools/releases/download/${local_rev}/${zip_name}"
+  tmpzip="/tmp/minis-sdk-tools-$$.zip"
+  set +e
+  curl_first "$tmpzip" $(github_urls "$gh")
+  cr=$?
+  set -e
+  if [ "$cr" -ne 0 ]; then
+    echo "SDK host tools download failed." >&2
+    echo "Expected $gh" >&2
+    echo "Bind-mount an SDK named android-sdk, or retry with working network." >&2
+    return 1
+  fi
+  stage="/tmp/minis-sdk-tools-$$"
+  mkdir -p "$stage"
+  unzip -qo "$tmpzip" -d "$stage" || { rm -rf "$stage" "$tmpzip"; return 1; }
+  rm -f "$tmpzip"
+  mkdir -p "$SDK_ROOT"
+  # Layout mirrors the old bundled zip: build-tools/<rev>/… and platform-tools/…
+  if [ -d "$stage/build-tools" ]; then
+    mkdir -p "$SDK_ROOT/build-tools"
+    rm -rf "$SDK_ROOT/build-tools/$local_rev"
+    mv "$stage/build-tools"/* "$SDK_ROOT/build-tools/" 2>/dev/null || true
+  fi
+  if [ -d "$stage/platform-tools" ]; then
+    rm -rf "$SDK_ROOT/platform-tools"
+    mv "$stage/platform-tools" "$SDK_ROOT/platform-tools"
+  fi
+  rm -rf "$stage"
+  chmod +x "$SDK_ROOT/build-tools/$local_rev"/* 2>/dev/null || true
+  chmod +x "$SDK_ROOT/platform-tools"/* 2>/dev/null || true
+  if [ -f "$AAPT2" ]; then
+    echo "SDK host tools (aapt2/zipalign/adb) -> $SDK_ROOT"
+  else
+    echo "downloaded SDK tools zip did not contain build-tools/$local_rev/aapt2" >&2
+    return 1
+  fi
+}
+
+# [T-apk-size] On-demand replacement for the APK-bundled cmdline-tools
+# (Java sdkmanager). Google repository + CN mirrors.
+install_cmdline_tools() {
+  ct_ver="11076708"
+  zip_name="commandlinetools-linux-${ct_ver}_latest.zip"
+  tmpzip="/tmp/minis-cmdline-tools-$$.zip"
+  set +e
+  curl_first "$tmpzip" \
+    "https://mirrors.cloud.tencent.com/AndroidRepository/$zip_name" \
+    "https://mirrors.tuna.tsinghua.edu.cn/android/repository/$zip_name" \
+    "https://mirrors.ustc.edu.cn/android/repository/$zip_name" \
+    "https://dl.google.com/android/repository/$zip_name"
+  cr=$?
+  set -e
+  if [ "$cr" -ne 0 ]; then
+    echo "cmdline-tools download failed." >&2
+    return 1
+  fi
+  stage="/tmp/minis-cmdline-tools-$$"
+  mkdir -p "$stage"
+  unzip -qo "$tmpzip" -d "$stage" || { rm -rf "$stage" "$tmpzip"; return 1; }
+  rm -f "$tmpzip"
+  # Google zip layout: cmdline-tools/bin/sdkmanager (no "latest" segment).
+  src="$stage/cmdline-tools"
+  if [ -d "$src/bin" ]; then
+    mkdir -p "$SDK_ROOT/cmdline-tools"
+    rm -rf "$SDK_ROOT/cmdline-tools/latest"
+    mv "$src" "$SDK_ROOT/cmdline-tools/latest"
+  else
+    echo "unexpected cmdline-tools zip layout" >&2
+    rm -rf "$stage"
+    return 1
+  fi
+  rm -rf "$stage"
+  chmod +x "$SDKMANAGER" 2>/dev/null || true
+  echo "cmdline-tools (sdkmanager) -> $SDK_ROOT/cmdline-tools/latest"
+}
+
 install_ndk() {
   if [ "${MINIS_SKIP_NDK:-0}" = "1" ]; then
     echo "MINIS_SKIP_NDK=1 — skipping NDK $NDK_TAG ($NDK_REV)"
@@ -476,19 +560,19 @@ if [ -d /var/minis/mounts/android-sdk ] && { [ -e /var/minis/mounts/android-sdk/
   rm -rf "$SDK_ROOT"
   ln -s /var/minis/mounts/android-sdk "$SDK_ROOT"
 else
+  # [T-apk-size] The SDK host tools are no longer bundled in the APK — they
+  # download on demand here (same lzhiyong aarch64 statics + Google
+  # cmdline-tools the APK used to ship, with the usual mirror ladder).
   if [ ! -f "$AAPT2" ]; then
-    echo "Bundled aapt2 not found at $AAPT2"
-    echo "Reinstall the app / re-extract the Ubuntu rootfs, or bind-mount an SDK named android-sdk." >&2
+    install_sdk_tools_zip
   else
-    echo "Using bundled aarch64 aapt2: $AAPT2"
-    file "$AAPT2" 2>/dev/null || true
+    echo "Using existing aarch64 aapt2: $AAPT2"
   fi
 
   if [ ! -f "$SDKMANAGER" ]; then
-    echo "Bundled sdkmanager not found at $SDKMANAGER"
-    echo "Reinstall the app / re-extract the Ubuntu rootfs." >&2
+    install_cmdline_tools
   else
-    echo "Using bundled Java sdkmanager: $SDKMANAGER"
+    echo "Using existing Java sdkmanager: $SDKMANAGER"
     chmod +x "$SDKMANAGER" 2>/dev/null || true
   fi
 fi

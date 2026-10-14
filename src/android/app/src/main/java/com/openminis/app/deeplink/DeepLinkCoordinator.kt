@@ -117,6 +117,24 @@ object DeepLinkCoordinator {
     private val _searchFocusRevision = MutableStateFlow(0)
     val searchFocusRevision: StateFlow<Int> = _searchFocusRevision.asStateFlow()
 
+    /**
+     * [T-dev-suite] Pending dev-suite install triggered by the agent-emitted
+     * deep link `minis://devsuite/install/<bundleId>`. PluginMarketScreen
+     * consumes it on appear and auto-starts the bundle assembly.
+     */
+    private val _pendingDevSuiteInstall = MutableStateFlow<String?>(null)
+    val pendingDevSuiteInstall: StateFlow<String?> = _pendingDevSuiteInstall.asStateFlow()
+
+    fun setPendingDevSuiteInstall(bundleId: String) {
+        _pendingDevSuiteInstall.value = bundleId
+    }
+
+    fun consumePendingDevSuiteInstall(): String? {
+        val current = _pendingDevSuiteInstall.value
+        _pendingDevSuiteInstall.value = null
+        return current
+    }
+
     fun setPendingSearchFocus(sessionId: String, messageId: String) {
         _pendingSearchFocus.value = SearchFocus(sessionId, messageId)
         _searchFocusRevision.value += 1

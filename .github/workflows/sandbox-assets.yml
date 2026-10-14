@@ -14,30 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # [T-apk-size] Only ubuntu-base still ships in the APK. The Android SDK
+      # host tools (android-sdk-tools-aarch64.zip / android-cmdline-tools.zip)
+      # are no longer bundled — minis-android-sdk-setup downloads them on
+      # demand with its mirror ladder (dev-suite android-core component).
       - name: Restore sandbox asset cache
         id: cache-sandbox
         uses: actions/cache@v4
         with:
           path: |
             src/android/app/src/main/assets/ubuntu-base.tar.gz
-            src/android/app/src/main/assets/android-sdk-tools-aarch64.zip
-            src/android/app/src/main/assets/android-cmdline-tools.zip
-          key: sandbox-assets-${{ runner.os }}-${{ hashFiles('scripts/prepare_android_sandbox.sh', 'scripts/repair_vendor_zip.py', 'scripts/slim_android_cmdline_tools.py') }}
+          key: sandbox-assets-${{ runner.os }}-${{ hashFiles('scripts/prepare_android_sandbox.sh') }}
 
       - name: Prepare embedded sandbox assets
         if: steps.cache-sandbox.outputs.cache-hit != 'true'
         run: |
           chmod +x scripts/prepare_android_sandbox.sh
           bash scripts/prepare_android_sandbox.sh
-          for f in ubuntu-base.tar.gz android-sdk-tools-aarch64.zip android-cmdline-tools.zip; do
-            test -s "src/android/app/src/main/assets/$f"
-          done
+          test -s "src/android/app/src/main/assets/ubuntu-base.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: sandbox-assets-${{ github.sha }}
           path: |
             src/android/app/src/main/assets/ubuntu-base.tar.gz
-            src/android/app/src/main/assets/android-sdk-tools-aarch64.zip
-            src/android/app/src/main/assets/android-cmdline-tools.zip
           if-no-files-found: error
           retention-days: 7

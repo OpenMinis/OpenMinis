@@ -1779,4 +1779,15 @@
     <string name="compact_progress">Compactage… %1$d s écoulées</string>
     <string name="compact_progress_split">Compactage… %1$d s · résumé par segments (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Environnements de développement</string>
+    <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau.</string>
+    <string name="dev_suite_online_header">Outils en ligne</string>
+    <string name="dev_suite_online_footer">Outils autonomes, installés en un appui.</string>
+    <string name="dev_suite_progress">%1$d/%2$d prêts</string>
+    <string name="dev_suite_installing">Installation…</string>
+    <string name="dev_suite_failed">échec</string>
+    <string name="dev_suite_ready">Prêt</string>
+    <string name="dev_suite_not_installed">Non installé</string>
+    <string name="dev_suite_required">requis</string>
+    <string name="dev_suite_assemble">Assembler</string>
 </resources>

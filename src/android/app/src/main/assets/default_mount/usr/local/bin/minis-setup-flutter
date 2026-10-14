@@ -1,0 +1,56 @@
+#!/bin/sh
+# Install the Flutter SDK into /opt/flutter (idempotent).
+# Part of the dev-suite "flutter" component; safe to run standalone.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+FLUTTER_ROOT=/opt/flutter
+FLUTTER_VERSION="${FLUTVER:-3.24.5}"
+TAR="flutter_linux_${FLUTTER_VERSION}.tar.xz"
+
+if [ -x "$FLUTTER_ROOT/bin/flutter" ]; then
+  echo "flutter already present: $FLUTTER_ROOT"
+  exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo "curl missing — run minis-dev-setup first" >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo "tar missing" >&2; exit 1; }
+command -v xz >/dev/null 2>&1 || {
+  . /usr/local/lib/minis/apt-lock.sh
+  minis_acquire_apt_lock 1800 || exit 1
+  trap minis_release_apt_lock EXIT
+  apt-get install -y --no-install-recommends xz-utils
+}
+
+# Mirror ladder: SJTU (CN, fastest usually) -> TUNA -> Google storage.
+tmp="/tmp/flutter-$$.tar.xz"
+ok=0
+for url in \
+  "https://mirrors.sjtug.sjtu.edu.cn/flutter_infra/releases/stable/linux/$TAR" \
+  "https://mirrors.tuna.tsinghua.edu.cn/flutter/flutter_infra/releases/stable/linux/$TAR" \
+  "https://storage.googleapis.com/flutter_infra/releases/stable/linux/$TAR"
+do
+  echo "  downloading $url"
+  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
+       -o "$tmp" "$url"; then ok=1; break; fi
+  rm -f "$tmp"
+done
+[ "$ok" = 1 ] || { echo "flutter download failed (all mirrors)" >&2; exit 1; }
+
+stage="/tmp/flutter-unpack-$$"
+mkdir -p "$stage"
+echo "extracting $TAR — PRoot 解大量小文件比较慢，没有新行也在继续"
+tar -xJf "$tmp" -C "$stage" --checkpoint=20000 --checkpoint-action='echo=…仍在解包'
+rm -f "$tmp"
+[ -d "$stage/flutter" ] || { echo "unexpected tarball layout" >&2; rm -rf "$stage"; exit 1; }
+
+mkdir -p /opt
+rm -rf "$FLUTTER_ROOT"
+mv "$stage/flutter" "$FLUTTER_ROOT"
+rm -rf "$stage"
+
+ln -sf "$FLUTTER_ROOT/bin/flutter" /usr/local/bin/flutter
+ln -sf "$FLUTTER_ROOT/bin/dart" /usr/local/bin/dart
+"$FLUTTER_ROOT/bin/flutter" --version 2>/dev/null | head -2 || true
+echo "flutter $FLUTTER_VERSION -> $FLUTTER_ROOT"

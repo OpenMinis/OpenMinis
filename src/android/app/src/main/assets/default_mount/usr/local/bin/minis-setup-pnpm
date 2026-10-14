@@ -1,0 +1,20 @@
+#!/bin/sh
+# Enable pnpm + yarn global package managers (idempotent).
+# Part of the dev-suite "nodejs-pkg" component. Requires node/npm first.
+set -eu
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+command -v npm >/dev/null 2>&1 || { echo "npm missing — install nodejs-core first" >&2; exit 1; }
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "installing pnpm via npm -g (npmmirror registry fallback)..."
+  npm install -g pnpm --registry=https://registry.npmmirror.com \
+    || npm install -g pnpm
+fi
+if ! command -v yarn >/dev/null 2>&1; then
+  echo "installing yarn via npm -g..."
+  npm install -g yarn --registry=https://registry.npmmirror.com \
+    || npm install -g yarn
+fi
+
+echo "pnpm $(pnpm --version 2>/dev/null || echo '?') / yarn $(yarn --version 2>/dev/null || echo '?')"

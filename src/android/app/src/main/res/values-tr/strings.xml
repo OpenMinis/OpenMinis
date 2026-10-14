@@ -1777,4 +1777,15 @@
     <string name="selection_copy_as_plain_text">Düz Metin Olarak Kopyala</string>
     <string name="chat_input_placeholder_hint_5">Enter tuşu gönderebilir ya da satır ekler</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Geliştirme ortamı paketleri</string>
+    <string name="dev_suite_section_footer">Tarifler, araç zincirlerini gerektiğinde sandbox içinde kurar — yükler artık uygulamaya gömülü değil, ilk kurulum ağ gerektirir.</string>
+    <string name="dev_suite_online_header">Çevrimiçi araçlar</string>
+    <string name="dev_suite_online_footer">Bağımsız araçlar, tek dokunuşla kurulur.</string>
+    <string name="dev_suite_progress">%1$d/%2$d hazır</string>
+    <string name="dev_suite_installing">Kuruluyor…</string>
+    <string name="dev_suite_failed">başarısız</string>
+    <string name="dev_suite_ready">Hazır</string>
+    <string name="dev_suite_not_installed">Kurulu değil</string>
+    <string name="dev_suite_required">zorunlu</string>
+    <string name="dev_suite_assemble">Kur</string>
 </resources>

@@ -784,6 +784,13 @@ class MainActivity : ComponentActivity() {
                     restoreState = true
                 }
             }
+            // [T-dev-suite] Agent-emitted one-tap bundle install: park the
+            // bundle id, land on the plugin market, the screen consumes it
+            // and auto-starts assembly.
+            is DeepLinkAction.OpenDevSuiteInstall -> {
+                DeepLinkCoordinator.setPendingDevSuiteInstall(action.bundleId)
+                nav.navigate(Routes.PLUGIN_MARKET)
+            }
             is DeepLinkAction.CreateEnvironmentVariable -> {
                 DeepLinkCoordinator.setPendingEnvVarCreate(action.key, action.value, action.note)
                 nav.navigate(Routes.ENV_VARS)

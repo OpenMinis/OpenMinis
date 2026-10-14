@@ -1,0 +1,51 @@
+#!/bin/sh
+# Install jadx (Android reverse-engineering / decompiler) into /opt/jadx.
+# Part of the dev-suite "android-re" component; idempotent.
+set -eu
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+JADX_ROOT=/opt/jadx
+JADX_VERSION="${JADX_VERSION:-1.5.1}"
+ZIP="jadx-${JADX_VERSION}.zip"
+GH="https://github.com/skylot/jadx/releases/download/v${JADX_VERSION}/${ZIP}"
+
+if [ -x "$JADX_ROOT/bin/jadx" ]; then
+  echo "jadx already present: $JADX_ROOT"
+  exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo "curl missing — run minis-dev-setup first" >&2; exit 1; }
+command -v unzip >/dev/null 2>&1 || {
+  . /usr/local/lib/minis/apt-lock.sh
+  minis_acquire_apt_lock 1800 || exit 1
+  trap minis_release_apt_lock EXIT
+  apt-get install -y --no-install-recommends unzip
+}
+
+tmp="/tmp/jadx-$$.zip"
+ok=0
+for url in \
+  "https://ghfast.top/$GH" \
+  "https://ghproxy.net/$GH" \
+  "https://mirror.ghproxy.com/$GH" \
+  "$GH"
+do
+  echo "  downloading $url"
+  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
+       -o "$tmp" "$url"; then ok=1; break; fi
+  rm -f "$tmp"
+done
+[ "$ok" = 1 ] || { echo "jadx download failed (all mirrors)" >&2; exit 1; }
+
+stage="/tmp/jadx-unpack-$$"
+mkdir -p "$stage"
+unzip -qo "$tmp" -d "$stage"
+rm -f "$tmp"
+[ -x "$stage/bin/jadx" ] || { echo "unexpected jadx zip layout" >&2; rm -rf "$stage"; exit 1; }
+
+mkdir -p /opt
+rm -rf "$JADX_ROOT"
+mv "$stage" "$JADX_ROOT"
+ln -sf "$JADX_ROOT/bin/jadx" /usr/local/bin/jadx
+ln -sf "$JADX_ROOT/bin/jadx-gui" /usr/local/bin/jadx-gui 2>/dev/null || true
+echo "jadx $JADX_VERSION -> $JADX_ROOT"

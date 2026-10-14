@@ -22,7 +22,6 @@ import java.nio.charset.Charset
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.util.zip.GZIPInputStream
-import java.util.zip.ZipInputStream
 
 /**
  * Observable state for rootfs installation. Mirrors the conceptual iOS
@@ -418,8 +417,12 @@ class RootfsManager private constructor(private val context: Context) {
         // extract or overlay must not leave dpkg without a writable temp.
         File(rootfsDir, "tmp").mkdirs()
         File(rootfsDir, "var/tmp").mkdirs()
-        installBundledAndroidSdkTools()
-        installBundledCmdlineTools()
+        // [T-apk-size] Android SDK host tools are no longer force-extracted
+        // here on every rootfs init — that cost every user 36MB of per-sandbox
+        // storage whether or not they build Android. The tools now download
+        // on demand inside minis-android-sdk-setup (dev-suite android-core
+        // component), with the same aarch64 statics + mirror ladder the APK
+        // used to bundle. Existing sandboxes keep their extracted copies.
     }
 
     /**
@@ -766,195 +769,6 @@ class RootfsManager private constructor(private val context: Context) {
         if (n > 0) Log.i(TAG, "[CA] copied $n hash certs from ${dir.path}")
         return n
     }
-
-    /**
-     * Unpack vendored aarch64 aapt2/zipalign/adb into `/opt/android-sdk`.
-     * Google's official build-tools are x86_64; these binaries are AOSP static
-     * aarch64 builds (lzhiyong/android-sdk-tools 35.0.2).
-     */
-    private fun installBundledAndroidSdkTools() {
-        val marker = File(rootfsDir, "opt/android-sdk/.minis-sdk-tools")
-        val errorMarker = File(rootfsDir, "opt/android-sdk/.minis-sdk-tools-error")
-        if (marker.exists() && marker.readText().trim() == SDK_BUILD_TOOLS_REV) {
-            errorMarker.delete()
-            return
-        }
-        var last: Throwable? = null
-        repeat(2) { attempt ->
-            // Files THIS attempt wrote, so a failure can be rolled back
-            // precisely. The previous code deleted `build-tools/<rev>` and
-            // `platform-tools` wholesale on failure, which also removed a
-            // working sdkmanager-installed platform-tools (adb, fastboot) and
-            // any aapt2 that had been put there by hand. A damaged bundled
-            // asset therefore left the device with *no* SDK tools at all — even
-            // when a working set existed before the attempt. Observed live on a
-            // device still running the corrupt asset: build-tools/35.0.2
-            // vanished and .minis-sdk-tools was never written.
-            var written: List<File> = emptyList()
-            try {
-                written = extractSdkZip(SDK_TOOLS_ASSET) { name ->
-                    when {
-                        name.startsWith("build-tools/") ->
-                            "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/" +
-                                name.removePrefix("build-tools/")
-                        name.startsWith("platform-tools/") -> "opt/android-sdk/$name"
-                        else -> null
-                    }
-                }
-                // [T-sdk-tools-verify-extraction] Extraction succeeding is not the
-                // same as the tools arriving. `ZipInputStream` is a streaming
-                // reader: a vendored archive with a damaged member throws only
-                // when that member is inflated, so everything before it lands and
-                // everything after it silently does not. The 35.0.2 upstream
-                // asset shipped exactly that way, and the only symptom was a
-                // missing aapt2 — which surfaced much later, inside a guest Gradle
-                // build, as "AAPT2 Daemon startup failed".
-                //
-                // So verify the members that the on-device build actually needs,
-                // and fail this attempt (rather than marking the install done) if
-                // any are absent.
-                val missing = SDK_TOOLS_REQUIRED.filter { rel ->
-                    val f = File(rootfsDir, "opt/android-sdk/$rel")
-                    !(f.isFile && f.length() > 0L)
-                }
-                if (missing.isNotEmpty()) {
-                    throw IllegalStateException(
-                        "bundled $SDK_TOOLS_ASSET extracted ${written.size} entries but is missing " +
-                            missing.joinToString(", ") + " — the vendored archive is damaged " +
-                            "or truncated; re-run scripts/prepare_android_sandbox.sh"
-                    )
-                }
-                File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/source.properties")
-                    .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
-                File(rootfsDir, "opt/android-sdk/platform-tools/source.properties")
-                    .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
-                // Only point Gradle at aapt2 once we know the binary is there. An
-                // override aimed at a nonexistent path converts "no bundled tools"
-                // into an opaque AGP failure.
-                writeAaptOverride()
-                marker.parentFile?.mkdirs()
-                marker.writeText("$SDK_BUILD_TOOLS_REV\n")
-                errorMarker.delete()
-                Log.i(
-                    TAG,
-                    "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV (${written.size} entries)"
-                )
-                return
-            } catch (t: Throwable) {
-                last = t
-                marker.delete()
-                // Undo only this attempt's writes, newest first, then drop the
-                // two directories if — and only if — they ended up empty. A
-                // pre-existing platform-tools installed by sdkmanager survives.
-                written.asReversed().forEach { f -> runCatching { if (f.isFile) f.delete() } }
-                listOf(
-                    File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV"),
-                    File(rootfsDir, "opt/android-sdk/platform-tools"),
-                ).forEach { dir ->
-                    runCatching {
-                        if (dir.isDirectory && dir.list()?.isEmpty() == true) dir.delete()
-                    }
-                }
-                Log.w(TAG, "SDK tools extract attempt ${attempt + 1} failed: ${t.message}")
-            }
-        }
-        Log.e(TAG, "SDK tools extract failed after retry; not marking installed", last)
-        // Leave a breadcrumb the guest build can read. Without it the next
-        // failure happens in a completely different layer (Gradle/aapt2) with no
-        // pointer back to the real cause.
-        runCatching {
-            errorMarker.parentFile?.mkdirs()
-            errorMarker.writeText(
-                "Bundled aarch64 SDK tools failed to install.\n" +
-                    "asset: $SDK_TOOLS_ASSET\n" +
-                    "error: ${last?.message ?: last?.toString() ?: "unknown"}\n" +
-                    "Consequence: no aapt2/zipalign inside the guest, so on-device\n" +
-                    "APK builds will fail. Fix the vendored asset with\n" +
-                    "scripts/prepare_android_sandbox.sh (it validates and repairs).\n"
-            )
-        }
-    }
-
-    private fun writeAaptOverride() {
-        val gradleProps = File(rootfsDir, "root/.gradle/gradle.properties")
-        gradleProps.parentFile?.mkdirs()
-        val override =
-            "android.aapt2FromMavenOverride=/opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/aapt2"
-        val existing = if (gradleProps.exists()) gradleProps.readText() else ""
-        val next = if (existing.contains("android.aapt2FromMavenOverride")) {
-            existing.replace(Regex("""(?m)^android\.aapt2FromMavenOverride=.*$"""), override)
-        } else if (existing.isEmpty() || existing.endsWith("\n")) {
-            existing + "$override\n"
-        } else {
-            existing + "\n$override\n"
-        }
-        gradleProps.writeText(next)
-    }
-
-    /**
-     * Unpack the slimmed Google cmdline-tools (Java sdkmanager only) into
-     * `/opt/android-sdk/cmdline-tools/latest`. Lint/R8/kotlin-compiler are
-     * omitted so the APK stays small; platforms still download at runtime.
-     */
-    private fun installBundledCmdlineTools() {
-        val marker = File(rootfsDir, "opt/android-sdk/.minis-cmdline-tools")
-        if (marker.exists()) return
-        var last: Throwable? = null
-        repeat(2) { attempt ->
-            try {
-                extractSdkZip(CMD_TOOLS_ASSET) { name ->
-                    if (name.startsWith("cmdline-tools/")) "opt/android-sdk/$name" else null
-                }
-                marker.parentFile?.mkdirs()
-                marker.writeText("ok\n")
-                Log.i(TAG, "Installed bundled Java sdkmanager")
-                return
-            } catch (t: Throwable) {
-                last = t
-                marker.delete()
-                File(rootfsDir, "opt/android-sdk/cmdline-tools").deleteRecursively()
-                Log.w(TAG, "sdkmanager extract attempt ${attempt + 1} failed: ${t.message}")
-            }
-        }
-        Log.e(TAG, "sdkmanager extract failed after retry; not marking installed", last)
-    }
-
-    /**
-     * Stream a bundled SDK archive into the rootfs. Returns every file and
-     * directory actually written, in order, so callers can verify the archive
-     * arrived whole and roll back precisely on failure — a [ZipInputStream]
-     * stops at the first damaged member and everything after it is never seen.
-     */
-    private fun extractSdkZip(asset: String, destRel: (String) -> String?): List<File> {
-        val input = try {
-            context.assets.open(asset)
-        } catch (t: Throwable) {
-            throw IllegalStateException("bundled asset missing: $asset (${t.message})", t)
-        }
-        val written = mutableListOf<File>()
-        input.use { raw ->
-            ZipInputStream(raw).use { zis ->
-                while (true) {
-                    val entry = zis.nextEntry ?: break
-                    val name = entry.name.replace('\\', '/').trimStart('/')
-                    if (name.isEmpty() || name.contains("..")) continue
-                    val rel = destRel(name) ?: continue
-                    val out = File(rootfsDir, rel)
-                    if (entry.isDirectory || name.endsWith("/")) {
-                        out.mkdirs()
-                        written += out
-                        continue
-                    }
-                    out.parentFile?.mkdirs()
-                    out.outputStream().use { zis.copyTo(it) }
-                    if (name.contains("/bin/") || !name.contains(".")) out.setExecutable(true, false)
-                    written += out
-                }
-            }
-        }
-        return written
-    }
-
 
     /** Drop the previous Alpine extract so it doesn't sit around after the distro switch. */
     private fun deleteLegacyAlpineRootfs() {
@@ -1942,21 +1756,8 @@ class RootfsManager private constructor(private val context: Context) {
         private const val DISTRO = "ubuntu-noble"
         private const val PROOT_ASSET = "proot-aarch64"
         private const val DEFAULT_MOUNT_ASSET = "default_mount"
-        private const val SDK_TOOLS_ASSET = "android-sdk-tools-aarch64.zip"
-        private const val CMD_TOOLS_ASSET = "android-cmdline-tools.zip"
         private const val SDK_BUILD_TOOLS_REV = "35.0.2"
 
-        /**
-         * Members of [SDK_TOOLS_ASSET] whose absence means the guest cannot build
-         * an APK. Mirrors SDK_TOOLS_REQUIRED in scripts/prepare_android_sandbox.sh
-         * — both sides of the same contract, one at packaging time and one at
-         * install time, because the archive can also be damaged in transit.
-         */
-        private val SDK_TOOLS_REQUIRED = listOf(
-            "build-tools/$SDK_BUILD_TOOLS_REV/aapt2",
-            "build-tools/$SDK_BUILD_TOOLS_REV/zipalign",
-            "platform-tools/adb",
-        )
 
         /**
          * Android 14+ stores CAs in the conscrypt APEX; `/system/etc/security/cacerts`

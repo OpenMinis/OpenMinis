@@ -275,6 +275,17 @@
     <string name="plugin_market_section_mcp">MCP presets</string>
     <string name="plugin_market_footer_mcp">One-tap add to MCP Integrations. Skills stay under Settings → Skills.</string>
     <string name="plugin_market_section_online">Online APIs</string>
+    <string name="dev_suite_section_header">Dev environment suites</string>
+    <string name="dev_suite_section_footer">Recipes install toolchains on demand inside the sandbox — payloads are not bundled with the app, so first-time assembly needs network.</string>
+    <string name="dev_suite_online_header">Online tools</string>
+    <string name="dev_suite_online_footer">Standalone tools installed on tap.</string>
+    <string name="dev_suite_progress">%1$d/%2$d ready</string>
+    <string name="dev_suite_installing">Installing…</string>
+    <string name="dev_suite_failed">failed</string>
+    <string name="dev_suite_ready">Ready</string>
+    <string name="dev_suite_not_installed">Not installed</string>
+    <string name="dev_suite_required">required</string>
+    <string name="dev_suite_assemble">Assemble</string>
     <string name="plugin_market_footer_online">Remote OpenAPI-lite tools. Requests are SSRF-checked; API keys never enter the model context.</string>
     <string name="plugin_market_section_local">Local tools</string>
     <string name="plugin_market_local_footer">Command-template tools you author: the agent calls them like built-in tools, {{param}} placeholders are substituted at call time, and execution goes through the sandbox shell gate.</string>

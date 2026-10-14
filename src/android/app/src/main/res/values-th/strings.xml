@@ -1777,4 +1777,15 @@
     <string name="selection_copy_as_plain_text">คัดลอกเป็นข้อความธรรมดา</string>
     <string name="chat_input_placeholder_hint_5">ตั้งปุ่ม Enter ให้ส่งหรือขึ้นบรรทัดใหม่ได้</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">ชุดสภาพแวดล้อมสำหรับพัฒนา</string>
+    <string name="dev_suite_section_footer">สูตรติดตั้ง toolchain ตามความต้องการภายในแซนด์บ็อกซ์ — เพย์โหลดไม่ถูกฝังในแอปอีกต่อไป การติดตั้งครั้งแรกต้องใช้เน็ตเวิร์ก</string>
+    <string name="dev_suite_online_header">เครื่องมือออนไลน์</string>
+    <string name="dev_suite_online_footer">เครื่องมือแบบสแตนด์อโลน ติดตั้งด้วยการแตะครั้งเดียว</string>
+    <string name="dev_suite_progress">%1$d/%2$d พร้อม</string>
+    <string name="dev_suite_installing">กำลังติดตั้ง…</string>
+    <string name="dev_suite_failed">ล้มเหลว</string>
+    <string name="dev_suite_ready">พร้อม</string>
+    <string name="dev_suite_not_installed">ยังไม่ติดตั้ง</string>
+    <string name="dev_suite_required">จำเป็น</string>
+    <string name="dev_suite_assemble">ติดตั้ง</string>
 </resources>

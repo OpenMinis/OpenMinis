@@ -2,6 +2,9 @@
 # Prepare the Android sandbox assets:
 #   Ubuntu 24.04 (noble) arm64 base tarball  →  assets/ubuntu-base.tar.gz
 #
+# [T-apk-size] The Android SDK host tools (aapt2/sdkmanager) are no longer
+# bundled — minis-android-sdk-setup downloads them on demand in the guest.
+#
 # The tarball is Canonical's official ubuntu-base (glibc + apt + bash), not
 # Alpine musl. arm64 packages live on ports.ubuntu.com.
 #
@@ -140,20 +143,6 @@ else
   fi
 fi
 
-SDK_TOOLS_VER="${SDK_TOOLS_VER:-35.0.2}"
-SDK_TOOLS_ZIP="$ASSETS/android-sdk-tools-aarch64.zip"
-SDK_TOOLS_URL="https://github.com/lzhiyong/android-sdk-tools/releases/download/${SDK_TOOLS_VER}/android-sdk-tools-static-aarch64.zip"
-
-# Members that MUST be present. The app unpacks this archive into
-# /opt/android-sdk inside the guest and then builds APKs with it; a zip that is
-# readable but missing aapt2 produces an app whose on-device build fails with
-# the inscrutable "AAPT2 Daemon startup failed".
-SDK_TOOLS_REQUIRED=(
-  "build-tools/aapt2"
-  "build-tools/zipalign"
-  "platform-tools/adb"
-)
-
 # Integrity gate for vendored blobs.
 #
 # These archives are committed to git verbatim from third-party releases and
@@ -220,26 +209,7 @@ PY
   return 0
 }
 
-if [ ! -f "$SDK_TOOLS_ZIP" ]; then
-  echo "==> Fetching aarch64 aapt2/zipalign/adb (${SDK_TOOLS_VER})"
-  TMP_SDK="$(mktemp)"
-  if curl -fL --retry 3 -o "$TMP_SDK" "$SDK_TOOLS_URL"; then
-    mv "$TMP_SDK" "$SDK_TOOLS_ZIP"
-  else
-    rm -f "$TMP_SDK"
-  fi
-fi
-
-# Gate the vendored copy on EVERY run, not just after a download: a bad blob can
-# already be sitting in the tree (that is how the corrupt 35.0.2 asset shipped).
 ASSETS_OK=1
-if [ -f "$SDK_TOOLS_ZIP" ]; then
-  validate_zip_asset "$SDK_TOOLS_ZIP" "${SDK_TOOLS_REQUIRED[@]}" || ASSETS_OK=0
-  ls -lh "$SDK_TOOLS_ZIP"
-else
-  ASSETS_OK=0
-  echo "WARNING: aarch64 SDK tools download failed; on-device aapt2 will be missing" >&2
-fi
 
 if [ -s "$ASSETS/ubuntu-base.tar.gz" ]; then
   # Same class of defect: an unvalidated blob that only fails at unpack time,
@@ -251,29 +221,6 @@ if [ -s "$ASSETS/ubuntu-base.tar.gz" ]; then
 else
   ASSETS_OK=0
   echo "WARNING: ubuntu-base.tar.gz is missing or empty" >&2
-fi
-
-# Official commandlinetools-linux is ~150MB (lint/R8/kotlin-compiler).
-# Keep only the Java sdkmanager classpath (~20MB) so it can ship in the APK.
-CMDLINE_ZIP="$ASSETS/android-cmdline-tools.zip"
-CMDLINE_URL="${CMDLINE_URL:-https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip}"
-if [ ! -f "$CMDLINE_ZIP" ]; then
-  echo "==> Fetching Android cmdline-tools and slimming to sdkmanager"
-  TMP_CMDLINE="$(mktemp)"
-  if curl -fL --retry 3 -o "$TMP_CMDLINE" "$CMDLINE_URL"; then
-    python3 "$ROOT/scripts/slim_android_cmdline_tools.py" "$TMP_CMDLINE" "$CMDLINE_ZIP"
-  else
-    echo "WARNING: cmdline-tools download failed; on-device sdkmanager will be missing" >&2
-  fi
-  rm -f "$TMP_CMDLINE"
-fi
-if [ -f "$CMDLINE_ZIP" ]; then
-  # This one is re-packed locally by slim_android_cmdline_tools.py rather than
-  # vendored, but it travels the same path into the APK and fails the same way.
-  validate_zip_asset "$CMDLINE_ZIP" cmdline-tools/latest/bin/sdkmanager || ASSETS_OK=0
-  ls -lh "$CMDLINE_ZIP"
-else
-  ASSETS_OK=0
 fi
 
 if [ "$ASSETS_OK" -ne 1 ]; then

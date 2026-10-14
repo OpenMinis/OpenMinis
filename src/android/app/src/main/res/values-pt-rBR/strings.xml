@@ -1777,4 +1777,15 @@
     <string name="selection_copy_as_plain_text">Copiar como texto simples</string>
     <string name="chat_input_placeholder_hint_5">O Enter pode enviar ou quebrar linha</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Suítes de ambiente de desenvolvimento</string>
+    <string name="dev_suite_section_footer">As receitas instalam toolchains sob demanda dentro do sandbox — os payloads não vêm mais no app; a primeira montagem precisa de rede.</string>
+    <string name="dev_suite_online_header">Ferramentas online</string>
+    <string name="dev_suite_online_footer">Ferramentas independentes, instale com um toque.</string>
+    <string name="dev_suite_progress">%1$d/%2$d prontos</string>
+    <string name="dev_suite_installing">Instalando…</string>
+    <string name="dev_suite_failed">falhou</string>
+    <string name="dev_suite_ready">Pronto</string>
+    <string name="dev_suite_not_installed">Não instalado</string>
+    <string name="dev_suite_required">obrigatório</string>
+    <string name="dev_suite_assemble">Montar</string>
 </resources>

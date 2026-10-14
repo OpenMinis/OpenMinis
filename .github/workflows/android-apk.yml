@@ -102,15 +102,17 @@ jobs:
           cp /tmp/native-deps/libs/rclone.aar src/android/app/libs/rclone.aar
           find /usr/local/lib/android/sdk/ndk/${ANDROID_NDK}/toolchains/llvm/prebuilt -path '*sysroot/usr/lib/aarch64-linux-android' -type d -print0 | while IFS= read -r -d '' d; do cp /tmp/native-deps/libunwind.a "$d/libunwind.a"; done
 
-      - name: Download sandbox assets
+      - name: Install sandbox assets
         uses: actions/download-artifact@v4
         with:
           name: sandbox-assets-${{ github.sha }}
           path: /tmp/sandbox-assets
 
+      # [T-apk-size] Only ubuntu-base is embedded now; the Android SDK host
+      # tools download on demand inside minis-android-sdk-setup.
       - name: Install embedded sandbox assets
         run: |
-          for f in ubuntu-base.tar.gz android-sdk-tools-aarch64.zip android-cmdline-tools.zip; do
+          for f in ubuntu-base.tar.gz; do
             src=$(find /tmp/sandbox-assets -name "$f" -type f -print -quit)
             test -n "$src" && test -s "$src"
             cp "$src" "src/android/app/src/main/assets/$f"
@@ -165,7 +167,7 @@ jobs:
           test -s "$SRC"
           mkdir -p dist
           cp "$SRC" dist/minis-ultra-com.openminis.linux.apk
-          unzip -l "$SRC" | grep -E "libproot|proot-aarch64|ubuntu-base|android-sdk-tools|android-cmdline-tools" || true
+          unzip -l "$SRC" | grep -E "libproot|proot-aarch64|ubuntu-base" || true
           NDK="/usr/local/lib/android/sdk/ndk/${ANDROID_NDK}"
           UNWIND_SO=$(find "$NDK" -path '*aarch64-linux-android*' -name libunwind.so 2>/dev/null | head -n 1 || true)
           UNWIND_A=$(find "$NDK" -path '*aarch64-linux-android*' -name libunwind.a 2>/dev/null | head -n 1 || true)

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Install qemu-user-static for x86_64 (and other arch) emulation. Idempotent.
+# Part of the dev-suite "qemu-x86-64-compat" online tool.
+#
+# NOTE: binfmt_misc auto-registration does NOT work inside PRoot (no kernel
+# binfmt access). The qemu-x86_64 binary itself works fine — invoke it
+# EXPLICITLY:  qemu-x86_64 /path/to/x86_64/binary args…
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+if command -v qemu-x86_64 >/dev/null 2>&1; then
+  echo "qemu-x86_64 already present: $(qemu-x86_64 --version | head -1)"
+  exit 0
+fi
+
+command -v apt-get >/dev/null 2>&1 || { echo "apt-get not found" >&2; exit 1; }
+[ -f /usr/local/lib/minis/apt-lock.sh ] || { echo "shared apt lock helper missing" >&2; exit 1; }
+. /usr/local/lib/minis/apt-lock.sh
+minis_acquire_apt_lock 1800 || { echo "apt is busy" >&2; exit 1; }
+trap minis_release_apt_lock EXIT
+apt-get update
+apt-get install -y --no-install-recommends qemu-user-static
+
+command -v qemu-x86_64 >/dev/null 2>&1 || { echo "qemu-x86_64 still missing after install" >&2; exit 1; }
+echo "qemu-x86_64 $(qemu-x86_64 --version | head -1)"
+echo "remember: PRoot has no binfmt_misc — call qemu-x86_64 <binary> explicitly."

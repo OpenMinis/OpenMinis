@@ -1776,4 +1776,15 @@
     <string name="compact_progress">圧縮中… %1$d 秒経過</string>
     <string name="compact_progress_split">圧縮中… %1$d 秒 · 分割して要約中（%2$d/%3$d）</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">開発環境スイート</string>
+    <string name="dev_suite_section_footer">レシピはサンドボックス内にオンデマンドでツールチェーンを導入します——ペイロードはアプリに同梱されなくなり、初回のセットアップにはネットワークが必要です。</string>
+    <string name="dev_suite_online_header">オンラインツール</string>
+    <string name="dev_suite_online_footer">スタンドアロンのツール、タップで導入。</string>
+    <string name="dev_suite_progress">%1$d/%2$d 準備完了</string>
+    <string name="dev_suite_installing">インストール中…</string>
+    <string name="dev_suite_failed">失敗</string>
+    <string name="dev_suite_ready">準備完了</string>
+    <string name="dev_suite_not_installed">未導入</string>
+    <string name="dev_suite_required">必須</string>
+    <string name="dev_suite_assemble">セットアップ</string>
 </resources>

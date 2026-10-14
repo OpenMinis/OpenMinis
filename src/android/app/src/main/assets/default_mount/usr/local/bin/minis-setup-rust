@@ -1,0 +1,55 @@
+#!/bin/sh
+# Install Rust via rustup with the rsproxy (CN) dist mirror. Idempotent.
+# Part of the dev-suite "rust-dev" component.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+if command -v rustc >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+  echo "rust already present: $(rustc --version)"
+  exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo "curl missing — run minis-dev-setup first" >&2; exit 1; }
+command -v cc >/dev/null 2>&1 || {
+  . /usr/local/lib/minis/apt-lock.sh
+  minis_acquire_apt_lock 1800 || exit 1
+  trap minis_release_apt_lock EXIT
+  apt-get update || true
+  apt-get install -y --no-install-recommends build-essential
+}
+
+# rsproxy mirrors both rustup and the dist archives; fall back to official.
+export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
+export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
+
+sh="/tmp/rustup-init-$$.sh"
+ok=0
+for url in \
+  "https://rsproxy.cn/rustup-init.sh" \
+  "https://sh.rustup.rs"
+do
+  [ -n "$url" ] || continue
+  echo "  downloading $url"
+  if curl -fL --retry 1 --connect-timeout 12 --speed-time 30 --speed-limit 100 \
+       -o "$sh" "$url"; then ok=1; break; fi
+  rm -f "$sh"
+done
+[ "$ok" = 1 ] || { echo "rustup-init download failed" >&2; exit 1; }
+
+sh "$sh" -y --default-toolchain stable --profile minimal --no-modify-path
+rm -f "$sh"
+
+# rustup installs to ~/.cargo; expose on PATH for every shell via profile.d.
+cat > /etc/profile.d/minis-rust.sh <<'EOF'
+export PATH="$HOME/.cargo/bin:$PATH"
+EOF
+
+# Also link into /usr/local/bin so non-login shells (agent tool calls) see it.
+for b in rustc cargo rustup rustfmt; do
+  if [ -x "/root/.cargo/bin/$b" ] && [ ! -e "/usr/local/bin/$b" ]; then
+    ln -sf "/root/.cargo/bin/$b" "/usr/local/bin/$b"
+  fi
+done
+
+echo "rust $(rustc --version 2>/dev/null || echo installed) via rustup"

@@ -1777,4 +1777,15 @@
     <string name="selection_copy_as_plain_text">Kopyahin bilang Plain Text</string>
     <string name="chat_input_placeholder_hint_5">Puwedeng ipadala o mag-bagong linya ang Enter</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Mga dev environment suite</string>
+    <string name="dev_suite_section_footer">Nag-i-install ang mga recipe ng toolchains sa loob ng sandbox kapag kailangan — hindi na kasama sa app ang mga payload, kailangan ng internet sa unang pag-setup.</string>
+    <string name="dev_suite_online_header">Mga online tool</string>
+    <string name="dev_suite_online_footer">Standalone na tool, i-tap para i-install.</string>
+    <string name="dev_suite_progress">%1$d/%2$d handa na</string>
+    <string name="dev_suite_installing">Nag-i-install…</string>
+    <string name="dev_suite_failed">nabigo</string>
+    <string name="dev_suite_ready">Handa na</string>
+    <string name="dev_suite_not_installed">Hindi naka-install</string>
+    <string name="dev_suite_required">kinakailangan</string>
+    <string name="dev_suite_assemble">I-assemble</string>
 </resources>

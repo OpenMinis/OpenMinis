@@ -1777,4 +1777,15 @@
     <string name="selection_copy_as_plain_text">Salin sebagai Teks Biasa</string>
     <string name="chat_input_placeholder_hint_5">Kekunci Enter boleh hantar atau baris baharu</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Suit persekitaran pembangunan</string>
+    <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian.</string>
+    <string name="dev_suite_online_header">Alat dalam talian</string>
+    <string name="dev_suite_online_footer">Alat mandiri, pasang dengan satu ketukan.</string>
+    <string name="dev_suite_progress">%1$d/%2$d sedia</string>
+    <string name="dev_suite_installing">Memasang…</string>
+    <string name="dev_suite_failed">gagal</string>
+    <string name="dev_suite_ready">Sedia</string>
+    <string name="dev_suite_not_installed">Tidak dipasang</string>
+    <string name="dev_suite_required">wajib</string>
+    <string name="dev_suite_assemble">Pasang</string>
 </resources>

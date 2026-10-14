@@ -1779,4 +1779,15 @@
     <string name="compact_progress">Compactando… %1$d s transcurridos</string>
     <string name="compact_progress_split">Compactando… %1$d s · resumiendo por segmentos (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Entornos de desarrollo</string>
+    <string name="dev_suite_section_footer">Las recetas instalan toolchains bajo demanda en el sandbox — los payloads ya no van en la APK; el primer montaje necesita red.</string>
+    <string name="dev_suite_online_header">Herramientas en línea</string>
+    <string name="dev_suite_online_footer">Herramientas independientes que se instalan al tocar.</string>
+    <string name="dev_suite_progress">%1$d/%2$d listos</string>
+    <string name="dev_suite_installing">Instalando…</string>
+    <string name="dev_suite_failed">fallido</string>
+    <string name="dev_suite_ready">Listo</string>
+    <string name="dev_suite_not_installed">No instalado</string>
+    <string name="dev_suite_required">obligatorio</string>
+    <string name="dev_suite_assemble">Montar</string>
 </resources>

@@ -173,7 +173,9 @@ if [[ "$host_arch" == "aarch64" || "$host_arch" == "arm64" ]]; then
     [[ -n "$cand" ]] || continue
     if aapt2_runs "$cand"; then AAPT2="$cand"; break; fi
   done < <(ls -1d "$sdk_root"/build-tools/*/aapt2 2>/dev/null | sort -rV)
-  # 2. the static aarch64 aapt2 this repo already vendors as an APK asset
+  # 2. the static aarch64 aapt2 this repo used to vendor as an APK asset
+  #    ([T-apk-size] no longer bundled — kept as a local-build fallback for
+  #    checkouts that still carry the zip)
   if [[ -z "$AAPT2" ]]; then
     vend="$ROOT/src/android/app/src/main/assets/android-sdk-tools-aarch64.zip"
     if [[ -f "$vend" ]]; then

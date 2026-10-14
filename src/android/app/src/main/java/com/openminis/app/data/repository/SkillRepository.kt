@@ -2113,12 +2113,12 @@ sdkmanager "build-tools;35.0.0"
 
 **正确做法：**
 
-- 继续用 APK 捆绑的 aarch64 `android-sdk-tools-aarch64.zip`
+- 用 `minis-android-sdk-setup` 按需下载的 aarch64 工具链（lzhiyong/android-sdk-tools）
 - 需要新版 aapt2 时，从 [lzhiyong/android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools/releases) 下载 **aarch64** 包
 - 不要用 `sdkmanager "build-tools;…"`，也不要解压 Google 的 `build-tools_r*-linux.zip`
 - 同样禁止 `sdkmanager "cmake;…"` / `sdkmanager "ndk;…"`：Google 的 linux 宿主工具是 x86_64
 
-`platform-tools` 同样以 x86_64 为主，客户机请用捆绑的 aarch64 `adb`。
+`platform-tools` 同样以 x86_64 为主，客户机请用 aarch64 的 `adb`。
 
 ## 中国大陆访问 Google 仓库
 

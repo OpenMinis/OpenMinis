@@ -1779,4 +1779,15 @@
     <string name="compact_progress">Wird verdichtet… %1$d s vergangen</string>
     <string name="compact_progress_split">Wird verdichtet… %1$d s · Zusammenfassung in Segmenten (%2$d/%3$d)</string>
     <string name="chat_process_step_view">View</string>
+    <string name="dev_suite_section_header">Entwicklungsumgebungen</string>
+    <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz.</string>
+    <string name="dev_suite_online_header">Online-Tools</string>
+    <string name="dev_suite_online_footer">Eigenständige Tools, per Tipp installiert.</string>
+    <string name="dev_suite_progress">%1$d/%2$d bereit</string>
+    <string name="dev_suite_installing">Installation…</string>
+    <string name="dev_suite_failed">fehlgeschlagen</string>
+    <string name="dev_suite_ready">Bereit</string>
+    <string name="dev_suite_not_installed">Nicht installiert</string>
+    <string name="dev_suite_required">erforderlich</string>
+    <string name="dev_suite_assemble">Einrichten</string>
 </resources>
