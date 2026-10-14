@@ -39,31 +39,37 @@ object DevSuiteStore {
         val p = prefs(context)
         val out = mutableMapOf<String, ComponentState>()
         for (id in p.all.keys) {
-            val raw = p.getString(id, null) ?: continue
-            val parts = raw.split('\u0001', limit = 3)
-            val status = when (parts.getOrNull(0)) {
-                "INSTALLING" -> Status.INSTALLING
-                "INSTALLED" -> Status.INSTALLED
-                "FAILED" -> Status.FAILED
-                else -> Status.NOT_INSTALLED
-            }
-            out[id] = ComponentState(
-                componentId = id,
-                status = status,
-                progressLine = parts.getOrNull(1).orEmpty(),
-                updatedAtMs = parts.getOrNull(2)?.toLongOrNull() ?: 0L,
-            )
+            out[id] = decodeComponentState(id, p.getString(id, null)) ?: continue
         }
         _states.value = out
         return out
     }
 
     fun update(context: Context, componentId: String, status: Status, progressLine: String = "") {
-        val p = prefs(context)
-        p.edit()
-            .putString(componentId, "$status\u0001$progressLine\u0001${System.currentTimeMillis()}")
-            .apply()
-        snapshot(context)
+        val previous = _states.value[componentId]
+        val next = ComponentState(
+            componentId = componentId,
+            status = status,
+            progressLine = progressLine,
+            updatedAtMs = System.currentTimeMillis(),
+        )
+        // [T-dev-suite-prefs-storm] Persist ONLY status transitions. The
+        // installer feeds every apt/pip output line through here — hundreds
+        // of full-XML SharedPreferences rewrites per install, and each
+        // apply() queues a disk write that QueuedWork.waitToFinish() can
+        // later force the MAIN thread to drain (observed as a multi-second
+        // main-thread stall during installs that deferred the foreground
+        // service's createService dispatch past its deadline — the
+        // install-crash amplifier). Progress lines are UI-only state: they
+        // flow through the in-memory StateFlow and never touch disk. Crash
+        // recovery (recoverInterrupted) only needs the status marker, and
+        // it overwrites the line anyway.
+        if (shouldPersistComponentState(previous?.status, status)) {
+            prefs(context).edit()
+                .putString(componentId, encodeComponentState(status, progressLine, next.updatedAtMs))
+                .apply()
+        }
+        _states.value = _states.value + (componentId to next)
     }
 
     /**
@@ -79,5 +85,36 @@ object DevSuiteStore {
             .map { it.componentId }
         interrupted.forEach { update(context, it, Status.FAILED, "安装被中断") }
         return interrupted
+    }
+
+    /**
+     * [T-dev-suite-prefs-storm] True when this update must hit disk: ONLY
+     * status transitions. Progress-line refreshes (the installer feeds every
+     * apt/pip output line through [update]) stay in memory — see the block
+     * comment in [update]. Pure so the throttle contract is unit-testable.
+     */
+    internal fun shouldPersistComponentState(previous: Status?, next: Status): Boolean =
+        previous != next
+
+    /** Encodes one component marker for SharedPreferences. Pure (testable). */
+    internal fun encodeComponentState(status: Status, progressLine: String, updatedAtMs: Long): String =
+        "$status\u0001$progressLine\u0001$updatedAtMs"
+
+    /** Decodes one component marker; null for absent/corrupt rows. Pure (testable). */
+    internal fun decodeComponentState(componentId: String, raw: String?): ComponentState? {
+        if (raw == null) return null
+        val parts = raw.split('\u0001', limit = 3)
+        val status = when (parts.getOrNull(0)) {
+            "INSTALLING" -> Status.INSTALLING
+            "INSTALLED" -> Status.INSTALLED
+            "FAILED" -> Status.FAILED
+            else -> Status.NOT_INSTALLED
+        }
+        return ComponentState(
+            componentId = componentId,
+            status = status,
+            progressLine = parts.getOrNull(1).orEmpty(),
+            updatedAtMs = parts.getOrNull(2)?.toLongOrNull() ?: 0L,
+        )
     }
 }

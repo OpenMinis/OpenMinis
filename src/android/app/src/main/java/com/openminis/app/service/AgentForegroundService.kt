@@ -239,6 +239,27 @@ class AgentForegroundService : Service() {
                 "processAliveMs=${android.os.SystemClock.elapsedRealtime() - processStartElapsedMs} " +
                 "slots=${SessionConcurrencyManager.diagSnapshot()}",
         )
+        // [T-fgs-deadline-invariant] Every Context.startForegroundService()
+        // delivery must be answered by Service.startForeground() in THIS
+        // dispatch — unconditionally. The refresh pipeline below deliberately
+        // skips no-op publishes (identical state) and applyForeground's
+        // notify()-only branch (non-forked SystemUI) never re-anchors; both
+        // are fine for notification churn but leave the platform's 5-10s
+        // foreground deadline armed against a service that already considers
+        // itself anchored (crash-2026-10-15_01-00-01 class). Re-anchoring
+        // with the CURRENT state notification is a cheap idempotent no-op for
+        // the platform, and it must run BEFORE any stopSelf() return path —
+        // stopSelf() tears the component down but does NOT retract the
+        // pending foreground requirement (see applyForeground's catch).
+        if (bootstrapPosted) {
+            val anchor = try {
+                buildNotification(notificationState())
+            } catch (t: Throwable) {
+                Log.w(TAG, "anchor build failed, using stub: ${t.message}")
+                stubForegroundNotification()
+            }
+            applyForeground(anchor, reanchor = true)
+        }
         // onCreate already satisfied the foreground deadline with a plain stub.
         // If even the stub failed, no background service should remain alive.
         if (!bootstrapPosted || com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()) {

@@ -3,6 +3,9 @@ package com.openminis.app.service
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +28,21 @@ import kotlinx.coroutines.flow.asStateFlow
 object SessionActivityTracker {
 
     private const val TAG = "SessionTracker"
+
+    // [T-fgs-stop-linger] Owns the deferred service stop. See
+    // [ServiceStopLinger] for the crossing this closes.
+    private val trackerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val stopLinger = ServiceStopLinger(
+        scope = trackerScope,
+        onStop = { stopService() },
+    )
+
+    /**
+     * Test seam: true while a deferred service stop is scheduled. The stop
+     * itself is a no-op without an initialized [appContext], so unit tests
+     * observe the linger wiring through this instead.
+     */
+    val isStopPendingForTest: Boolean get() = stopLinger.isPending
 
     private val _activeSessions = MutableStateFlow<Set<String>>(emptySet())
     val activeSessions: StateFlow<Set<String>> = _activeSessions.asStateFlow()
@@ -315,6 +333,10 @@ object SessionActivityTracker {
      * action can fan out to every running session.
      */
     fun setActive(sessionId: String, onStop: (() -> Unit)? = null) {
+        // [T-fgs-stop-linger] A new run cancels any deferred stop — the
+        // service is needed again, and the next startForegroundService()
+        // must not race the teardown it would have triggered.
+        stopLinger.cancel()
         val wasIdle = !shouldRunService()
         // [T-android-live-update-completed] Capture BEFORE mutating: a run
         // "begins" only on the empty → non-empty edge. A second concurrent
@@ -393,8 +415,13 @@ object SessionActivityTracker {
         }
         publishNotificationTimeline()
         if (!shouldRunService()) {
-            stopService()
+            // [T-fgs-stop-linger] Deferred stop: a rapid follow-up command
+            // (next probe / apt step in the same assembly) cancels this and
+            // keeps one service instance, instead of crossing stopService()
+            // with its own startForegroundService() at ActivityManager.
+            stopLinger.schedule()
         } else {
+            stopLinger.cancel()
             updateService()
         }
         // T180-bg-notif: fire the completion listener AFTER service state
@@ -425,6 +452,9 @@ object SessionActivityTracker {
      */
     fun setPresent(sessionId: String) {
         if (sessionId in _presentSessions.value) return
+        // [T-fgs-stop-linger] Presence re-holds the service the same way a
+        // new active session does — cancel any deferred stop.
+        stopLinger.cancel()
         val wasIdle = !shouldRunService()
         _presentSessions.value = _presentSessions.value + sessionId
         Log.d(TAG, "Presence set: $sessionId (present total: ${_presentSessions.value.size})")
@@ -446,8 +476,10 @@ object SessionActivityTracker {
         _presentSessions.value = _presentSessions.value - sessionId
         Log.d(TAG, "Presence cleared: $sessionId (present total: ${_presentSessions.value.size})")
         if (!shouldRunService()) {
-            stopService()
+            // [T-fgs-stop-linger] see setInactive — deferred, cancellable.
+            stopLinger.schedule()
         } else {
+            stopLinger.cancel()
             updateService()
         }
     }
@@ -464,8 +496,10 @@ object SessionActivityTracker {
         _presentSessions.value = emptySet()
         Log.d(TAG, "Presence cleared (all)")
         if (!shouldRunService()) {
-            stopService()
+            // [T-fgs-stop-linger] see setInactive — deferred, cancellable.
+            stopLinger.schedule()
         } else {
+            stopLinger.cancel()
             updateService()
         }
     }
