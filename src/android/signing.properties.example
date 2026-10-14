@@ -1,0 +1,15 @@
+# OpenMinis release signing configuration — TEMPLATE (not tracked: the real file holds secrets)
+#
+# Copy to src/android/signing.properties and fill in. That file is git-ignored:
+# plaintext keystore passwords in the repository meant anyone could sign an APK
+# carrying this project's upgrade identity. CI does not need this file at all —
+# it reads MINIS_UPLOAD_* from repository secrets.
+#
+# Every value below can also be supplied as an environment variable, which then
+# wins over this file:
+#   MINIS_UPLOAD_STORE_FILE / MINIS_UPLOAD_STORE_PASSWORD
+#   MINIS_UPLOAD_KEY_ALIAS   / MINIS_UPLOAD_KEY_PASSWORD
+signing.storeFile=release.keystore
+signing.storePassword=
+signing.keyAlias=
+signing.keyPassword=

@@ -12,7 +12,7 @@ import org.json.JSONObject
 /**
  * Browser-debug RPC handlers (`debug.browser.*`).
  *
- * Mirrors the iOS `debug.browser.*` surface in `docs/debug-server-api.md`. All
+ * Mirrors the iOS `debug.browser.*` surface (debug-server API spec, §browser). All
  * methods operate on the application-scoped [MinisApp.sharedBrowserTabPool]
  * (the same pool the in-shell `minis-browser-use` agent drives) so external
  * automation sees the tabs the user has actually opened.

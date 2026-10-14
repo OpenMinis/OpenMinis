@@ -77,7 +77,7 @@ object Iso8601MillisNullableSerializer : KSerializer<Long?> {
 /**
  * On-the-wire types for the `.minisbak` backup package.
  *
- * Spec: `docs/backup-restore-design.md` §2 / §2.1. This is the FORMAT layer,
+ * Spec: backup-restore design §2 / §2.1. This is the FORMAT layer,
  * mirroring `src/ios/Agent/Backup/BackupFormat.swift` field-for-field —
  * §5.4 explicitly forbids inventing a second format, and the manifest keys
  * are sealed by `manifest_mac`, so every name here is wire-frozen.

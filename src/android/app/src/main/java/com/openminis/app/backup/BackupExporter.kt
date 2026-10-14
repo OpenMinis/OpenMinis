@@ -18,7 +18,7 @@ import com.openminis.app.util.IsoTime
 import java.util.UUID
 
 /**
- * Builds a `.minisbak` package on Android (docs/backup-restore-design.md §2,
+ * Builds a `.minisbak` package on Android (backup-restore design §2,
  * §9 stage 4), mirroring `src/ios/Agent/Backup/BackupExporter.swift`.
  *
  * Shape: stage everything into a scratch directory, then zip that directory

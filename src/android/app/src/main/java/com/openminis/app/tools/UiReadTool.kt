@@ -40,11 +40,16 @@ object UiReadTool {
         }
         val cap = (obj.optInt("max_chars", 6_000)).coerceIn(1_000, MAX_CHARS)
         val toolTitle = obj.optString("tool_title", "ui_read")
+        // [T-ui-read-honest-status] `|| true` plus a hardcoded success=true made
+        // "no accessibility service" and "dump failed" indistinguishable from a
+        // real (empty) screen, so the GUI loop's read-again-to-verify treated
+        // dead reads as observations. The CLI's exit status now decides.
         val script = """
             if [ -x /usr/local/bin/android-a11y-cli ]; then
-              android-a11y-cli read-screen 2>&1 | head -c $cap || true
+              android-a11y-cli read-screen 2>&1 | head -c $cap
             else
               echo "android-a11y-cli not available in sandbox; use su_exec to reach host tools"
+              exit 127
             fi
         """.trimIndent()
         return runCatching {
@@ -53,11 +58,18 @@ object UiReadTool {
                 .start()
             val out = process.inputStream.bufferedReader().readText()
             process.waitFor()
+            val exit = process.exitValue()
             val trimmed = out.trim().take(cap)
             val body = trimmed.ifBlank { "（屏幕为空或读屏失败——确认已授予无障碍权限：Settings → 权限）" }
-            ToolExecutionResult(body, true, toolTitle = toolTitle)
+            val code = when {
+                trimmed.contains("SERVICE_NOT_RUNNING") -> ToolErrorCode.PERMISSION_DENIED
+                exit == 127 -> ToolErrorCode.UNSUPPORTED
+                exit != 0 -> ToolErrorCode.EXECUTION_FAILED
+                else -> null
+            }
+            ToolExecutionResult(body, exit == 0, errorCode = code, toolTitle = toolTitle)
         }.getOrElse {
-            ToolExecutionResult("Error: ${it.message}", false, toolTitle = toolTitle)
+            ToolExecutionResult("Error: ${it.message}", false, errorCode = ToolErrorCode.EXECUTION_FAILED, toolTitle = toolTitle)
         }
     }
 }

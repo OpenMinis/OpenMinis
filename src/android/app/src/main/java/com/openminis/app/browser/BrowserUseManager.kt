@@ -459,13 +459,39 @@ class BrowserUseManager(
             ): android.webkit.WebResourceResponse? {
                 val url = request.url ?: return null
                 if (url.scheme != "minis") return null
-                return interceptMinisURL(url)
+                return interceptMinisURL(url, request.requestHeaders)
             }
         }
     }
 
+    /**
+     * [T-android-minis-cors-scope] Which requester may read a local file across
+     * origins. `Access-Control-Allow-Origin: *` on every intercepted file meant
+     * ANY page the agent navigates to could `fetch("minis://workspace/…")` and
+     * read the bytes back — session workspaces hold downloaded user files and
+     * staged tool output, so a drive-by page turned the agent's own browser into
+     * an exfiltration channel.
+     *
+     * A web page (http/https origin) gets no CORS header at all: its main-frame
+     * navigation still works, its cross-origin READ of local bytes does not.
+     * Same-scheme callers (a `minis://` workspace app fetching its own assets)
+     * get their exact origin echoed back, and a request with no Origin header
+     * (top-level navigation) needs nothing.
+     */
+    private fun corsHeadersFor(origin: String?): Map<String, String> = when {
+        origin.isNullOrBlank() -> emptyMap()
+        origin.startsWith("http://", true) || origin.startsWith("https://", true) -> emptyMap()
+        else -> mapOf("Access-Control-Allow-Origin" to origin)
+    }
+
     /** Resolve minis:// URLs to local workspace files. */
-    private fun interceptMinisURL(uri: android.net.Uri): android.webkit.WebResourceResponse? {
+    private fun interceptMinisURL(
+        uri: android.net.Uri,
+        requestHeaders: Map<String, String>? = null,
+    ): android.webkit.WebResourceResponse? {
+        val corsHeaders = corsHeadersFor(
+            requestHeaders?.get("Origin") ?: requestHeaders?.get("origin"),
+        )
         try {
             // minis://workspace/foo.html → /var/minis/workspace/foo.html, then
             // resolve to the host file via PRoot bind mounts (per-session
@@ -520,7 +546,7 @@ class BrowserUseManager(
                 localFile.inputStream()
             }
             return android.webkit.WebResourceResponse(mimeType, "UTF-8", 200, "OK",
-                mapOf("Access-Control-Allow-Origin" to "*"),
+                corsHeaders,
                 stream)
         } catch (e: Exception) {
             Log.w(TAG, "minis:// intercept error: ${e.message}")

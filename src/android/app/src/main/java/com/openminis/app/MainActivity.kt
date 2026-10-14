@@ -613,8 +613,7 @@ class MainActivity : ComponentActivity() {
                 // chat, not only while a stream is in flight. Without
                 // this hook the process drops from adj=200 to adj=700
                 // the moment Home is pressed and a Pixel 4a will
-                // reclaim within a couple of minutes (see
-                // docs/parity/android-keep-alive-audit.md).
+                // reclaim within a couple of minutes.
                 DisposableEffect(navController) {
                     val job = lifecycleScope.launch {
                         navController.currentBackStackEntryFlow.collect { entry ->

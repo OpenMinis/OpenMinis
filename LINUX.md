@@ -6,7 +6,7 @@
 
 滚动 APK：GitHub Releases 标签 `android-latest`，文件名 `minis-ultra-com.openminis.linux.apk`。关于页 / 检查更新走 fork `tall-1997/OpenMinis-Linux`；滚动包用 release body 里的 `versionCode` / `versionName`（以及 APK `updated_at`）判断是否比本机新。
 
-正式发行包：[Releases `1.36.24-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.24-linux)。1.36.24：手机时区变化时同步客户机 `/etc/localtime`，不再只改正在运行的 shell 的 `TZ`。详见 [docs/RELEASE-NOTES.zh.md](docs/RELEASE-NOTES.zh.md)。
+正式发行包：[Releases `1.36.24-linux`](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/1.36.24-linux)。1.36.24：手机时区变化时同步客户机 `/etc/localtime`，不再只改正在运行的 shell 的 `TZ`。完整变更记录见 [Releases](https://github.com/tall-1997/OpenMinis-Linux/releases)。
 
 ## 沙箱当服务器
 
@@ -63,7 +63,7 @@ yum install python3          # → apt-get install -y python3
 `aapt2` / `zipalign` / `adb` 以 **aarch64** 静态二进制打进 APK（AOSP，来自 lzhiyong/android-sdk-tools 35.0.2），解压到 `/opt/android-sdk`。
 `sdkmanager`（Google cmdline-tools 12.0，Java）也捆绑了——精简到 sdkmanager 的 classpath（约 20MB，丢掉 lint/R8/kotlin-compiler）。它跑在 aarch64 OpenJDK 上，**只用来拉** `platforms;android-36` 和 `platforms;android-35`。CMake 默认 3.31.6（失败则 3.22.1）。NDK 只装 r29（`29.0.14206865`，lzhiyong/termux-ndk 的 `android-ndk-r29-aarch64.tar.xz`）。已有 r28 会留下，但不算安装成功，失败也不回退 r28。不要用 sdkmanager 装 Google 的 linux x86_64 宿主包。
 
-**严禁**在客户机里安装 Google 的 linux build-tools / cmake / ndk：那是 x86_64，会把 aapt2 覆盖成无法执行的 ELF，或留下不能跑的 clang。完整镜像清单见内置技能 `android-sdk-mirrors` 和 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
+**严禁**在客户机里安装 Google 的 linux build-tools / cmake / ndk：那是 x86_64，会把 aapt2 覆盖成无法执行的 ELF，或留下不能跑的 clang。完整镜像清单见内置技能 `android-sdk-mirrors`。
 
 客户机继承 Android 的 `TMPDIR`（应用 cache 目录）时，dpkg/apt 会解包失败。PRoot 启动时把 `TMPDIR`/`TMP`/`TEMP` 钉成 `/tmp`；`minis-dev-setup` 会先修破损依赖并安装 `ca-certificates`。
 

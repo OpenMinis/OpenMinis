@@ -19,7 +19,7 @@ Android arm64 上的私人 AI Agent。把兼容接口接到手机里的一台 Ub
 - 正式版：带版本号的 tag（例如 `1.36.36-linux`）
 - 滚动构建：[android-latest](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest)（`main` 每次成功构建覆盖）
 
-侧载前允许「安装未知应用」。debug 签名不能覆盖另一张证书装上的版本，见 [docs/SIGNING.md](docs/SIGNING.md)。
+侧载前允许「安装未知应用」。debug 签名不能覆盖另一张证书装上的版本，签名说明见 [BUILDING.md](BUILDING.md) 的「Release 签名」一节。
 
 ## 能做什么
 
@@ -40,7 +40,7 @@ cd OpenMinis-Linux
 cd src/android && ./gradlew :app:assembleDebug
 ```
 
-国内镜像见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。不要用 sdkmanager 的 x86_64 包覆盖客户机里的 aarch64 `aapt2`。
+国内镜像见内置技能 `android-sdk-mirrors`。不要用 sdkmanager 的 x86_64 包覆盖客户机里的 aarch64 `aapt2`。
 
 ## 目录
 
@@ -85,7 +85,7 @@ Current builds are on [Releases](https://github.com/tall-1997/OpenMinis-Linux/re
 - Versioned tags (for example `1.36.36-linux`)
 - Rolling build: [android-latest](https://github.com/tall-1997/OpenMinis-Linux/releases/tag/android-latest) (replaced on each successful `main` build)
 
-Allow unknown-app installs before sideloading. A debug signature cannot replace an install signed with a different certificate. See [docs/SIGNING.md](docs/SIGNING.md).
+Allow unknown-app installs before sideloading. A debug signature cannot replace an install signed with a different certificate. Signing notes: [BUILDING.md](BUILDING.md) («Release 签名»).
 
 ## What it does
 
@@ -106,7 +106,7 @@ cd OpenMinis-Linux
 cd src/android && ./gradlew :app:assembleDebug
 ```
 
-Do not replace the guest's aarch64 `aapt2` with the sdkmanager x86_64 package. Mirrors: [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md).
+Do not replace the guest's aarch64 `aapt2` with the sdkmanager x86_64 package. Mirrors: the built-in `android-sdk-mirrors` skill.
 
 ## Layout
 

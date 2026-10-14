@@ -363,30 +363,46 @@ object UpdateDownloadManager {
         // present: hash the finished file and refuse to stage it on mismatch.
         // A wrong-size or corrupted splice would otherwise be recorded as a
         // perfectly installable pending update.
-        if (expectedSha256 != null) {
-            val actual = runCatching { PendingUpdateStore.sha256(file) }.getOrNull()
-            if (actual == null || !actual.equals(expectedSha256, ignoreCase = true)) {
-                AppLogger.error(
-                    TAG,
-                    "sha256 mismatch: expected=$expectedSha256 actual=$actual — discarding ${file.name}",
-                )
-                file.delete()
-                _state.value = _state.value.copy(
-                    running = false,
-                    probing = false,
-                    error = "integrity check failed (sha256 mismatch)",
-                )
-                return
-            }
+        if (expectedSha256.isNullOrBlank()) {
+            // [T-update-sha-required] …and its ABSENCE is not a licence to skip
+            // the check. Nothing else anchors this download: the mirror sources
+            // resolve the same asset URL (so there is no independent attestation),
+            // and the install-time gate only compares the signing certificate
+            // against the running install — a certificate whose keystore is
+            // published in the repository. An unadvertised-checksum APK was
+            // therefore installable on trust alone. Refuse it; the release page
+            // keeps the manual path open.
+            AppLogger.error(TAG, "release asset advertises no sha256 — refusing to stage ${file.name}")
+            file.delete()
+            _state.value = _state.value.copy(
+                running = false,
+                probing = false,
+                error = "update refused: the release asset carries no published checksum " +
+                    "(install manually from the release page)",
+            )
+            return
         }
-        val sha = expectedSha256 ?: runCatching { PendingUpdateStore.sha256(file) }.getOrNull()
+        val actual = runCatching { PendingUpdateStore.sha256(file) }.getOrNull()
+        if (actual == null || !actual.equals(expectedSha256, ignoreCase = true)) {
+            AppLogger.error(
+                TAG,
+                "sha256 mismatch: expected=$expectedSha256 actual=$actual — discarding ${file.name}",
+            )
+            file.delete()
+            _state.value = _state.value.copy(
+                running = false,
+                probing = false,
+                error = "integrity check failed (sha256 mismatch)",
+            )
+            return
+        }
         PendingUpdateStore.setPending(
             appCtx,
             PendingUpdateStore.PendingUpdate(
                 targetVersionName = versionName,
                 apkPath = file.absolutePath,
                 apkSize = file.length(),
-                sha256 = sha,
+                sha256 = expectedSha256,
                 downloadedAtMs = System.currentTimeMillis(),
             ),
         )

@@ -31,8 +31,7 @@ object ReadImageTool {
      * directly against this session's host dir instead of consulting the
      * global, last-writer-wins `bindMounts` map. Without this, an agent
      * loop in session A that calls `read_image` after session B booted
-     * its PRoot reads from session B's host dir — confirmed leak per
-     * docs/parity/cross-session-isolation-audit.md.
+     * its PRoot reads from session B's host dir — a confirmed leak before this fix.
      *
      * The legacy single-arg overload is preserved for callers that don't
      * know the session id (and falls back to the global map). Mirror iOS

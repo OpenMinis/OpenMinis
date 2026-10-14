@@ -1,7 +1,7 @@
 #!/bin/sh
 # minis-mirror — sandbox apt mirror selector with automatic fallback chain.
 #
-# Design goals (see docs/DESIGN_PHILOSOPHY.md: "验证优先于能力"):
+# Design goal — 验证优先于能力:
 #   * The sandbox must not die with its first mirror. TUNA hiccups, DNS
 #     fails, a campus firewall blocks ports — apt should self-heal instead
 #     of bubbling "Unable to fetch" to the user.

@@ -136,8 +136,27 @@ class EnvVarRepository(private val context: Context) {
 
     // -- Metadata Persistence --
 
-    private fun saveMetadata() {
-        try {
+    /**
+     * [T-android-env-empty-load-wipe] True when env-vars.json exists but could
+     * not be read/parsed. Mirrors [T-android-provider-empty-load-wipe] and the
+     * same guard in [MCPRepository]: a torn file used to collapse to "no
+     * variables", and the next add/delete then rewrote the file from that empty
+     * list — every other variable's metadata (key name, note) went with it while
+     * its value stayed keyless in the encrypted prefs. Persistence is refused
+     * until a clean read.
+     */
+    @Volatile
+    private var diskUnreadable = false
+
+    val isDiskUnreadable: Boolean get() = diskUnreadable
+
+    /** Returns false when the write was refused or failed. */
+    private fun saveMetadata(): Boolean {
+        if (diskUnreadable) {
+            Log.e(TAG, "env-vars.json unreadable — refusing to overwrite it from memory (${_entries.value.size} entries)")
+            return false
+        }
+        return try {
             val array = JSONArray()
             for (entry in _entries.value) {
                 val obj = JSONObject()
@@ -147,15 +166,22 @@ class EnvVarRepository(private val context: Context) {
                 obj.put("createdAt", entry.createdAt)
                 array.put(obj)
             }
-            metadataFile.writeText(array.toString())
+            // Atomic: a process death mid-write used to tear the file, and the
+            // next launch's failed parse silently emptied every entry.
+            writeTextAtomic(metadataFile, array.toString())
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save metadata: ${e.message}")
+            false
         }
     }
 
     private fun loadMetadata() {
+        if (!metadataFile.exists()) {
+            diskUnreadable = false
+            return
+        }
         try {
-            if (!metadataFile.exists()) return
             val array = JSONArray(metadataFile.readText())
             val entries = mutableListOf<EnvVarEntry>()
             for (i in 0 until array.length()) {
@@ -168,8 +194,10 @@ class EnvVarRepository(private val context: Context) {
                 ))
             }
             _entries.value = entries
+            diskUnreadable = false
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load metadata: ${e.message}")
+            Log.e(TAG, "Failed to load metadata, refusing to rewrite env-vars.json: ${e.message}")
+            diskUnreadable = true
         }
     }
 }

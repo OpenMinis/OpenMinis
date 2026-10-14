@@ -25,7 +25,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.R
 import com.openminis.app.data.repository.MCPRepository
-import com.openminis.app.plugins.DevSuiteCatalog
 import com.openminis.app.plugins.LocalToolPluginStore
 import com.openminis.app.plugins.OnlinePluginStore
 import com.openminis.app.plugins.PluginCatalog
@@ -86,22 +85,21 @@ fun PluginMarketScreen(
         // recipes): apt + setup scripts, downloaded on demand — the payloads
         // no longer ship in the APK. Also consumes the pending
         // minis://devsuite/install/<bundleId> deep link the agent can emit.
-        var pendingSuite by remember { mutableStateOf<String?>(null) }
+        // [T-dev-suite-link-consent] The deep link only opens the bundle's
+        // confirmation dialog now (see DevSuiteSection.pendingInstallBundleId):
+        // required components pre-checked, optional heavy ones not. Assembling
+        // straight away from a chat-emitted link meant a prompt-injected
+        // `minis://devsuite/install/android-suite` silently downloaded several
+        // gigabytes, including the components this very screen lets users
+        // deselect.
+        var pendingSuiteId by remember { mutableStateOf<String?>(null) }
         LaunchedEffect(Unit) {
-            pendingSuite = com.openminis.app.deeplink.DeepLinkCoordinator.consumePendingDevSuiteInstall()
+            pendingSuiteId = com.openminis.app.deeplink.DeepLinkCoordinator.consumePendingDevSuiteInstall()
         }
-        DevSuiteSection()
-        pendingSuite?.let { id ->
-            LaunchedEffect(id) {
-                DevSuiteCatalog.bundleById(id)?.let { bundle ->
-                    val selected = bundle.components.map { it.id }.toSet()
-                    com.openminis.app.plugins.DevSuiteInstaller.assembleBundleAsync(
-                        context, bundle, selected,
-                    )
-                }
-                pendingSuite = null
-            }
-        }
+        DevSuiteSection(
+            pendingInstallBundleId = pendingSuiteId,
+            onPendingInstallConsumed = { pendingSuiteId = null },
+        )
 
         SettingsSection(
             header = stringResource(R.string.plugin_market_section_online),

@@ -14,7 +14,7 @@ plugins {
 // PUBLISH_MANIFEST.yml so it is never synced; the public repo ships only
 // `provider-customization.properties.example` (empty values). A build without a
 // configured value compiles fine but fails at runtime the first time the
-// value is required (see ClaudeOAuthManager). See docs/PUBLISH_POLICY.md.
+// value is required (see ClaudeOAuthManager). Publish policy: .github/workflows/android-apk.yml.
 val appCustomization = Properties().apply {
     val f = rootProject.file("app/provider-customization.properties")
     if (f.exists()) f.inputStream().use { load(it) }
@@ -171,6 +171,21 @@ android {
 
     val uploadStoreFile = resolveSigningStoreFile()
     val hasUploadKeystore = uploadStoreFile != null
+    // [T-signing-secret-untracked] signing.properties is no longer in git, so a
+    // fresh clone resolves a keystore with a blank password and fails inside
+    // apksigner with a message about a corrupt file. Say what is actually
+    // missing instead.
+    if (hasUploadKeystore &&
+        envOrBlank("MINIS_UPLOAD_STORE_PASSWORD").isEmpty() &&
+        signingProps.getProperty("signing.storePassword").isNullOrBlank()
+    ) {
+        logger.warn(
+            "Release signing: keystore ${uploadStoreFile?.name} found but no password. " +
+                "Set MINIS_UPLOAD_STORE_PASSWORD (and MINIS_UPLOAD_KEY_*), or copy " +
+                "signing.properties.example to signing.properties and fill it in. " +
+                "Without a password the signRelease task will fail.",
+        )
+    }
     signingConfigs {
         if (hasUploadKeystore) {
             create("releaseUpload") {

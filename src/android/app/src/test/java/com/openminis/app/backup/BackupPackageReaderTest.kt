@@ -81,12 +81,17 @@ class BackupPackageReaderTest {
             alg = "pbkdf2-hmac-sha256", salt = "AAECAwQFBgcICQoLDA0ODw==", iterations = 1000
         )
         val right = BackupCrypto.deriveKeys("right passphrase", kdf)
-        writeManifest(
-            """
+        val body = """
             {"format":"minisbak/1","encryption":{"scheme":"minisbak-enc/1",
              "kdf":{"alg":"pbkdf2-hmac-sha256","salt":"AAECAwQFBgcICQoLDA0ODw==","iterations":1000},
              "verifier":"${right.verifier}"}}
-            """.trimIndent()
+        """.trimIndent()
+        writeManifest(body)
+        // Every encrypted package this app writes carries the sidecar, and an
+        // encrypted package WITHOUT any manifest MAC is now refused
+        // (verifyManifestAuthenticity), so the happy path has to sign it.
+        File(root, "manifest.mac").writeText(
+            BackupCrypto.manifestMac(body.toByteArray(Charsets.UTF_8), right.macKey)
         )
 
         val reader = BackupPackageReader(root)
@@ -101,6 +106,38 @@ class BackupPackageReaderTest {
         // The right one must succeed and yield usable keys.
         val keys = reader.unlock("right passphrase")
         assertEquals(right.verifier, keys.verifier)
+    }
+
+    /**
+     * [T-android-manifest-mac-failclosed] An encrypted package whose sidecar was
+     * stripped must not unlock on a correct passphrase. The verifier is inside
+     * the plaintext manifest, so it travels with the edit — only the MAC tells an
+     * attacker's manifest from the author's.
+     */
+    @Test
+    fun `an encrypted package with no manifest MAC is refused`() {
+        val kdf = BackupManifest.Encryption.KDF(
+            alg = "pbkdf2-hmac-sha256", salt = "AAECAwQFBgcICQoLDA0ODw==", iterations = 1000
+        )
+        val right = BackupCrypto.deriveKeys("pass", kdf)
+        writeManifest(
+            """
+            {"format":"minisbak/1","encryption":{"scheme":"minisbak-enc/1",
+             "kdf":{"alg":"pbkdf2-hmac-sha256","salt":"AAECAwQFBgcICQoLDA0ODw==","iterations":1000},
+             "verifier":"${right.verifier}"}}
+            """.trimIndent()
+        )
+
+        var message: String? = null
+        try {
+            BackupPackageReader(root).unlock("pass")
+        } catch (e: BackupException) {
+            message = e.message
+        }
+        assertTrue(
+            "an unsigned encrypted manifest must not unlock, got: $message",
+            message?.contains("no manifest authentication") == true,
+        )
     }
 
     @Test

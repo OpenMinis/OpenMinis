@@ -12,7 +12,7 @@ import org.json.JSONObject
 /**
  * Read-only `provider.*` and `provider.groups.*` RPC handlers — Phase 1.
  *
- * Mirrors the read shape from `docs/debug-server-api.md`. Mutation handlers
+ * Mirrors the read shape from the debug-server API spec. Mutation handlers
  * (`provider.instances.create/update/delete/test`, `provider.models.*`,
  * `provider.groups.create/update/delete/setDefault`) land in Phase 2.
  *

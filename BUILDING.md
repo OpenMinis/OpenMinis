@@ -63,9 +63,9 @@ cd src/android
 
 - `build_proot.sh` 用 NDK 交叉编译 PRoot，并放入 `assets/` 和 `jniLibs/arm64-v8a/`。`libproot-loader.so` 与 `libproot-loader32.so` 必须在 APK 里，否则客户机命令会报 `[Shell not running]`。
 - `build_proot.sh` **需要 gawk**：proot 的 `loader-info.awk` 用了 `strtonum()`，那是 gawk 扩展，而 Debian/Ubuntu 默认的 `/usr/bin/awk` 是 mawk。脚本会自己找一个支持 `strtonum` 的 awk 并在 make 期间遮蔽默认的。
-- `prepare_android_sandbox.sh` 下载 Ubuntu 24.04 arm64 的 `ubuntu-base.tar.gz`（不进 git），并准备 aarch64 aapt2 与精简 sdkmanager。它会校验每个 blob：`android-sdk-tools-aarch64.zip` 来自第三方 release，35.0.2 那份的偏移量就是坏的，脚本用 `repair_vendor_zip.py` 就地重建。
-- 在 aarch64 宿主机上编译时，AGP 默认从 Maven 取 **x86_64** 的 aapt2，会以 `AAPT2 Daemon startup failed` 失败。`build_apk_aarch64.sh` 自动加 `-Pandroid.aapt2FromMavenOverride=` 指向一个能在本机跑的 aarch64 aapt2。同样地，在 aarch64 客户机里不要用 Google 的 x86_64 `build-tools` 覆盖 aapt2。见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
-- Release 签名见 [docs/SIGNING.md](docs/SIGNING.md)。仓库里有 `src/android/release.keystore` 和 `signing.properties` 时，`:app:assembleRelease` 用这套证书。
+- `prepare_android_sandbox.sh` 下载 Ubuntu 24.04 arm64 的 `ubuntu-base.tar.gz`（不进 git）并做 gzip 完整性校验。**Android SDK 宿主工具（aapt2 / sdkmanager）不再打包进 APK**：`18dff0c` 起改由客户机里的 `minis-android-sdk-setup` 按需下载，所以这个脚本不再产出 `android-sdk-tools-aarch64.zip` / `android-cmdline-tools.zip`，`slim_android_cmdline_tools.py` 也随之退休。`repair_vendor_zip.py` 仅在重新引入第三方 zip 时才用得上（校验逻辑保留）。
+- 在 aarch64 宿主机上编译时，AGP 默认从 Maven 取 **x86_64** 的 aapt2，会以 `AAPT2 Daemon startup failed` 失败。`build_apk_aarch64.sh` 自动加 `-Pandroid.aapt2FromMavenOverride=` 指向一个能在本机跑的 aarch64 aapt2。同样地，在 aarch64 客户机里不要用 Google 的 x86_64 `build-tools` 覆盖 aapt2。镜像清单见内置技能 `android-sdk-mirrors`（`SkillRepository.ANDROID_SDK_MIRRORS_CONTENT`）。
+- Release 签名：`src/android/release.keystore` 是本项目公开的默认上传证书（进 git，便于 CI 与本地共用同一张证书 —— 应用内更新按证书指纹比对，见 `UpdateChecker.verifyApkSignature`）。**口令文件 `signing.properties` 不再进 git**：私钥已经公开，口令再公开就等于任何人都能签发本项目的升级包。本地开发：`cp src/android/signing.properties.example src/android/signing.properties` 后填口令。CI：用 repository secrets（`MINIS_UPLOAD_KEYSTORE_BASE64` + 三个 `MINIS_UPLOAD_*`，或仅 `MINIS_UPLOAD_STORE_PASSWORD` 以复用仓库内证书）；两者都没有时 `Upload keystore` 步骤直接失败，**不会**退化成 debug 签名（那会让所有已安装用户失去升级路径）。
 
 `src/android/app/src/main/cpp/` 里的 JNI 由 Gradle 的 CMake 一起编译，不用单独跑。
 

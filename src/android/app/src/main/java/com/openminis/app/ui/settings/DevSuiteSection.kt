@@ -39,16 +39,38 @@ import com.openminis.app.plugins.DevSuiteStore
  * payloads never ship in the APK — recipes download them on demand.
  */
 @Composable
-fun DevSuiteSection() {
+fun DevSuiteSection(
+    /**
+     * [T-dev-suite-link-consent] Bundle id handed over by a
+     * `minis://devsuite/install/<id>` deep link. It only PRESELECTS the
+     * confirmation dialog — the install still starts when the user taps 装配.
+     * A chat-emitted (and therefore prompt-injectable) link used to call
+     * assembleBundleAsync with every component pre-selected, silently pulling
+     * gigabytes on a metered connection.
+     */
+    pendingInstallBundleId: String? = null,
+    onPendingInstallConsumed: () -> Unit = {},
+) {
     val context = LocalContext.current
     val states by DevSuiteStore.states.collectAsState()
     val busy by DevSuiteInstaller.busy.collectAsState()
     val current by DevSuiteInstaller.current.collectAsState()
     var confirmBundle by remember { mutableStateOf<DevBundle?>(null) }
 
+    LaunchedEffect(pendingInstallBundleId) {
+        val id = pendingInstallBundleId ?: return@LaunchedEffect
+        confirmBundle = DevSuiteCatalog.bundleById(id)
+        onPendingInstallConsumed()
+    }
+
     // Crash recovery: a component stuck in INSTALLING means the process died
     // mid-install — flip it to FAILED so the UI offers a retry.
-    LaunchedEffect(Unit) { DevSuiteStore.recoverInterrupted(context) }
+    // [T-dev-suite-recover-scope] Only when nothing is actually running: this
+    // section re-composes whenever the user leaves and returns to Settings, and
+    // an unconditional pass used to mark the LIVE install FAILED.
+    LaunchedEffect(busy) {
+        if (!busy) DevSuiteStore.recoverInterrupted(context)
+    }
 
     SettingsSection(
         header = stringResource(R.string.dev_suite_section_header),

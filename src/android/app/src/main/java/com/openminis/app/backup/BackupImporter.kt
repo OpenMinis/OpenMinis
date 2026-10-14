@@ -18,7 +18,7 @@ import java.io.File
 import com.openminis.app.util.IsoTime
 
 /**
- * Restores a `.minisbak` package on Android (docs/backup-restore-design.md §8),
+ * Restores a `.minisbak` package on Android (backup-restore design §8),
  * mirroring `src/ios/Agent/Backup/BackupImporter.swift`.
  *
  * Scope: **Merge mode** (§8.2's default) — match by id, newer `updatedAt` wins.

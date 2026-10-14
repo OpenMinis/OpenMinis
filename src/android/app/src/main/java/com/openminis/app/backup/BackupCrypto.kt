@@ -22,7 +22,8 @@ import java.util.Base64
 
 /**
  * Passphrase-based encryption for `.minisbak` packages
- * (docs/backup-restore-design.md §5, scheme `minisbak-enc/1`).
+ * (backup-restore design §5, scheme `minisbak-enc/1` — the doc itself was
+ * dropped from the public repo; this file is the normative implementation).
  *
  * This is the Android column of the §5.2.1 parameter table, implemented
  * against `src/ios/Agent/Backup/BackupCrypto.swift`. Every value here is wire
@@ -127,6 +128,13 @@ object BackupCrypto {
         }
         return when (kdf.alg) {
             "pbkdf2-hmac-sha256" -> {
+                // The iteration count travels in the manifest on purpose (see
+                // BackupCryptoInteropTest's known-answer vectors), and a
+                // downgraded count does not buy an attacker anything here: the
+                // verifier was computed at the REAL cost, so deriving at 1 round
+                // simply fails the verifier. What authenticates the KDF fields —
+                // and every other manifest field — is the manifest MAC, which is
+                // now mandatory (BackupPackageReader.verifyManifestAuthenticity).
                 val iterations = kdf.iterations ?: PBKDF2_ITERATIONS
                 Keys(pbkdf2(passphrase, salt, iterations))
             }

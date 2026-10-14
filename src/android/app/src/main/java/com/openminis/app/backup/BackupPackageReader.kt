@@ -117,6 +117,17 @@ class BackupPackageReader(private val root: File) {
      * that form is present the check is skipped rather than failed, because a
      * false "tampered" on a good package is the worse outcome and integrity
      * hashes still cover every member.
+     *
+     * [T-android-manifest-mac-failclosed] Carrying ONLY the legacy form is a
+     * package from the other platform. Having NEITHER form is not a legacy
+     * package — [BackupExporter] writes the sidecar on every encrypted backup,
+     * so an unsigned manifest means the sidecar was stripped and the plaintext
+     * manifest rewritten. That used to fall through silently (not even a log),
+     * which is exactly the attack this function exists to stop: the `providers`
+     * entry can be dropped and the KDF downgraded, and `unlock()` derives and
+     * verifier-checks BEFORE authenticity, so the verifier cannot tell an edited
+     * but self-consistent manifest from a real one. Encrypted packages without
+     * any MAC are refused.
      */
     private fun verifyManifestAuthenticity(manifest: BackupManifest, keys: BackupCrypto.Keys) {
         val sidecar = File(root, "manifest.mac")
@@ -130,7 +141,15 @@ class BackupPackageReader(private val root: File) {
                 "[Backup] package carries only the legacy embedded manifest_mac; " +
                     "skipping MAC check (integrity hashes still apply)"
             )
+            return
         }
+        throw BackupException(
+            "This encrypted package carries no manifest authentication " +
+                "(neither the manifest.mac sidecar nor the legacy embedded " +
+                "manifest_mac). Either the package was modified or it was " +
+                "written before manifest signing existed; restoring it could " +
+                "hide which categories hold credentials.",
+        )
     }
 
     /**

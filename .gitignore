@@ -30,6 +30,11 @@ render.experimental.xml
 # Default Minis Ultra upload key — tracked so CI and local release APKs
 # share one certificate (UpdateChecker). Override with MINIS_UPLOAD_*.
 !src/android/release.keystore
+# [T-signing-secret-untracked] The password file is NOT tracked: a plaintext
+# credential next to a tracked private key lets anyone sign an APK with this
+# project's upgrade identity. Copy signing.properties.example and fill it in
+# locally; CI supplies MINIS_UPLOAD_* from repository secrets.
+src/android/signing.properties
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json

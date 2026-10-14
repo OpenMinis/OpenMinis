@@ -127,18 +127,33 @@ jobs:
       - name: Upload keystore
         env:
           B64: ${{ secrets.MINIS_UPLOAD_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.MINIS_UPLOAD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MINIS_UPLOAD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MINIS_UPLOAD_KEY_PASSWORD }}
         run: |
           if [ -n "$B64" ]; then
             echo "$B64" | base64 -d > /tmp/minis-upload.jks
             echo "MINIS_UPLOAD_STORE_FILE=/tmp/minis-upload.jks" >> "$GITHUB_ENV"
-            echo "MINIS_UPLOAD_STORE_PASSWORD=${{ secrets.MINIS_UPLOAD_STORE_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "MINIS_UPLOAD_KEY_ALIAS=${{ secrets.MINIS_UPLOAD_KEY_ALIAS }}" >> "$GITHUB_ENV"
-            echo "MINIS_UPLOAD_KEY_PASSWORD=${{ secrets.MINIS_UPLOAD_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "MINIS_UPLOAD_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "MINIS_UPLOAD_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "MINIS_UPLOAD_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "signed with GitHub Actions secret keystore"
-          elif [ -f src/android/release.keystore ] && [ -f src/android/signing.properties ]; then
-            echo "signed with committed src/android/release.keystore"
+          elif [ -n "$STORE_PASSWORD" ] && [ -f src/android/release.keystore ]; then
+            # Tracked upload key + password from secrets. The password file that
+            # used to make this path work without a secret is no longer tracked
+            # (a plaintext credential beside a tracked private key is not a
+            # secret), so the repo variable is what authorises this branch.
+            echo "MINIS_UPLOAD_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "MINIS_UPLOAD_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "MINIS_UPLOAD_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "signed with the tracked src/android/release.keystore"
           else
-            echo "No upload keystore — APK will be debug-signed (cannot replace a differently signed install)"
+            # Never fall through to a debug-signed release: UpdateChecker pins
+            # updates to the installed signing certificate, so a debug-signed APK
+            # could not replace any real install — publishing one silently
+            # strands every existing user on a dead upgrade path.
+            echo "::error::No upload keystore available. Set MINIS_UPLOAD_KEYSTORE_BASE64 (+ passwords), or MINIS_UPLOAD_STORE_PASSWORD to use the tracked release.keystore. Refusing to publish a debug-signed release."
+            exit 1
           fi
 
       - name: Assemble release APK
@@ -180,7 +195,7 @@ jobs:
             echo "staged libunwind.a from $UNWIND_A"
           fi
           if [ -z "$UNWIND_SO" ] && [ -z "$UNWIND_A" ]; then
-            echo "libunwind not in NDK sysroot — see docs/SIGNING.md"
+            echo "libunwind not in NDK sysroot — native-deps stages dist/libunwind.a"
           fi
           ls -lh dist/
 
@@ -238,16 +253,18 @@ jobs:
             - NDK：r29 `29.0.14206865`（与应用内安装同一修订号，不回退 r28）
             - versionName：`${{ steps.appver.outputs.name }}`
             - versionCode：${{ steps.appver.outputs.code }}
-            - 签名说明见 docs/SIGNING.md
+            - 签名说明见 BUILDING.md 的「Release 签名」一节
 
       - name: Select versioned release notes
         if: startsWith(github.ref, 'refs/tags/')
         id: notes
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           SHORT="${TAG%-linux}"
           OUT="${RUNNER_TEMP}/RELEASE-BODY.md"
-          for f in "docs/github-release-${TAG}.md" "docs/github-release-${SHORT}.md"; do
+          # A hand-written note for this tag wins, if committed.
+          for f in "release-notes/github-release-${TAG}.md" "release-notes/github-release-${SHORT}.md"; do
             if [ -f "$f" ]; then
               cp "$f" "$OUT"
               echo "path=$OUT" >> "$GITHUB_OUTPUT"
@@ -255,10 +272,27 @@ jobs:
               exit 0
             fi
           done
-          # RELEASE-NOTES.zh.md is the full changelog; never paste it wholesale.
-          awk 'BEGIN{p=1} /^---[[:space:]]*$/{exit} {print}' docs/RELEASE-NOTES.zh.md > "$OUT"
+          # [T-release-notes-generated] The docs/ tree this step used to read was
+          # deleted in 66841fd, so every tag push failed two steps later at
+          # `test -s "$NOTES"` — versioned releases have been unpublishable from
+          # CI since then. Derive the body from the commit log instead: it is
+          # always non-empty, and checkout already runs with fetch-depth: 0.
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## ${TAG}"
+            echo
+            if [ -n "${PREV}" ]; then
+              echo "自 ${PREV} 以来的变更："
+              echo
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREV}..${TAG}"
+            else
+              git log -1 --pretty=format:'- %s (%h)' "${TAG}"
+            fi
+            echo
+          } > "$OUT"
+          test -s "$OUT"
           echo "path=$OUT" >> "$GITHUB_OUTPUT"
-          echo "release body: first section of docs/RELEASE-NOTES.zh.md"
+          echo "release body: generated from ${PREV:-<root>}..${TAG}"
 
       # action-gh-release@v2 can exit 0 after creating an unpublished draft for a
       # non-prerelease tag. The public Release then 404s and has no APK. Publish

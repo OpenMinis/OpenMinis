@@ -32,6 +32,15 @@ data class DevComponent(
     val purgePaths: List<String> = emptyList(),
     /** Command symlinks removed on uninstall (names, resolved on PATH). */
     val purgeLinks: List<String> = emptyList(),
+    /**
+     * Conservative free-space reservation for this component: downloaded payload
+     * PLUS build output, in bytes. 0 for apt-only components (dpkg is small and
+     * the guest apt path is not the concern here). [DevSuiteInstaller] refuses
+     * an assembly whose total exceeds what the device can actually free — the
+     * runtime disk gate only fires below 2 GiB, i.e. after a multi-GB download
+     * has already filled the volume mid-transfer.
+     */
+    val estimatedBytes: Long = 0L,
 )
 
 data class DevBundle(
@@ -61,6 +70,7 @@ object DevSuiteCatalog {
                     postInstallSteps = listOf("/usr/local/bin/minis-android-sdk-setup"),
                     checkCommand = "test -x /opt/android-sdk/build-tools/35.0.2/aapt2 && test -x /opt/android-sdk/cmdline-tools/latest/bin/sdkmanager",
                     purgePaths = listOf("/opt/android-sdk"),
+                    estimatedBytes = 3_000_000_000L,
                 ),
                 DevComponent(
                     id = "flutter",
@@ -71,6 +81,7 @@ object DevSuiteCatalog {
                     checkCommand = "test -x /opt/flutter/bin/flutter",
                     purgePaths = listOf("/opt/flutter"),
                     purgeLinks = listOf("flutter", "dart"),
+                    estimatedBytes = 2_500_000_000L,
                 ),
                 DevComponent(
                     id = "android-ndk",
@@ -80,6 +91,7 @@ object DevSuiteCatalog {
                     postInstallSteps = listOf("/usr/local/bin/minis-android-sdk-setup"),
                     checkCommand = "test -x /opt/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-aarch64/bin/clang",
                     dependsOn = listOf("android-core"),
+                    estimatedBytes = 1_500_000_000L,
                 ),
                 DevComponent(
                     id = "android-re",
@@ -90,6 +102,7 @@ object DevSuiteCatalog {
                     checkCommand = "command -v jadx",
                     purgePaths = listOf("/opt/jadx"),
                     purgeLinks = listOf("jadx", "jadx-gui"),
+                    estimatedBytes = 400_000_000L,
                 ),
                 DevComponent(
                     id = "rust-dev",
@@ -100,6 +113,7 @@ object DevSuiteCatalog {
                     checkCommand = "command -v rustc && command -v cargo",
                     purgePaths = listOf("/root/.rustup", "/root/.cargo"),
                     purgeLinks = listOf("rustc", "cargo", "rustup", "rustfmt"),
+                    estimatedBytes = 1_500_000_000L,
                 ),
             ),
         ),
@@ -203,6 +217,7 @@ object DevSuiteCatalog {
             checkCommand = "command -v llama-server",
             purgePaths = listOf("/opt/llama.cpp"),
             purgeLinks = listOf("llama-server"),
+            estimatedBytes = 2_000_000_000L,
         ),
     )
 

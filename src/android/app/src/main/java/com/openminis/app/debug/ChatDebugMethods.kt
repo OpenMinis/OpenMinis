@@ -13,7 +13,7 @@ import org.json.JSONObject
  * Read-only `chat.*` RPC handlers — Phase 1.
  *
  * Mirrors the `chat.sessions.*` / `chat.messages.list` / `chat.models.list`
- * shape from `docs/debug-server-api.md`. Mutation handlers (`chat.prompt`,
+ * shape from the debug-server API spec. Mutation handlers (`chat.prompt`,
  * `chat.retry`, `chat.session.cancel`, `chat.session.delete`) land in Phase 2
  * once the headless ChatViewModel runner is wired.
  */

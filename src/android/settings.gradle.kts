@@ -68,7 +68,7 @@ dependencyResolutionManagement {
         // deps/rclone-mobile by `deps/build_rclone_android.sh`, which is also
         // what produces the iOS XCFramework from the same Go sources and the
         // same trimmed backend list. Treated as a build artifact, not a vendored
-        // binary — see docs/backup-restore-design.md §6.2.
+        // binary (backup-restore design doc §6.2).
         // First APK builds may omit the AAR; app/build.gradle.kts then compiles
         // src/rcloneStub instead.
         flatDir { dirs("app/libs") }

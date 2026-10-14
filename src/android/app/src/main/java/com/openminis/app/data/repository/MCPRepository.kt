@@ -120,19 +120,50 @@ class MCPRepository(private val context: Context) {
     /** Alias matching SkillRepository.reloadFromDisk() so callers read symmetrically. */
     fun reloadFromDisk() = load()
 
+    /**
+     * [T-mcp-empty-load-wipe] servers.json EXISTS but could not be read or
+     * parsed. Same failure class [T-android-provider-empty-load-wipe] already
+     * guards on the provider side: swallowing the error as "zero servers" makes
+     * a torn/hand-mangled file indistinguishable from a fresh install, and the
+     * next add/toggle then `save()`s that emptiness over the populated file —
+     * permanently deleting every MCP server definition, OAuth config included.
+     * While this flag is set, persistence is refused until a clean read.
+     */
+    @Volatile
+    private var diskUnreadable = false
+
+    /** True when the last read of servers.json could not be trusted. */
+    val isDiskUnreadable: Boolean get() = diskUnreadable
+
     private fun readServersFile(): List<MCPServerConfig> {
         val file = serversFile
-        if (!file.exists()) return emptyList()
+        if (!file.exists()) {
+            diskUnreadable = false
+            return emptyList()
+        }
         val text = try { file.readText() } catch (e: Exception) {
-            Log.w(TAG, "Failed to read servers.json: ${e.message}")
+            Log.e(TAG, "Failed to read servers.json, refusing to rewrite it: ${e.message}")
+            diskUnreadable = true
             return emptyList()
         }
-        if (text.isBlank()) return emptyList()
+        if (text.isBlank()) {
+            // An empty file is a torn write, not an empty config: the app always
+            // writes the mcpServers object.
+            Log.e(TAG, "servers.json is empty — treating it as unreadable")
+            diskUnreadable = true
+            return emptyList()
+        }
         val root = try { JSONObject(text) } catch (e: Exception) {
-            Log.w(TAG, "servers.json is not valid JSON: ${e.message}")
+            Log.e(TAG, "servers.json is not valid JSON, refusing to rewrite it: ${e.message}")
+            diskUnreadable = true
             return emptyList()
         }
-        val obj = root.optJSONObject("mcpServers") ?: return emptyList()
+        val obj = root.optJSONObject("mcpServers") ?: run {
+            Log.e(TAG, "servers.json has no mcpServers object — treating it as unreadable")
+            diskUnreadable = true
+            return emptyList()
+        }
+        diskUnreadable = false
         val out = mutableListOf<MCPServerConfig>()
         // [T-mcp-review-fixes-android] FIX 2: createdAt must be a STABLE recency
         // signal. Entries written by the CLI / JSON-import have no createdAt; we
@@ -165,15 +196,29 @@ class MCPRepository(private val context: Context) {
         return sorted
     }
 
-    /** Write [list] (defaults to current [servers]) to servers.json in mcpServers format. */
-    private fun save(list: List<MCPServerConfig> = _servers.value) {
+    /**
+     * Write [list] (defaults to current [servers]) to servers.json in mcpServers
+     * format. Returns false when nothing was persisted — either because the disk
+     * state could not be read ([diskUnreadable], see [T-mcp-empty-load-wipe]:
+     * overwriting an unreadable file with in-memory state is the wipe) or because
+     * the write itself failed.
+     */
+    private fun save(list: List<MCPServerConfig> = _servers.value): Boolean {
+        if (diskUnreadable) {
+            Log.e(
+                TAG,
+                "servers.json unreadable — refusing to overwrite it with ${list.size} " +
+                    "in-memory entries (would delete the on-disk config)",
+            )
+            return false
+        }
         mcpDir.mkdirs()
         val mcpServers = JSONObject()
         for (s in list) {
             mcpServers.put(s.id, entryToJson(s))
         }
         val root = JSONObject().put("mcpServers", mcpServers)
-        try {
+        return try {
             // [T-mcp-servers-json-atomic-write] servers.json has CONCURRENT
             // readers: the in-guest minis-mcp-cli daemon polls it for config
             // changes and the file browser can open it. A torn write here
@@ -181,8 +226,10 @@ class MCPRepository(private val context: Context) {
             // (the CLI then fails with "server not found"). Temp+rename, same
             // discipline MemoryRepository.applyUser uses for GLOBAL.md.
             writeTextAtomic(serversFile, root.toString(2))
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write servers.json: ${e.message}")
+            false
         }
     }
 
@@ -284,7 +331,7 @@ class MCPRepository(private val context: Context) {
     fun add(server: MCPServerConfig): Boolean {
         if (server.id.isBlank()) return false
         _servers.value = _servers.value.filter { it.id != server.id } + server
-        save()
+        if (!save()) return false
         Log.i(TAG, "Added MCP server: ${server.id}")
         return true
     }
@@ -292,8 +339,7 @@ class MCPRepository(private val context: Context) {
     fun update(server: MCPServerConfig): Boolean {
         if (_servers.value.none { it.id == server.id }) return false
         _servers.value = _servers.value.map { if (it.id == server.id) server else it }
-        save()
-        return true
+        return save()
     }
 
     fun delete(id: String) {
@@ -436,8 +482,13 @@ class MCPRepository(private val context: Context) {
         val incomingIds = parsed.mapTo(HashSet()) { it.id }
         _servers.value = _servers.value.filter { it.id !in incomingIds } + parsed
         _servers.value = _servers.value.sortedByDescending { it.createdAt }
-        save()
-        Log.i(TAG, "Imported ${parsed.size} MCP server(s)")
+        if (!save()) {
+            // Nothing was lost on disk (the write was refused), but the import
+            // lives only in memory until servers.json is readable again.
+            Log.e(TAG, "Import of ${parsed.size} server(s) kept in memory only — servers.json is unreadable")
+        } else {
+            Log.i(TAG, "Imported ${parsed.size} MCP server(s)")
+        }
         return parsed
     }
 

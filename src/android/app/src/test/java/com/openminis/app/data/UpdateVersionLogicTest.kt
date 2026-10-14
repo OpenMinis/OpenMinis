@@ -22,7 +22,7 @@ class UpdateVersionLogicTest {
         - NDK：r29 `29.0.14206865`（与应用内安装同一修订号，不回退 r28）
         - versionName：`2.0.39`
         - versionCode：239
-        - 签名说明见 docs/SIGNING.md
+        - 签名说明见 BUILDING.md
     """.trimIndent()
 
     private fun rolling(

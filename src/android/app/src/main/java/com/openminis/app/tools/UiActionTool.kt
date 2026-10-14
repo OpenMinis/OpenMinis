@@ -47,9 +47,32 @@ object UiActionTool {
         ),
     )
 
+    /** Single-quoted for `bash -c`; `it.replace` handles the nested-quote dance. */
+    private fun shQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
     /** `--window <token>` suffix for coordinate gestures; empty when absent. */
     private fun windowFlag(obj: JSONObject): String =
-        obj.optString("window_token").takeIf { it.isNotBlank() }?.let { " --window '$it'" } ?: ""
+        obj.optString("window_token").takeIf { it.isNotBlank() }?.let { " --window ${shQuote(it)}" } ?: ""
+
+    /**
+     * [T-ui-action-arg-quoting] Coordinates are model-supplied and get
+     * interpolated into a `bash -c` command line. They used to be stringified
+     * verbatim, so `x = "0 0; <cmd>"` executed as shell — and SecurityGate could
+     * not stop it, because the gate approved `ui_action`, not the command
+     * materialised here. Accept a plain integer only; anything else is null and
+     * the caller refuses the action.
+     */
+    private fun coordinate(obj: JSONObject, key: String): Int? {
+        if (!obj.has(key) || obj.isNull(key)) return null
+        return when (val raw = obj.get(key)) {
+            is Number -> raw.toInt()
+            is String -> raw.trim().toIntOrNull()
+            else -> null
+        }
+    }
+
+    /** Directions the accessibility CLI accepts (`--direction must be up|down|left|right`). */
+    private val SCROLL_DIRECTIONS = setOf("up", "down", "left", "right")
 
     fun execute(argsJson: String): ToolExecutionResult {
         val obj = runCatching { JSONObject(argsJson) }.getOrElse {
@@ -58,31 +81,55 @@ object UiActionTool {
         val action = obj.optString("action").lowercase()
         val toolTitle = obj.optString("tool_title", "ui_action")
 
-        fun num(key: String): String = obj.opt(key).let { v ->
-            if (v == JSONObject.NULL || v == null) "" else v.toString()
+        /** Space-separated validated coordinates, or null when one is missing/bogus. */
+        fun coords(vararg keys: String): String? {
+            val out = ArrayList<Int>(keys.size)
+            for (key in keys) {
+                val value = coordinate(obj, key) ?: return null
+                out.add(value)
+            }
+            return out.joinToString(" ")
         }
 
+        val invalidArgs = ToolExecutionResult(
+            "Error: bad arguments for action '$action' — coordinates must be plain integers, " +
+                "direction must be one of ${SCROLL_DIRECTIONS.joinToString("/")}. " +
+                "(支持: tap/type/swipe/scroll/back/open_app/open_url/long_press)",
+            false,
+            errorCode = ToolErrorCode.INVALID_ARGUMENTS,
+            recoveryHint = "Re-read the screen with ui_read and pass numeric x/y (and x2/y2 for swipe) " +
+                "from that snapshot.",
+            toolTitle = toolTitle,
+        )
+
         val cmd: String = when (action) {
-            "tap" -> "android-a11y-cli tap ${num("x")} ${num("y")}${windowFlag(obj)}"
-            "long_press" -> "android-a11y-cli long-press ${num("x")} ${num("y")}${windowFlag(obj)}"
-            "type" -> "android-a11y-cli type " + "'" + obj.optString("text").replace("'", "'\\''") + "'"
-            "swipe" -> "android-a11y-cli swipe ${num("x")} ${num("y")} ${num("x2")} ${num("y2")}${windowFlag(obj)}"
-            "scroll" -> "android-a11y-cli scroll ${obj.optString("direction", "down")}${windowFlag(obj)}"
+            "tap" -> coords("x", "y")?.let { "android-a11y-cli tap $it${windowFlag(obj)}" } ?: return invalidArgs
+            "long_press" -> coords("x", "y")?.let { "android-a11y-cli long-press $it${windowFlag(obj)}" } ?: return invalidArgs
+            "swipe" -> coords("x", "y", "x2", "y2")?.let { "android-a11y-cli swipe $it${windowFlag(obj)}" } ?: return invalidArgs
+            "type" -> "android-a11y-cli type " + shQuote(obj.optString("text"))
+            "scroll" -> {
+                val direction = obj.optString("direction", "down").lowercase()
+                if (direction !in SCROLL_DIRECTIONS) return invalidArgs
+                "android-a11y-cli scroll $direction${windowFlag(obj)}"
+            }
             "back" -> "android-a11y-cli back"
-            "open_app" -> "android-shizuku-cli launch " + "'" + obj.optString("package_name").replace("'", "'\\''") + "'"
-            "open_url" -> "android-open " + "'" + obj.optString("url").replace("'", "'\\''") + "'"
+            "open_app" -> "android-shizuku-cli launch " + shQuote(obj.optString("package_name"))
+            "open_url" -> "android-open " + shQuote(obj.optString("url"))
             else -> return ToolExecutionResult(
                 "Error: unknown action '$action' (支持: tap/type/swipe/scroll/back/open_app/open_url/long_press)",
                 false,
-                errorCode = com.openminis.app.tools.ToolErrorCode.INVALID_ARGUMENTS,
+                errorCode = ToolErrorCode.INVALID_ARGUMENTS,
                 recoveryHint = "Choose one of: tap, type, swipe, scroll, back, open_app, open_url, long_press.",
                 toolTitle = toolTitle,
             )
         }
 
+        // [T-ui-action-arg-quoting] No `|| true`: it pinned bash's exit status to
+        // 0, so every failed tap/type was reported to the model as a success and
+        // the read-back-to-verify loop trusted it.
         val script = """
             if [ -x /usr/local/bin/android-a11y-cli ]; then
-              $cmd 2>&1 || true
+              $cmd 2>&1
             else
               echo "android-a11y-cli not available in sandbox"
             fi
@@ -96,8 +143,9 @@ object UiActionTool {
             process.waitFor()
             val trimmed = out.trim().ifBlank { "(无输出)" }
             val code = when {
-                trimmed.contains("WINDOW_CHANGED") -> com.openminis.app.tools.ToolErrorCode.STALE_OBSERVATION
-                trimmed.contains("SERVICE_NOT_RUNNING") -> com.openminis.app.tools.ToolErrorCode.PERMISSION_DENIED
+                trimmed.contains("WINDOW_CHANGED") -> ToolErrorCode.STALE_OBSERVATION
+                trimmed.contains("SERVICE_NOT_RUNNING") -> ToolErrorCode.PERMISSION_DENIED
+                process.exitValue() != 0 -> ToolErrorCode.EXECUTION_FAILED
                 else -> null
             }
             ToolExecutionResult(trimmed, process.exitValue() == 0, errorCode = code, toolTitle = toolTitle)

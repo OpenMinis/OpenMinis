@@ -552,19 +552,62 @@ class SecurityGateImpl : SecurityGate {
         return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
     }
 
+    /**
+     * [T-android-rule-laundering] An `allow` rule used to be decided against the
+     * JOINED command with substring semantics, so one rule like `cat` or a blank
+     * pattern authorised `cat x; rm -rf /data/data/…` — and step [1] returns
+     * before SuPathPolicy, GuestMountPolicy, the block-device and fatal arms,
+     * which contradicts the ordering contract [PrefixRulePolicy] documents for
+     * its own layer. `allow` is therefore matched per risk unit and never over a
+     * fatal command. `deny` keeps its old broad matching: over-deny is not a
+     * security hole, and tightening it would silently loosen user intent.
+     */
     private fun evaluateRules(cmd: GateCommand): String? {
         if (permissionRules.isEmpty()) return null
         val target = extractCommand(cmd)
+        val isShell = cmd.toolName in SHELL_TOOLS
+        // Segments, not risk units: an allow rule is written in the user's own
+        // words (`sudo *`, `timeout *`), so it must keep seeing the wrapper it
+        // typed. Units are still what the fatal check runs over, because that
+        // question is about the payload, not the spelling.
+        val segments = if (isShell) shellSegments(target).ifEmpty { listOf(target) } else listOf(target)
+        val hasFatalUnit = isShell &&
+            riskUnits(target).any { classifySegment(it) == RiskLevel.FATAL_BANNED }
         var allowHit = false
         for (r in permissionRules) {
             if (!toolFilterMatches(r.toolFilter, cmd.toolName)) continue
-            if (!patternMatches(r.pattern, target)) continue
-            when (r.action.lowercase()) {
-                "deny" -> return "deny"
-                "allow" -> allowHit = true
+            val action = r.action.lowercase()
+            if (action == "allow") {
+                if (hasFatalUnit) continue
+                if (segments.all { matchesAllowPattern(r.pattern, it) }) allowHit = true
+                continue
+            }
+            if (patternMatches(r.pattern, target)) {
+                if (action == "deny") return "deny"
             }
         }
         return if (allowHit) "allow" else null
+    }
+
+    /**
+     * Whole-unit prefix match for an allow pattern: `git` covers `git status` but
+     * not `grep category`, `cat*` covers `cat notes.md` but not a later segment
+     * of the same command line. A blank pattern authorises nothing — it used to
+     * authorise everything.
+     */
+    private fun matchesAllowPattern(pattern: String, unit: String): Boolean {
+        val p = pattern.trim()
+        if (p.isEmpty()) return false
+        if (p == "*") return true
+        val body = buildString {
+            for (c in p) when (c) {
+                '*' -> append(".*")
+                '?' -> append('.')
+                else -> append(Regex.escape(c.toString()))
+            }
+        }
+        val target = unit.trim()
+        return runCatching { Regex("^$body(\\s.*)?$").matches(target) }.getOrDefault(false)
     }
 
     private fun toolFilterMatches(filter: String, toolName: String): Boolean = when {

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-click aarch64 APK: PRoot + libunwind.a + Gradle assembleRelease.
-# Signing: Gradle uses src/android/release.keystore via signing.properties
-# by default. MINIS_UPLOAD_* env overrides. Debug keystore is last-resort
+# Signing: Gradle signs with src/android/release.keystore, whose password comes
+# from MINIS_UPLOAD_* env vars or a LOCAL src/android/signing.properties (that
+# file is git-ignored — copy signing.properties.example). Without a password the
+# sign task fails. Debug keystore is last-resort
 # (UpdateChecker cannot replace a differently-signed install).
 set -euo pipefail
 [ -d "${TMPDIR:-}" ] || export TMPDIR=/tmp

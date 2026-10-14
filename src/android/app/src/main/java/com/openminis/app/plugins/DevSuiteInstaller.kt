@@ -1,6 +1,8 @@
 package com.openminis.app.plugins
 
 import android.content.Context
+import android.os.StatFs
+import android.util.Log
 import com.openminis.app.sandbox.ExecutionCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -112,6 +114,23 @@ object DevSuiteInstaller {
     }
 
     /**
+     * [T-dev-suite-disk-gate] Refuse an assembly the device cannot hold, BEFORE
+     * a byte is downloaded. The runtime gate inside the sandbox only fires under
+     * 2 GiB free, so an android-suite assembly (~8 GB of toolchains) on a nearly
+     * full phone used to start blindly, fill the volume mid-transfer and fail —
+     * leaving partially unpacked SDK trees behind.
+     *
+     * Returns the shortfall message, or null when there is room.
+     */
+    internal fun roomShortfall(context: Context, components: List<DevComponent>): String? {
+        val needed = components.sumOf { it.estimatedBytes }
+        if (needed <= 0L) return null
+        val free = runCatching { StatFs(context.filesDir.path).availableBytes }.getOrDefault(Long.MAX_VALUE)
+        if (free >= needed) return null
+        return "存储空间不足：需要约 ${needed / 1_000_000_000} GB，可用 ${free / 1_000_000_000} GB"
+    }
+
+    /**
      * Install a bundle's selected components in dependency order: required
      * components always install; optional ones only when [includeIds]
      * contains them (or when another selected component depends on them).
@@ -125,6 +144,14 @@ object DevSuiteInstaller {
     ) {
         scope.launch {
             val ordered = orderComponents(bundle, includeIds)
+            roomShortfall(context, ordered)?.let { reason ->
+                Log.e("DevSuiteInstaller", "assembly refused: $reason")
+                ordered.firstOrNull()?.let { first ->
+                    DevSuiteStore.update(context, first.id, DevSuiteStore.Status.FAILED, reason)
+                }
+                onDone(emptyList())
+                return@launch
+            }
             val ready = mutableListOf<String>()
             for (c in ordered) {
                 val ok = install(context, c)

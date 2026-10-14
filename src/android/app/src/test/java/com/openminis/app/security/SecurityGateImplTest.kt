@@ -212,6 +212,91 @@ class SecurityGateImplTest {
         assertTrue(d is Decision.Allow)
     }
 
+    /**
+     * [T-android-rule-laundering] An allow rule covers the command the user
+     * actually approved — every segment of it. Matching the joined string let
+     * `cat*` authorise `cat notes.md; rm -rf …`, and step [1] returns before
+     * every hard refusal, so the fence never saw the payload.
+     */
+    @Test
+    fun allowRuleCannotLaunderACompoundCommand() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "cat*")),
+        )
+        val d = gate.decide(
+            gate.classify(
+                "shell_execute",
+                """{"command":"cat notes.md; rm -rf /data/data/com.openminis.app/files"}""",
+            ),
+            PermissionMode.ASK,
+        )
+        assertFalse("a second segment is not covered by the cat rule: $d", d is Decision.Allow)
+    }
+
+    /** Same rule, single segment: still allowed — the tightening is not a blanket refusal. */
+    @Test
+    fun allowRuleStillCoversTheCommandItMatches() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "cat*")),
+        )
+        val d = gate.decide(
+            gate.classify("shell_execute", """{"command":"cat notes.md"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue("got: $d", d is Decision.Allow)
+    }
+
+    /**
+     * `patternMatches` used to end in `target.contains(pattern.trim('*'))`, so a
+     * `cat` rule fired on any command whose text merely contained "cat".
+     *
+     * The command must be one the gate would NOT auto-allow on its own merits —
+     * step [8] auto-runs safe read-only shell in ASK — otherwise the assertion
+     * says nothing about the rule. `iptables -F` classifies DANGEROUS, so the
+     * only way it reaches Allow is a rule.
+     */
+    @Test
+    fun allowRuleIsNotASubstringMatch() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "table")),
+        )
+        val d = gate.decide(
+            gate.classify("shell_execute", """{"command":"iptables -F"}"""),
+            PermissionMode.ASK,
+        )
+        assertFalse("`table` must not authorise `iptables -F`: $d", d is Decision.Allow)
+    }
+
+    /** A blank pattern authorised everything (patternMatches returned true). */
+    @Test
+    fun blankAllowPatternAuthorisesNothing() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "")),
+        )
+        val d = gate.decide(
+            gate.classify("shell_execute", """{"command":"iptables -F"}"""),
+            PermissionMode.ASK,
+        )
+        assertFalse("an empty pattern must not be a wildcard: $d", d is Decision.Allow)
+    }
+
+    /**
+     * Even a deliberate `*` rule stops at the fatal layer: an allow rule may not
+     * outvote "this command destroys the device", which is what step [1] used to
+     * do by returning before the fatal arms.
+     */
+    @Test
+    fun allowRuleNeverOutvotesAFatalCommand() {
+        gate.setPermissionRules(
+            listOf(PermissionRule(action = "allow", toolFilter = "shell_execute", pattern = "*")),
+        )
+        val d = gate.decide(
+            gate.classify("shell_execute", """{"command":"rm -rf /"}"""),
+            PermissionMode.ASK,
+        )
+        assertFalse("fatal must never be laundered by a rule: $d", d is Decision.Allow)
+    }
+
     @Test
     fun auditHashChainDetectsTamper() {
         val cmd = gate.classify("file_read", """{"path":"/tmp/a"}""")

@@ -24,8 +24,8 @@ import org.json.JSONObject
 
 /**
  * `android-a11y-cli` — UI-layer automation surface backed by
- * [MinisAccessibilityService]. Mirrors the design doc
- * `docs/.../android-accessibility-cli-design.md`.
+ * [MinisAccessibilityService]. The CLI surface it implements is the
+ * android-a11y-cli command set handled below.
  *
  * Output envelope `{ ok, data }` / `{ ok:false, error:{code,message} }`
  * matches the rest of `android-*` so `--quiet` strips it cleanly.
