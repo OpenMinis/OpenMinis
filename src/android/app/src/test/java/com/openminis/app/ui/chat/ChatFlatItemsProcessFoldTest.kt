@@ -117,6 +117,40 @@ class ChatFlatItemsProcessFoldTest {
     }
 
     @Test
+    fun `a lone thinking after a carded run stays inline`() {
+        // [P-process-card-single-step] Regression: the visibility gate used
+        // to be ROUND-level (`!roundFolded || in keepVisibleIds`), so once
+        // any run in the round carded, a LONE thinking block from a
+        // below-threshold run (thinking → reply text, one step) was hidden
+        // with nowhere to render — the user lost the thinking entirely
+        // ("只有一步思考的气泡被丢弃了"). The gate is block-level now: a
+        // block no card owns renders inline.
+        val items = buildFlatChatItems(
+            listOf(
+                assistant(
+                    blocks = listOf(
+                        thinking(id = "th1"),
+                        tool(id = "t1"),
+                        tool(id = "t2"),
+                        text(id = "tx1", content = "reply"),
+                        thinking(id = "th2"),
+                        text(id = "tx2", content = "tail"),
+                    ),
+                ),
+            ),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+        )
+        val k = kinds(items)
+        // The carded run (3 steps) is a summary and its steps are inside it.
+        assertTrue(k.contains("summary"))
+        assertFalse(k.contains("tool:bash"))
+        // The lone thinking after the reply text stays inline — it belongs
+        // to no card.
+        assertTrue(k.contains("thinking"))
+    }
+
+    @Test
     fun `a two step run becomes a card and a single step stays inline`() {
         // [P-process-card] The card threshold is the RUN, not the round:
         // two process steps are enough to card, one step is noise and stays

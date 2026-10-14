@@ -7,10 +7,13 @@ package com.openminis.app.ui.chat
 // Imports trimmed after ChatScreen.kt split; externally-called ones internal.
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowRight
@@ -1056,6 +1059,17 @@ internal fun ProcessSummaryBar(
             .border(0.5.dp, thinkingBlue.copy(alpha = 0.15f), shape)
             .clip(shape)
             .clickable(onClick = onToggle)
+            // [P-process-card] Animate the expand/collapse height change:
+            // without this the row list appears in one frame and the whole
+            // screen visibly jumps (user: "让用户感觉整个屏幕闪一下"). A
+            // gentle spring keeps the card growing/shrinking in place while
+            // the list reflows around it.
+            .animateContentSize(
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioLowBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            )
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

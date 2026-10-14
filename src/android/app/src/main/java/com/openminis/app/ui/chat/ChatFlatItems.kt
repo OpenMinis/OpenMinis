@@ -449,9 +449,6 @@ internal data class ProcessStepRef(
     val block: AssistantBlock,
 )
 
-/** Rounds with fewer foldable steps than this never fold (rule 1). */
-private const val ROUND_MIN_FOLDABLE_STEPS = 3
-
 /** A process run shorter than this stays inline (a card for one row is noise). */
 private const val SEGMENT_MIN_STEPS = 2
 
@@ -813,6 +810,14 @@ internal fun buildFlatChatItems(
         // list for good — expanding the card renders them INSIDE the card.
         // A card the user has not opened folds its steps; a card they opened
         // (its own key, not the round's) keeps them in the card either way.
+        //
+        // [P-process-card-single-step] foldedBlockIds is BLOCK-level: only
+        // the blocks of runs that actually became cards. A run below the
+        // 2-step threshold (a lone thinking before reply text) never cards,
+        // so its blocks stay OUT of foldedBlockIds and must keep rendering
+        // inline — the old `!roundFolded || in keepVisibleIds` gate hid
+        // them whenever ANY card existed in the round, which silently
+        // dropped the lone thinking (user: "只有一步思考的气泡被丢弃了").
         val foldedBlockIds: Set<String> = if (round == null || isSystem) {
             emptySet()
         } else {
@@ -831,8 +836,7 @@ internal fun buildFlatChatItems(
             when (block.kind) {
                 "text" -> block.content.isNotEmpty()
                 "info" -> true
-                "thinking" -> block.id !in foldedBlockIds &&
-                    (!roundFolded || block.id in keepVisibleIds)
+                "thinking" -> block.id !in foldedBlockIds
                 "tool_use" -> block.id !in foldedBlockIds && shouldShowProcessToolRow(
                     block,
                     showCompletedToolCards = showCompletedToolCards,
@@ -950,7 +954,10 @@ internal fun buildFlatChatItems(
                     }
                 }
                 "thinking" -> {
-                    if (block.id !in foldedBlockIds && (!roundFolded || block.id in keepVisibleIds)) {
+                    // [P-process-card-single-step] Block-level gate: a
+                    // thinking block not owned by any card renders inline,
+                    // whether or not sibling runs in the round carded.
+                    if (block.id !in foldedBlockIds) {
                         out.add(dedupe(FlatChatItem.AssistantThinking(
                             messageId = message.id,
                             block = block,
@@ -1090,15 +1097,18 @@ internal fun shouldShowProcessToolRow(
     block: AssistantBlock,
     showCompletedToolCards: Boolean,
     foldAiProcess: Boolean,
-    roundFolded: Boolean,
-    keepVisibleIds: Set<String>,
+    @Suppress("UNUSED_PARAMETER") roundFolded: Boolean,
+    @Suppress("UNUSED_PARAMETER") keepVisibleIds: Set<String>,
 ): Boolean {
     if (isAlwaysVisibleProcessTool(block)) return true
-    // A tool the process card already owns never renders a second copy in
-    // the list, running or not — the card header names the live step.
-    // isInFlightProcessTool only decides the fold-OFF list, where there is
-    // no card to hold it.
-    if (roundFolded) return block.id in keepVisibleIds
+    // [P-process-card-single-step] No round-level gate here: every caller
+    // has already filtered `block.id !in foldedBlockIds`, so a block that
+    // reaches this function belongs to a run that did NOT card (below the
+    // 2-step threshold) and must render inline. The old
+    // `if (roundFolded) return block.id in keepVisibleIds` hid those
+    // blocks whenever any sibling run in the round carded — dropping a
+    // lone tool the same way the lone thinking was dropped. Card-owned
+    // blocks never reach here; the block-level check upstream is the gate.
     if (isInFlightProcessTool(block)) return true
     // Fold mode owns visibility: a running or user-expanded round shows every
     // step in-thread (the fold bar no longer carries tool chips, so hiding
