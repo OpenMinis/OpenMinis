@@ -516,7 +516,8 @@ dependencies {
 // the job log alone — no artifact download, no --info noise.
 tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
     testLogging {
-        exceptionFormat = org.gradle.api.tasks.testing.TestExceptionFormat.FULL
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
         showCauses = true
+        showStackTraces = true
     }
 }
