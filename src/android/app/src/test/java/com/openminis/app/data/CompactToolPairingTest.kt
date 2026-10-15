@@ -94,6 +94,35 @@ class CompactToolPairingTest {
     }
 
     /**
+     * MIXED ID FORMS (upstream bc142f750 / [T-android-responses-tool-id-normalize]).
+     * The Responses path stores "<call_id>|<fc_id>" on the pair, but a model
+     * switch, a DB reload or a relay can leave the bare call_id on one half.
+     * Raw comparison calls that a mismatch: the sweep would DELETE the real
+     * result and fabricate an "interrupted" error for a tool that had worked.
+     */
+    @Test
+    fun `mixed id forms pair - combined use, bare result`() {
+        val history = listOf(
+            userText("hi"),
+            assistantToolUse("call_A|fc_A"),
+            toolResult("call_A"),
+            userText("thanks"),
+        )
+        assertEquals("a correctly paired round must pass through untouched", history, dropOrphanedToolParts(history))
+    }
+
+    @Test
+    fun `mixed id forms pair - bare use, combined result`() {
+        val history = listOf(
+            userText("hi"),
+            assistantToolUse("call_A"),
+            toolResult("call_A|fc_A"),
+            userText("thanks"),
+        )
+        assertEquals(history, dropOrphanedToolParts(history))
+    }
+
+    /**
      * THE REPORTED WEDGE: compaction cut between an assistant's tool_use and
      * its own tool_result, so the slice carries a result whose call is gone.
      * That lone output is what the provider rejects with a 400.

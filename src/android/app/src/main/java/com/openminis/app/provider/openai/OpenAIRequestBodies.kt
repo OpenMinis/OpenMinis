@@ -7,6 +7,7 @@ import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.model.hasImageInput
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.SamplingIdentity
 import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.applyUserAgentOverride
@@ -1304,7 +1305,21 @@ internal class OpenAIRequestBodies(
                 })
             }
         }
-        body.put("input", input)
+        // [T-android-responses-orphan-tool-output] Last gate on the tool
+        // pairing, over the ids this request actually carries (split on "|"
+        // and capped). Without it a stranded or duplicated tool result 400s
+        // every send until the chat is cleared. See ResponsesToolPairing.
+        val paired = ResponsesToolPairing.sanitize(input)
+        if (paired.changed) {
+            AppLogger.warning(
+                "OpenAIRequestBodies",
+                "[sanitize-responses] repaired outgoing tool pairing: " +
+                    "droppedOrphanOutputs=${paired.droppedOrphanOutputs} " +
+                    "droppedDuplicateOutputs=${paired.droppedDuplicateOutputs} " +
+                    "placeholderCalls=${paired.placeholderCalls} items=${input.length()}",
+            )
+        }
+        body.put("input", paired.items)
 
         // [T-android-model-use-passthrough-mode GH#72] Same verbatim merge as the
         // chat-completions builder. Skipped for Codex OAuth inside mergeChatExtraBody.

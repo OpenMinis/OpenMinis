@@ -3,6 +3,7 @@ package com.openminis.app.ui.chat
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.provider.ToolPairing
 
 /**
  * Validate tool rounds in wire order. A result is valid only when it follows
@@ -30,7 +31,18 @@ internal fun dropOrphanedToolParts(history: List<LLMMessage>): List<LLMMessage> 
                     unmatchedUses += use
                 }
                 is AgentContentPart.ToolResult -> {
-                    val matchIndex = pending.indexOfFirst { it.id == part.id && it.name == part.name }
+                    // [T-android-responses-tool-id-normalize] Compare pairing
+                    // keys, not raw ids: the Responses path stores
+                    // "<call_id>|<fc_id>" while a model switch, a DB reload or
+                    // a relay can leave the plain call_id on the other half of
+                    // the pair. A raw comparison calls that a mismatch, and the
+                    // repair below then deletes a REAL result and fabricates an
+                    // "interrupted" error for a tool that had worked. For ids
+                    // without "|" (Chat Completions, Anthropic, Gemini) the key
+                    // is the identity and nothing changes.
+                    val matchIndex = pending.indexOfFirst {
+                        ToolPairing.key(it.id) == ToolPairing.key(part.id) && it.name == part.name
+                    }
                     if (matchIndex >= 0) {
                         val use = pending.removeAt(matchIndex)
                         unmatchedUses.remove(use)
