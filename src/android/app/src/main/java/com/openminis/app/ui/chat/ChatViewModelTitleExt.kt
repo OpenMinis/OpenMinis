@@ -428,7 +428,6 @@ private suspend fun ChatViewModel.applyFallbackTitleFromFirstMessage(reason: Str
 }
 
 /**
-/**
  * The temperature override for a model entry (null = provider default).
  * Shared by the title failover chain and other sampling paths.
  */
