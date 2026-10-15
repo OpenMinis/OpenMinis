@@ -141,14 +141,8 @@ object Routes {
     // rehydrates (FileItem.from) and the pending SAF result lands on a live
     // preview. Holder stays as the hot path (no re-stat on every navigate).
     const val FILE_PREVIEW = "file_preview?path={path}"
-    // Same encoding recipe as [skillFile]/[terminal]: URLEncoder is
-    // plain-JVM (unit-testable without Robolectric), and `+` must become
-    // %20 because Navigation percent-decodes query params — a bare `+`
-    // would reach the screen as a literal plus (PR6 media-path bug class).
-    fun filePreview(path: String): String {
-        val encoded = java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20")
-        return "file_preview?path=$encoded"
-    }
+    // Encoding recipe: see navEnc() in FilePreviewRoute.kt.
+    fun filePreview(path: String): String = "file_preview?path=${navEnc(path)}"
     const val ENV_VARS = "env_vars"
     const val SKILLS = "skills"
     const val MULTI_AGENT = "multi_agent"
@@ -164,21 +158,15 @@ object Routes {
     const val TOOL_LIMITS = "tool_limits"
 
     fun skillDetail(skillId: String) = "skill/$skillId"
-    fun skillFile(skillId: String, relativePath: String = "SKILL.md"): String {
+    fun skillFile(skillId: String, relativePath: String = "SKILL.md"): String =
         // Path may contain `/`, which the nav library treats as a route
         // separator. URL-encode so subdirectory paths survive a round-trip.
-        val encoded = java.net.URLEncoder.encode(relativePath, "UTF-8").replace("+", "%20")
-        return "skill_file/$skillId/$encoded"
-    }
+        "skill_file/$skillId/${navEnc(relativePath)}"
     const val TERMINAL = "terminal?initCommand={initCommand}&sessionId={sessionId}"
     fun terminal(initCommand: String? = null, sessionId: String? = null): String {
-        // URLEncoder follows application/x-www-form-urlencoded — spaces become `+`.
-        // Nav library only %-decodes the route, so `+` would reach the screen literally.
-        // Replace `+` with `%20` so Nav decodes it back to a space.
-        fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8").replace("+", "%20")
         val params = buildList {
-            if (initCommand != null) add("initCommand=${enc(initCommand)}")
-            if (sessionId != null) add("sessionId=${enc(sessionId)}")
+            if (initCommand != null) add("initCommand=${navEnc(initCommand)}")
+            if (sessionId != null) add("sessionId=${navEnc(sessionId)}")
         }
         return if (params.isEmpty()) "terminal" else "terminal?${params.joinToString("&")}"
     }
@@ -251,25 +239,6 @@ object Routes {
     fun modelEntryDetail(instanceId: String, entryId: String) =
         "model_entry/${android.net.Uri.encode(instanceId)}/${android.net.Uri.encode(entryId)}"
     fun addCustomModel(instanceId: String) = "add_custom_model/$instanceId"
-}
-
-/**
- * Holder for file preview navigation state (not serializable via nav args).
- *
- * [T-android-filepreview-holder-lifetime] Both slots are released by the
- * destination that consumes them (see the DisposableEffect in FILE_BROWSER /
- * FILE_PREVIEW): this object is process-static and the browser VM it carries is
- * hand-built by the navigating screen — it is attached to no ViewModelStore, so
- * onCleared() never runs and without the clear the last browsed
- * FileBrowserViewModel (plus its FileItem and every listed FileItem) lived for
- * the rest of the process. The CHAT_FILES destination builds its VM with
- * remember() and had a different lifetime for the same class; clearing on
- * dispose makes the two converge on "only while the destination is on the
- * stack".
- */
-internal object FilePreviewHolder {
-    var currentItem: FileItem? = null
-    var fileBrowserViewModel: FileBrowserViewModel? = null
 }
 
 /**
@@ -1369,17 +1338,12 @@ fun AppNavigation(
             DisposableEffect(entry) {
                 onDispose { FilePreviewHolder.currentItem = null }
             }
-            // [T-android-filepreview-nav-args] Holder first (hot path — the
-            // navigating screen just statted this file), nav-arg rehydration
-            // second (process-death restore: Holder is empty, the back stack
-            // entry still carries the path). A path that no longer resolves
-            // (file deleted while the app was dead) pops the preview.
-            val item = FilePreviewHolder.currentItem
-                ?: entry.arguments?.getString("path")?.takeIf { it.isNotEmpty() }
-                    ?.let { FileItem.from(java.io.File(it)) }
-            if (item == null) {
-                LaunchedEffect(Unit) { navController.safePopBackStack() }
-            } else {
+            // [T-android-filepreview-nav-args] Rehydration lives in
+            // FilePreviewRoute.rememberFilePreviewItem: Holder first (hot
+            // path), nav-arg second (process-death restore), pop if neither
+            // resolves.
+            val item = rememberFilePreviewItem(navController, entry)
+            if (item != null) {
                 FilePreviewScreen(
                     item = item,
                     onBack = { navController.safePopBackStack() },
