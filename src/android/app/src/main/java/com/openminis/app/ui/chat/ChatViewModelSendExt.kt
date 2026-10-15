@@ -121,13 +121,27 @@ internal fun ChatViewModel.sendMessage(
             trimmed,
             currentAttachments.any { it.isImage },
         )
-        resolveProviderFromGroup(
-            groupIdForCaps,
-            _activeEntryId.value,
-            neededCaps,
-            pinActiveEntry = neededCaps.isEmpty(),
-        )
-        currentProvider?.let { provider = it }
+        // [T-capability-route-no-vm-mutation] Capability routing is a
+        // PER-TURN detour: this message needs IMAGE_INPUT, so a capable
+        // member serves THIS request while the user's active entry stays
+        // untouched for the next plain-text turn. The old call went through
+        // resolveProviderFromGroup, which unconditionally rewrote
+        // currentProvider/_modelName while pinActiveEntry=false left
+        // _activeEntryId on the user's pick — the VM then showed model A
+        // while buildSystemPrompt injected the persona of entry B for the
+        // rest of the session. Resolve the target WITHOUT touching VM state
+        // and build a local provider for this turn only.
+        resolveGroupTargetEntry(groupIdForCaps, _activeEntryId.value, neededCaps)?.let { (target, reason) ->
+            reason?.let { SessionActivityTracker.updateToolStatus(it.take(80)) }
+            val instance = providerRepository.instance(target.providerInstanceId)
+            // Non-null by construction (availableMemberEntries required a
+            // credential); guard anyway so a mid-send config change degrades
+            // to the user's provider instead of crashing.
+            if (instance != null) {
+                val apiKey = providerRepository.usableApiKey(instance) ?: ""
+                provider = ProviderFactory.create(instance, apiKey, target.model, context)
+            }
+        }
     }
     if (internalGoalRun && provider.model.isPureVideoGenerator) {
         appendSystemInfo("Goal execution needs a text-capable model. Select one and resume the Goal.", "info")
