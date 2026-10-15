@@ -189,8 +189,33 @@ class ToolResultImageSerializationTest {
     @Test
     fun `responses api emits an input_image block for a tool-result image`() {
         // The Responses path is a separate builder, not a flag on buildRequestBody.
+        // Realistic shape: the assistant's function_call precedes the output, so
+        // the pair survives ResponsesToolPairing.sanitize and the output ships.
+        val history = listOf(
+            LLMMessage(LLMMessage.Role.USER, "look at the chart"),
+            LLMMessage(
+                role = LLMMessage.Role.ASSISTANT,
+                content = "",
+                contentParts = listOf(
+                    AgentContentPart.ToolUse("call_abc123", "read_image", JSONObject()),
+                ),
+            ),
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = "",
+                contentParts = listOf(
+                    AgentContentPart.ToolResult(
+                        id = "call_abc123",
+                        name = "read_image",
+                        content = "[/var/minis/chart.png | 1635x1064 | 273116 bytes]",
+                        imageData = pngBytes,
+                        imageMimeType = "image/jpeg",
+                    ),
+                ),
+            ),
+        )
         val body = provider(visionModel, useResponsesAPI = true).buildResponsesAPIBody(
-            messages = historyWithToolResultImage(),
+            messages = history,
             systemPrompt = null,
             maxTokens = 1024,
             stream = false,
@@ -202,8 +227,32 @@ class ToolResultImageSerializationTest {
             types.contains("input_image"),
         )
         assertTrue(
-            "the function_call_output itself must still be emitted",
+            "the paired function_call_output itself must still be emitted",
             types.contains("function_call_output"),
+        )
+    }
+
+    @Test
+    fun `responses api drops an orphan tool output but keeps its pixels`() {
+        // [T-android-responses-tool-id-normalize] An output whose call was
+        // trimmed away (history compaction, model switch, DB reload) would 400
+        // on the real API: "No tool call found for function call output with
+        // call_id ...". sanitize drops the orphan item; the pixels still ride
+        // the following user turn so the vision model keeps its evidence.
+        val body = provider(visionModel, useResponsesAPI = true).buildResponsesAPIBody(
+            messages = historyWithToolResultImage(),
+            systemPrompt = null,
+            maxTokens = 1024,
+            stream = false,
+        )
+        val types = typesIn(body)
+        assertFalse(
+            "an orphan function_call_output must be dropped, not shipped to a 400; types=$types",
+            types.contains("function_call_output"),
+        )
+        assertTrue(
+            "but the tool-result pixels must still reach the vision model",
+            types.contains("input_image"),
         )
     }
 
