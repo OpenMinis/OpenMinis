@@ -87,6 +87,19 @@ internal suspend fun ChatViewModel.executeTool(
         // [T-ui-action] GUI Agent 的手：tap/type/swipe/scroll/back/open_app/open_url。
         com.openminis.app.tools.UiActionTool.NAME ->
             com.openminis.app.tools.UiActionTool.execute(argsJson)
+        // [T-ui-skill-wired] ui_skill was REGISTERED in AgentTools (and its
+        // description even tells the model to prefer it over manual
+        // ui_read+ui_action) but had NO dispatch branch here — every call
+        // fell through to "Unknown tool: ui_skill". The whole
+        // record→match→replay pipeline (A11ySkillStore + SkillReplayEngine)
+        // was dead code in production. forContext() is a process-wide
+        // singleton (see A11ySkillStore), so concurrent ui_skill calls and
+        // any future settings-page wiring share one lock-guarded instance.
+        com.openminis.app.tools.UiSkillTool.NAME ->
+            com.openminis.app.tools.UiSkillTool.execute(
+                argsJson,
+                com.openminis.app.accessibility.A11ySkillStore.forContext(context),
+            )
         // T178: pass sessionId + context so read_image routes through
         // resolveSessionHostPath like file_read/write/edit do — without
         // these, the tool consults the global last-writer-wins

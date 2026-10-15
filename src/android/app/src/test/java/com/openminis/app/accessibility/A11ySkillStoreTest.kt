@@ -201,6 +201,77 @@ class A11ySkillStoreTest {
         assertEquals(0, A11ySkillStore(dir2).all().size)
     }
 
+    // ─── forDir 进程级单例（并发安全的前提） ─────────────────────────────
+
+    @Test
+    fun `forDir returns the same instance for the same dir`() {
+        A11ySkillStore.resetSingletonForTest()
+        try {
+            val dir = tmp.newFolder("singleton-a")
+            val first = A11ySkillStore.forDir(dir)
+            val second = A11ySkillStore.forDir(dir)
+            assertTrue("同目录必须复用同一实例（否则 @Synchronized 锁跨实例无效）", first === second)
+        } finally {
+            A11ySkillStore.resetSingletonForTest()
+        }
+    }
+
+    @Test
+    fun `forDir swaps the cached instance when the dir changes and reset clears it`() {
+        A11ySkillStore.resetSingletonForTest()
+        try {
+            val dirA = tmp.newFolder("singleton-b")
+            val dirB = tmp.newFolder("singleton-c")
+            val a = A11ySkillStore.forDir(dirA)
+            val b = A11ySkillStore.forDir(dirB)
+            assertTrue(a !== b)
+            // 换回 a 的目录 → 重新创建（单槽缓存，生产只有一个 dir）
+            val aAgain = A11ySkillStore.forDir(dirA)
+            assertTrue(a !== aAgain)
+            A11ySkillStore.resetSingletonForTest()
+            val afterReset = A11ySkillStore.forDir(dirA)
+            assertTrue(a !== afterReset)
+        } finally {
+            A11ySkillStore.resetSingletonForTest()
+        }
+    }
+
+    @Test
+    fun `two separate instances over one dir lose updates - the bug the singleton fixes`() {
+        // 旧 forContext 每次调用 new 一个实例的形态：两个实例各自持有
+        // 独立 cache + 独立锁，读-改-写序列互相覆盖（last-writer-wins）。
+        val dir = tmp.newFolder("lost-update")
+        val a = A11ySkillStore(dir)
+        val b = A11ySkillStore(dir)
+        b.all() // b 先加载（空 cache）
+        a.save("a", "ia", listOf(step()), null)
+        b.save("b", "ib", listOf(step()), null) // b 用自己的旧 cache 整体重写文件
+        val disk = A11ySkillStore(dir)
+        // b 的整文件重写把 a 的写入吞掉了 —— 这就是丢更新
+        assertNull("双实例互写必然丢更新（记录旧缺陷形态）", disk.byName("a"))
+        assertNotNull(disk.byName("b"))
+    }
+
+    @Test
+    fun `concurrent saves on the shared singleton instance lose nothing`() {
+        A11ySkillStore.resetSingletonForTest()
+        try {
+            val dir = tmp.newFolder("concurrent")
+            val store = A11ySkillStore.forDir(dir)
+            val threads = (0 until 8).map { t ->
+                Thread {
+                    repeat(5) { i -> store.save("skill-$t-$i", "i-$t-$i", listOf(step()), null) }
+                }
+            }
+            threads.forEach { it.start() }
+            threads.forEach { it.join() }
+            assertEquals(40, store.all().size)
+            assertEquals(40, A11ySkillStore(dir).all().size)
+        } finally {
+            A11ySkillStore.resetSingletonForTest()
+        }
+    }
+
     // ─── fromRecorderSteps ────────────────────────────────────────────────
 
     @Test

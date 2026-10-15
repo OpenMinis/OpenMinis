@@ -47,8 +47,31 @@ class A11ySkillStore(private val dir: File) {
         const val STALE_AFTER_FAILURES = 3
         const val FILE_NAME = "a11y_skills.json"
 
-        fun forContext(context: android.content.Context): A11ySkillStore =
-            A11ySkillStore(File(context.filesDir, "a11y-skills"))
+        // [T-skill-store-singleton] Process-wide singleton keyed by the
+        // single canonical dir (filesDir/a11y-skills). Every method on the
+        // store is @Synchronized, but that lock only guards ONE instance —
+        // a fresh instance per call would give two callers two independent
+        // caches and two read-modify-write cycles over the same JSON file
+        // (last-writer-wins, lost updates). Caching the instance makes the
+        // per-instance lock actually mean something, and lets the chat tool
+        // and any future settings-page wiring share one view of the data.
+        @Volatile
+        private var cached: A11ySkillStore? = null
+
+        fun forContext(context: android.content.Context): A11ySkillStore {
+            val dir = File(context.filesDir, "a11y-skills")
+            return forDir(dir)
+        }
+
+        /** Test-visible singleton accessor: same dir → same instance. */
+        @Synchronized
+        internal fun forDir(dir: File): A11ySkillStore =
+            cached?.takeIf { it.dir == dir } ?: A11ySkillStore(dir).also { cached = it }
+
+        /** Drop the cached singleton (tests only). */
+        internal fun resetSingletonForTest() {
+            synchronized(this) { cached = null }
+        }
 
         /** Adapter from the live recorder buffer to persisted steps. */
         fun fromRecorderSteps(steps: List<A11yScriptRecorder.Step>): List<Step> =

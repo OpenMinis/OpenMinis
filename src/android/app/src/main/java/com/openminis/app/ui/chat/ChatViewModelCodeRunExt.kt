@@ -48,6 +48,13 @@ internal fun ChatViewModel.runCodeBlockInline(lang: String, code: String) {
         appendLocalAssistantNotice(CodeBlockRunTexts.busyHint())
         return
     }
+    // [T-code-run-state-additive] The run-state set used to be single-slot
+    // (setOf(code) on start, emptySet() in finally). Two concurrent runs —
+    // the entry gate only checks _isStreaming, which code runs never set —
+    // meant the FIRST finisher wiped the SECOND block's spinner while it
+    // was still running. Add/remove per code instead of set/clear, and use
+    // membership as the re-entry guard for double-taps on the same block.
+    if (code in _codeBlockRunState.value) return
     val plan = CodeBlockRunRouter.plan(lang, code, System.currentTimeMillis())
     if (plan == null) {
         appendLocalAssistantNotice(CodeBlockRunTexts.unsupportedHint(lang))
@@ -83,7 +90,7 @@ internal fun ChatViewModel.runCodeBlockInline(lang: String, code: String) {
         "ChatCodeRun",
         "run start lang=$lang file=${plan.fileName} mode=$mode",
     )
-    _codeBlockRunState.value = setOf(code)
+    _codeBlockRunState.value = _codeBlockRunState.value + code
 
     viewModelScope.launch(Dispatchers.IO) {
         try {
@@ -109,7 +116,7 @@ internal fun ChatViewModel.runCodeBlockInline(lang: String, code: String) {
             )
             appendLocalAssistantNotice(text, persist = true)
         } finally {
-            _codeBlockRunState.value = emptySet()
+            _codeBlockRunState.value = _codeBlockRunState.value - code
         }
     }
 }
