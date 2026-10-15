@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">In Sitzung</string>
     <string name="notif_task_completed_channel_name">Aufgabenabschluss</string>
     <string name="notif_task_completed_channel_description">Benachrichtigt, wenn eine Agent-Sitzung abgeschlossen ist, während die App im Hintergrund läuft.</string>
+    <string name="notif_question_channel_name">Agent-Fragen</string>
+    <string name="notif_question_channel_desc">Der Agent wartet während der Aufgabe auf deine Antwort</string>
     <string name="notif_task_completed_default_title">Aufgabe abgeschlossen</string>
     <string name="notif_task_completed_body">Tippen, um den Chat zu öffnen und die Antwort zu lesen.</string>
     <string name="notif_config_confirm_channel_name">Konfigurationsfreigaben</string>

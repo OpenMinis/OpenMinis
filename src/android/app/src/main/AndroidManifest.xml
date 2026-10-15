@@ -534,6 +534,18 @@
             </intent-filter>
         </receiver>
 
+        <!-- [T-question-bg-notify] Option-button taps on the ask_user_question
+             notification. Non-exported like the approval receiver above:
+             notification-action PendingIntents explicitly target this
+             component, and the action string is app-internal. -->
+        <receiver
+            android:name=".notification.AskUserBroadcastReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.openminis.app.ANSWER_QUESTION" />
+            </intent-filter>
+        </receiver>
+
         <!-- [T-android-scheduled-tasks-design] AlarmManager target for
              user-defined scheduled tasks (Settings → home top-right
              schedule icon). The receiver dispatches to ScheduledAgentRunner

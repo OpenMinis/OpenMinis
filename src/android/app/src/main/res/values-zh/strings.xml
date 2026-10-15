@@ -1487,6 +1487,8 @@
     <string name="notif_task_completed_channel_name">任务完成</string>
     <string name="notif_approval_channel_name">工具审批</string>
     <string name="notif_approval_channel_desc">Agent 请求敏感工具调用的审批</string>
+    <string name="notif_question_channel_name">Agent 提问</string>
+    <string name="notif_question_channel_desc">智能体在任务中等待你的回答</string>
     <string name="notif_task_completed_channel_description">在应用处于后台且 Agent 会话完成时弹出通知。</string>
     <string name="notif_task_completed_default_title">任务已完成</string>
     <string name="notif_task_completed_body">点击打开聊天查看回复。</string>

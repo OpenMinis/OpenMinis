@@ -1125,6 +1125,8 @@
     <string name="notif_in_session">В сессии</string>
     <string name="notif_task_completed_channel_name">Завершение задач</string>
     <string name="notif_task_completed_channel_description">Уведомляет, когда сессия Minis Ultra Agent завершается, пока приложение в фоне.</string>
+    <string name="notif_question_channel_name">Вопросы агента</string>
+    <string name="notif_question_channel_desc">Агент ждёт вашего ответа во время задачи</string>
     <string name="notif_task_completed_default_title">Задача завершена</string>
     <string name="notif_task_completed_body">Нажмите, чтобы открыть чат и прочитать ответ.</string>
     <string name="notif_config_confirm_channel_name">Подтверждение настроек</string>

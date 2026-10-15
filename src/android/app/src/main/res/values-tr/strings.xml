@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">Oturumda</string>
     <string name="notif_task_completed_channel_name">Görev Tamamlama</string>
     <string name="notif_task_completed_channel_description">Uygulama arka plandayken bir Agent oturumu bittiğinde bildirir.</string>
+    <string name="notif_question_channel_name">Agent Soruları</string>
+    <string name="notif_question_channel_desc">Agent görev sırasında yanıtınızı bekliyor</string>
     <string name="notif_task_completed_default_title">Görev tamamlandı</string>
     <string name="notif_task_completed_body">Sohbeti açıp yanıtı okumak için dokunun.</string>
     <string name="notif_config_confirm_channel_name">Yapılandırma Onayları</string>

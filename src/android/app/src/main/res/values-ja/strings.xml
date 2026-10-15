@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">セッション中</string>
     <string name="notif_task_completed_channel_name">タスク完了</string>
     <string name="notif_task_completed_channel_description">アプリがバックグラウンドにあるとき Agent セッションの完了を通知します。</string>
+    <string name="notif_question_channel_name">エージェントの質問</string>
+    <string name="notif_question_channel_desc">タスク中にエージェントが回答を待っています</string>
     <string name="notif_task_completed_default_title">タスクが完了しました</string>
     <string name="notif_task_completed_body">タップしてチャットを開き、返信を表示します。</string>
     <string name="notif_config_confirm_channel_name">設定の承認</string>

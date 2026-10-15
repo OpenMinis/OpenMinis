@@ -2499,10 +2499,34 @@ class ChatViewModel(
         val deferred = kotlinx.coroutines.CompletableDeferred<String>()
         askUserDeferred = deferred
         _pendingUserQuestions.value = questions
+        // [T-question-bg-notify] Register with the process-global gate so the
+        // notification answer actions can reach this deferred, then watch
+        // presence: while the user is NOT looking at this chat, post the
+        // "agent is waiting" notification; when they return, clear it (the
+        // in-app card is on screen, the shade copy is redundant). Both the
+        // routing id and the persisted id are checked — a draft session is
+        // present under the route argument while realSessionId has already
+        // been promoted (the [T-draft-approval-key-drift] shape).
+        val questionSessionId = realSessionId.ifEmpty { sessionId }
+        val gateId = com.openminis.app.service.AskUserGate.register(questionSessionId, questions, deferred)
+        val notifier = com.openminis.app.notification.AskUserNotifier(context)
+        val watchJob = viewModelScope.launch {
+            SessionActivityTracker.presentSessions.collect { present ->
+                val onScreen = questionSessionId in present || sessionId in present
+                if (onScreen || !deferred.isActive) {
+                    com.openminis.app.notification.AskUserNotifier.cancelQuestion(context, questionSessionId)
+                } else {
+                    notifier.notifyQuestion(questionSessionId, gateId, questions)
+                }
+            }
+        }
         return try {
             val answers = deferred.await()
             ToolExecutionResult(answers, true)
         } finally {
+            watchJob.cancel()
+            com.openminis.app.service.AskUserGate.unregister(gateId)
+            com.openminis.app.notification.AskUserNotifier.cancelQuestion(context, questionSessionId)
             if (askUserDeferred === deferred) {
                 askUserDeferred = null
                 _pendingUserQuestions.value = null

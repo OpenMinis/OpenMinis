@@ -276,6 +276,23 @@ class AgentForegroundService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        // [T-question-bg-notify] Question notification answer fallback, same
+        // delivery shape as the approval fallback below: the PendingIntent
+        // targets AskUserBroadcastReceiver, but if the system re-routes a
+        // stale broadcast to this foreground service we still resolve the
+        // answer and clear the bar entry.
+        if (intent?.action == com.openminis.app.notification.AskUserIntents.ACTION_ANSWER) {
+            val qId = intent.getStringExtra(com.openminis.app.notification.AskUserIntents.EXTRA_REQUEST_ID)
+            val qLabel = intent.getStringExtra(com.openminis.app.notification.AskUserIntents.EXTRA_ANSWER_LABEL)
+            if (qId != null && qLabel != null) {
+                val qSession = AskUserGate.detailOf(qId)?.sessionId
+                AskUserGate.answerWithLabel(qId, qLabel)
+                if (qSession != null) {
+                    com.openminis.app.notification.AskUserNotifier.cancelQuestion(this, qSession)
+                }
+            }
+            return START_NOT_STICKY
+        }
         if (intent?.action == ACTION_APPROVE || intent?.action == ACTION_DENY) {
             // [T-android-notif-approval] Approval notification action fallback.
             // PendingIntent targets ApprovalBroadcastReceiver (getBroadcast), which
@@ -311,6 +328,11 @@ class AgentForegroundService : Service() {
             val stopPendingIds = ApprovalGate.pendingIds()
             ApprovalGate.cleanupAll()
             com.openminis.app.notification.ApprovalNotifier.cancelAll(this, stopPendingIds)
+            // [T-question-bg-notify] Stopping the agent must also resolve
+            // every pending ask_user_question (skip verdict) and clear its
+            // notification — same orphaned-bar contract as approvals above.
+            val stopQuestionSessions = AskUserGate.cancelAll("interrupted")
+            com.openminis.app.notification.AskUserNotifier.cancelAll(this, stopQuestionSessions)
             SessionActivityTracker.cancelAllActiveStreams()
             stopSelf()
             return START_NOT_STICKY
@@ -329,6 +351,9 @@ class AgentForegroundService : Service() {
             val interruptPendingIds = ApprovalGate.pendingIds()
             ApprovalGate.cleanupAll()
             com.openminis.app.notification.ApprovalNotifier.cancelAll(this, interruptPendingIds)
+            // [T-question-bg-notify] Same contract as ACTION_STOP.
+            val interruptQuestionSessions = AskUserGate.cancelAll("interrupted")
+            com.openminis.app.notification.AskUserNotifier.cancelAll(this, interruptQuestionSessions)
             SessionActivityTracker.cancelAllActiveStreams()
             // [T-android-interrupt-clear] The ongoing notification is the
             // visual representation of "agent is running". If we just stopped

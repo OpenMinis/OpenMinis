@@ -1124,6 +1124,8 @@
     <string name="notif_in_session">În sesiune</string>
     <string name="notif_task_completed_channel_name">Finalizarea sarcinilor</string>
     <string name="notif_task_completed_channel_description">Anunță când o sesiune a Agentului se termină în timp ce aplicația este în fundal.</string>
+    <string name="notif_question_channel_name">Întrebările agentului</string>
+    <string name="notif_question_channel_desc">Agentul așteaptă răspunsul tău în timpul sarcinii</string>
     <string name="notif_task_completed_default_title">Sarcină finalizată</string>
     <string name="notif_task_completed_body">Atinge pentru a deschide conversația și a citi răspunsul.</string>
     <string name="notif_config_confirm_channel_name">Aprobări de configurare</string>

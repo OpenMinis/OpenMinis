@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">En la sesión</string>
     <string name="notif_task_completed_channel_name">Tarea completada</string>
     <string name="notif_task_completed_channel_description">Avisa cuando una sesión de Minis Ultra Agent termina mientras la app está en segundo plano.</string>
+    <string name="notif_question_channel_name">Preguntas del agente</string>
+    <string name="notif_question_channel_desc">El agente espera tu respuesta durante la tarea</string>
     <string name="notif_task_completed_default_title">Tarea completada</string>
     <string name="notif_task_completed_body">Toca para abrir el chat y leer la respuesta.</string>
     <string name="notif_config_confirm_channel_name">Aprobaciones de configuración</string>

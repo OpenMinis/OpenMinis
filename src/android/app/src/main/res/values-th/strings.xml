@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">ในเซสชัน</string>
     <string name="notif_task_completed_channel_name">งานเสร็จสิ้น</string>
     <string name="notif_task_completed_channel_description">แจ้งเตือนเมื่อเซสชันของ Agent เสร็จสิ้นขณะที่แอปอยู่เบื้องหลัง</string>
+    <string name="notif_question_channel_name">คำถามจากเอเจนต์</string>
+    <string name="notif_question_channel_desc">เอเจนต์รอคำตอบจากคุณระหว่างทำงาน</string>
     <string name="notif_task_completed_default_title">งานเสร็จสิ้น</string>
     <string name="notif_task_completed_body">แตะเพื่อเปิดแชทและอ่านคำตอบ</string>
     <string name="notif_config_confirm_channel_name">การอนุมัติการตั้งค่า</string>

@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">Sa session</string>
     <string name="notif_task_completed_channel_name">Pagkatapos ng Gawain</string>
     <string name="notif_task_completed_channel_description">Nagpapaalam kapag natapos ang session ng Agent habang nasa background ang app.</string>
+    <string name="notif_question_channel_name">Mga Tanong ng Agent</string>
+    <string name="notif_question_channel_desc">Naghihintay ang agent ng sagot mo habang nagtatrabaho</string>
     <string name="notif_task_completed_default_title">Tapos na ang gawain</string>
     <string name="notif_task_completed_body">I-tap para buksan ang chat at basahin ang sagot.</string>
     <string name="notif_config_confirm_channel_name">Mga Pag-apruba sa Config</string>

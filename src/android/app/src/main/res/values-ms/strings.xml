@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">Dalam sesi</string>
     <string name="notif_task_completed_channel_name">Penyiapan Tugasan</string>
     <string name="notif_task_completed_channel_description">Memberitahu apabila sesi Ejen selesai ketika aplikasi berada di latar belakang.</string>
+    <string name="notif_question_channel_name">Soalan Ejen</string>
+    <string name="notif_question_channel_desc">Ejen menunggu jawapan anda semasa tugasan</string>
     <string name="notif_task_completed_default_title">Tugasan selesai</string>
     <string name="notif_task_completed_body">Ketik untuk membuka sembang dan membaca balasannya.</string>
     <string name="notif_config_confirm_channel_name">Kelulusan Konfigurasi</string>

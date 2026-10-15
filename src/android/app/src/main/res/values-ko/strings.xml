@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">세션 중</string>
     <string name="notif_task_completed_channel_name">작업 완료</string>
     <string name="notif_task_completed_channel_description">앱이 백그라운드에 있을 때 Agent 세션 완료를 알립니다.</string>
+    <string name="notif_question_channel_name">에이전트 질문</string>
+    <string name="notif_question_channel_desc">작업 중 에이전트가 답변을 기다립니다</string>
     <string name="notif_task_completed_default_title">작업이 완료되었습니다</string>
     <string name="notif_task_completed_body">탭하여 채팅을 열고 응답을 확인하세요.</string>
     <string name="notif_config_confirm_channel_name">구성 승인</string>

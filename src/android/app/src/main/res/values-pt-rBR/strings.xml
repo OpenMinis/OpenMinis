@@ -1123,6 +1123,8 @@
     <string name="notif_in_session">Na sessão</string>
     <string name="notif_task_completed_channel_name">Conclusão de tarefas</string>
     <string name="notif_task_completed_channel_description">Avisa quando uma sessão do Agente termina com o app em segundo plano.</string>
+    <string name="notif_question_channel_name">Perguntas do agente</string>
+    <string name="notif_question_channel_desc">O agente aguarda sua resposta durante a tarefa</string>
     <string name="notif_task_completed_default_title">Tarefa concluída</string>
     <string name="notif_task_completed_body">Toque para abrir a conversa e ler a resposta.</string>
     <string name="notif_config_confirm_channel_name">Aprovações de configuração</string>

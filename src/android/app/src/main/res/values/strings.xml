@@ -1602,6 +1602,8 @@
     <string name="notif_task_completed_channel_name">Task Completion</string>
     <string name="notif_approval_channel_name">Tool Approval</string>
     <string name="notif_approval_channel_desc">Agent requests permission for sensitive tool calls</string>
+    <string name="notif_question_channel_name">Agent Questions</string>
+    <string name="notif_question_channel_desc">The agent asks for your input mid-task</string>
     <string name="notif_task_completed_channel_description">Notifies when an Agent session finishes while the app is backgrounded.</string>
     <string name="notif_task_completed_default_title">Task completed</string>
     <string name="notif_task_completed_body">Tap to open the chat and read the response.</string>
