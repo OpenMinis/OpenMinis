@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.core.app.NotificationCompat
 import com.openminis.app.MinisApp
+import com.openminis.app.R
 import com.openminis.app.debug.HeadlessChatRunner
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.service.AgentForegroundService
@@ -312,7 +313,7 @@ object ScheduledAgentRunner {
         val publicVersion = NotificationCompat.Builder(context, ScheduledTaskManager.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_recent_history)
             .setContentTitle("Minis")
-            .setContentText("定时任务已完成 — 解锁查看结果")
+            .setContentText(context.getString(R.string.notify_scheduled_done_locked))
             .setContentIntent(contentPi)
             .setAutoCancel(true)
             .build()

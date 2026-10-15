@@ -201,7 +201,7 @@ fun MultiAgentSettingsScreen(
                 SettingsRow(
                     title = role.name + if (role.builtin) "" else " *",
                     subtitle = role.description +
-                        " · 工具: " + role.tools.sorted().take(6).joinToString(),
+                        stringResource(R.string.ma_role_tools_suffix, role.tools.sorted().take(6).joinToString()),
                     showChevron = !role.builtin,
                     onClick = if (role.builtin) null else ({ editingRole = role }),
                     showDivider = index < roles.lastIndex,
@@ -227,8 +227,8 @@ fun MultiAgentSettingsScreen(
                 )
             }
             SettingsRow(
-                title = "+ 新增角色",
-                subtitle = "自定义名字/描述/提示词/工具白名单, 同名覆盖内置",
+                title = stringResource(R.string.ma_add_role),
+                subtitle = stringResource(R.string.ma_add_role_sub),
                 showChevron = false,
                 onClick = { showAddDialog = true },
                 showDivider = false,
@@ -345,8 +345,8 @@ fun MultiAgentSettingsScreen(
         }
 
         SettingsSection(
-            header = "子代理类型",
-            footer = "dispatch_agents 按类型名派发。内置探索者 / 审查员 / 编码员 / 研究员，各自有独立工具白名单。",
+            header = stringResource(R.string.ma_subagent_types),
+            footer = stringResource(R.string.ma_subagent_types_footer),
         ) {
             val types = com.openminis.app.tools.SubAgentTypeStore.load(context)
             types.forEachIndexed { index, type ->
@@ -418,7 +418,7 @@ private fun MindMapTeamImportDialog(
                     roles.forEachIndexed { index, role ->
                         Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                             Text(
-                                text = role.name + if (team?.members?.firstOrNull { it.name == role.name }?.isSubTeamLead == true) " · 组长" else "",
+                                text = role.name + if (team?.members?.firstOrNull { it.name == role.name }?.isSubTeamLead == true) stringResource(R.string.ma_team_lead_suffix) else "",
                                 style = MaterialTheme.typography.bodyMedium,
                             )
                             Text(
@@ -477,7 +477,7 @@ private fun SubAgentSlotRow(
                 showDivider = true,
             )
             SettingsValueRow(
-                title = "本次思考深度",
+                title = stringResource(R.string.ma_thinking_depth),
                 value = selectedThinking.displayName,
                 onClick = if (enabled && maxThinking != ThinkingLevel.OFF) ({ thinkingExpanded = true }) else null,
                 showDivider = showDivider,
@@ -549,39 +549,39 @@ private fun CollabRoleEditDialog(
     val valid = name.isNotBlank() && prompt.isNotBlank()
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (builtin) "内置角色 (保存为自定义副本)" else if (initial == null) "新增协作角色" else "编辑角色") },
+        title = { Text(if (builtin) stringResource(R.string.ma_role_dialog_title_builtin) else if (initial == null) stringResource(R.string.ma_role_dialog_title_new) else stringResource(R.string.ma_role_dialog_title_edit)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("角色名 (spawn_agent 的 role)") },
+                    label = { Text(stringResource(R.string.ma_role_name_label)) },
                     singleLine = true,
                     readOnly = builtin,
                 )
                 OutlinedTextField(
                     value = description,
                     onValueChange = { description = it },
-                    label = { Text("一句话描述") },
+                    label = { Text(stringResource(R.string.ma_role_desc_label)) },
                     singleLine = true,
                 )
                 OutlinedTextField(
                     value = prompt,
                     onValueChange = { prompt = it },
-                    label = { Text("角色提示词 (盯着/不管/该找谁/闭嘴)") },
+                    label = { Text(stringResource(R.string.ma_role_prompt_label)) },
                     minLines = 4,
                     maxLines = 8,
                 )
                 OutlinedTextField(
                     value = toolsCsv,
                     onValueChange = { toolsCsv = it },
-                    label = { Text("工具白名单 (逗号分隔, 空=不限)") },
+                    label = { Text(stringResource(R.string.ma_role_tools_label)) },
                     minLines = 2,
                     maxLines = 3,
                 )
                 if (onDelete != null) {
                     TextButton(onClick = onDelete) {
-                        Text("删除此角色", color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+                        Text(stringResource(R.string.ma_role_delete), color = androidx.compose.material3.MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -598,8 +598,8 @@ private fun CollabRoleEditDialog(
                         builtin = false,
                     ),
                 )
-            }) { Text("保存") }
+            }) { Text(stringResource(R.string.common_save)) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) } },
     )
 }

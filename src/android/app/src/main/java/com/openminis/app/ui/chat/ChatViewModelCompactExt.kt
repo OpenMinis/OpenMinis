@@ -66,12 +66,12 @@ private inline fun ChatViewModel.compactAllImpl(
         return
     }
     val provider = currentProvider ?: run {
-        appendSystemInfo("未配置模型提供商，无法压缩。", "compact")
+        appendSystemInfo(context.getString(R.string.vm_compact_no_provider), "compact")
         return
     }
     val history = agentHistory.toList()
     if (history.isEmpty()) {
-        appendSystemInfo("会话为空，无需压缩。", "compact")
+        appendSystemInfo(context.getString(R.string.vm_compact_empty_session), "compact")
         return
     }
     // ─── v2 unified anchor model ───────────────────────────────────
@@ -140,12 +140,12 @@ private inline fun ChatViewModel.compactAllImpl(
         else prevIdx
     }
     if (effectiveStartIdx > anchorIdx) {
-        appendSystemInfo("此处已压缩过。", "compact")
+        appendSystemInfo(context.getString(R.string.vm_compact_already_compacted), "compact")
         return
     }
     val toCompact = history.subList(effectiveStartIdx, anchorIdx + 1)
     if (toCompact.isEmpty()) {
-        appendSystemInfo("没有可压缩的内容。", "compact")
+        appendSystemInfo(context.getString(R.string.vm_compact_nothing_to_compact), "compact")
         return
     }
     // Past every precondition — from here the launch below owns the

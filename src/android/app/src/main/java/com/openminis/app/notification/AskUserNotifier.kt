@@ -91,6 +91,17 @@ class AskUserNotifier(private val context: Context) {
             )
         }
 
+        /**
+         * [T-orphan-notification-sweep] Cancels every question notification
+         * still active in this package. Called at process start: the question
+         * gate is process-local, so any row still up when a fresh process
+         * boots is an orphan from a dead process (see
+         * [OrphanNotificationSweep]).
+         */
+        fun sweepOrphans(ctx: Context) {
+            OrphanNotificationSweep.sweep(ctx, CHANNEL_ID)
+        }
+
         /** Cancels the question notification for [sessionId]. */
         fun cancelQuestion(ctx: Context, sessionId: String) {
             try {
@@ -135,7 +146,7 @@ class AskUserNotifier(private val context: Context) {
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Agent 在等你回答")
+            .setContentTitle(context.getString(R.string.notify_question_title))
             .setContentText(questionPreview(first, questions.size))
             .setContentIntent(launchIntent)
             .setOngoing(true)
@@ -145,8 +156,8 @@ class AskUserNotifier(private val context: Context) {
             .setPublicVersion(
                 NotificationCompat.Builder(context, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_dialog_info)
-                    .setContentTitle("Minis 在等你回答")
-                    .setContentText("解锁后查看问题并回答")
+                    .setContentTitle(context.getString(R.string.notify_question_public_title))
+                    .setContentText(context.getString(R.string.notify_question_public_text))
                     .setContentIntent(launchIntent)
                     .setOngoing(true)
                     .setAutoCancel(false)
@@ -176,7 +187,9 @@ class AskUserNotifier(private val context: Context) {
 
     private fun questionPreview(first: AskUserQuestion.Question, total: Int): String {
         val base = first.header.ifBlank { first.question }.take(200)
-        return if (total > 1) "$base（共 $total 个问题）" else base
+        return if (total > 1) {
+            base + context.getString(R.string.notify_question_multi_suffix, total)
+        } else base
     }
 
     private fun answerPending(requestId: String, label: String): PendingIntent {

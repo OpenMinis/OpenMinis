@@ -373,6 +373,22 @@ class MinisApp : Application(), ImageLoaderFactory {
         // every heavy subsystem (DB, repositories, offload server, PRoot
         // bind mounts, network monitor, …). The only thing MainActivity
         // will do is pop the share-or-dismiss dialog and finish. Without
+        // [T-orphan-notification-sweep] Question/approval notifications are
+        // setOngoing(true) and their gates are process-local singletons. If
+        // the previous process died with one pending (OOM kill, crash, force
+        // stop), the row is stuck: unswipeable, unanswerable, uncancellable.
+        // A fresh process has no pending gates by definition, so anything
+        // still up on those channels IS an orphan — sweep it now. This must
+        // run BEFORE the safe-mode early-return below: a crash-loop launch is
+        // precisely the "process died" case, and the sweep needs nothing but
+        // NotificationManager (no DB, no repositories).
+        try {
+            com.openminis.app.notification.AskUserNotifier.sweepOrphans(this)
+            com.openminis.app.notification.ApprovalNotifier.sweepOrphans(this)
+        } catch (t: Throwable) {
+            Log.w("MinisApp", "orphan notification sweep failed: ${t.message}")
+        }
+
         // this guard, anything from `chatRepository = ChatRepository(...)`
         // onward is a potential re-crash trigger on a loop — the whole
         // point of safe-mode is to stop the bleeding before another

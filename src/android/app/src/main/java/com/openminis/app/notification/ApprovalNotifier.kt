@@ -82,6 +82,17 @@ class ApprovalNotifier(private val context: Context) {
         fun notificationId(requestId: String): Int = NOTIF_BASE xor requestId.hashCode()
 
         /**
+         * [T-orphan-notification-sweep] Cancels every approval notification
+         * still active in this package. Called at process start: the approval
+         * gate is process-local, so any row still up when a fresh process
+         * boots is an orphan from a dead process (see
+         * [OrphanNotificationSweep]).
+         */
+        fun sweepOrphans(ctx: Context) {
+            OrphanNotificationSweep.sweep(ctx, CHANNEL_ID)
+        }
+
+        /**
          * Creates the notification channel [CHANNEL_ID] if it hasn't been created yet.
          * Safe to call from any thread before posting the approval notification.
          */
@@ -176,12 +187,12 @@ class ApprovalNotifier(private val context: Context) {
         }
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("需要审批: $toolName")
-            .setContentText(preview.take(200).ifBlank { "Agent 请求执行敏感操作" })
+            .setContentTitle(context.getString(R.string.notify_approval_title, toolName))
+            .setContentText(preview.take(200).ifBlank { context.getString(R.string.notify_approval_default_text) })
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setContentIntent(launchIntent)
-            .addAction(android.R.drawable.ic_menu_send, "同意", actionPending(true))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒绝", actionPending(false))
+            .addAction(android.R.drawable.ic_menu_send, context.getString(R.string.notify_approval_action_approve), actionPending(true))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.notify_approval_action_deny), actionPending(false))
             .setOngoing(true)
             .setAutoCancel(false)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -193,11 +204,11 @@ class ApprovalNotifier(private val context: Context) {
             .setPublicVersion(
                 NotificationCompat.Builder(context, CHANNEL_ID)
                     .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                    .setContentTitle("Minis 需要审批")
-                    .setContentText("敏感操作待确认，请解锁处理")
+                    .setContentTitle(context.getString(R.string.notify_approval_public_title))
+                    .setContentText(context.getString(R.string.notify_approval_public_text))
                     .setContentIntent(launchIntent)
-                    .addAction(android.R.drawable.ic_menu_send, "同意", actionPending(true))
-                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒绝", actionPending(false))
+                    .addAction(android.R.drawable.ic_menu_send, context.getString(R.string.notify_approval_action_approve), actionPending(true))
+                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.notify_approval_action_deny), actionPending(false))
                     .setOngoing(true)
                     .setAutoCancel(false)
                     .build(),

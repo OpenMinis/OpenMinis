@@ -221,11 +221,11 @@ fun MCPIntegrationsScreen(
         // ─── 内置 MCP Server（实验）──────────────────────────────────────────
         val builtInPort = mcpConfig.port
         SettingsSection(
-            header = "内置 MCP Server（实验）",
+            header = stringResource(R.string.mcp_builtin_section),
             footer = null,
         ) {
             SettingsSwitchRow(
-                title = "启用内置 MCP Server",
+                title = stringResource(R.string.mcp_builtin_enable),
                 subtitle = when (mcpState.status) {
                     McpServerManager.Status.RUNNING -> {
                         val actual = mcpState.actualPort ?: builtInPort
@@ -273,31 +273,30 @@ fun MCPIntegrationsScreen(
                 },
             )
             SettingsRow(
-                title = "端口",
-                subtitle = "当前端口：$builtInPort（1024–65535）",
+                title = stringResource(R.string.mcp_builtin_port),
+                subtitle = stringResource(R.string.mcp_builtin_port_sub, builtInPort),
                 icon = Icons.Outlined.Terminal,
                 onClick = { showPortDialog = true },
             )
             SettingsRow(
-                title = "访问令牌（Bearer Token）",
-                subtitle = mcpConfig.token?.let { "已配置 · " + it.take(4) + "****" + it.takeLast(4) }
-                    ?: "未生成（客户端将无法通过鉴权，建议生成）",
+                title = stringResource(R.string.mcp_builtin_token),
+                subtitle = mcpConfig.token?.let { stringResource(R.string.mcp_builtin_token_configured, it.take(4) + "****" + it.takeLast(4)) }
+                    ?: stringResource(R.string.mcp_builtin_token_missing),
                 icon = Icons.Outlined.Key,
                 onClick = { showTokenDialog = true },
             )
             SettingsRow(
-                title = "Shell 策略",
+                title = stringResource(R.string.mcp_builtin_shell_policy),
                 subtitle = if (mcpConfig.shellPolicy == McpServerConfigStore.SHELL_POLICY_STRICT)
-                    "strict：仅放行只读与安全命令，其余返回需要确认的错误"
+                    stringResource(R.string.mcp_builtin_shell_strict)
                 else
-                    "auto：放行除高危外全部命令",
+                    stringResource(R.string.mcp_builtin_shell_auto),
                 icon = Icons.Outlined.Info,
                 onClick = { showShellPolicyDialog = true },
             )
             SettingsRow(
-                title = "PC 端连接",
-                subtitle = "先执行 adb reverse tcp:$builtInPort tcp:$builtInPort，然后在 MCP 客户端添加 " +
-                    "http://127.0.0.1:$builtInPort/mcp（Streamable HTTP，需 Bearer token）",
+                title = stringResource(R.string.mcp_builtin_pc_connect),
+                subtitle = stringResource(R.string.mcp_builtin_pc_connect_sub, builtInPort),
                 icon = Icons.Outlined.Language,
                 showChevron = false,
                 showDivider = false,
@@ -352,11 +351,11 @@ fun MCPIntegrationsScreen(
         var portText by remember(showPortDialog) { mutableStateOf(mcpConfig.port.toString()) }
         AlertDialog(
             onDismissRequest = { showPortDialog = false },
-            title = { Text("修改端口") },
+            title = { Text(stringResource(R.string.mcp_builtin_port_edit)) },
             text = {
                 Column {
                     Text(
-                        "1024–65535。修改后需重新启动 Server 生效。",
+                        stringResource(R.string.mcp_builtin_port_edit_sub),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -378,7 +377,7 @@ fun MCPIntegrationsScreen(
                             McpServerManager.restart()
                         }
                     }
-                }) { Text("保存") }
+                }) { Text(stringResource(R.string.common_save)) }
             },
             dismissButton = {
                 MinisTextButton(onClick = { showPortDialog = false }) { Text(stringResource(R.string.cancel)) }
@@ -391,15 +390,16 @@ fun MCPIntegrationsScreen(
         val currentToken = mcpConfig.token
         AlertDialog(
             onDismissRequest = { showTokenDialog = false },
-            title = { Text("访问令牌") },
+            title = { Text(stringResource(R.string.mcp_builtin_token_dialog_title)) },
             text = {
                 Column {
                     Text(
-                        currentToken?.let { it.take(4) + "****" + it.takeLast(4) } ?: "（未生成）",
+                        currentToken?.let { it.take(4) + "****" + it.takeLast(4) }
+                            ?: stringResource(R.string.mcp_builtin_token_not_generated),
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     )
                     Text(
-                        "完整令牌仅显示一次，请复制保存。客户端请求头需携带 Authorization: Bearer <token>。",
+                        stringResource(R.string.mcp_builtin_token_dialog_body),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -411,14 +411,14 @@ fun MCPIntegrationsScreen(
                         val newToken = mcpStore?.regenerateToken()
                         if (newToken != null) {
                             clipboard.setText(androidx.compose.ui.text.AnnotatedString(newToken))
-                            android.widget.Toast.makeText(context, "已重新生成并复制", android.widget.Toast.LENGTH_SHORT).show()
+                            android.widget.Toast.makeText(context, context.getString(R.string.mcp_builtin_token_regenerated_toast), android.widget.Toast.LENGTH_SHORT).show()
                         }
-                    }) { Text("重新生成") }
+                    }) { Text(stringResource(R.string.mcp_builtin_token_regenerate)) }
                     currentToken?.let {
                         MinisTextButton(onClick = {
                             clipboard.setText(androidx.compose.ui.text.AnnotatedString(it))
                             android.widget.Toast.makeText(context, context.getString(R.string.mcp_export_copied), android.widget.Toast.LENGTH_SHORT).show()
-                        }) { Text("复制") }
+                        }) { Text(stringResource(R.string.common_copy)) }
                     }
                 }
             },
@@ -432,11 +432,11 @@ fun MCPIntegrationsScreen(
     if (showShellPolicyDialog) {
         AlertDialog(
             onDismissRequest = { showShellPolicyDialog = false },
-            title = { Text("Shell 策略") },
+            title = { Text(stringResource(R.string.mcp_builtin_shell_dialog_title)) },
             text = {
                 Column {
                     Text(
-                        "shell_exec 工具的放行范围，立即生效（无需重启）。",
+                        stringResource(R.string.mcp_builtin_shell_dialog_sub),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -460,7 +460,7 @@ fun MCPIntegrationsScreen(
                 }
             },
             confirmButton = {
-                MinisTextButton(onClick = { showShellPolicyDialog = false }) { Text("完成") }
+                MinisTextButton(onClick = { showShellPolicyDialog = false }) { Text(stringResource(R.string.common_done)) }
             },
         )
     }

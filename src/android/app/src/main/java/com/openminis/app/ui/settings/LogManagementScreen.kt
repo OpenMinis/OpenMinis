@@ -241,11 +241,11 @@ private fun LogsBody(
 
         // [T-stream-trace-live] 轨迹录制开关与回放入口。
         SettingsSection(
-            header = "流式轨迹（回放与排障）",
-            footer = "录制后可在下方浏览每次会话的 chunk 帧序列，对照改流解析器前后的差异。",
+            header = stringResource(R.string.log_stream_trace_section),
+            footer = stringResource(R.string.log_stream_trace_footer),
         ) {
             SettingsSwitchRow(
-                title = "录制流式轨迹",
+                title = stringResource(R.string.log_stream_trace_record),
                 checked = streamTraceEnabled,
                 onCheckedChange = { value ->
                     streamTraceEnabled = value
@@ -255,8 +255,8 @@ private fun LogsBody(
                 showDivider = true,
             )
             SettingsRow(
-                title = "浏览轨迹回放",
-                subtitle = "offloads/stream-traces/ 下的录制文件（每行一个 chunk）",
+                title = stringResource(R.string.log_stream_trace_browse),
+                subtitle = stringResource(R.string.log_stream_trace_browse_sub),
                 onClick = { showStreamTraces = true },
                 showDivider = false,
             )
@@ -280,12 +280,12 @@ private fun LogsBody(
             }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showStreamTraces = false },
-                title = { Text("轨迹回放（最近 30 条）") },
+                title = { Text(stringResource(R.string.log_stream_trace_dialog_title)) },
                 text = {
                     if (!traceFilesLoaded) {
                         CircularProgressIndicator()
                     } else if (traceFiles.isEmpty()) {
-                        Text("暂无轨迹。打开「录制流式轨迹」后发一次消息即开始录制。")
+                        Text(stringResource(R.string.log_stream_trace_empty))
                     } else {
                         Column(
                             modifier = Modifier
@@ -305,7 +305,7 @@ private fun LogsBody(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showStreamTraces = false }) { Text("关闭") }
+                    TextButton(onClick = { showStreamTraces = false }) { Text(stringResource(R.string.common_close)) }
                 },
             )
         }
@@ -334,7 +334,7 @@ private fun LogsBody(
                                     }
                                 }.getOrDefault(line.take(120))
                             }
-                    }.getOrDefault("读取失败")
+                    }.getOrDefault(context.getString(R.string.log_read_failed))
                 }
             }
             androidx.compose.material3.AlertDialog(
@@ -361,27 +361,27 @@ private fun LogsBody(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { selectedTraceFile = null }) { Text("关闭") }
+                    TextButton(onClick = { selectedTraceFile = null }) { Text(stringResource(R.string.common_close)) }
                 },
             )
         }
 
         // [T-context-assembly-preview] 上下文组装快照入口：最近一次发给模型
         // 的 system prompt 构成明细+全文，排障"模型实际收到什么"。
-        SettingsSection(header = "上下文组装快照") {
+        SettingsSection(header = stringResource(R.string.log_context_snapshot_section)) {
             SettingsRow(
-                title = "查看最近一次上下文组装",
-                subtitle = "按来源列出大小与全文（offloads/context-assembly/latest.md）",
+                title = stringResource(R.string.log_context_snapshot_view),
+                subtitle = stringResource(R.string.log_context_snapshot_sub),
                 onClick = { showContextSnapshot = true },
                 showDivider = false,
             )
         }
 
         // [T-answer-versions] 被重试覆盖的旧回答归档入口：不丢数据的第二份保险。
-        SettingsSection(header = "历史回答版本归档") {
+        SettingsSection(header = stringResource(R.string.log_answer_versions_section)) {
             SettingsRow(
-                title = "浏览被覆盖的旧回答",
-                subtitle = "offloads/answer-versions/ 下重试前归档的上一版回答",
+                title = stringResource(R.string.log_answer_versions_browse),
+                subtitle = stringResource(R.string.log_answer_versions_sub),
                 onClick = { showAnswerVersions = true },
                 showDivider = false,
             )
@@ -403,12 +403,12 @@ private fun LogsBody(
             }
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showAnswerVersions = false },
-                title = { Text("旧回答归档（最近 30 条）") },
+                title = { Text(stringResource(R.string.log_answer_versions_dialog_title)) },
                 text = {
                     if (!versionFilesLoaded) {
                         CircularProgressIndicator()
                     } else if (versionFiles.isEmpty()) {
-                        Text("暂无归档。重试某条回答后，被覆盖的上一版会出现在这里。")
+                        Text(stringResource(R.string.log_answer_versions_empty))
                     } else {
                         Column(
                             modifier = Modifier
@@ -428,7 +428,7 @@ private fun LogsBody(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showAnswerVersions = false }) { Text("关闭") }
+                    TextButton(onClick = { showAnswerVersions = false }) { Text(stringResource(R.string.common_close)) }
                 },
             )
         }
@@ -444,7 +444,7 @@ private fun LogsBody(
                     runCatching {
                         val raw = f.readText()
                         org.json.JSONObject(raw).optString("partsJson", raw).take(3_000)
-                    }.getOrDefault("读取失败")
+                    }.getOrDefault(context.getString(R.string.log_read_failed))
                 }
             }
             androidx.compose.material3.AlertDialog(
@@ -469,7 +469,7 @@ private fun LogsBody(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { selectedVersionFile = null }) { Text("关闭") }
+                    TextButton(onClick = { selectedVersionFile = null }) { Text(stringResource(R.string.common_close)) }
                 },
             )
         }
@@ -478,17 +478,17 @@ private fun LogsBody(
             val snapshot = com.openminis.app.agent.ContextAssemblySnapshot.latest
             androidx.compose.material3.AlertDialog(
                 onDismissRequest = { showContextSnapshot = false },
-                title = { Text("上下文组装快照") },
+                title = { Text(stringResource(R.string.log_context_snapshot_dialog_title)) },
                 text = {
                     val body = snapshot?.let { s ->
                         buildString {
-                            append("总字符：").append(s.totalChars).append("\n\n")
+                            append(context.getString(R.string.log_context_snapshot_total_chars, s.totalChars)).append("\n\n")
                             s.sections.forEach { (label, len) ->
-                                append("• ").append(len).append(" 字符 — ").append(label).append("\n")
+                                append(context.getString(R.string.log_context_snapshot_line, len, label)).append("\n")
                             }
-                            append("\n（全文见 offloads/context-assembly/latest.md）")
+                            append(context.getString(R.string.log_context_snapshot_full_note))
                         }
-                    } ?: "还没有捕获过上下文组装（发一次消息后生成）。"
+                    } ?: context.getString(R.string.log_context_snapshot_none)
                     androidx.compose.foundation.rememberScrollState().let { scroll ->
                         Text(
                             text = body,
@@ -501,7 +501,7 @@ private fun LogsBody(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showContextSnapshot = false }) { Text("关闭") }
+                    TextButton(onClick = { showContextSnapshot = false }) { Text(stringResource(R.string.common_close)) }
                 },
             )
         }
