@@ -89,7 +89,13 @@ object MarkdownParser {
         }
     }
 
-    data class ListItem(val content: String, val checked: Boolean? = null)
+    data class ListItem(
+        val content: String,
+        val checked: Boolean? = null,
+        /** [T-list-item-block-children] Block-shaped continuations (table /
+         * code fence) parsed under this item; rendered nested. */
+        val children: List<Block> = emptyList(),
+    )
 
     enum class Alignment { LEFT, CENTER, RIGHT }
 
@@ -199,20 +205,34 @@ object MarkdownParser {
             val bulletMatch = bulletItemRegex.find(line)
             if (bulletMatch != null) {
                 val items = mutableListOf<ListItem>()
+                // [T-list-item-block-children] Continuation lines carrying a
+                // fenced code block or a table used to be appended to the
+                // item content verbatim, so the renderer printed raw pipes
+                // and backticks as prose. Collect them per item and let
+                // appendContinuation decide: plain text still merges into
+                // `content` (legacy behavior), block-shaped continuations
+                // parse into `children` which the list renderer nests.
+                var cont = mutableListOf<String>()
+                fun flushCont() {
+                    if (cont.isNotEmpty() && items.isNotEmpty()) {
+                        items[items.lastIndex] = appendContinuation(items.last(), cont)
+                    }
+                    cont = mutableListOf()
+                }
                 while (i < lines.size) {
                     val bm = bulletItemRegex.find(lines[i])
                     if (bm == null) break
+                    flushCont()
                     val content = bm.groupValues[1]
                     items.add(parseListItem(content))
                     i++
                     // Collect continuation lines (indented)
                     while (i < lines.size && lines[i].startsWith("  ") && !bulletPrefixRegex.matches(lines[i])) {
-                        items[items.lastIndex] = items.last().copy(
-                            content = items.last().content + "\n" + lines[i].trimStart()
-                        )
+                        cont.add(lines[i].trimStart())
                         i++
                     }
                 }
+                flushCont()
                 blocks.add(Block.BulletList(items))
                 continue
             }
@@ -226,12 +246,31 @@ object MarkdownParser {
             if (numMatch != null) {
                 val startNum = numMatch.groupValues[1].toIntOrNull() ?: 1
                 val items = mutableListOf<ListItem>()
+                // [T-list-item-block-children] Same continuation treatment
+                // as the bullet branch: indented block content under "1."
+                // used to break the list and re-parse at top level, so
+                // tables/code under numbered items rendered as siblings
+                // instead of nested children (and plain indented prose
+                // became a detached paragraph).
+                var cont = mutableListOf<String>()
+                fun flushCont() {
+                    if (cont.isNotEmpty() && items.isNotEmpty()) {
+                        items[items.lastIndex] = appendContinuation(items.last(), cont)
+                    }
+                    cont = mutableListOf()
+                }
                 while (i < lines.size) {
                     val nm = numberedItemRegex.find(lines[i])
                     if (nm == null) break
+                    flushCont()
                     items.add(ListItem(nm.groupValues[2]))
                     i++
+                    while (i < lines.size && lines[i].startsWith("  ") && !numberedItemRegex.matches(lines[i])) {
+                        cont.add(lines[i].trimStart())
+                        i++
+                    }
                 }
+                flushCont()
                 blocks.add(Block.NumberedList(startNum, items))
                 continue
             }
@@ -262,6 +301,13 @@ object MarkdownParser {
                 val pl = lines[i]
                 if (pl.isBlank() || pl.trimStart().startsWith("```") ||
                     pl.trimStart().startsWith("# ") || pl.trimStart().startsWith("> ") ||
+                    // [T-para-table-lookahead] A paragraph directly followed
+                    // by a table (no blank line) used to swallow the table
+                    // rows as prose. Break on the same header+separator
+                    // shape the main loop's table branch matches, so the
+                    // table parses as a sibling block. The pipe check keeps
+                    // "text\n---" (setext-ish prose) on the old path.
+                    (pl.contains('|') && i + 1 < lines.size && isTableSeparator(lines[i + 1])) ||
                     bulletContinueRegex.containsMatchIn(pl) ||
                     // Keep in sync with the numbered-list marker above (≤2 digits).
                     numberedContinueRegex.containsMatchIn(pl) ||
@@ -275,6 +321,42 @@ object MarkdownParser {
         }
 
         return blocks
+    }
+
+    /**
+     * [T-list-item-block-children] Fold a list item's continuation lines
+     * into the item. Plain continuation lines keep the legacy behavior
+     * (merge into `content`). When the continuation carries block-shaped
+     * content — a fenced code block or a table — it parses into `children`
+     * instead, so the list renderer can nest real blocks under the item
+     * instead of printing pipes and backticks as prose. Leading paragraphs
+     * of the parsed continuation still merge into `content` (they are prose
+     * belonging to the item).
+     *
+     * The table probe mirrors the paragraph branch's conservative shape: a
+     * pipe in the line AND the next line being a separator row. Prose like
+     * "a | b" without a separator stays merged text.
+     */
+    private fun appendContinuation(item: ListItem, contLines: List<String>): ListItem {
+        if (contLines.isEmpty()) return item
+        val hasBlock = contLines.any { it.trimStart().startsWith("```") } ||
+            contLines.withIndex().any { (j, ln) ->
+                ln.contains('|') && j + 1 < contLines.size && isTableSeparator(contLines[j + 1])
+            }
+        if (!hasBlock) {
+            return item.copy(content = item.content + "\n" + contLines.joinToString("\n"))
+        }
+        val parsed = parse(contLines.joinToString("\n"))
+        val leading = mutableListOf<String>()
+        var idx = 0
+        while (idx < parsed.size && parsed[idx] is Block.Paragraph) {
+            leading.add((parsed[idx] as Block.Paragraph).content)
+            idx++
+        }
+        return item.copy(
+            content = (listOf(item.content) + leading).joinToString("\n"),
+            children = parsed.drop(idx),
+        )
     }
 
     private fun parseListItem(content: String): ListItem {

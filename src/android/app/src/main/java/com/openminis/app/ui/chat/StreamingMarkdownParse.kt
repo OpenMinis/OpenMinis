@@ -201,6 +201,20 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 val items = mutableListOf<ListItem>()
                 val rawLines = mutableListOf<String>()
                 val baseIndent = line.length - trimmed.length
+                // [T-list-item-block-children] Continuation lines carrying a
+                // fenced code block or a table used to be appended to the
+                // item text verbatim, so the renderer printed raw pipes and
+                // backticks as prose. Collect them per item and let
+                // appendContinuation decide: plain text still merges into
+                // `text` (legacy behavior), block-shaped continuations parse
+                // into `children` which the list renderer nests.
+                var cont = mutableListOf<String>()
+                suspend fun flushCont() {
+                    if (cont.isNotEmpty() && items.isNotEmpty()) {
+                        items[items.lastIndex] = appendContinuation(items.last(), cont)
+                    }
+                    cont = mutableListOf()
+                }
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
@@ -208,17 +222,16 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     if (t.isEmpty()) { i++; continue }
                     if (!t.matches(bulletListItemRegex) && indent <= baseIndent) break
                     if (indent > baseIndent) {
-                        // Continuation or nested — append to last item
-                        if (items.isNotEmpty()) {
-                            val last = items.last()
-                            items[items.lastIndex] = last.copy(text = last.text + "\n" + t)
-                        }
+                        // Continuation or nested — collect for the last item
+                        if (items.isNotEmpty()) cont.add(t)
                     } else {
+                        flushCont()
                         rawLines.add(l)
                         items.add(ListItem(t.replaceFirst(bulletListPrefixRegex, "")))
                     }
                     i++
                 }
+                flushCont()
                 blocks.add(MdBlock.UnorderedList(rawLines.joinToString("\n"), items))
             }
 
@@ -229,6 +242,15 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 val startMatch = numberedListStartRegex.find(trimmed)
                 val startNum = startMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
                 val baseIndent = line.length - trimmed.length
+                // [T-list-item-block-children] Same continuation treatment
+                // as the bullet branch above.
+                var cont = mutableListOf<String>()
+                suspend fun flushCont() {
+                    if (cont.isNotEmpty() && items.isNotEmpty()) {
+                        items[items.lastIndex] = appendContinuation(items.last(), cont)
+                    }
+                    cont = mutableListOf()
+                }
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
@@ -236,16 +258,15 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     if (t.isEmpty()) { i++; continue }
                     if (!t.matches(numberedListItemRegex) && indent <= baseIndent) break
                     if (indent > baseIndent) {
-                        if (items.isNotEmpty()) {
-                            val last = items.last()
-                            items[items.lastIndex] = last.copy(text = last.text + "\n" + t)
-                        }
+                        if (items.isNotEmpty()) cont.add(t)
                     } else {
+                        flushCont()
                         rawLines.add(l)
                         items.add(ListItem(t.replaceFirst(numberedListPrefixRegex, "")))
                     }
                     i++
                 }
+                flushCont()
                 blocks.add(MdBlock.OrderedList(rawLines.joinToString("\n"), items, startNum))
             }
 
@@ -300,5 +321,41 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
         }
     }
     return blocks
+}
+
+/**
+ * [T-list-item-block-children] Fold a list item's continuation lines into
+ * the item. Plain continuation lines keep the legacy behavior (merge into
+ * `text`). When the continuation carries block-shaped content — a fenced
+ * code block or a table — it parses into `children` instead, so the list
+ * renderer can nest real blocks under the item instead of printing pipes
+ * and backticks as prose. Leading paragraphs of the parsed continuation
+ * still merge into `text` (they are prose belonging to the item).
+ *
+ * The table probe mirrors the paragraph branch's conservative shape: a
+ * pipe in the line AND the next line being a separator row. Prose like
+ * "a | b" without a separator stays merged text.
+ */
+internal suspend fun appendContinuation(item: ListItem, contLines: List<String>): ListItem {
+    if (contLines.isEmpty()) return item
+    val hasBlock = contLines.any { it.trimStart().startsWith("```") } ||
+        contLines.withIndex().any { (j, ln) ->
+            ln.contains('|') && j + 1 < contLines.size &&
+                contLines[j + 1].trim().matches(tableSeparatorRegex)
+        }
+    if (!hasBlock) {
+        return item.copy(text = item.text + "\n" + contLines.joinToString("\n"))
+    }
+    val parsed = parseMarkdownBlocks(contLines.joinToString("\n"))
+    val leading = mutableListOf<String>()
+    var idx = 0
+    while (idx < parsed.size && parsed[idx] is MdBlock.Paragraph) {
+        leading.add(parsed[idx].raw)
+        idx++
+    }
+    return item.copy(
+        text = (listOf(item.text) + leading).joinToString("\n"),
+        children = parsed.drop(idx),
+    )
 }
 

@@ -7,6 +7,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -248,6 +249,17 @@ internal fun RenderBlock(block: MdBlock) {
                             inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(item.text)),
                         )
                     }
+                    // [T-list-item-block-children] Nested blocks (table /
+                    // code fence collected by appendContinuation) render
+                    // under the item instead of being printed as prose.
+                    if (item.children.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier.padding(start = 20.dp, bottom = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            item.children.forEach { child -> RenderBlock(child) }
+                        }
+                    }
                 }
             }
         }
@@ -269,6 +281,15 @@ internal fun RenderBlock(block: MdBlock) {
                             modifier = Modifier.weight(1f),
                             inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(item.text)),
                         )
+                    }
+                    // [T-list-item-block-children] see UnorderedList above.
+                    if (item.children.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier.padding(start = 20.dp, bottom = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            item.children.forEach { child -> RenderBlock(child) }
+                        }
                     }
                 }
             }

@@ -398,6 +398,19 @@ private fun BulletListView(
                     modifier = Modifier.weight(1f),
                 )
             }
+            // [T-list-item-block-children] Nested blocks (table / code
+            // fence collected by MarkdownParser.appendContinuation)
+            // render under the item instead of being printed as prose.
+            if (item.children.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(start = 24.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    item.children.forEach { child ->
+                        BlockContent(child, color, baseStyle)
+                    }
+                }
+            }
         }
     }
 }
@@ -425,6 +438,17 @@ private fun NumberedListView(
                     style = baseStyle,
                     modifier = Modifier.weight(1f),
                 )
+            }
+            // [T-list-item-block-children] see BulletListView above.
+            if (item.children.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(start = 24.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    item.children.forEach { child ->
+                        BlockContent(child, color, baseStyle)
+                    }
+                }
             }
         }
     }
