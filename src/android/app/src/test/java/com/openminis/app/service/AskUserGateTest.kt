@@ -9,6 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -18,6 +19,14 @@ import org.junit.Test
  * a plain object with no Android dependencies.
  */
 class AskUserGateTest {
+
+    // The gate is a process-wide singleton; tests share one JVM, so each
+    // test starts from a drained gate (several tests deliberately leave
+    // entries registered to assert unregister semantics).
+    @Before
+    fun drainGate() {
+        AskUserGate.cancelAll("test-setup")
+    }
 
     private fun question(
         text: String = "选一个方向",
