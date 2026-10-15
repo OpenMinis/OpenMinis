@@ -131,7 +131,24 @@ object Routes {
     const val MIRROR_CATEGORY_DETAIL = "mirror_category/{categoryKey}"
     fun mirrorCategoryDetail(categoryKey: String) = "mirror_category/$categoryKey"
     const val FILE_BROWSER = "file_browser"
-    const val FILE_PREVIEW = "file_preview"
+    // [T-android-filepreview-nav-args] The previewed file's absolute path is
+    // carried as a nav argument so the destination survives process death.
+    // Previously the hand-off was only the process-static FilePreviewHolder:
+    // if the system killed the app while a SAF CreateDocument sheet was up
+    // (the classic low-memory moment), the restored FILE_PREVIEW entry found
+    // a null Holder, popped itself — and the SAF result then delivered to a
+    // dead screen. With the path in the back stack entry the destination
+    // rehydrates (FileItem.from) and the pending SAF result lands on a live
+    // preview. Holder stays as the hot path (no re-stat on every navigate).
+    const val FILE_PREVIEW = "file_preview?path={path}"
+    // Same encoding recipe as [skillFile]/[terminal]: URLEncoder is
+    // plain-JVM (unit-testable without Robolectric), and `+` must become
+    // %20 because Navigation percent-decodes query params — a bare `+`
+    // would reach the screen as a literal plus (PR6 media-path bug class).
+    fun filePreview(path: String): String {
+        val encoded = java.net.URLEncoder.encode(path, "UTF-8").replace("+", "%20")
+        return "file_preview?path=$encoded"
+    }
     const val ENV_VARS = "env_vars"
     const val SKILLS = "skills"
     const val MULTI_AGENT = "multi_agent"
@@ -1261,7 +1278,7 @@ fun AppNavigation(
                             htmlBrowserUrl = "file://${item.file.absolutePath}"
                         } else {
                             FilePreviewHolder.currentItem = item
-                            navController.safeNavigate(Routes.FILE_PREVIEW)
+                            navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
                         }
                     },
                 )
@@ -1312,7 +1329,7 @@ fun AppNavigation(
                         htmlBrowserUrl = "file://${item.file.absolutePath}"
                     } else {
                         FilePreviewHolder.currentItem = item
-                        navController.safeNavigate(Routes.FILE_PREVIEW)
+                        navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
                     }
                 },
             )
@@ -1338,6 +1355,12 @@ fun AppNavigation(
                 usePlatformDefaultWidth = false,
                 decorFitsSystemWindows = false,
             ),
+            arguments = listOf(
+                navArgument("path") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            ),
         ) { entry ->
             // [T-android-filepreview-holder-lifetime] Same release rule as
             // FILE_BROWSER: the FileItem is a process-static hand-off, so it is
@@ -1346,7 +1369,14 @@ fun AppNavigation(
             DisposableEffect(entry) {
                 onDispose { FilePreviewHolder.currentItem = null }
             }
+            // [T-android-filepreview-nav-args] Holder first (hot path — the
+            // navigating screen just statted this file), nav-arg rehydration
+            // second (process-death restore: Holder is empty, the back stack
+            // entry still carries the path). A path that no longer resolves
+            // (file deleted while the app was dead) pops the preview.
             val item = FilePreviewHolder.currentItem
+                ?: entry.arguments?.getString("path")?.takeIf { it.isNotEmpty() }
+                    ?.let { FileItem.from(java.io.File(it)) }
             if (item == null) {
                 LaunchedEffect(Unit) { navController.safePopBackStack() }
             } else {

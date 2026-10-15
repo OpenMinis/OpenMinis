@@ -123,14 +123,38 @@ fun FilePreviewScreen(
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch(Dispatchers.IO) {
-            val ok = try {
-                context.contentResolver.openOutputStream(uri)?.use { out ->
-                    item.file.inputStream().use { it.copyTo(out) }
+            // [T-android-save-as-null-stream] DocumentsUI has already created
+            // the destination document by the time this callback runs. Two
+            // failure shapes used to leave that document at 0 bytes while
+            // still toasting "已保存":
+            //   1. openOutputStream(uri) == null fell through `?.use` as a
+            //      silent no-op success;
+            //   2. the copy landed no bytes without throwing.
+            // Now: null stream or a demonstrably empty result is a failure,
+            // and the empty husk is deleted so the user's storage does not
+            // accumulate 0-byte files from failed saves.
+            val srcLen = item.file.length()
+            var ok = false
+            var reason = ""
+            try {
+                val out = context.contentResolver.openOutputStream(uri)
+                if (out == null) {
+                    reason = "openOutputStream returned null"
+                } else {
+                    out.use { o -> item.file.inputStream().use { it.copyTo(o) } }
+                    val dstLen = runCatching {
+                        context.contentResolver.openAssetFileDescriptor(uri, "r")
+                            ?.use { it.length } ?: FileSaveGuard.UNKNOWN_LENGTH
+                    }.getOrDefault(FileSaveGuard.UNKNOWN_LENGTH)
+                    ok = FileSaveGuard.copiedIntact(srcLen, dstLen)
+                    if (!ok) reason = "empty after copy (src=$srcLen dst=$dstLen)"
                 }
-                true
             } catch (e: Exception) {
-                AppLogger.warning("FilePreview", "Save-As failed: ${e.message}")
-                false
+                reason = e.message ?: e.javaClass.simpleName
+            }
+            if (!ok) {
+                AppLogger.warning("FilePreview", "Save-As failed for ${item.name}: $reason")
+                runCatching { context.contentResolver.delete(uri, null, null) }
             }
             withContext(Dispatchers.Main) {
                 Toast.makeText(
@@ -1330,12 +1354,33 @@ private suspend fun saveImageToGallery(context: Context, src: File): Boolean =
                 val uri = context.contentResolver.insert(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values,
                 ) ?: return@withContext false
-                context.contentResolver.openOutputStream(uri)?.use { out: OutputStream ->
-                    src.inputStream().use { it.copyTo(out) }
+                // [T-android-save-as-null-stream] A null stream used to fall
+                // through `?.use` and the row below was still published
+                // (IS_PENDING=0) — a 0-byte image in the gallery. On any
+                // failure the pending row is deleted instead of published.
+                var copied = false
+                try {
+                    val out = context.contentResolver.openOutputStream(uri)
+                    if (out == null) {
+                        AppLogger.warning("FilePreview", "saveImageToGallery: openOutputStream returned null")
+                    } else {
+                        out.use { o: OutputStream -> src.inputStream().use { it.copyTo(o) } }
+                        val dstLen = runCatching {
+                            context.contentResolver.openAssetFileDescriptor(uri, "r")
+                                ?.use { it.length } ?: FileSaveGuard.UNKNOWN_LENGTH
+                        }.getOrDefault(FileSaveGuard.UNKNOWN_LENGTH)
+                        copied = FileSaveGuard.copiedIntact(srcLen = src.length(), dstLen = dstLen)
+                    }
+                } finally {
+                    if (copied) {
+                        values.clear()
+                        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                        context.contentResolver.update(uri, values, null, null)
+                    } else {
+                        runCatching { context.contentResolver.delete(uri, null, null) }
+                    }
                 }
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                context.contentResolver.update(uri, values, null, null)
+                if (!copied) return@withContext false
             } else {
                 @Suppress("DEPRECATION")
                 val dir = Environment.getExternalStoragePublicDirectory(

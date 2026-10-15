@@ -1043,7 +1043,7 @@ fun ChatSplitScaffoldRoute(
                 onBrowseChatFiles = { navController.safeNavigate(Routes.chatFiles(sessionId)) },
                 onPreviewAttachment = { item ->
                     FilePreviewHolder.currentItem = item
-                    navController.safeNavigate(Routes.FILE_PREVIEW)
+                    navController.safeNavigate(Routes.filePreview(item.file.absolutePath))
                 },
                 onModelGroupsClick = { navController.safeNavigate(Routes.MODEL_GROUPS) },
             )

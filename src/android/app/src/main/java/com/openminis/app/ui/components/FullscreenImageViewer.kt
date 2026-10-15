@@ -488,7 +488,6 @@ internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
     withContext(Dispatchers.IO) {
         try {
             val filename = "minis_${System.currentTimeMillis()}.png"
-            val stream: OutputStream?
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -498,17 +497,41 @@ internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
                 }
                 val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     ?: return@withContext false
-                stream = context.contentResolver.openOutputStream(uri)
-                stream?.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                context.contentResolver.update(uri, values, null, null)
+                // [T-android-save-as-null-stream] Mirrors FilePreviewScreen:
+                // a null stream or empty result must not publish a 0-byte
+                // gallery entry — delete the pending row instead.
+                var copied = false
+                try {
+                    val out = context.contentResolver.openOutputStream(uri)
+                    if (out == null) {
+                        com.openminis.app.logging.AppLogger.warning(
+                            "ImageGallery", "saveToGallery: openOutputStream returned null",
+                        )
+                    } else {
+                        out.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                        // bitmap.compress returns success but may emit 0
+                        // bytes for recycled/empty bitmaps — verify.
+                        val dstLen = runCatching {
+                            context.contentResolver.openAssetFileDescriptor(uri, "r")
+                                ?.use { it.length } ?: -1L
+                        }.getOrDefault(-1L)
+                        copied = dstLen != 0L
+                    }
+                } finally {
+                    if (copied) {
+                        values.clear()
+                        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                        context.contentResolver.update(uri, values, null, null)
+                    } else {
+                        runCatching { context.contentResolver.delete(uri, null, null) }
+                    }
+                }
             } else {
                 @Suppress("DEPRECATION")
                 val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
                 val minisDir = File(dir, "Minis Ultra").also { it.mkdirs() }
                 val file = File(minisDir, filename)
-                stream = file.outputStream()
+                val stream: OutputStream? = file.outputStream()
                 stream.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
             true

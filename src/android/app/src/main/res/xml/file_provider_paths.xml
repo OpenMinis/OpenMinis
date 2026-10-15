@@ -15,11 +15,25 @@
          FileProvider.getUriForFile threw IllegalArgumentException and the
          user saw "分享失败" toasts instead of the share sheet. -->
     <cache-path name="share" path="share/" />
+    <!-- LargeContentGuard.exportLargeContentToFile dumps oversized chat
+         messages here before sharing; same missing-root failure mode as T207
+         (the export button failed before the chooser ever appeared). -->
+    <cache-path name="large-messages" path="large-messages/" />
     <!-- PRoot rootfs — expose so inline video/audio cards can hand the host
          file to the system player via ACTION_VIEW. -->
     <files-path name="rootfs" path="ubuntu-rootfs/" />
     <!-- Per-session attachments/workspace/etc. where agent downloads land. -->
     <files-path name="sessions" path="minis-sessions/" />
+    <!-- [T-android-workspaces-provider-root] Sessions filed into a project
+         folder move their workspace/attachments/offloads/browser trees to
+         filesDir/minis-workspaces/<folderId>/ (SessionWorkspace.WORKSPACES_DIR).
+         This root was missing, so FileProvider.getUriForFile threw
+         "Failed to find configured root" for every agent-generated file in a
+         filed session — share/export from the file preview was dead for them
+         (three "share failed for aii_v1.1.0.zip" WARNs in one user session).
+         FileProviderPathsCoverageTest pins all three SessionWorkspace roots
+         so a future layout change can't silently drop one again. -->
+    <files-path name="workspaces" path="minis-workspaces/" />
     <files-path name="global" path="minis-global/" />
     <!-- Downloaded update APKs (UpdateChecker → PendingUpdateStore). Moved
          from cacheDir/shared/ to filesDir/updates/ so the OS doesn't evict
