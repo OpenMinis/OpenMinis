@@ -1778,6 +1778,8 @@
     <string name="mcp_delete_server">Excluir servidor</string>
     <string name="dev_suite_section_header">Suítes de ambiente de desenvolvimento</string>
     <string name="dev_suite_section_footer">As receitas instalam toolchains sob demanda dentro do sandbox — os payloads não vêm mais no app; a primeira montagem precisa de rede. Rede restrita? Execute minis-devsuite-offline-list para a lista de importação offline.</string>
+    <string name="dev_suite_offline_hint_title">Importação offline disponível</string>
+    <string name="dev_suite_offline_hint_body">Falha no download? Execute minis-devsuite-offline-list em um terminal para obter a lista de arquivos, baixe-os em outro aparelho, coloque-os em /var/minis/shared/offline/ e monte novamente — os arquivos locais têm prioridade, sem necessidade de rede.</string>
     <string name="dev_suite_online_header">Ferramentas online</string>
     <string name="dev_suite_online_footer">Ferramentas independentes, instale com um toque.</string>
     <string name="dev_suite_progress">%1$d/%2$d prontos</string>

@@ -241,6 +241,8 @@
     <string name="plugin_market_section_online">在线 API</string>
     <string name="dev_suite_section_header">开发环境套件</string>
     <string name="dev_suite_section_footer">配方按需在沙箱内安装工具链——安装包不再内置重型载荷，首次装配需要网络。 网络受限可运行 minis-devsuite-offline-list 生成离线导入清单。</string>
+    <string name="dev_suite_offline_hint_title">可离线导入</string>
+    <string name="dev_suite_offline_hint_body">下载失败？在终端运行 minis-devsuite-offline-list 获取文件清单，在其他设备下载后放入 /var/minis/shared/offline/，再重新装配——本地文件优先，无需网络。</string>
     <string name="dev_suite_online_header">在线工具</string>
     <string name="dev_suite_online_footer">独立工具，点击即装。</string>
     <string name="dev_suite_progress">%1$d/%2$d 已就绪</string>

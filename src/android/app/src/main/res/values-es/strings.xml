@@ -1780,6 +1780,8 @@
     <string name="mcp_delete_server">Eliminar servidor</string>
     <string name="dev_suite_section_header">Entornos de desarrollo</string>
     <string name="dev_suite_section_footer">Las recetas instalan toolchains bajo demanda en el sandbox — los payloads ya no van en la APK; el primer montaje necesita red. ¿Red restringida? Ejecute minis-devsuite-offline-list para obtener la lista de importación sin conexión.</string>
+    <string name="dev_suite_offline_hint_title">Importación sin conexión disponible</string>
+    <string name="dev_suite_offline_hint_body">¿Falló la descarga? Ejecute minis-devsuite-offline-list en un terminal para obtener la lista de archivos, descárguelos en otro dispositivo, colóquelos en /var/minis/shared/offline/ y vuelva a ensamblar: los archivos locales se usan primero, sin necesidad de red.</string>
     <string name="dev_suite_online_header">Herramientas en línea</string>
     <string name="dev_suite_online_footer">Herramientas independientes que se instalan al tocar.</string>
     <string name="dev_suite_progress">%1$d/%2$d listos</string>

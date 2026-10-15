@@ -1786,6 +1786,8 @@
     <string name="mcp_delete_server">Usuń serwer</string>
     <string name="dev_suite_section_header">Pakiety środowisk programistycznych</string>
     <string name="dev_suite_section_footer">Przepisy instalują toolchainy na żądanie w sandboxie — ładunki nie są już wbudowane w aplikację, pierwsza instalacja wymaga sieci. Ograniczona sieć? Uruchom minis-devsuite-offline-list, aby uzyskać listę importu offline.</string>
+    <string name="dev_suite_offline_hint_title">Import offline dostępny</string>
+    <string name="dev_suite_offline_hint_body">Pobieranie nie powiodło się? Uruchom minis-devsuite-offline-list w terminalu, aby uzyskać listę plików, pobierz je na innym urządzeniu, umieść w /var/minis/shared/offline/ i ponownie złóż pakiet — pliki lokalne mają pierwszeństwo, sieć nie jest potrzebna.</string>
     <string name="dev_suite_online_header">Narzędzia online</string>
     <string name="dev_suite_online_footer">Niezależne narzędzia, instalacja jednym dotknięciem.</string>
     <string name="dev_suite_progress">%1$d/%2$d gotowe</string>

@@ -1780,6 +1780,8 @@
     <string name="mcp_delete_server">Supprimer le serveur</string>
     <string name="dev_suite_section_header">Environnements de développement</string>
     <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau. Réseau restreint ? Exécutez minis-devsuite-offline-list pour la liste d\'import hors ligne.</string>
+    <string name="dev_suite_offline_hint_title">Import hors ligne disponible</string>
+    <string name="dev_suite_offline_hint_body">Échec du téléchargement ? Exécutez minis-devsuite-offline-list dans un terminal pour obtenir la liste des fichiers, téléchargez-les sur un autre appareil, déposez-les dans /var/minis/shared/offline/, puis relancez l\'assemblage — les fichiers locaux sont utilisés en priorité, sans réseau.</string>
     <string name="dev_suite_online_header">Outils en ligne</string>
     <string name="dev_suite_online_footer">Outils autonomes, installés en un appui.</string>
     <string name="dev_suite_progress">%1$d/%2$d prêts</string>

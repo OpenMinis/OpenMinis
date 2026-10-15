@@ -1778,6 +1778,8 @@
     <string name="mcp_delete_server">Padam pelayan</string>
     <string name="dev_suite_section_header">Suit persekitaran pembangunan</string>
     <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian. Rangkaian terhad? Jalankan minis-devsuite-offline-list untuk senarai import luar talian.</string>
+    <string name="dev_suite_offline_hint_title">Import luar talian tersedia</string>
+    <string name="dev_suite_offline_hint_body">Muat turun gagal? Jalankan minis-devsuite-offline-list di terminal untuk mendapatkan senarai fail, muat turun fail di peranti lain, letakkan dalam /var/minis/shared/offline/, kemudian pasang semula — fail tempatan digunakan dahulu, tanpa rangkaian.</string>
     <string name="dev_suite_online_header">Alat dalam talian</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan satu ketukan.</string>
     <string name="dev_suite_progress">%1$d/%2$d sedia</string>

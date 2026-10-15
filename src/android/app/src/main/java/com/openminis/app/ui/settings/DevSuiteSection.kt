@@ -5,8 +5,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -88,6 +91,18 @@ fun DevSuiteSection(
         header = stringResource(R.string.dev_suite_section_header),
         footer = stringResource(R.string.dev_suite_section_footer),
     ) {
+        // [T-devsuite-offline-entry] PR24 built the offline import mechanism
+        // (CLI manifest + /var/minis/shared/offline/ drop point + offline_pick
+        // in every download site) but no UI ever told anyone it exists — a
+        // network-restricted user saw only a FAILED row and a dead end. The
+        // hint rides the failure state itself: the moment any component fails
+        // is the moment the user needs the offline path, and it names both
+        // halves of the contract (the CLI that prints the manifest, the
+        // directory that feeds it). The static footer below keeps a one-line
+        // general mention for the not-yet-failed case.
+        if (states.values.any { it.status == DevSuiteStore.Status.FAILED }) {
+            DevSuiteOfflineHint()
+        }
         DevSuiteCatalog.bundles.forEach { bundle ->
             val readyCount = bundle.components.count {
                 states[it.id]?.status == DevSuiteStore.Status.INSTALLED
@@ -318,6 +333,43 @@ private fun DevComponentRow(
             TextButton(onClick = onRemove, enabled = true) {
                 Text(stringResource(R.string.common_remove), style = MaterialTheme.typography.labelSmall)
             }
+        }
+    }
+}
+
+/**
+ * [T-devsuite-offline-entry] Failure-state banner pointing at the offline
+ * import path (see DevSuiteSection for the rationale). Plain informational
+ * row — nothing to tap: the user runs the CLI in a terminal and drops the
+ * files into the shared folder from any file manager, then retries assembly
+ * (offline_pick makes the retry use the local copies with zero network).
+ * Padding mirrors SettingsRow (14dp horizontal inside the section card) so
+ * the banner reads as a row of the card it sits in.
+ */
+@Composable
+private fun DevSuiteOfflineHint() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.CloudOff,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column {
+            Text(
+                text = stringResource(R.string.dev_suite_offline_hint_title),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = stringResource(R.string.dev_suite_offline_hint_body),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

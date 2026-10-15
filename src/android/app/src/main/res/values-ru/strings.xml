@@ -1788,6 +1788,8 @@
     <string name="mcp_delete_server">Удалить сервер</string>
     <string name="dev_suite_section_header">Наборы сред разработки</string>
     <string name="dev_suite_section_footer">Рецепты устанавливают тулчейны по требованию внутри песочницы — полезная нагрузка больше не вшита в приложение, первая сборка требует сеть. Ограниченная сеть? Запустите minis-devsuite-offline-list — он выведет список для офлайн-импорта.</string>
+    <string name="dev_suite_offline_hint_title">Доступен офлайн-импорт</string>
+    <string name="dev_suite_offline_hint_body">Ошибка загрузки? Запустите minis-devsuite-offline-list в терминале, чтобы получить список файлов, скачайте их на другом устройстве, положите в /var/minis/shared/offline/ и снова запустите сборку — локальные файлы используются в первую очередь, сеть не нужна.</string>
     <string name="dev_suite_online_header">Онлайн-инструменты</string>
     <string name="dev_suite_online_footer">Автономные инструменты, установка одним касанием.</string>
     <string name="dev_suite_progress">%1$d/%2$d готово</string>

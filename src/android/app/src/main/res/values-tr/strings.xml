@@ -1778,6 +1778,8 @@
     <string name="mcp_delete_server">Sunucuyu sil</string>
     <string name="dev_suite_section_header">Geliştirme ortamı paketleri</string>
     <string name="dev_suite_section_footer">Tarifler, araç zincirlerini gerektiğinde sandbox içinde kurar — yükler artık uygulamaya gömülü değil, ilk kurulum ağ gerektirir. Ağ kısıtlı mı? Çevrimdışı içe aktarma listesi için minis-devsuite-offline-list komutunu çalıştırın.</string>
+    <string name="dev_suite_offline_hint_title">Çevrimdışı içe aktarım var</string>
+    <string name="dev_suite_offline_hint_body">İndirme başarısız mı? Dosya listesi için terminalde minis-devsuite-offline-list komutunu çalıştırın, dosyaları başka bir cihazda indirin, /var/minis/shared/offline/ klasörüne koyun ve kurulumu yeniden başlatın — yerel dosyalar önce kullanılır, ağ gerekmez.</string>
     <string name="dev_suite_online_header">Çevrimiçi araçlar</string>
     <string name="dev_suite_online_footer">Bağımsız araçlar, tek dokunuşla kurulur.</string>
     <string name="dev_suite_progress">%1$d/%2$d hazır</string>

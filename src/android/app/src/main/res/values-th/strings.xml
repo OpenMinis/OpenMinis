@@ -1778,6 +1778,8 @@
     <string name="mcp_delete_server">ลบเซิร์ฟเวอร์</string>
     <string name="dev_suite_section_header">ชุดสภาพแวดล้อมสำหรับพัฒนา</string>
     <string name="dev_suite_section_footer">สูตรติดตั้ง toolchain ตามความต้องการภายในแซนด์บ็อกซ์ — เพย์โหลดไม่ถูกฝังในแอปอีกต่อไป การติดตั้งครั้งแรกต้องใช้เน็ตเวิร์ก เน็ตเวิร์กจำกัด? เรียก minis-devsuite-offline-list เพื่อสร้างรายการนำเข้าแบบออฟไลน์</string>
+    <string name="dev_suite_offline_hint_title">มีการนำเข้าแบบออฟไลน์</string>
+    <string name="dev_suite_offline_hint_body">ดาวน์โหลดไม่สำเร็จ? เรียก minis-devsuite-offline-list ในเทอร์มินัลเพื่อดูรายการไฟล์ ดาวน์โหลดไฟล์จากอุปกรณ์อื่น วางลงใน /var/minis/shared/offline/ แล้วประกอบใหม่ — ไฟล์ในเครื่องถูกใช้ก่อน ไม่ต้องใช้เครือข่าย</string>
     <string name="dev_suite_online_header">เครื่องมือออนไลน์</string>
     <string name="dev_suite_online_footer">เครื่องมือแบบสแตนด์อโลน ติดตั้งด้วยการแตะครั้งเดียว</string>
     <string name="dev_suite_progress">%1$d/%2$d พร้อม</string>

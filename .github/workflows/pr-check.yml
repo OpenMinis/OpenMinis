@@ -112,3 +112,9 @@ jobs:
           python3 scripts/ci/check_new_untranslated.py \
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.sha }}"
+
+      # [T-arch-ratchet] UI review report P2-2: oversized files are on a
+      # one-way diet. Baseline ceilings never rise; new files cap at 800
+      # lines. Runs on every event (tree state, not diff state).
+      - name: Architecture policy ratchet
+        run: python3 scripts/ci/check_architecture_policy.py

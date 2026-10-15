@@ -1780,6 +1780,8 @@
     <string name="mcp_delete_server">Server löschen</string>
     <string name="dev_suite_section_header">Entwicklungsumgebungen</string>
     <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz. Netzwerk eingeschränkt? minis-devsuite-offline-list listet die Dateien für den Offline-Import auf.</string>
+    <string name="dev_suite_offline_hint_title">Offline-Import verfügbar</string>
+    <string name="dev_suite_offline_hint_body">Download fehlgeschlagen? Führen Sie minis-devsuite-offline-list im Terminal aus, um die Dateiliste abzurufen, laden Sie die Dateien auf einem anderen Gerät herunter, legen Sie sie in /var/minis/shared/offline/ ab und starten Sie die Assembly erneut — lokale Dateien werden zuerst verwendet, kein Netzwerk nötig.</string>
     <string name="dev_suite_online_header">Online-Tools</string>
     <string name="dev_suite_online_footer">Eigenständige Tools, per Tipp installiert.</string>
     <string name="dev_suite_progress">%1$d/%2$d bereit</string>

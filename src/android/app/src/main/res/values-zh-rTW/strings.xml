@@ -1869,6 +1869,8 @@
     <string name="mcp_delete_server">刪除伺服器</string>
     <string name="dev_suite_section_header">開發環境套件</string>
     <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。 網路受限可執行 minis-devsuite-offline-list 產生離線匯入清單。</string>
+    <string name="dev_suite_offline_hint_title">可離線匯入</string>
+    <string name="dev_suite_offline_hint_body">下載失敗？在終端機執行 minis-devsuite-offline-list 取得檔案清單，在其他裝置下載後放入 /var/minis/shared/offline/，再重新裝配——本機檔案優先，無需網路。</string>
     <string name="dev_suite_online_header">線上工具</string>
     <string name="dev_suite_online_footer">獨立工具，點擊即裝。</string>
     <string name="dev_suite_progress">%1$d/%2$d 已就緒</string>

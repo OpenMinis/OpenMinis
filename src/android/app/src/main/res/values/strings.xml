@@ -275,6 +275,8 @@
     <string name="plugin_market_section_online">Online APIs</string>
     <string name="dev_suite_section_header">Dev environment suites</string>
     <string name="dev_suite_section_footer">Recipes install toolchains on demand inside the sandbox — payloads are not bundled with the app, so first-time assembly needs network. Network-restricted? Run minis-devsuite-offline-list for the offline import manifest.</string>
+    <string name="dev_suite_offline_hint_title">Offline import available</string>
+    <string name="dev_suite_offline_hint_body">Download failed? Run minis-devsuite-offline-list in a terminal to get the file list, download the files on another device, drop them into /var/minis/shared/offline/, then assemble again — local files are used first, no network needed.</string>
     <string name="dev_suite_online_header">Online tools</string>
     <string name="dev_suite_online_footer">Standalone tools installed on tap.</string>
     <string name="dev_suite_progress">%1$d/%2$d ready</string>

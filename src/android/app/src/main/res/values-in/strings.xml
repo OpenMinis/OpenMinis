@@ -1783,6 +1783,8 @@
     <string name="mcp_delete_server">Hapus server</string>
     <string name="dev_suite_section_header">Suite lingkungan pengembangan</string>
     <string name="dev_suite_section_footer">Resep memasang toolchain sesuai permintaan di dalam sandbox — payload tidak lagi dibundel di aplikasi, pemasangan pertama butuh jaringan. Jaringan terbatas? Jalankan minis-devsuite-offline-list untuk daftar impor offline.</string>
+    <string name="dev_suite_offline_hint_title">Impor luring tersedia</string>
+    <string name="dev_suite_offline_hint_body">Unduhan gagal? Jalankan minis-devsuite-offline-list di terminal untuk mendapatkan daftar berkas, unduh berkasnya di perangkat lain, letakkan di /var/minis/shared/offline/, lalu rakit kembali — berkas lokal dipakai lebih dulu, tanpa jaringan.</string>
     <string name="dev_suite_online_header">Alat daring</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan sekali ketuk.</string>
     <string name="dev_suite_progress">%1$d/%2$d siap</string>

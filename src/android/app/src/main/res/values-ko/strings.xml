@@ -1777,6 +1777,8 @@
     <string name="mcp_delete_server">서버 삭제</string>
     <string name="dev_suite_section_header">개발 환경 스위트</string>
     <string name="dev_suite_section_footer">레시피는 필요할 때 샌드박스 안에 툴체인을 설치합니다——페이로드는 더 이상 앱에 포함되지 않으며, 첫 설치에는 네트워크가 필요합니다. 네트워크가 제한된 환경이라면 minis-devsuite-offline-list를 실행해 오프라인 가져오기 목록을 생성하세요.</string>
+    <string name="dev_suite_offline_hint_title">오프라인 가져오기 사용 가능</string>
+    <string name="dev_suite_offline_hint_body">다운로드에 실패했나요? 터미널에서 minis-devsuite-offline-list 를 실행해 파일 목록을 확인하고, 다른 기기에서 내려받은 파일을 /var/minis/shared/offline/ 에 넣은 뒤 다시 조립하세요. 로컬 파일이 우선 사용되며 네트워크가 필요 없습니다.</string>
     <string name="dev_suite_online_header">온라인 도구</string>
     <string name="dev_suite_online_footer">탭하여 설치하는 독립 도구.</string>
     <string name="dev_suite_progress">%1$d/%2$d 준비됨</string>

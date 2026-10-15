@@ -257,6 +257,12 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // [T-restore-txn-integration] Robolectric needs the app resource table
+        // merged into the unit-test classpath to build its framework shadow
+        // (the archive/restore transaction tests run a real in-memory Room
+        // database). Pure-JVM tests are unaffected — they never touch
+        // resources.
+        unitTests.isIncludeAndroidResources = true
     }
 
     // [T-androidtest-release] This project has no debug buildType, and AGP
@@ -534,6 +540,15 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20231013")
+    // [T-restore-txn-integration] Robolectric runs the archive/restore Room
+    // transactions against a real in-memory SQLite. RestoreOrderTest proves
+    // the pure ordering function, but the two-pass scratch renumbering, the
+    // unique (session_id, sort_order) index and the chunked archive
+    // retirement only exist against a real database. 4.14.1 covers SDK 35
+    // (= targetSdk); pinned via @Config so a compileSdk bump never silently
+    // changes which framework the tests run on.
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.test:core:1.6.1")
 
     // Testing — Instrumented (on-device) tests
     // [T-android-downgrade-compat] MigrationTestHelper replays the committed
