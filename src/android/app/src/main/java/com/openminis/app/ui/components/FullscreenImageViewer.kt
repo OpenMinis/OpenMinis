@@ -531,7 +531,10 @@ internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
                 val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
                 val minisDir = File(dir, "Minis Ultra").also { it.mkdirs() }
                 val file = File(minisDir, filename)
-                val stream: OutputStream? = file.outputStream()
+                // file.outputStream() is platform-type non-null (it throws
+                // FileNotFoundException instead of returning null); keep the
+                // non-null type so `use`'s block receives OutputStream.
+                val stream: OutputStream = file.outputStream()
                 stream.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
             true
