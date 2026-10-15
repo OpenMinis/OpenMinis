@@ -122,8 +122,7 @@ class RestoreArchivedVersionsIntegrationTest {
         assertEquals(
             3,
             repo.restorableArchivedMessageCount(sessionId),
-            "m3/m4/m5 have archived versions and no live row",
-        )
+        ) // m3/m4/m5 have archived versions and no live row
 
         // ── Restore ──
         val result = repo.restoreArchivedVersions(sessionId)
