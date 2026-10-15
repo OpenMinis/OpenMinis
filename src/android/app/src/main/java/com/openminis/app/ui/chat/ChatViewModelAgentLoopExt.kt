@@ -61,6 +61,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // epoch, so a tail that outlives its replacement drops the raise instead
     // of re-showing the resume banner over the fresh turn.
     val loopResumeEpoch = snapshotResumeEpoch()
+    // [T-android-model-switch-next-request] Snapshot the model-selection
+    // epoch too: this run's fallback writeback (persisting the fallback
+    // model onto the VM) may only land while this snapshot is still
+    // current. A user switching models mid-run bumps the epoch, so the
+    // writeback drops and the user's choice takes effect on the NEXT
+    // request instead of being clobbered by the loop's tail.
+    val loopModelEpoch = snapshotModelSelectionEpoch()
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
     // 成功时 finish(DONE)；失败路径不落 FINISH，留 RUNNING 由
@@ -1308,50 +1315,21 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     Log.i(ChatViewModel.TAG, "🔀 $reason on ${currentProvider.model.displayName}, switching to ${next.model.displayName} (realModelChange=$isRealModelChange)")
                     currentProvider = next
                     retryAttempt = 0
-                    // Also update class-level provider so the next sendMessage() starts from here
-                    this.currentProvider = next
-                    // Update top bar model info + active entry. (For a same-
-                    // model endpoint recovery these are no-ops on the visible
-                    // model name, but still keep activeEntryId / provider name
-                    // in sync with the instance we actually used.)
-                    _modelName.value = currentProvider.model.displayName
-                    // Update activeEntryId so model picker reflects the switch.
-                    // [T-android-fallback-entry-identity] Look the entry up by
-                    // its OWN id, carried on the candidate. The previous
-                    // `find { it.model.id == currentProvider.model.id }` was
-                    // ambiguous: two instances can expose the same model id, so
-                    // it returned whichever entry sits earlier in modelEntries.
-                    // Observed in the field — falling back onto
-                    // `deepseek-v4-flash` served by "DeekSeak" showed the
-                    // provider as "Bailian OpenAI", because Bailian also has a
-                    // `deepseek-v4-flash` entry and happened to be found first.
-                    // That also poisoned activeEntryId and the persisted
-                    // binding, so re-entering the session resumed on the WRONG
-                    // instance.
-                    val newEntry = providerRepository.config.value.modelEntries.find {
-                        it.id == nextCandidate.entryId
-                    }
-                    if (newEntry != null) {
-                        _activeEntryId.value = newEntry.id
-                        currentModel = newEntry.model
-                        val newInstance = providerRepository.instance(newEntry.providerInstanceId)
-                        if (newInstance != null) {
-                            _providerName.value = newInstance.label.ifEmpty { newEntry.model.provider }
-                        }
-                    }
-                    // Flash ONLY on a genuine model switch — never on a
-                    // transparent same-model endpoint retry.
-                    if (isRealModelChange) _fallbackTrigger.value++
-                    // [T-android-cross-window-compact] REVERTED by design:
-                    // auto-compacting on a model switch silently dropped
-                    // context the user could still see (reads as data loss).
-                    // The new model's own provider error, the in-loop
-                    // threshold guard, and dynamicMaxTokens() handle the
-                    // smaller window without surprise truncation.
-                    // Persist the fallback model so re-entering the session starts from here
-                    val groupId = _selectedGroupId.value
-                    if (groupId != null && newEntry != null) {
-                        persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
+                    // [T-android-model-switch-next-request] Gate the VM
+                    // writeback on the model-selection epoch: the run itself
+                    // keeps executing on `next` (snapshot semantics — the
+                    // fallback was resolved inside THIS run), but if the user
+                    // picked a different model mid-run, their selection stays
+                    // on the VM and the next request uses it. The old code
+                    // wrote unconditionally, silently clobbering the picker.
+                    if (ModelSwitchGate.mayWriteBack(loopModelEpoch, snapshotModelSelectionEpoch())) {
+                        persistFallbackModelSelection(next, nextCandidate.entryId, isRealModelChange)
+                    } else {
+                        Log.i(
+                            ChatViewModel.TAG,
+                            "[ModelSwitch] user changed model mid-run (epoch $loopModelEpoch -> ${snapshotModelSelectionEpoch()}); " +
+                                "skipping fallback writeback, user's selection takes effect next request",
+                        )
                     }
                     val infoText = fallbackReasons.joinToString("\n") + "\n🔄 Switched to ${currentProvider.model.displayName}"
                     allToolBlocks.removeAll { it.kind == "info" }
@@ -2346,4 +2324,62 @@ internal fun settleThinkingDurationMs(block: AssistantBlock): Long {
     val start = block.startTimeMs
     if (start <= 0L) return block.durationMs
     return (System.currentTimeMillis() - start).coerceAtLeast(block.durationMs)
+}
+
+/**
+ * [T-android-model-switch-next-request] Persist a group-fallback model
+ * switch onto the VM so the next sendMessage() starts from it. Extracted
+ * from the fallback branch of runAgentLoop so the loop can gate the
+ * call on the model-selection epoch — when the user picks a model
+ * mid-run, this writeback is skipped and their selection wins (see
+ * [ModelSwitchGate]).
+ */
+internal fun ChatViewModel.persistFallbackModelSelection(
+    next: LLMProvider,
+    entryId: String?,
+    isRealModelChange: Boolean,
+) {
+    // Also update class-level provider so the next sendMessage() starts from here
+    this.currentProvider = next
+    // Update top bar model info + active entry. (For a same-model
+    // endpoint recovery these are no-ops on the visible model name, but
+    // still keep activeEntryId / provider name in sync with the instance
+    // we actually used.) [T-android-model-switch-next-request] Reads the
+    // non-null parameter, not the VM's nullable property — the original
+    // loop read its local `var currentProvider`, and the bare name inside
+    // this extension resolves to `this.currentProvider` (LLMProvider?).
+    _modelName.value = next.model.displayName
+    // Update activeEntryId so model picker reflects the switch.
+    // [T-android-fallback-entry-identity] Look the entry up by its OWN id,
+    // carried on the candidate. The previous
+    // `find { it.model.id == currentProvider.model.id }` was ambiguous:
+    // two instances can expose the same model id, so it returned whichever
+    // entry sits earlier in modelEntries. Observed in the field — falling
+    // back onto `deepseek-v4-flash` served by "DeekSeak" showed the
+    // provider as "Bailian OpenAI", because Bailian also has a
+    // `deepseek-v4-flash` entry and happened to be found first. That also
+    // poisoned activeEntryId and the persisted binding, so re-entering the
+    // session resumed on the WRONG instance.
+    val newEntry = providerRepository.config.value.modelEntries.find { it.id == entryId }
+    if (newEntry != null) {
+        _activeEntryId.value = newEntry.id
+        currentModel = newEntry.model
+        val newInstance = providerRepository.instance(newEntry.providerInstanceId)
+        if (newInstance != null) {
+            _providerName.value = newInstance.label.ifEmpty { newEntry.model.provider }
+        }
+    }
+    // Flash ONLY on a genuine model switch — never on a transparent
+    // same-model endpoint retry.
+    if (isRealModelChange) _fallbackTrigger.value++
+    // [T-android-cross-window-compact] REVERTED by design: auto-compacting
+    // on a model switch silently dropped context the user could still see
+    // (reads as data loss). The new model's own provider error, the
+    // in-loop threshold guard, and dynamicMaxTokens() handle the smaller
+    // window without surprise truncation.
+    // Persist the fallback model so re-entering the session starts from here
+    val groupId = _selectedGroupId.value
+    if (groupId != null && newEntry != null) {
+        persistBinding("""{"type":"group","groupId":"$groupId","lastEntryId":"${newEntry.id}"}""")
+    }
 }

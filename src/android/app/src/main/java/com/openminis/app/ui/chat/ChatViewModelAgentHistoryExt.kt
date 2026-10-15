@@ -10,7 +10,7 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
     val summary = _compactSummary.value
     val marker = _cachedLatestMarker
     // No compact in play → return full history untouched.
-    if (summary.isNullOrBlank() || marker == null) return agentHistory.toList()
+    if (summary.isNullOrBlank() || marker == null) return progressivelyTrimmed(agentHistory.toList())
 
     val summaryWrappedText = "<context-summary>\n" +
         "The following is a summary of the earlier conversation that was compacted to save context space.\n" +
@@ -83,7 +83,7 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
                         "summary+tail injection (tail=${DETACHED_TAIL_MESSAGES})",
                 )
             }
-            return detachedCompactHistory(effectiveSummaryWrappedText)
+            return progressivelyTrimmed(detachedCompactHistory(effectiveSummaryWrappedText))
         }
 
         // Step 1: walk back from anchor collecting user-text turns. Stop
@@ -205,7 +205,7 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
             result.addAll(postAnchor)
             result.add(LLMMessage(role = LLMMessage.Role.USER, content = effectiveSummaryWrappedText))
         }
-        return result
+        return progressivelyTrimmed(result)
     }
 
     // ─── v1 (legacy) markers ──────────────────────────────────────
@@ -241,4 +241,32 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
 
     Log.w(ChatViewModel.TAG, "[Compact] effectiveAgentHistory: marker ${marker.id.take(8)} unresolvable in agentHistory (size=${agentHistory.size}); returning full history")
     return agentHistory.toList()
+}
+
+/**
+ * [T-android-progressive-trim] Apply progressive context trimming to an
+ * outgoing history projection. No-op (same list instance) unless the
+ * untrimmed estimate crosses a trim tier against the model's context
+ * window. See [ProgressiveTrim] for the tier ladder and safety
+ * invariants; the level is deliberately computed from the UNTRIMMED
+ * estimate so it cannot oscillate between turns.
+ *
+ * v1 (legacy) compact paths intentionally bypass this — their behavior is
+ * frozen by contract ("original behavior preserved unchanged").
+ */
+internal fun ChatViewModel.progressivelyTrimmed(list: List<LLMMessage>): List<LLMMessage> {
+    if (list.size <= ProgressiveTrim.PROTECTED_RECENT_MESSAGES) return list
+    val window = effectiveContextWindowTokens() ?: return list
+    val untrimmed = estimateMessagesTokens(list)
+    val level = ProgressiveTrim.levelFor(untrimmed, window)
+    if (level == ProgressiveTrim.Level.NONE) return list
+    val trimmed = ProgressiveTrim.trim(list, level)
+    if (trimmed !== list) {
+        AppLogger.info(
+            ChatViewModel.TAG,
+            "[ProgressiveTrim] level=$level window=$window untrimmedEst=$untrimmed " +
+                "messages=${list.size} — stripped old reasoning / stubbed large tool outputs",
+        )
+    }
+    return trimmed
 }

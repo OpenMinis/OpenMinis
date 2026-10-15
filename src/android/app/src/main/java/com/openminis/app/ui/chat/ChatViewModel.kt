@@ -1444,6 +1444,37 @@ class ChatViewModel(
         resumeEpoch += 1L
     }
 
+    /**
+     * [T-android-model-switch-next-request] Monotonic counter bumped by every
+     * USER-driven model selection (selectEntry / selectGroup /
+     * selectGroupEntry). runAgentLoop snapshots it at entry
+     * (loopModelEpoch); the loop's own fallback writeback —
+     * this.currentProvider / _activeEntryId / currentModel / _modelName /
+     * _providerName / persistBinding — may only land while the snapshot is
+     * still current.
+     *
+     * Why: a user switching models mid-run used to have their choice
+     * silently clobbered by the loop's group-fallback writeback (the run
+     * kept executing on the launch-time model — correct snapshot
+     * semantics — but its "persist the fallback model" tail overwrote
+     * the picker state the user had just touched). With the epoch, a
+     * mid-run switch wins: the loop finishes on its own model, the
+     * user's selection stays on the VM, and the NEXT request runs on it
+     * — nextRequest semantics, mirroring iOS model switching.
+     *
+     * Same pattern as [resumeEpoch] (PR18): bump on user action, snapshot
+     * at run start, gate the deferred writeback on snapshot == current.
+     */
+    @Volatile private var modelSelectionEpoch: Long = 0L
+
+    /** Bump — called by every user-driven model selection. */
+    internal fun claimModelSelectionEpoch() {
+        modelSelectionEpoch += 1L
+    }
+
+    /** Read — called when a run starts, to snapshot its model identity. */
+    internal fun snapshotModelSelectionEpoch(): Long = modelSelectionEpoch
+
     /** Read the current epoch — called when a run starts, to snapshot its claim. */
     internal fun snapshotResumeEpoch(): Long = resumeEpoch
 
@@ -1763,12 +1794,22 @@ class ChatViewModel(
      * Chinese sessions sail past the threshold.
      */
     internal fun estimateAgentHistoryTokens(): Int {
-        var total = 0L
         // Effective, not raw: with a compact marker in play the next request
         // carries the summary + kept tail, not the full history. Feeding the
         // raw size into the send-time / in-loop gates made every post-compact
         // check look over-threshold.
-        for (msg in effectiveAgentHistoryUncounted()) {
+        return estimateMessagesTokens(effectiveAgentHistoryUncounted())
+    }
+
+    /**
+     * [T-android-progressive-trim] Token estimate over an arbitrary message
+     * list (extracted from estimateAgentHistoryTokens so the progressive-trim
+     * level decision can estimate the UNTRIMMED payload with the exact same
+     * arithmetic, calibration included).
+     */
+    internal fun estimateMessagesTokens(messages: List<LLMMessage>): Int {
+        var total = 0L
+        for (msg in messages) {
             total += estimateMixedTokens(msg.content)
             for (part in msg.contentParts) {
                 when (part) {
@@ -3981,6 +4022,10 @@ class ChatViewModel(
 
 
     fun selectGroup(groupId: String) {
+        // [T-android-model-switch-next-request] User expressed a model
+        // choice — invalidate any in-flight loop's fallback writeback so
+        // this selection survives until the next request.
+        claimModelSelectionEpoch()
         _selectedGroupId.value = groupId
         _selectedGroupName.value = providerRepository.group(groupId)?.name ?: ""
         val resolved = resolveProviderFromGroup(groupId)
@@ -3992,6 +4037,8 @@ class ChatViewModel(
 
     /** Select a specific entry within a group (keeps group selected). */
     fun selectGroupEntry(groupId: String, entryId: String) {
+        // [T-android-model-switch-next-request] See selectGroup.
+        claimModelSelectionEpoch()
         _selectedGroupId.value = groupId
         _selectedGroupName.value = providerRepository.group(groupId)?.name ?: ""
         val resolved = resolveProviderFromGroup(groupId, entryId)
@@ -4067,6 +4114,11 @@ class ChatViewModel(
 
     /** Select a specific model entry (bypasses group selection). */
     override fun selectEntry(entryId: String) {
+        // [T-android-model-switch-next-request] See selectGroup. Bumped at
+        // entry (before any early-return): the user tapped a model, and a
+        // failed resolve leaves the VM state untouched anyway, so the
+        // loop's writeback being dropped once is harmless.
+        claimModelSelectionEpoch()
         val config = providerRepository.config.value
         val entry = config.modelEntries.find { it.id == entryId } ?: return
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return

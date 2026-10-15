@@ -290,6 +290,30 @@ private inline fun ChatViewModel.compactAllImpl(
             // resolve the boundary on the very next outgoing turn.
             // Mirrors iOS `cachedLatestMarker = marker`.
             _cachedLatestMarker = marker
+            // [T-android-compact-delivery] Verify the marker actually
+            // delivers: the next outgoing projection must resolve the
+            // boundary (anchor found in agentHistory). A marker that
+            // cannot be resolved makes effectiveAgentHistory() degrade
+            // to the FULL history — the compaction silently does nothing
+            // and the next request re-sends everything (the exact
+            // "compact didn't help" symptom). Fail loudly here instead.
+            val anchorId = marker.lastCompactedMessageId
+            val anchorResolved = marker.version < 2 || anchorId.isNullOrEmpty() ||
+                agentHistory.any { it.dbMessageId == anchorId }
+            if (!anchorResolved) {
+                Log.w(
+                    ChatViewModel.TAG,
+                    "[Compact] marker ${marker.id.take(8)} persisted but anchor " +
+                        "${anchorId?.take(8)} does not resolve (agentHistory=${agentHistory.size}); " +
+                        "next request would carry the full history",
+                )
+                withContext(Dispatchers.Main) {
+                    appendSystemInfo(
+                        "Compaction saved, but the boundary could not be resolved; the next request still carries the full history.",
+                        "compact",
+                    )
+                }
+            }
             // Fresh anchor sits inside the window by construction.
             _compactMarkerDetached = false
             // [T-android-compact-stale-usage] Same stale-reading hazard the
