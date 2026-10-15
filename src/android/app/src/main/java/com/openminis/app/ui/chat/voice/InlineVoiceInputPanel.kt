@@ -58,8 +58,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -847,11 +850,42 @@ private fun TranscriptArea(
 ) {
     val screenH = LocalConfiguration.current.screenHeightDp.dp
     val bandMax = screenH * 0.6f - ExpandedBase
+    // [T-android-voice-dbltap-select] Word range computed by the double-tap
+    // below, consumed once when the editor composes. Declared outside the
+    // branch split so the display state can write it and the editor state
+    // can read it across the same recomposition.
+    var pendingSelection by remember { mutableStateOf<TextRange?>(null) }
     if (isEditing) {
         val focus = remember { FocusRequester() }
+        // TextFieldValue overload (not the String one) so entering edit mode
+        // can arrive with the double-tapped word already selected. Keyed on
+        // isEditing: re-seeded on every entry, preserved across keystrokes.
+        var editValue by remember(isEditing) {
+            mutableStateOf(
+                TextFieldValue(transcript, pendingSelection ?: TextRange(transcript.length))
+            )
+        }
+        // Mirror external transcript changes (input-text carry) into the
+        // field — the String overload did this implicitly. Keystrokes round
+        // trip as no-ops because editValue.text already equals transcript.
+        LaunchedEffect(transcript) {
+            if (editValue.text != transcript) {
+                val sel = editValue.selection
+                editValue = TextFieldValue(
+                    transcript,
+                    TextRange(
+                        sel.start.coerceIn(0, transcript.length),
+                        sel.end.coerceIn(0, transcript.length),
+                    ),
+                )
+            }
+        }
         BasicTextField(
-            value = transcript,
-            onValueChange = onTranscriptChange,
+            value = editValue,
+            onValueChange = { new ->
+                editValue = new
+                onTranscriptChange(new.text)
+            },
             textStyle = TextStyle(
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 16.sp,
@@ -867,26 +901,43 @@ private fun TranscriptArea(
         )
         LaunchedEffect(Unit) { focus.requestFocus() }
     } else {
+        var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = bandMax)
                 .padding(horizontal = 32.dp)
-                .verticalScroll(rememberScrollState())
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onDoubleTap = { onBeginEdit() },
-                        onLongPress = { onClearAll() },
-                    )
-                },
+                .verticalScroll(rememberScrollState()),
             contentAlignment = Alignment.Center,
         ) {
+            // Tap detection lives on the Text itself (not the band) so the
+            // reported position is already in text-layout space and maps
+            // straight onto getOffsetForPosition — no coordinate algebra
+            // across the band's padding/scroll.
             Text(
                 transcript,
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
+                onTextLayout = { textLayout = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(transcript) {
+                        detectTapGestures(
+                            onDoubleTap = { pos ->
+                                val layout = textLayout
+                                val charOffset = if (layout != null) {
+                                    runCatching { layout.getOffsetForPosition(pos) }
+                                        .getOrDefault(transcript.length)
+                                } else {
+                                    transcript.length
+                                }
+                                pendingSelection = voiceWordRangeAt(transcript, charOffset)
+                                onBeginEdit()
+                            },
+                            onLongPress = { onClearAll() },
+                        )
+                    },
             )
         }
     }
