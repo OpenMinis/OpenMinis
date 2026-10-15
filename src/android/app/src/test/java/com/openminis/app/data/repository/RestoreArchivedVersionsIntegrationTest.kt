@@ -36,7 +36,11 @@ import org.robolectric.annotation.Config
  * on every PR, same as the rest of the suite.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+// Plain android.app.Application, NOT MinisApp: the real app's onCreate wires
+// RootfsManager against sandbox paths that don't exist under Robolectric
+// (File(<null>) NPE at RootfsManager.kt:202). This test only needs a Context
+// to hand Room an in-memory database — nothing from the app class.
+@Config(sdk = [35], application = android.app.Application::class)
 class RestoreArchivedVersionsIntegrationTest {
 
     private lateinit var db: AppDatabase
