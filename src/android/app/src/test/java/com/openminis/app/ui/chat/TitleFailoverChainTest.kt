@@ -18,7 +18,7 @@ class TitleFailoverChainTest {
 
     @Test
     fun `empty subs and no primary yields empty chain`() {
-        assertEquals(emptyList<String>(), TitleFailoverChain.plan(emptyList(), null))
+        assertEquals(emptyList<String>(), TitleFailoverChain.plan<String>(emptyList(), null))
     }
 
     @Test
