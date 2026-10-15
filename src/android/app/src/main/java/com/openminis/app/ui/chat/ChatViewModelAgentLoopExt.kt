@@ -256,6 +256,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // cap is hit, a still-over-threshold history stops the turn rather than
     // compacting forever. Mirrors iOS maxInLoopCompactions.
     var inLoopCompactions = 0
+    // [T-compact-on-context-overflow] How many times THIS runAgentLoop has
+    // compacted in response to the provider's own context verdict
+    // (LLMError.ContextLengthExceeded) rather than the token estimate.
+    // Capped at 1: if the provider still refuses after a compaction, the
+    // history isn't the problem (or the model's real window is smaller
+    // than configured) and fallback/terminal-error handling takes over.
+    var contextOverflowCompactions = 0
     // [T-android-empty-after-toolresult-reminder] One-shot guard for the
     // "<system-reminder> + retry one round" recovery when the server returns
     // an empty response right after a tool result. Fires at most once per
@@ -1169,6 +1176,102 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     actual is com.openminis.app.data.model.LLMError.TransientError ||
                     actual is com.openminis.app.data.model.LLMError.RateLimited ||
                     is5xx || isTimeoutConnect) && !isPermanentCapacity
+                // [T-compact-on-context-overflow] Upstream 1.14 compaction
+                // robustness: compaction is triggered by the provider's
+                // context verdict — never by network errors. The taxonomy
+                // already separates them (ContextLengthExceeded is only
+                // classified from real 400/413 context signals, NetworkError
+                // / Timeout / TransientError never reach this branch), so
+                // wire the actionable remedy: compact once, then retry the
+                // SAME provider with the smaller history. Only when that
+                // fails do we fall through to group fallback (a bigger-
+                // window member may still rescue) and the terminal error.
+                if (actual is com.openminis.app.data.model.LLMError.ContextLengthExceeded &&
+                    contextOverflowCompactions < 1
+                ) {
+                    contextOverflowCompactions += 1
+                    Log.w(
+                        ChatViewModel.TAG,
+                        "📦 Context overflow on ${currentProvider.model.displayName} — " +
+                            "compacting once and retrying (attempt $contextOverflowCompactions)",
+                    )
+                    withContext(Dispatchers.Main) {
+                        setTransientInlineError(
+                            context.getString(
+                                com.openminis.app.R.string.vm_context_filling_compacting,
+                                contextTokensForPolicy(),
+                                effectiveContextWindowTokens() ?: 0,
+                            ),
+                        )
+                    }
+                    val compacted = awaitCompaction()
+                    withContext(Dispatchers.Main) { clearInlineError() }
+                    if (compacted) {
+                        // [T-android-inloop-compact-divider-order / GH#235]
+                        // Same seal+swap contract as the in-loop COMPACTED
+                        // branch: compactAll() tail-appends the "N messages
+                        // compacted" divider AFTER the still-streaming
+                        // bubble, so continuing to write into that bubble
+                        // renders fresh output ABOVE the divider. Seal it,
+                        // drop it when empty, and continue in a FRESH
+                        // placeholder below the divider.
+                        val sealedId = assistantId
+                        val freshAssistantId = "assistant_${System.currentTimeMillis()}_${turn}"
+                        withContext(Dispatchers.Main) {
+                            updateAssistantMessage(
+                                sealedId,
+                                messageTextSnapshot(),
+                                false,
+                                allToolBlocks,
+                                isAwaitingModelResponse = false,
+                            )
+                            val sealed = _messages.value.firstOrNull { it.id == sealedId }
+                            if (sealed != null &&
+                                sealed.content.isEmpty() &&
+                                sealed.toolBlocks.isEmpty()
+                            ) {
+                                _messages.value = _messages.value.filterNot { it.id == sealedId }
+                                AppLogger.info(
+                                    ChatViewModel.TAG,
+                                    "[Compact] overflow: dropped empty sealed bubble $sealedId",
+                                )
+                            }
+                            _messages.value = trimLoadedWindow(_messages.value + ChatMessage(
+                                id = freshAssistantId,
+                                role = "assistant",
+                                content = "",
+                                isStreaming = true,
+                                isAwaitingModelResponse = true,
+                                thinkingLevel = turnThinkingLevel,
+                            ))
+                        }
+                        clearStreamFlushState(sealedId)
+                        if (_streamingById.value.containsKey(sealedId)) {
+                            _streamingById.value = _streamingById.value - sealedId
+                        }
+                        assistantId = freshAssistantId
+                        accumulatedText = ""
+                        allToolBlocks.clear()
+                        allToolInputs.clear()
+                        toolInputChunkRings.clear()
+                        // Per-attempt state reset — same list as the
+                        // transient-retry path above.
+                        turnTextSb.setLength(0)
+                        currentTextBlockSb = null
+                        turnTextBlockIdx = -1
+                        turnThinking.clear()
+                        toolCalls.clear()
+                        toolCallSignatures.clear()
+                        toolReplayGuard.reset()
+                        replayRenamedIds.clear()
+                        pendingChunkSb.setLength(0)
+                        lastUiUpdateMs = 0L
+                        lastFlushedLen = 0
+                        stallResumeContext = null
+                        continue  // retry on same provider with compacted history
+                    }
+                    // Compaction failed — fall through to fallback / throw.
+                }
                 val maxRetries = effectiveMaxRetries()
                 // 429 with another group member: switch endpoints instead of
                 // hammering the same key through 1/2/4/8/16s (inside a typical

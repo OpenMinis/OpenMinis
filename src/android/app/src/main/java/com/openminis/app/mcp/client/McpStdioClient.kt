@@ -26,7 +26,32 @@ class McpStdioClient(
     private val spawn: SpawnSpec,
     private val startupTimeoutMs: Long = 60_000L,
     private val callTimeoutMs: Long = 300_000L,
+    private val hooks: ProcessHooks? = null,
 ) : McpClient {
+
+    /**
+     * [T-mcp-stdio-cap] Host-side lifecycle hooks for the spawned proot
+     * process. Kept optional and Process-typed so the class stays
+     * JVM-testable; the Android wiring ([McpNativeBridge]) registers the
+     * process with [com.openminis.app.sandbox.SandboxWorkload] so the whole
+     * guest tree is owned: background cgroup confinement, the global
+     * process cap, and a tree-wide kill when this server stops — upstream
+     * beta.2 "stopping one ends its whole process tree". Without the hook,
+     * destroyForcibly() SIGKILLs only proot and the traced node/python
+     * server survives as an orphan.
+     */
+    interface ProcessHooks {
+        /** Called right after a successful spawn, before initialize. */
+        fun onSpawned(process: Process)
+
+        /**
+         * Called exactly once per spawned process when it stops.
+         * [graceful] = it exited after SIGTERM (proot --kill-on-exit already
+         * tore the tracees down); false = it had to be SIGKILLed, the host
+         * side must kill the surviving tree itself.
+         */
+        fun onTerminated(process: Process, graceful: Boolean)
+    }
 
     /**
      * Everything Android-specific needed to launch the guest process:
@@ -62,6 +87,12 @@ class McpStdioClient(
 
     private fun alive(): Boolean = process?.isAlive == true
 
+    /** [T-mcp-stdio-cap] Occupies a live-server slot (process alive). */
+    val isLive: Boolean get() = alive()
+
+    /** [T-mcp-stdio-cap] A JSON-RPC request is in flight — not evictable. */
+    val isBusy: Boolean get() = pending.isNotEmpty()
+
     private fun stderrSnapshot(): String = synchronized(stderrTail) { stderrTail.toString() }
 
     private fun appendStderr(chunk: String) {
@@ -86,6 +117,7 @@ class McpStdioClient(
             throw McpError(McpError.CONNECTION_ERROR, "failed to spawn '${spawn.argv.lastOrNull()}': ${e.message}")
         }
         process = proc
+        hooks?.onSpawned(proc)
         writer = proc.outputStream.bufferedWriter(StandardCharsets.UTF_8)
         stdout = BufferedReader(InputStreamReader(proc.inputStream, StandardCharsets.UTF_8))
 
@@ -209,9 +241,18 @@ class McpStdioClient(
         process = null
         if (p != null && p.isAlive) {
             runCatching { p.destroy() }
-            if (!runCatching { p.waitFor(2, TimeUnit.SECONDS) }.getOrDefault(false)) {
+            val exited = runCatching { p.waitFor(2, TimeUnit.SECONDS) }.getOrDefault(false)
+            if (!exited) {
                 runCatching { p.destroyForcibly() }
+                // [T-mcp-stdio-cap] SIGKILLed proot cannot run its
+                // --kill-on-exit teardown — the host hook must kill the
+                // surviving tracee tree (SandboxWorkload.release kill=true).
+                hooks?.onTerminated(p, graceful = false)
+            } else {
+                hooks?.onTerminated(p, graceful = true)
             }
+        } else if (p != null) {
+            hooks?.onTerminated(p, graceful = true)
         }
     }
 

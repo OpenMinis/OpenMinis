@@ -1056,6 +1056,21 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
+     * [T-android-title-failover] EVERY usable member of the configured title
+     * sub-group, in group order — the failover chain for title generation.
+     * Upstream 1.14: "A failed title model hands over to the next one."
+     * resolveTitleSubEntry only exposes the first member, so a failing
+     * sub-model was retried until the attempt budget burned out instead of
+     * handing over to the next usable member. Same credential-aware filter
+     * as availableMemberEntries.
+     */
+    fun resolveTitleSubGroupEntries(): List<ModelEntry> {
+        val subGroupId = defaultSubGroupId ?: return emptyList()
+        val group = group(subGroupId) ?: return emptyList()
+        return availableMemberEntries(group)
+    }
+
+    /**
      * [T-disabled-provider-via-group-android] True when [entryId] resolves
      * to an entry whose provider instance is currently enabled. Used by the
      * settings UI to dim members that won't be reachable at runtime.

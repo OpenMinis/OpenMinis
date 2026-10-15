@@ -60,7 +60,12 @@ object McpNativeBridge {
             .build()
     }
 
-    private data class Cached(val fingerprint: String, val client: McpClient)
+    private data class Cached(
+        val fingerprint: String,
+        val client: McpClient,
+        /** [T-mcp-stdio-cap] Last cache hit — LRU input for the live-STDIO cap. */
+        @Volatile var lastUsedMs: Long = System.currentTimeMillis(),
+    )
 
     private val clients = ConcurrentHashMap<String, Cached>()
 
@@ -239,7 +244,10 @@ object McpNativeBridge {
         // a stale URL or a client without the built-in token.
         val fp = fingerprint(cfg) + "|" + loopbackFingerprint(context, cfg)
         val cachedNow = clients[cfg.id]
-        if (cachedNow != null && cachedNow.fingerprint == fp) return cachedNow.client to cfg
+        if (cachedNow != null && cachedNow.fingerprint == fp) {
+            cachedNow.lastUsedMs = System.currentTimeMillis()
+            return cachedNow.client to cfg
+        }
         // [T-mcp-client-rebuild-leak] Re-check under the per-id monitor: the
         // winner of the race publishes, everyone else adopts its client instead of
         // building a second one. The stale/changed previous instance is closed
@@ -248,13 +256,51 @@ object McpNativeBridge {
         val monitor = clientBuildLocks.getOrPut(cfg.id) { Any() }
         synchronized(monitor) {
             val cached = clients[cfg.id]
-            if (cached != null && cached.fingerprint == fp) return cached.client to cfg
+            if (cached != null && cached.fingerprint == fp) {
+                cached.lastUsedMs = System.currentTimeMillis()
+                return cached.client to cfg
+            }
+            // [T-mcp-stdio-cap] Enforce the live-STDIO-server cap BEFORE
+            // spawning a new guest process — upstream beta.2 parity. A
+            // rebuild of the same server id replaces its own slot, so it is
+            // excluded from the live set.
+            if (cfg.isStdio) enforceStdioCap(cfg.id)
             // Config changed (or first use): rebuild. A dead stdio process also
             // lands here via invalidate() from the caller's error path.
             if (cached != null) runCatching { cached.client.close() }
             val client = buildClient(context, cfg)
             clients[cfg.id] = Cached(fp, client)
             return client to cfg
+        }
+    }
+
+    /**
+     * [T-mcp-stdio-cap] Evict LRU idle live STDIO servers (or refuse) so the
+     * new spawn stays under [McpStdioCap.DEFAULT_MAX_LIVE]. Runs under the
+     * NEW server's per-id monitor; evicting takes the victims' internal
+     * close() locks only, never their build monitors, so no lock cycle.
+     */
+    private fun enforceStdioCap(excludeId: String) {
+        val live = clients.entries
+            .filter { (id, c) -> id != excludeId && c.client is McpStdioClient && c.client.isLive }
+            .map { (id, c) ->
+                McpStdioCap.Entry(
+                    serverId = id,
+                    lastUsedMs = c.lastUsedMs,
+                    busy = (c.client as McpStdioClient).isBusy,
+                )
+            }
+        when (val decision = McpStdioCap.decide(live)) {
+            is McpStdioCap.Decision.Evict -> for (id in decision.serverIds) {
+                clients.remove(id)?.let { runCatching { it.client.close() } }
+                AppLogger.info(TAG, "stdio cap: evicted idle server '$id' (LRU)")
+            }
+            is McpStdioCap.Decision.Refused -> throw McpError(
+                "TOO_MANY_STDIO_SERVERS",
+                "Too many live STDIO MCP servers (${live.size}, cap " +
+                    "${McpStdioCap.DEFAULT_MAX_LIVE}) and all are busy — disable unused " +
+                    "servers in Settings → MCP or retry when a call finishes.",
+            )
         }
     }
 
@@ -298,6 +344,28 @@ object McpNativeBridge {
                 cfg.id,
                 buildSpawnSpec(context, cfg, command, resolve),
                 startupTimeoutMs = (cfg.startupTimeoutSeconds ?: DEFAULT_STARTUP_TIMEOUT_SECONDS) * 1000L,
+                hooks = object : McpStdioClient.ProcessHooks {
+                    override fun onSpawned(process: java.lang.Process) {
+                        // [T-mcp-stdio-cap] Register the proot root with the
+                        // host-side workload owner: background cgroup +
+                        // process-group adoption + the global process cap and
+                        // memory-pressure sweeps now cover this server too.
+                        com.openminis.app.sandbox.SandboxWorkload.track(
+                            process, "mcp-stdio:${cfg.id}",
+                        )
+                    }
+
+                    override fun onTerminated(process: java.lang.Process, graceful: Boolean) {
+                        // graceful: proot's --kill-on-exit already reaped the
+                        // tracees — just unregister the root. Forcible: the
+                        // SIGKILLed proot could not clean up, so release()
+                        // kills the whole sticky tree (upstream beta.2:
+                        // "stopping one ends its whole process tree").
+                        com.openminis.app.sandbox.SandboxWorkload.release(
+                            process, kill = !graceful, reason = "mcp-stdio:${cfg.id}",
+                        )
+                    }
+                },
             )
         }
     }

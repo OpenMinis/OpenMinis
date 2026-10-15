@@ -3,6 +3,7 @@ package com.openminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.LLMProvider
@@ -46,18 +47,16 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
         AppLogger.info("TitleGen", "skip guard=title-already-set title='${_sessionTitle.value.take(200)}'")
         return
     }
-    // Prefer a dedicated sub-model (cheap, non-OAuth) — mirrors iOS resolveSubEntry.
-    // Falls back to the primary provider if no sub-group is configured.
-    // [T-title-gen-fallback-first-message-android] If no provider can be
-    // resolved at all, the session would silently stay "New Chat". Log the
-    // reason and fall back to the first user message as the title.
-    val subProvider = resolveTitleProvider()
-    if (subProvider == null) {
-        AppLogger.info("TitleGen", "resolveTitleProvider=null — falling back to currentProvider")
-    }
-    val provider = subProvider ?: currentProvider
-    if (provider == null) {
-        AppLogger.warning("TitleGen", "no provider available (sub + current both null) — fallback-to-first-message path")
+    // Prefer dedicated sub-models (cheap, non-OAuth) — mirrors iOS resolveSubEntry.
+    // [T-android-title-failover] Upstream 1.14: "A failed title model hands
+    // over to the next one." The chain is EVERY usable sub-group member in
+    // group order, then the primary provider — a failing candidate (request
+    // error / timeout / empty / unparseable response) advances to the next
+    // candidate instead of retrying the same one until the attempt budget
+    // burns out. First-message fallback stays the terminal state.
+    val candidates = titleCandidateChain()
+    if (candidates.isEmpty()) {
+        AppLogger.warning("TitleGen", "no title candidate available (sub-group + current both empty) — fallback-to-first-message path")
         viewModelScope.launch(Dispatchers.IO) {
             applyFallbackTitleFromFirstMessage("no provider available")
         }
@@ -184,113 +183,145 @@ internal fun ChatViewModel.generateSessionTitleIfNeeded() {
             // previous manual prefix branch here was redundant.
             val effectiveSystemPrompt = TITLE_GEN_SYSTEM_PROMPT
 
-            AppLogger.info(
-                "TitleGen",
-                "dispatch attempt=$titleGenerationAttempts provider=${provider.javaClass.simpleName} model=${provider.model.id}",
-            )
-            // [T-android-titlegen-reasoning] Match iOS callSubModelForTitle:
-            // explicitly disable thinking (thinkingLevel = OFF). The provider
-            // layer's injectThinkingParams honors OFF — e.g. DeepSeek V4 gets
-            // an explicit {"thinking":{"type":"disabled"}}, o-series/gpt-5
-            // omit reasoning_effort, Anthropic sends no thinking block — so a
-            // reasoning sub-model doesn't burn the whole budget on hidden
-            // thinking and return empty text. As a belt-and-suspenders for
-            // models where OFF is still a no-op (e.g. Qwen3, which thinks by
-            // default), keep the T334 budget bump so it can finish thinking
-            // and still emit the JSON. Unified with regenerateTitle's ladder.
-            val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
-            val response = provider.sendMessage(
-                messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
-                systemPrompt = effectiveSystemPrompt,
-                maxTokens = titleMaxTokens,
-                temperature = titleTemperature(),
-                thinkingLevel = ThinkingLevel.OFF,
-            )
+            // [T-android-title-failover] Walk the candidate chain: every
+            // usable sub-group member in group order, then the primary
+            // provider. A failing candidate (request error / timeout /
+            // empty / unparseable response) hands over to the next one —
+            // upstream 1.14 parity. The first-message fallback only fires
+            // after the WHOLE chain is exhausted.
+            var lastFailureReason = "unknown"
+            for ((candIdx, cand) in candidates.withIndex()) {
+                val provider = cand.provider
+                try {
+                    AppLogger.info(
+                        "TitleGen",
+                        "dispatch attempt=$titleGenerationAttempts candidate=${candIdx + 1}/${candidates.size} " +
+                            "provider=${provider.javaClass.simpleName} model=${provider.model.id} source=${cand.source}",
+                    )
+                    // [T-android-titlegen-reasoning] Match iOS callSubModelForTitle:
+                    // explicitly disable thinking (thinkingLevel = OFF). The provider
+                    // layer's injectThinkingParams honors OFF — e.g. DeepSeek V4 gets
+                    // an explicit {"thinking":{"type":"disabled"}}, o-series/gpt-5
+                    // omit reasoning_effort, Anthropic sends no thinking block — so a
+                    // reasoning sub-model doesn't burn the whole budget on hidden
+                    // thinking and return empty text. As a belt-and-suspenders for
+                    // models where OFF is still a no-op (e.g. Qwen3, which thinks by
+                    // default), keep the T334 budget bump so it can finish thinking
+                    // and still emit the JSON. Unified with regenerateTitle's ladder.
+                    val titleMaxTokens = if (provider.model.supportsReasoning == true) 2048 else 100
+                    val response = provider.sendMessage(
+                        messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
+                        systemPrompt = effectiveSystemPrompt,
+                        maxTokens = titleMaxTokens,
+                        temperature = cand.temperature,
+                        thinkingLevel = ThinkingLevel.OFF,
+                    )
 
-            AppLogger.info(
-                "TitleGen",
-                "response stopReason=${response.stopReason} textLen=${response.text.length} " +
-                    "raw='${response.text.take(200).replace("\n", "\\n")}'",
-            )
-            val (title, category, folderName) = parseTitleResponse(response.text)
-            if (title.isNotEmpty()) {
-                val sid = realSessionId.ifEmpty { sessionId }
-                chatRepository.updateSessionTitleAndCategory(sid, title, category)
-                withContext(Dispatchers.Main) {
-                    _sessionTitle.value = title
-                    _sessionCategory.value = category
-                }
-                AppLogger.info("TitleGen", "outcome=set title='$title' category='$category'")
-                // [T-android-auto-grouping] Group assignment is best-effort
-                // and strictly SUBORDINATE to the title: a name that
-                // resolves to nothing is silently dropped (never create a
-                // group from a model's answer), and setFolderIfUnfiled
-                // means a hand-filed session is never overridden by the
-                // model's guess. Mirrors iOS.
-                if (!folderName.isNullOrEmpty()) {
-                    // findFolderByName rather than a local equals: it trims
-                    // BOTH sides (models routinely echo "Work " with a
-                    // trailing space, which an exact equals silently
-                    // rejects — the feature then looks intermittently
-                    // broken), and because listFolders is ORDER BY
-                    // updated_at DESC its first hit is the most recently
-                    // updated duplicate. That matters when two devices
-                    // created a same-named group offline: an arbitrary pick
-                    // files the chat into the group the user isn't looking
-                    // at. Same resolver the AI-Suggest flow uses.
-                    val match = chatRepository.findFolderByName(folderName)
-                        // The prompt shows SANITIZED names, so a group whose
-                        // real name contains stripped characters comes back
-                        // in its sanitized form and won't match directly.
-                        // Fall back to comparing sanitized-to-sanitized —
-                        // but REFUSE an ambiguous hit rather than taking the
-                        // first. Two folders can render to the same string
-                        // (truncation at GROUP_NAME_MAX, or names differing
-                        // only in stripped characters); filing into an
-                        // arbitrary one is a silent wrong-group move the
-                        // user gets no signal about. Leaving it ungrouped is
-                        // the recoverable outcome.
-                        ?: chatRepository.listFolders().filter {
-                            ChatViewModel.promptSafe(it.name, GROUP_NAME_MAX)
-                                .equals(folderName.trim(), ignoreCase = true)
-                        }.singleOrNull()
-                    if (match != null) {
-                        val applied = chatRepository.setFolderIfUnfiled(match.id, sid)
-                        AppLogger.info(
-                            "TitleGen",
-                            "auto-group '$folderName' -> ${match.id.take(8)} applied=$applied",
-                        )
+                    AppLogger.info(
+                        "TitleGen",
+                        "response stopReason=${response.stopReason} textLen=${response.text.length} " +
+                            "raw='${response.text.take(200).replace("\n", "\\n")}'",
+                    )
+                    val (title, category, folderName) = parseTitleResponse(response.text)
+                    if (title.isNotEmpty()) {
+                        val sid = realSessionId.ifEmpty { sessionId }
+                        chatRepository.updateSessionTitleAndCategory(sid, title, category)
+                        withContext(Dispatchers.Main) {
+                            _sessionTitle.value = title
+                            _sessionCategory.value = category
+                        }
+                        AppLogger.info("TitleGen", "outcome=set title='$title' category='$category'")
+                        // [T-android-auto-grouping] Group assignment is best-effort
+                        // and strictly SUBORDINATE to the title: a name that
+                        // resolves to nothing is silently dropped (never create a
+                        // group from a model's answer), and setFolderIfUnfiled
+                        // means a hand-filed session is never overridden by the
+                        // model's guess. Mirrors iOS.
+                        if (!folderName.isNullOrEmpty()) {
+                            // findFolderByName rather than a local equals: it trims
+                            // BOTH sides (models routinely echo "Work " with a
+                            // trailing space, which an exact equals silently
+                            // rejects — the feature then looks intermittently
+                            // broken), and because listFolders is ORDER BY
+                            // updated_at DESC its first hit is the most recently
+                            // updated duplicate. That matters when two devices
+                            // created a same-named group offline: an arbitrary pick
+                            // files the chat into the group the user isn't looking
+                            // at. Same resolver the AI-Suggest flow uses.
+                            val match = chatRepository.findFolderByName(folderName)
+                                // The prompt shows SANITIZED names, so a group whose
+                                // real name contains stripped characters comes back
+                                // in its sanitized form and won't match directly.
+                                // Fall back to comparing sanitized-to-sanitized —
+                                // but REFUSE an ambiguous hit rather than taking the
+                                // first. Two folders can render to the same string
+                                // (truncation at GROUP_NAME_MAX, or names differing
+                                // only in stripped characters); filing into an
+                                // arbitrary one is a silent wrong-group move the
+                                // user gets no signal about. Leaving it ungrouped is
+                                // the recoverable outcome.
+                                ?: chatRepository.listFolders().filter {
+                                    ChatViewModel.promptSafe(it.name, GROUP_NAME_MAX)
+                                        .equals(folderName.trim(), ignoreCase = true)
+                                }.singleOrNull()
+                            if (match != null) {
+                                val applied = chatRepository.setFolderIfUnfiled(match.id, sid)
+                                AppLogger.info(
+                                    "TitleGen",
+                                    "auto-group '$folderName' -> ${match.id.take(8)} applied=$applied",
+                                )
+                            } else {
+                                AppLogger.info(
+                                    "TitleGen",
+                                    "auto-group: model offered '$folderName' but no group matches — leaving ungrouped",
+                                )
+                            }
+                        }
+                        // [T-android-title-failover] Success — stop walking the chain.
+                        return@launch
                     } else {
-                        AppLogger.info(
+                        // [T-android-title-failover] The request succeeded but
+                        // yielded no usable title — empty body or a response
+                        // parseTitleResponse couldn't extract a title from (e.g.
+                        // reasoning model that spent its whole budget thinking, or
+                        // non-JSON output). Hand over to the next candidate; the
+                        // first-message fallback only fires after the whole chain
+                        // is exhausted.
+                        lastFailureReason = "empty/unparseable title response (stopReason=${response.stopReason} textLen=${response.text.length})"
+                        AppLogger.warning(
                             "TitleGen",
-                            "auto-group: model offered '$folderName' but no group matches — leaving ungrouped",
+                            "outcome=candidate-failed candidate=${candIdx + 1}/${candidates.size} " +
+                                "model=${provider.model.id} $lastFailureReason",
                         )
                     }
-                }
-            } else {
-                // [T-title-gen-fallback-first-message-android] The request
-                // succeeded but yielded no usable title — empty body or a
-                // response parseTitleResponse couldn't extract a title from
-                // (e.g. reasoning model that spent its whole budget thinking,
-                // or non-JSON output). Previously this was silent and left
-                // the session as "New Chat". Log the real cause and, on the
-                // final attempt, fall back to the first user message.
-                AppLogger.warning(
-                    "TitleGen",
-                    "outcome=no-title attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +
-                        "(empty / unparseable response) stopReason=${response.stopReason} " +
-                        "textLen=${response.text.length}",
-                )
-                if (titleGenerationAttempts >= TITLE_MAX_ATTEMPTS) {
-                    AppLogger.warning("TitleGen", "outcome=gave-up ($titleGenerationAttempts/$TITLE_MAX_ATTEMPTS) — applying first-message fallback title")
-                    applyFallbackTitleFromFirstMessage("empty/unparseable title response")
+                } catch (ce: kotlinx.coroutines.CancellationException) {
+                    // Propagate cancellation to the outer handler — the
+                    // finally block's !isActive path lands the fallback.
+                    throw ce
+                } catch (e: Exception) {
+                    // [T-android-title-failover] Request error / timeout /
+                    // provider failure on THIS candidate — contained here,
+                    // the chain advances to the next one.
+                    lastFailureReason = "${e.javaClass.simpleName}: ${e.message?.take(200)}"
+                    AppLogger.warning(
+                        "TitleGen",
+                        "outcome=candidate-failed candidate=${candIdx + 1}/${candidates.size} " +
+                            "model=${provider.model.id} $lastFailureReason",
+                    )
                 }
             }
+            // [T-android-title-failover] Chain exhausted — every candidate
+            // failed. Terminal state: first-message fallback.
+            AppLogger.warning(
+                "TitleGen",
+                "outcome=gave-up — all ${candidates.size} title candidates failed ($lastFailureReason) — applying first-message fallback title",
+            )
+            applyFallbackTitleFromFirstMessage("all title candidates failed: $lastFailureReason")
         } catch (e: Exception) {
-            // [T-title-gen-fallback-first-message-android] Request error /
-            // timeout / provider failure. Log the concrete cause (was
-            // already logged, kept) and fall back to the first user message
-            // on the final attempt.
+            // [T-title-gen-fallback-first-message-android] Only
+            // CancellationException escapes the per-candidate loop now —
+            // request failures are contained per candidate above. Keep the
+            // terminal logging for the cancellation path.
             AppLogger.warning(
                 "TitleGen",
                 "outcome=exception attempt=$titleGenerationAttempts/$TITLE_MAX_ATTEMPTS " +
@@ -397,11 +428,9 @@ private suspend fun ChatViewModel.applyFallbackTitleFromFirstMessage(reason: Str
 }
 
 /**
- * Resolve the provider used for title generation. Mirrors iOS resolveSubEntry:
- * prefer an explicitly configured sub-model (cheap, non-OAuth) so title
- * generation doesn't hit the expensive primary model or fail under the
- * OAuth-Anthropic Claude-Code-only gate. Falls back to null if no sub is
- * configured — caller uses the primary provider then.
+/**
+ * The temperature override for a model entry (null = provider default).
+ * Shared by the title failover chain and other sampling paths.
  */
 internal fun ChatViewModel.samplingTemperature(entryId: String?): Double? {
     if (entryId.isNullOrBlank()) return null
@@ -411,21 +440,64 @@ internal fun ChatViewModel.samplingTemperature(entryId: String?): Double? {
         ?.temperature
 }
 
-/** Title sub-entry's own override. Falls back to the serving entry only when no sub-entry exists. */
-private fun ChatViewModel.titleTemperature(): Double? {
-    val sub = providerRepository.resolveTitleSubEntry()
-    return if (sub != null) sub.overrides.temperature else samplingTemperature(_activeEntryId.value)
+/** One failover candidate for title generation. */
+private data class TitleCandidate(
+    val provider: LLMProvider,
+    val temperature: Double?,
+    /** "sub" (sub-group member) or "primary" (current conversation provider). */
+    val source: String,
+)
+
+/**
+ * [T-android-title-failover] Pure ordering/dedup core for the title-model
+ * failover chain, extracted so the contract is unit-testable without a VM:
+ * sub-group order preserved, duplicates on the same instance+model dropped
+ * (first occurrence wins), primary appended once at the tail. Generic in the
+ * candidate payload so tests can drive it with plain strings.
+ */
+internal object TitleFailoverChain {
+    fun <T> plan(subs: List<Pair<String, T>>, primary: Pair<String, T>?): List<T> {
+        val out = mutableListOf<T>()
+        val seen = mutableSetOf<String>()
+        for ((key, candidate) in subs) {
+            if (seen.add(key)) out.add(candidate)
+        }
+        if (primary != null && seen.add(primary.first)) out.add(primary.second)
+        return out
+    }
 }
 
-private fun ChatViewModel.resolveTitleProvider(): LLMProvider? {
-    // [T-disabled-provider-via-group-android] Resolve the dedicated
-    // title-generation sub-model (first enabled member of defaultSubGroupId).
-    // [T-android-regenerate-title-submodel] Shares
-    // ProviderRepository.resolveTitleSubEntry with the manual Regenerate
-    // path so both prefer the same sub-model. Silently degrades (caller
-    // falls back to the primary provider) when no sub-group is configured or
-    // every member sits behind a disabled provider.
-    val entry = providerRepository.resolveTitleSubEntry() ?: return null
+/**
+ * [T-android-title-failover] The title-model failover chain: every usable
+ * member of the configured sub-group in group order, then the primary
+ * provider. Deduped on instance+model so a primary that is also a sub-group
+ * member is not tried twice. Upstream 1.14 parity: a failed title model
+ * hands over to the next one instead of being retried until the attempt
+ * budget burns out.
+ */
+private fun ChatViewModel.titleCandidateChain(): List<TitleCandidate> {
+    val subs: List<Pair<String, TitleCandidate>> = providerRepository.resolveTitleSubGroupEntries()
+        .mapNotNull { entry ->
+            buildTitleProviderForEntry(entry)?.let { provider ->
+                "${entry.providerInstanceId}:${entry.model.id}" to
+                    TitleCandidate(provider, entry.overrides.temperature, "sub")
+            }
+        }
+    val primaryPair: Pair<String, TitleCandidate>? = currentProvider?.let { p ->
+        val activeEntry = providerRepository.config.value.modelEntries
+            .firstOrNull { it.id == _activeEntryId.value }
+        "${activeEntry?.providerInstanceId ?: "primary"}:${p.model.id}" to
+            TitleCandidate(p, samplingTemperature(_activeEntryId.value), "primary")
+    }
+    return TitleFailoverChain.plan(subs, primaryPair)
+}
+
+/**
+ * Build a provider for one sub-group entry with the OAuth pre-refresh the
+ * single-candidate path had. Returns null when the instance or its
+ * credential is unusable — the chain then skips this member.
+ */
+private fun ChatViewModel.buildTitleProviderForEntry(entry: ModelEntry): LLMProvider? {
     val instance = providerRepository.instance(entry.providerInstanceId) ?: return null
     // [T-android-keyless-provider-selection] usableApiKey — a keyless
     // self-hosted sub-model is usable; loadApiKey returned null and made
