@@ -1820,7 +1820,7 @@ class ChatViewModel(
             for (part in msg.contentParts) {
                 when (part) {
                     is AgentContentPart.Text -> total += estimateMixedTokens(part.text)
-                    is AgentContentPart.ToolUse -> total += estimateMixedTokens(part.input.toString())
+                    is AgentContentPart.ToolUse -> total += estimateMixedTokens(TokenScanMemo.toolUseInputJson(part.input))
                     is AgentContentPart.ToolResult -> total += estimateMixedTokens(part.content)
                     is AgentContentPart.ImageData -> total += 1_500
                 }
@@ -1835,13 +1835,7 @@ class ChatViewModel(
         }
     }
 
-    private fun estimateMixedTokens(text: String): Long {
-        if (text.isEmpty()) return 0
-        var ascii = 0
-        var other = 0
-        for (c in text) if (c.code < 128) ascii++ else other++
-        return ascii / 4L + other * 3L / 5L
-    }
+    private fun estimateMixedTokens(text: String): Long = TokenScanMemo.mixedTokens(text)
 
     /** max(real usage, estimate) so a stale-but-real reading always wins. */
     internal fun contextTokensForPolicy(): Int =
@@ -2897,7 +2891,7 @@ class ChatViewModel(
             for (part in msg.contentParts) {
                 when (part) {
                     is AgentContentPart.Text -> usedChars += part.text.length
-                    is AgentContentPart.ToolUse -> usedChars += part.input.toString().length
+                    is AgentContentPart.ToolUse -> usedChars += TokenScanMemo.toolUseInputJson(part.input).length
                     is AgentContentPart.ToolResult -> {
                         usedChars += part.content.length
                     }

@@ -7,6 +7,7 @@ import com.openminis.app.data.model.sanitizeToolId
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.CredentialAcceptance
+import com.openminis.app.provider.FullBodyJson
 import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.data.model.LLMMessage
@@ -72,11 +73,7 @@ class AnthropicProvider(
      */
     var enhancedCache: Boolean = false
 
-    /**
-     * Build a `cache_control` object honoring [enhancedCache]. Default 5-minute
-     * TTL is `{"type":"ephemeral"}`; enhanced is `{"type":"ephemeral","ttl":"1h"}`.
-     * Every ephemeral breakpoint in the request body routes through here.
-     */
+    /** Build a `cache_control` honoring [enhancedCache]: default 5-minute TTL `{"type":"ephemeral"}`, enhanced adds `"ttl":"1h"`. Every breakpoint routes here. */
     private fun ephemeralCacheControl(): JSONObject =
         JSONObject().put("type", "ephemeral").apply {
             if (enhancedCache) put("ttl", "1h")
@@ -116,7 +113,8 @@ class AnthropicProvider(
             throw mapHttpError(response.code, responseBody, response.header("Retry-After"))
         }
 
-        val json = JSONObject(responseBody)
+        // [T-nonstream-json-default] Parse moves to Default (read stays on IO); FullBodyJson wraps the raw JSONException.
+        val json = FullBodyJson.parse(responseBody, "anthropic non-streaming body")
         parseResponse(json)
     }
 

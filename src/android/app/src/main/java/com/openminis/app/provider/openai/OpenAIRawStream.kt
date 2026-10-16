@@ -4,6 +4,7 @@ import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
+import com.openminis.app.provider.FullBodyJson
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
@@ -422,20 +423,13 @@ internal fun OpenAIProvider.rawStreamMessage(
         ) {
             try {
                 val raw = pushback?.reader()?.readText().orEmpty()
-                val json = try {
-                    JSONObject(raw)
-                } catch (e: Exception) {
-                    // Never let a raw JSONException reach the user: it names a
-                    // tokenizer internals problem, not the actual mismatch.
-                    throw LLMError.DecodingError(
-                        IllegalStateException(
-                            "expected a JSON object body (Content-Type: " +
-                                "${responseContentType.ifBlank { "absent" }}) but got: " +
-                                raw.take(120).replace('\n', ' '),
-                            e,
-                        ),
-                    )
-                }
+                // [T-nonstream-json-default] Parse moves to Dispatchers.Default;
+                // FullBodyJson also wraps the raw JSONException (defense shared
+                // with the Anthropic/Gemini non-streaming paths).
+                val json = FullBodyJson.parse(
+                    raw,
+                    "chat-completions body (Content-Type: ${responseContentType.ifBlank { "absent" }})",
+                )
                 send(LLMStreamChunk.Started)
                 val choice = json.optJSONArray("choices")?.optJSONObject(0)
                 val message = choice?.optJSONObject("message")

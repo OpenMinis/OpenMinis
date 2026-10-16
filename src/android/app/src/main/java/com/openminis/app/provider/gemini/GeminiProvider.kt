@@ -5,6 +5,7 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.CredentialAcceptance
+import com.openminis.app.provider.FullBodyJson
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
@@ -87,7 +88,10 @@ class GeminiProvider(
             throw mapHttpError(response.code, responseBody, response.header("Retry-After"))
         }
 
-        val json = JSONObject(responseBody)
+        // [T-nonstream-json-default] Parse moves to Dispatchers.Default; the
+        // read above stays on IO. FullBodyJson also wraps the raw
+        // JSONException (defense shared with OpenAI/Anthropic paths).
+        val json = FullBodyJson.parse(responseBody, "gemini non-streaming body")
         val text = extractText(json)
         val finishReason = extractFinishReason(json)
         val usage = extractUsage(json)
