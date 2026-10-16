@@ -1396,12 +1396,12 @@ fun ChatScreen(
 
     // A session-scoped ViewModel can keep streaming while its screen is
     // disposed. On re-entry the retained LazyListState may point into history;
-    // the normal stream follower intentionally respects that browsing state.
-    // A running session is different: opening it is an explicit request to
-    // follow the live output. Wait for the initial DB tail, drain any committed
-    // tail rows, then pin after the flattened rows have been published.
+    // opening a session is an explicit request to show its latest output,
+    // whether the previous run is still streaming or already finished. Wait
+    // for the DB tail and flatten publish before pinning, otherwise a long
+    // session can land on a restored middle anchor.
     LaunchedEffect(sessionId, sessionLoaded, isStreaming, hasNewerMessages) {
-        if (!sessionLoaded || !isStreaming || entryPinRequested) return@LaunchedEffect
+        if (!sessionLoaded || entryPinRequested) return@LaunchedEffect
         entryPinRequested = true
         scrollPolicy.pin()
         viewModel.ensureSessionTailLoaded()
@@ -1410,9 +1410,9 @@ fun ChatScreen(
         // from landing on a mid-history restored viewport before this pin.
         viewModel.hasNewerMessages.first { !it }
         withFrameNanos { }
-        tracedScrollToItem("SESSION-REENTRY/live-tail", 0, 0)
+        tracedScrollToItem("SESSION-REENTRY/tail", 0, 0)
         kotlinx.coroutines.delay(100)
-        tracedScrollToItem("SESSION-REENTRY/live-tail-settle", 0, 0)
+        tracedScrollToItem("SESSION-REENTRY/tail-settle", 0, 0)
     }
 
     LaunchedEffect(hasNewerMessages, pinRealLatest) {
@@ -1722,69 +1722,16 @@ fun ChatScreen(
                 if (listState.isScrollInProgress) return@collect
                 val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
                 if (sinceInterrupt < 1000L) return@collect
-                // [T-android-stream-grow-anim] Frame-driven glide to the bottom.
-                // animateScrollToItem(0) was the problem: when the viewport had
-                // fallen >= 1 item behind (diagnostics showed fIdx=1..5 during
-                // fast streams), it snaps most of the distance instantly and
-                // animates only the final sliver — reading as "no animation".
-                // Instead, scroll toward the bottom a bounded amount per frame
-                // inside one scroll session until index 0 is fully pinned
-                // (fIdx==0 && fOff==0). Every frame moves, so the whole catch-up
-                // is visibly animated regardless of how many items behind we
-                // are. We never measure item heights (the source of earlier
-                // stutter) — we just step toward the bottom and stop when the
-                // pin condition is met. In reverseLayout, the bottom (newest,
-                // index 0) is the NEGATIVE scroll direction.
+                // Keep the stream follower one-way and atomic. The previous
+                // frame-driven loop estimated item heights while the streaming
+                // row was being remeasured; stale estimates could alternate
+                // with fresh ones and visibly move the whole window up/down.
+                // Stable-key anchoring handles normal growth; this is only the
+                // bounded recovery when the viewport actually fell behind.
                 if (listState.firstVisibleItemIndex != 0 ||
                     listState.firstVisibleItemScrollOffset != 0
                 ) {
-                    // [T-android-stream-grow-anim review] Cold start: item sizes
-                    // not measured yet → avgItemSize==0 → the distance estimate
-                    // is bogus and the glide would under-scroll. Snap instead;
-                    // by the next sample the cache is warm and glides resume.
-                    if (avgItemSize.value <= 0) {
-                        tracedScrollToItem("LE(streaming-content)cold", 0, 0)
-                        return@collect
-                    }
-                    // [T-android-stream-grow-anim] Ease-out frame-driven glide
-                    // to the bottom. Each frame moves a fraction of the
-                    // estimated remaining distance so the motion decelerates as
-                    // it lands (curveEaseOut, the shape iOS uses for its 0.2s
-                    // contentOffset animate). Two caps keep it smooth on the
-                    // matched matters:
-                    //   • per-frame step is capped well BELOW a typical
-                    //     streaming fragment (~tens of px) so a single frame
-                    //     can never leap a whole item — that leap was the
-                    //     residual "frames=1 jump" in earlier diagnostics
-                    //     (avg-estimated remaining over-shot, step hit the cap,
-                    //     one frame crossed an item).
-                    //   • a gentler 0.22 fraction + 14px floor stretches even a
-                    //     short catch-up across several frames, so it always
-                    //     reads as a glide rather than a hop.
-                    // Distance uses the running average visible-item height (an
-                    // aggregate, not a per-item delta, so no re-block noise).
-                    val avg = avgItemSize.value.toFloat().coerceAtLeast(1f)
-                    // Step ceiling: ~40% of the average item, so >= ~3 frames
-                    // cross any one item. Bounded to a sane absolute window.
-                    val stepCeil = (avg * 0.40f).coerceIn(28f, 80f)
-                    runCatching {
-                        listState.scroll {
-                            var guard = 0
-                            while (
-                                (listState.firstVisibleItemIndex != 0 ||
-                                    listState.firstVisibleItemScrollOffset != 0) &&
-                                guard < 120
-                            ) {
-                                guard++
-                                val remaining = listState.firstVisibleItemIndex * avg +
-                                    listState.firstVisibleItemScrollOffset
-                                val step = (remaining * 0.22f).coerceIn(14f, stepCeil)
-                                // Negative = toward newest/bottom in reverseLayout.
-                                val consumed = withFrameNanos { scrollBy(-step) }
-                                if (consumed == 0f) break
-                            }
-                        }
-                    }
+                    tracedScrollToItem("LE(streaming-content)/tail", 0, 0)
                 }
             }
     }

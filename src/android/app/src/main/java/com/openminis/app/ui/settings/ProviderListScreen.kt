@@ -43,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,6 +84,45 @@ private sealed class ProviderImportOutcome {
     data object ReadFailed : ProviderImportOutcome()
     data class Imported(val label: String) : ProviderImportOutcome()
     data class ZipSummary(val ok: Int, val total: Int) : ProviderImportOutcome()
+}
+
+private data class ProviderRowSnapshot(
+    val modelCount: Int = 0,
+    val apiKey: String? = null,
+    val isConfigured: Boolean = false,
+    val needsReauth: Boolean = false,
+)
+
+@Composable
+private fun rememberProviderRowSnapshot(
+    instance: ProviderInstance,
+    providerRepository: ProviderRepository,
+    context: android.content.Context,
+): ProviderRowSnapshot {
+    val snapshot by produceState(
+        initialValue = ProviderRowSnapshot(),
+        key1 = instance.id,
+        key2 = instance.credentialType,
+        key3 = instance.allowsEmptyAPIKey,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val apiKey = providerRepository.loadApiKey(instance.id)
+            val configured = if (instance.credentialType ==
+                com.openminis.app.data.model.ProviderCredential.oauth) {
+                val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+                mgr?.isAuthenticated() == true
+            } else {
+                !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
+            }
+            ProviderRowSnapshot(
+                modelCount = providerRepository.visibleEntries(instance.id).size,
+                apiKey = apiKey,
+                isConfigured = configured,
+                needsReauth = com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id),
+            )
+        }
+    }
+    return snapshot
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -339,28 +379,11 @@ fun ProviderListScreen(
                         },
                     ) { index, instance, isDragging ->
                         key(instance.id) {
-                            val modelCount = providerRepository.visibleEntries(instance.id).size
-                            val apiKey = providerRepository.loadApiKey(instance.id)
-                            // Mirrors iOS `isConfigured` on ProviderInstancesView:
-                            // for OAuth providers, having a manual bearer token OR
-                            // a stored OAuth credential counts as "configured" — not
-                            // just the presence of an API key. Without this, OAuth
-                            // instances always show the gray dot even after a
-                            // successful sign-in or manual token paste.
-                            val isConfigured = if (instance.credentialType ==
-                                com.openminis.app.data.model.ProviderCredential.oauth) {
-                                val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                                mgr?.isAuthenticated() == true
-                            } else {
-                                // [T-empty-key-compat-endpoints] A keyless
-                                // third-party compatible endpoint is
-                                // configured-by-definition (mirrors iOS).
-                                !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
-                            }
-                            // [T-oauth-keep-credentials] Red dot when the stored
-                            // bundle was rejected and awaits re-login.
-                            val needsReauth = com.openminis.app.auth.OAuthManager
-                                .needsReauth(context, instance.id)
+                            val snapshot = rememberProviderRowSnapshot(
+                                instance,
+                                providerRepository,
+                                context,
+                            )
                             // Lift the dragged row above its neighbours so it
                             // reads as "picked up" (matches ModelGroupsScreen).
                             val elevation by animateDpAsState(
@@ -403,10 +426,10 @@ fun ProviderListScreen(
                                 ) {
                                     ProviderInstanceRow(
                                         instance = instance,
-                                        modelCount = modelCount,
-                                        apiKey = apiKey,
-                                        isConfigured = isConfigured,
-                                        needsReauth = needsReauth,
+                                        modelCount = snapshot.modelCount,
+                                        apiKey = snapshot.apiKey,
+                                        isConfigured = snapshot.isConfigured,
+                                        needsReauth = snapshot.needsReauth,
                                         pinned = instance.pinned,
                                         onTogglePinned = {
                                             providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -546,18 +569,12 @@ private fun ProviderSwipeableRow(
     onRequestDelete: () -> Unit,
     syncResult: ModelRefreshResult? = null,
 ) {
-    val modelCount = providerRepository.visibleEntries(instance.id).size
-    val apiKey = providerRepository.loadApiKey(instance.id)
-    val isConfigured = if (instance.credentialType ==
-        com.openminis.app.data.model.ProviderCredential.oauth) {
-        val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-        mgr?.isAuthenticated() == true
-    } else {
-        !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
-    }
-    // [T-oauth-keep-credentials] Red dot when the stored bundle was rejected
-    // and awaits re-login (static read — covers gemini too).
-    val needsReauth = com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id)
+    // Provider rows used to perform model-store, key-store and OAuth reads
+    // synchronously during composition. With several instances that made
+    // entering Settings block the main thread before the first frame. Keep a
+    // small row snapshot and populate it off-main; the row can render its
+    // neutral state while the snapshot is being prepared.
+    val snapshot = rememberProviderRowSnapshot(instance, providerRepository, context)
     SwipeRowActions(
         actions = listOf(
             SwipeRowAction(
@@ -578,10 +595,10 @@ private fun ProviderSwipeableRow(
     ) {
         ProviderInstanceRow(
             instance = instance,
-            modelCount = modelCount,
-            apiKey = apiKey,
-            isConfigured = isConfigured,
-            needsReauth = needsReauth,
+            modelCount = snapshot.modelCount,
+            apiKey = snapshot.apiKey,
+            isConfigured = snapshot.isConfigured,
+            needsReauth = snapshot.needsReauth,
             pinned = instance.pinned,
             onTogglePinned = {
                 providerRepository.setInstancePinned(instance.id, !instance.pinned)

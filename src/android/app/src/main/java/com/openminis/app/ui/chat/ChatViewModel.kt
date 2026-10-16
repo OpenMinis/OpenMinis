@@ -1014,6 +1014,9 @@ class ChatViewModel(
     fun loadOlderMessages() {
         if (!claimOlderLoad()) return
         loadingOlderFlag.set(false)
+        // loadOlderPage owns the CAS for every caller. Claiming here as well
+        // is intentionally released before launch: the suspend operation
+        // performs the authoritative claim again when it starts.
         viewModelScope.launch { loadOlderPage() }
     }
 

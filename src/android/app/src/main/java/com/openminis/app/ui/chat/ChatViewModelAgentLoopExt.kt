@@ -646,9 +646,14 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [_compactSummary] is prepended as a `<context-summary>`
                 // user message. Falls through to the raw agentHistory when
                 // no compact has happened, so the common path stays zero-copy.
-                val requestGoalState = if (goalRunRequested) {
-                    withContext(Dispatchers.IO) { goalManager.get(goalSessionId) }
-                } else null
+                // A Goal belongs to the session, not only to an explicit
+                // /goal resume run. Read it for every request so ordinary
+                // user turns carry the same persistent objective context.
+                // The old gate made Goals silently disappear after the
+                // command that created or resumed them finished.
+                val requestGoalState = withContext(Dispatchers.IO) {
+                    goalManager.get(goalSessionId)
+                }
                 val goalCanContinue = requestGoalState?.let {
                     com.openminis.app.goal.GoalStateMachine.canContinue(it, usefulActivity = true)
                 } == true
@@ -659,7 +664,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     loopExitedNormally = true
                     break
                 }
-                val requestGoalPrompt = requestGoalState?.let(goalManager::continuationPrompt)
+                // Only an active, budget-eligible Goal is mounted into the
+                // request. Paused, completed, blocked, and budget-limited
+                // Goals remain visible to update_goal(op=get), but must not
+                // silently steer ordinary user turns.
+                val requestGoalPrompt = requestGoalState
+                    ?.takeIf { goalCanContinue }
+                    ?.let(goalManager::continuationPrompt)
                 val requestHistory = com.openminis.app.goal.withGoalContext(
                     effectiveAgentHistory(),
                     requestGoalPrompt,

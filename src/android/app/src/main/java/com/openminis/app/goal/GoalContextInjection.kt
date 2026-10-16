@@ -42,8 +42,26 @@ internal fun withGoalContext(
 ): List<LLMMessage> {
     if (prompt.isNullOrBlank()) return history
     val requestHistory = history.toMutableList()
-    val userIndex = requestHistory.indexOfLast { it.role == LLMMessage.Role.USER }
-    if (userIndex >= 0 && requestHistory[userIndex].content.contains("<goal_context>")) return requestHistory
+    var userIndex = requestHistory.indexOfLast { it.role == LLMMessage.Role.USER }
+    // A previous Goal continuation is part of the bounded request history.
+    // Do not treat that old block as the current mount: the persisted Goal
+    // may have changed status, budget, or objective since then.
+    if (userIndex >= 0 && requestHistory[userIndex].content.contains("<goal_context>")) {
+        val user = requestHistory[userIndex]
+        val withoutOldGoal = user.content
+            .replace(Regex("\\n*<goal_context>.*?</goal_context>\\n*", setOf(RegexOption.DOT_MATCHES_ALL)), "")
+            .trimEnd()
+        val retainedParts = user.contentParts.dropLastWhile {
+            it is AgentContentPart.Text && it.text.contains("<goal_context>")
+        }
+        requestHistory[userIndex] = user.copy(
+            content = withoutOldGoal,
+            contentParts = retainedParts.ifEmpty {
+                listOf(AgentContentPart.Text(withoutOldGoal))
+            },
+        )
+    }
+    userIndex = requestHistory.indexOfLast { it.role == LLMMessage.Role.USER }
     if (appendNewUser || userIndex < 0) {
         requestHistory += LLMMessage(
             role = LLMMessage.Role.USER,

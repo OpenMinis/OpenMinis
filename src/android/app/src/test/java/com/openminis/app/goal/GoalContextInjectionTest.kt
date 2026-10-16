@@ -62,4 +62,27 @@ class GoalContextInjectionTest {
         val history = listOf(LLMMessage(role = LLMMessage.Role.USER, content = "hello"))
         assertEquals(history, withGoalContext(history, null))
     }
+
+    @Test fun `latest goal replaces stale mounted goal in request history`() {
+        val stale = "<goal_context>old objective</goal_context>"
+        val history = listOf(
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = "hello\n\n$stale",
+                contentParts = listOf(
+                    AgentContentPart.Text("hello"),
+                    AgentContentPart.Text(stale),
+                ),
+            ),
+        )
+        val request = withGoalContext(
+            history,
+            "<goal_context>new objective</goal_context>",
+        )
+
+        assertEquals(1, request.size)
+        assertTrue(request.single().content.contains("new objective"))
+        assertTrue(!request.single().content.contains("old objective"))
+        assertEquals(2, request.single().contentParts.size)
+    }
 }
