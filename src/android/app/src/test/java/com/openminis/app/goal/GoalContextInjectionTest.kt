@@ -1,10 +1,13 @@
 package com.openminis.app.goal
 
+import com.openminis.app.data.db.GoalStatus
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class GoalContextInjectionTest {
@@ -84,5 +87,29 @@ class GoalContextInjectionTest {
         assertTrue(request.single().content.contains("new objective"))
         assertTrue(!request.single().content.contains("old objective"))
         assertEquals(2, request.single().contentParts.size)
+    }
+
+    @Test fun `active budget-eligible goal mounts its continuation prompt`() {
+        val goal = GoalStateMachine.create("s", "ship it", 500, 1)
+        val mount = goalMount(goal) { "<goal_context>prompt</goal_context>" }
+        assertTrue(mount.canContinue)
+        assertEquals("<goal_context>prompt</goal_context>", mount.prompt)
+    }
+
+    @Test fun `paused and budget-limited goals mount no prompt`() {
+        val active = GoalStateMachine.create("s", "ship it", 500, 1)
+        val paused = active.copy(status = GoalStatus.PAUSED)
+        val spent = active.copy(tokensUsed = 500)
+        for (goal in listOf(paused, spent)) {
+            val mount = goalMount(goal) { fail("non-continuable goal must not build a prompt"); "" }
+            assertTrue(!mount.canContinue)
+            assertNull(mount.prompt)
+        }
+    }
+
+    @Test fun `missing goal mounts nothing`() {
+        val mount = goalMount(null) { fail("missing goal must not build a prompt"); "" }
+        assertTrue(!mount.canContinue)
+        assertNull(mount.prompt)
     }
 }

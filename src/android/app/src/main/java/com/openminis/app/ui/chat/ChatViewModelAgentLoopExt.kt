@@ -215,7 +215,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // turnFinishReason == null branch below).
     var streamDropContinuations = 0
 
-
     // Add placeholder assistant message (once). Mark as awaiting so the
     // "Minis is thinking" indicator shows during the initial request gap
     // before the first stream chunk arrives. Mirrors iOS isAwaitingModelResponse.
@@ -646,34 +645,23 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [_compactSummary] is prepended as a `<context-summary>`
                 // user message. Falls through to the raw agentHistory when
                 // no compact has happened, so the common path stays zero-copy.
-                // A Goal belongs to the session, not only to an explicit
-                // /goal resume run. Read it for every request so ordinary
-                // user turns carry the same persistent objective context.
-                // The old gate made Goals silently disappear after the
-                // command that created or resumed them finished.
+                // A Goal belongs to the session, not only to an explicit /goal
+                // resume run — read it every request so ordinary turns carry it.
                 val requestGoalState = withContext(Dispatchers.IO) {
                     goalManager.get(goalSessionId)
                 }
-                val goalCanContinue = requestGoalState?.let {
-                    com.openminis.app.goal.GoalStateMachine.canContinue(it, usefulActivity = true)
-                } == true
-                if (goalRunRequested && !goalCanContinue) {
+                val goalMount = com.openminis.app.goal.goalMount(
+                    requestGoalState, goalManager::continuationPrompt)
+                if (goalRunRequested && !goalMount.canContinue) {
                     withContext(Dispatchers.Main) {
                         updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
                     }
                     loopExitedNormally = true
                     break
                 }
-                // Only an active, budget-eligible Goal is mounted into the
-                // request. Paused, completed, blocked, and budget-limited
-                // Goals remain visible to update_goal(op=get), but must not
-                // silently steer ordinary user turns.
-                val requestGoalPrompt = requestGoalState
-                    ?.takeIf { goalCanContinue }
-                    ?.let(goalManager::continuationPrompt)
                 val requestHistory = com.openminis.app.goal.withGoalContext(
                     effectiveAgentHistory(),
-                    requestGoalPrompt,
+                    goalMount.prompt,
                     appendNewUser = goalExecutionRun && turn == 0,
                 ).let { history ->
                     // [T-stall-resume] A previous attempt stalled mid-stream:

@@ -35,6 +35,29 @@ internal fun goalContextPrompt(goal: SessionGoalEntity): String = buildString {
     appendLine("</goal_context>")
 }
 
+/**
+ * The per-request Goal mount decision. A Goal belongs to the session, not
+ * only to an explicit /goal resume run, so the agent loop reads it for every
+ * request; the old gate made Goals silently disappear after the command that
+ * created or resumed them finished. Only an active, budget-eligible Goal is
+ * mounted into the request: paused, completed, blocked, and budget-limited
+ * Goals remain visible to update_goal(op=get), but must not silently steer
+ * ordinary user turns.
+ */
+internal class GoalMount(
+    val canContinue: Boolean,
+    val prompt: String?,
+)
+
+internal fun goalMount(
+    state: SessionGoalEntity?,
+    continuationPrompt: (SessionGoalEntity) -> String,
+): GoalMount {
+    val canContinue = state != null &&
+        GoalStateMachine.canContinue(state, usefulActivity = true)
+    return GoalMount(canContinue, state?.takeIf { canContinue }?.let(continuationPrompt))
+}
+
 internal fun withGoalContext(
     history: List<LLMMessage>,
     prompt: String?,

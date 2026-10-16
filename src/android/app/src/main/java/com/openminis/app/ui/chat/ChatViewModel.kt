@@ -3912,7 +3912,6 @@ class ChatViewModel(
         }
     }
 
-
     /**
      * Mark every non-system UI message that falls before [marker]'s boundary
      * as [ChatMessage.isCompactedHistory]. Mirrors iOS Phase 2.5 boundary
@@ -4198,8 +4197,6 @@ class ChatViewModel(
         val provider: LLMProvider,
         val entryId: String,
     )
-
-
 
     // [T-android-split-chat] addAttachment / removeAttachment / clearAttachments
     // moved to ChatViewModelUiStateExt.kt (extension functions).

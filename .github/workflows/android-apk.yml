@@ -34,9 +34,27 @@ jobs:
   sandbox-assets:
     uses: ./.github/workflows/sandbox-assets.yml
 
+  # [T-arch-ratchet-main] pr-check.yml only fires on pull_request, so a
+  # direct push to main never ran the architecture gate — an oversized file
+  # merged straight to main then silently broke every later PR's CI. Same
+  # whole-tree check, seconds to run, parallel with the native/sandbox jobs
+  # so a violation fails the run before the expensive APK build starts.
+  arch-gate:
+    name: Architecture policy ratchet
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+      - name: Architecture policy ratchet
+        run: python3 scripts/ci/check_architecture_policy.py
+
   build:
     name: Build Minis Ultra APK
-    needs: [native-deps, sandbox-assets]
+    needs: [native-deps, sandbox-assets, arch-gate]
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
