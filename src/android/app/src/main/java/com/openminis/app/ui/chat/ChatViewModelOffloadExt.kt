@@ -4,7 +4,7 @@ import com.openminis.app.data.ContextOffload
 import com.openminis.app.data.ContextPolicy
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.model.AgentContentPart
-import org.json.JSONObject
+import com.openminis.app.provider.NonFiniteJson
 
 /**
  * Walk [agentHistory], identify large tool outputs in the older
@@ -163,7 +163,7 @@ internal fun ChatViewModel.offloadContextIfNeeded(
                     context, sid, content,
                     toolId = part.id, toolName = part.name,
                 )
-                val newInput = org.json.JSONObject(part.input.toString())
+                val newInput = NonFiniteJson.parse(part.input.toString())
                 newInput.put(
                     "content",
                     ContextOffload.stub(candidate.tokens, candidate.bytes, linuxPath),

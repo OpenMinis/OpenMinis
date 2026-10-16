@@ -53,6 +53,7 @@ import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.tools.GroupChat
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.provider.catalogMaxThinkingLevel
 import com.openminis.app.provider.effectiveMaxThinkingLevel
@@ -5294,7 +5295,7 @@ class ChatViewModel(
                     val name = block.toolName
                     if (name.isBlank()) continue
                     val inputStr = toolCallInputs[block.id] ?: "{}"
-                    val inputJson = try { JSONObject(inputStr) } catch (_: Exception) { JSONObject() }
+                    val inputJson = NonFiniteJson.parseOrNull(inputStr) ?: JSONObject()
                     // [T-android-gemini3-thoughtsig / #179] Carry the block's
                     // signature into the persisted/replayed ToolUse.
                     out.add(AgentContentPart.ToolUse(block.id, name, inputJson, thoughtSignature = block.thoughtSignature))
@@ -6197,11 +6198,7 @@ class ChatViewModel(
                     "toolUse" -> {
                         val v = obj.getJSONObject("value")
                         val inputStr = v.optString("input", "{}")
-                        val inputJson = try {
-                            JSONObject(inputStr)
-                        } catch (_: Exception) {
-                            JSONObject()
-                        }
+                        val inputJson = NonFiniteJson.parseOrNull(inputStr) ?: JSONObject()
                         contentParts.add(AgentContentPart.ToolUse(
                             id = v.optString("toolUseId", ""),
                             name = v.optString("name", ""),

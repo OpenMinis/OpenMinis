@@ -6,6 +6,7 @@ import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.CredentialAcceptance
 import com.openminis.app.provider.HttpRetryAfter
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.applyUserAgentOverride
@@ -507,7 +508,7 @@ class GeminiProvider(
             val part = parts.getJSONObject(i)
             val fc = part.optJSONObject("functionCall") ?: continue
             val name = fc.safeOptString("name", "")
-            val args = fc.optJSONObject("args") ?: JSONObject()
+            val args = NonFiniteJson.scrub(fc.optJSONObject("args") ?: JSONObject())
             val sig = part.safeOptString("thoughtSignature", "").ifEmpty { null }
             if (name.isNotEmpty()) calls.add(Triple(name, args, sig))
         }

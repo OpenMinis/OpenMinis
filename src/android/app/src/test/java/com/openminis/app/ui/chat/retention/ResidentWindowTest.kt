@@ -183,4 +183,61 @@ class ResidentWindowTest {
         assertEquals(0, ResidentWindow.byteCut(history))
         assertEquals(0, ResidentWindow.countCut(history, maxMessages = 400))
     }
+
+    @Test
+    fun `messageBytes sums to bytesOf`() {
+        val history = listOf(
+            text("head"),
+            toolTurn("a", 4096),
+            splitToolUse("split"),
+            splitToolResult("split", 512),
+        )
+        assertEquals(
+            ResidentWindow.bytesOf(history),
+            history.sumOf { ResidentWindow.messageBytes(it) },
+        )
+    }
+
+    @Test
+    fun `byteCut lands on the exact suffix boundary`() {
+        // Distinct, hand-computable sizes pin the suffix-sum arithmetic —
+        // an off-by-one in the precomputed array would return a neighboring
+        // cut. text(10 chars) = 40 bytes; toolTurn = 26 ({"cmd":"run"} as
+        // UTF-16) + 2*result chars = 226.
+        val history = listOf(
+            text("h".repeat(10)),        // 40
+            toolTurn("a", 100),          // 226
+            toolTurn("b", 100),          // 226
+            toolTurn("c", 100),          // 226
+            text("t".repeat(10)),        // 40
+        )
+        // Suffix sums: 758 / 718 / 492 / 266 / 40. Budget 500 fits only
+        // from index 2 on, so the cut must be exactly 2.
+        assertEquals(2, ResidentWindow.byteCut(history, budget = 500L))
+    }
+
+    @Test
+    fun `a multi-megabyte tool input is dropped by the byte cut`() {
+        // The ANR shape: one huge ToolUse INPUT — the only part whose size
+        // requires *serializing* to measure. The suffix-sum refactor sizes
+        // it once per pass instead of once per candidate cut, which is what
+        // stalled the main thread for seconds at session load.
+        val hugeInput = LLMMessage(
+            role = LLMMessage.Role.ASSISTANT,
+            content = "",
+            contentParts = listOf(
+                AgentContentPart.ToolUse(
+                    "big", "shell_execute",
+                    JSONObject().put("blob", "x".repeat(2_000_000)),
+                ),
+                AgentContentPart.ToolResult("big", "shell_execute", "ok"),
+            ),
+        )
+        val history = listOf(text("head"), hugeInput, text("tail"))
+        val cut = ResidentWindow.byteCut(history, budget = 1_000_000L)
+        assertTrue("huge input must be dropped: cut=$cut", cut in 1..2)
+        assertTrue(
+            ResidentWindow.bytesOf(history.subList(cut, history.size)) <= 1_000_000L,
+        )
+    }
 }

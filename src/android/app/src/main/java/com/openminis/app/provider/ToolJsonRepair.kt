@@ -91,7 +91,11 @@ object ToolJsonRepair {
     }
 
     private fun tryParseObject(s: String): JSONObject? = try {
-        JSONObject(s)
+        // [T-android-nonfinite-json] Scrub the repaired payload: a truncated
+        // stream can cut a number literal into a non-finite form, and the
+        // copied values must round-trip JSON or every later serialization of
+        // the tool input breaks (see NonFiniteJson).
+        NonFiniteJson.parse(s)
     } catch (_: Throwable) {
         null
     }

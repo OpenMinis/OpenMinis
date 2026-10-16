@@ -1,5 +1,6 @@
 package com.openminis.app.mcp.client
 
+import com.openminis.app.provider.NonFiniteJson
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -96,7 +97,7 @@ object McpJsonRpc {
         return if (contentType.contains("text/event-stream", ignoreCase = true)) {
             parseSseEvents(body).firstOrNull { isReplyFor(it, wantId) }
         } else {
-            runCatching { JSONObject(body) }.getOrNull()?.takeIf { isReplyFor(it, wantId) }
+            runCatching { NonFiniteJson.parse(body) }.getOrNull()?.takeIf { isReplyFor(it, wantId) }
         }
     }
 
@@ -119,7 +120,7 @@ object McpJsonRpc {
             val joined = dataLines.joinToString("\n")
             dataLines.clear()
             if (joined.isBlank()) return
-            runCatching { JSONObject(joined) }.getOrNull()?.let(out::add)
+            runCatching { NonFiniteJson.parse(joined) }.getOrNull()?.let(out::add)
         }
         for (raw in body.split('\n')) {
             val line = raw.removeSuffix("\r")
@@ -146,7 +147,7 @@ object McpJsonRpc {
             val line = reader.readLine()
                 ?: throw McpError(McpError.CONNECTION_ERROR, "server closed the stream before replying")
             if (line.isBlank()) continue
-            val obj = runCatching { JSONObject(line) }.getOrNull() ?: continue
+            val obj = runCatching { NonFiniteJson.parse(line) }.getOrNull() ?: continue
             if (obj.optInt("id", Int.MIN_VALUE) == wantId &&
                 (obj.has("result") || obj.has("error"))
             ) return obj

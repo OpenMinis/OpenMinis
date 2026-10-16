@@ -7,6 +7,7 @@ import com.openminis.app.data.model.sanitizeToolId
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.CredentialAcceptance
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.data.model.LLMModel
@@ -303,11 +304,7 @@ class AnthropicProvider(
                     }
                     "content_block_stop" -> {
                         if (currentToolId != null && currentToolName != null) {
-                            val args = try {
-                                JSONObject(toolInputBuffer.toString())
-                            } catch (_: Exception) {
-                                JSONObject()
-                            }
+                            val args = NonFiniteJson.parseOrNull(toolInputBuffer.toString()) ?: JSONObject()
                             android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=$currentToolId name=$currentToolName args=${args.toString().take(300)}")
                             send(LLMStreamChunk.ToolCallComplete(currentToolId!!, currentToolName!!, args))
                             currentToolId = null

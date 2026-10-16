@@ -5,6 +5,7 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.provider.HttpRetryAfter
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.data.model.LLMMediaAttachment
 import com.openminis.app.data.model.LLMMessage
@@ -60,7 +61,6 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
-
 
 /**
  * [T-android-stale-conn-retry-hang] Streaming time-to-first-byte
@@ -721,7 +721,7 @@ internal fun OpenAIProvider.rawStreamMessage(
                                 val itemId = item.optString("id", "")
                                 val acc = responsesToolCalls.remove(itemId) ?: continue
                                 val argsStr = item.optString("arguments", acc.args.toString())
-                                val args = try { JSONObject(argsStr) } catch (_: Exception) { JSONObject() }
+                                val args = NonFiniteJson.parseOrNull(argsStr) ?: JSONObject()
                                 val combined = combineResponsesAPIIds(acc.callId, itemId)
                                 android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete (Responses) id=$combined name=${acc.name} args=${args.toString().take(300)}")
                                 send(LLMStreamChunk.ToolCallComplete(combined, acc.name, args))
@@ -1011,7 +1011,7 @@ internal fun OpenAIProvider.rawStreamMessage(
             // Emit ToolCallComplete for all accumulated tool calls
             for ((_, acc) in toolCallAccumulators) {
                 if (acc.id.isNotEmpty() && acc.name.isNotEmpty()) {
-                    val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
+                    val args = NonFiniteJson.parseOrNull(acc.args.toString()) ?: JSONObject()
                     android.util.Log.d("ToolChain[Provider]", "→ ToolCallComplete id=${acc.id} name=${acc.name} args=${args.toString().take(300)}")
                     send(LLMStreamChunk.ToolCallComplete(acc.id, acc.name, args))
                 }
@@ -1024,7 +1024,7 @@ internal fun OpenAIProvider.rawStreamMessage(
             // disappears (T247 root cause; same path hit by T237 DeepSeek truncation).
             for ((itemId, acc) in responsesToolCalls) {
                 if (acc.callId.isNotEmpty() && acc.name.isNotEmpty()) {
-                    val args = try { JSONObject(acc.args.toString()) } catch (_: Exception) { JSONObject() }
+                    val args = NonFiniteJson.parseOrNull(acc.args.toString()) ?: JSONObject()
                     val combined = combineResponsesAPIIds(acc.callId, itemId)
                     com.openminis.app.logging.AppLogger.warning(
                         "OpenAIProvider",

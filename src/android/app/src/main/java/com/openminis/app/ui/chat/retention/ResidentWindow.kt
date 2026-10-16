@@ -17,7 +17,29 @@ import com.openminis.app.data.model.LLMMessage
 internal object ResidentWindow {
     const val RESIDENT_BYTES = HotWindow.RESIDENT_BYTES
 
-    fun bytesOf(history: List<LLMMessage>): Long = history.sumOf { msg ->
+    fun bytesOf(history: List<LLMMessage>): Long {
+        var total = 0L
+        for (msg in history) total += messageBytes(msg)
+        return total
+    }
+
+    /**
+     * Per-message byte estimate, extracted from [bytesOf] so [byteCut] can
+     * size each message exactly once per pass instead of re-serializing the
+     * whole remaining suffix at every candidate cut.
+     *
+     * [AgentContentPart.ToolUse.input] is the only part whose size requires
+     * *serializing* (a `JSONObject` has no cached length), which is why the
+     * old `byteCut` — `bytesOf(subList(cut, size))` inside the candidate
+     * loop — re-stringified every tool input O(candidates) times. On a
+     * session with a multi-megabyte tool argument that stalled the main
+     * thread for seconds during `loadSession`'s history rebuild and ANR'd
+     * the app (input dispatching timed out). Sizing each message once and
+     * walking candidates over suffix sums is semantically identical —
+     * `suffix[cut] == bytesOf(history.subList(cut, history.size))` — and
+     * costs one serialization pass total.
+     */
+    fun messageBytes(msg: LLMMessage): Long =
         msg.content.length.toLong() * 2 +
             (msg.reasoningContent?.length?.toLong() ?: 0L) * 2 +
             msg.contentParts.sumOf { part ->
@@ -29,7 +51,6 @@ internal object ResidentWindow {
                     is AgentContentPart.ImageData -> part.data.size.toLong()
                 }
             }
-    }
 
     /**
      * How many leading entries to drop so the history is at most
@@ -54,11 +75,19 @@ internal object ResidentWindow {
      */
     fun byteCut(history: List<LLMMessage>, budget: Long = RESIDENT_BYTES): Int {
         if (history.size <= 1) return 0
-        if (bytesOf(history) <= budget) return 0
+        // One sizing pass (see [messageBytes]), then pure arithmetic per
+        // candidate: suffix[cut] is the byte cost of keeping everything
+        // from `cut` on, which is exactly what the old per-candidate
+        // `bytesOf(history.subList(cut, history.size))` computed.
+        val suffix = LongArray(history.size + 1)
+        for (i in history.size - 1 downTo 0) {
+            suffix[i] = suffix[i + 1] + messageBytes(history[i])
+        }
+        if (suffix[0] <= budget) return 0
         var cut = 0
         while (cut < history.size - 1) {
             if (isLegalBoundary(history, cut)) {
-                if (bytesOf(history.subList(cut, history.size)) <= budget) return cut
+                if (suffix[cut] <= budget) return cut
             }
             val next = firstLegalCut(history, cut + 1) ?: break
             cut = next

@@ -6,6 +6,7 @@ import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.data.repository.SkillRepository
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.text.BoundedText
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -14,7 +15,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
@@ -335,7 +335,7 @@ class EvolutionEngine(
     }
 
     private fun skillIdFromTool(toolName: String, argsJson: String): String? {
-        val obj = runCatching { JSONObject(argsJson) }.getOrNull() ?: return null
+        val obj = runCatching { NonFiniteJson.parse(argsJson) }.getOrNull() ?: return null
         val path = obj.optString("path", "")
         skillRepository.skillIdFromPath(path)?.let { return it }
         val command = obj.optString("command", "")

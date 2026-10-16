@@ -51,7 +51,7 @@ object StreamTrace {
                 "tool_input_delta" -> LLMStreamChunk.ToolInputDelta(obj.getString("id"), obj.getString("accumulated"))
                 "tool_call_complete" -> LLMStreamChunk.ToolCallComplete(
                     obj.getString("id"), obj.getString("name"),
-                    org.json.JSONObject(obj.optString("args", "{}")),
+                    NonFiniteJson.parse(obj.optString("args", "{}")),
                     obj.optString("thoughtSignature").takeIf { it.isNotBlank() },
                 )
                 "finished" -> LLMStreamChunk.Finished(obj.optString("stopReason").takeIf { it.isNotBlank() })

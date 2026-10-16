@@ -4,6 +4,7 @@ import android.content.Context
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.AgentToolParam
 import com.openminis.app.tools.FetchUrlGuard
+import com.openminis.app.provider.NonFiniteJson
 import com.openminis.app.tools.ToolExecutionResult
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -101,11 +102,7 @@ object OnlineApiTool {
         }
         val spec = plugin.tools.find { it.name == parsed.second }
             ?: return ToolExecutionResult("Unknown operation ${parsed.second} on ${plugin.name}", false)
-        val args = try {
-            JSONObject(argsJson)
-        } catch (_: Exception) {
-            JSONObject()
-        }
+        val args = NonFiniteJson.parseOrNull(argsJson) ?: JSONObject()
         args.remove("tool_title")
         return runCatching { request(plugin, spec, args, context) }
             .getOrElse { ToolExecutionResult("Cannot reach plugin server: ${it.message?.take(200)}", false) }
