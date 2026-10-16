@@ -167,7 +167,7 @@ def tool_sign_apk(args):
             "-keyalg", "RSA", "-keysize", "2048",
             "-validity", "10000",
             "-storepass", "minis123", "-keypass", "minis123",
-            "-dname", "CN=Taixu Debug, OU=Taixu, O=Taixu, C=CN",
+            "-dname", "CN=Minis Debug, OU=Minis, O=Minis, C=CN",
         ])
         if not ok:
             return False, "生成调试密钥库失败: {}".format(out)

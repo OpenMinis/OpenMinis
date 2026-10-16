@@ -52,8 +52,8 @@ object PluginCatalog {
             url = "https://mcp.deepwiki.com/mcp",
         ),
         // [T-mcp-builtin-servers] Five zero-dependency Python stdio servers
-        // bundled under /usr/local/lib/minis-mcp-servers/ (ported from
-        // taixu's BuiltinMcpPresets). They need only python3 in the guest —
+        // bundled under /usr/local/lib/minis-mcp-servers/ (ported from the
+        // built-in MCP presets). They need only python3 in the guest —
         // no pip, no npx, no network.
         McpPreset(
             id = "minis_git",

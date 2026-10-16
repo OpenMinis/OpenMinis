@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.R
 import com.openminis.app.agent.Level
+import com.openminis.app.data.ToolLimitPrefs
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.LLMMessage
@@ -276,7 +277,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // that emits text across several turns doesn't re-fire it and cut off
     // its own speech mid-sentence.
     var didStopStaleReadAloud = false
-    for (turn in 0 until ChatViewModel.MAX_AGENT_TURNS) {
+    // [T-main-session-turn-cap] The runaway guard is user-tunable
+    // (Settings → Tool Limits); 200 is only the shipped default. Read once
+    // per run so a mid-run settings change can't shift the range end under
+    // an in-flight iteration.
+    val maxTurns = ToolLimitPrefs.mainSessionMaxTurns()
+    for (turn in 0 until maxTurns) {
         currentCoroutineContext().ensureActive()
         // Sanitize history before each API call (mirrors iOS pre-API validation)
         sanitizeAgentHistory()
@@ -2386,7 +2392,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // Two ways to leave the for-loop above:
     //   (a) `break` from the "no tool calls" happy-path → loopExitedNormally=true,
     //       updateAssistantMessage(...false...) already cleared streaming state.
-    //   (b) `for (turn in 0 until MAX_AGENT_TURNS)` exhausted → flag stays false,
+    //   (b) `for (turn in 0 until maxTurns)` exhausted → flag stays false,
     //       which means the model kept asking for tool calls past the ceiling.
     //
     // (b) is the only case that needs the inline-error/Resume hand-holding;
@@ -2395,7 +2401,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     if (!loopExitedNormally) {
         AppLogger.warning(
             ChatViewModel.TAG_STREAM,
-            "runAgentLoop EXIT — hit MAX_AGENT_TURNS=${ChatViewModel.MAX_AGENT_TURNS}, finalizing as resumable",
+            "runAgentLoop EXIT — hit turn cap=$maxTurns, finalizing as resumable",
         )
         withContext(Dispatchers.Main) {
             finalizeAtTurnLimit(assistantId, accumulatedText, allToolBlocks, loopResumeEpoch)

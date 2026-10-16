@@ -41,10 +41,28 @@ class SubAgentKindTest {
         assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "implement the login flow"))
         assertEquals(10, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, null, 60, "look at Foo.kt"))
         assertEquals(99, SubAgentKind.clampTurns(SubAgentKind.EXPLORE, 99))
-        assertEquals(20, SubAgentKind.clampTurns(SubAgentKind.WORKER, null, 60, "do the slice"))
+        assertEquals(30, SubAgentKind.clampTurns(SubAgentKind.WORKER, null, 60, "do the slice"))
         assertEquals(30, SubAgentKind.clampTurns(SubAgentKind.WORKER, 99, 30))
         assertEquals(8, SubAgentKind.clampTurns(SubAgentKind.PLAN, 8, 30))
         assertEquals(10, SubAgentKind.clampTurns(SubAgentKind.WORKER, 0, 60, "find the crash"))
+    }
+
+    /**
+     * [T-subagent-complex-hints] Repair verbs are complex-tier hints. Before
+     * the keyword expansion a short "fix the login bug" prompt sized as plain
+     * medium and ran dry at 20 turns — the exact user complaint.
+     */
+    @Test
+    fun repairVerbsSizeComplex() {
+        assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "fix the login bug"))
+        assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "修复登录崩溃"))
+        assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "debug why the probe fails"))
+        assertEquals(40, SubAgentKind.inferTurns(SubAgentKind.WORKER, "排查探针失败原因"))
+        // Investigation verbs also lift explore out of the 10-turn recon band.
+        assertEquals(30, SubAgentKind.inferTurns(SubAgentKind.EXPLORE, "investigate the flaky test"))
+        assertEquals(30, SubAgentKind.inferTurns(SubAgentKind.EXPLORE, "排查轮次上限来源"))
+        // Plain recon stays cheap.
+        assertEquals(10, SubAgentKind.inferTurns(SubAgentKind.EXPLORE, "look at Foo.kt"))
     }
 
     @Test

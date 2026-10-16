@@ -19,7 +19,12 @@ object SubAgentKind {
     const val SPAWN_AGENT = "spawn_agent"
 
     const val SIMPLE_TURNS = 10
-    const val MEDIUM_TURNS = 20
+    // [T-subagent-medium-band] Medium was 20, which starved the most common
+    // real-world shape: a focused fix/debug task that is not "implement the
+    // login flow" long but needs read → edit → verify cycles, not 10 turns of
+    // pure recon. 30 keeps simple recon cheap while a default-sized worker
+    // can actually finish a bounded fix.
+    const val MEDIUM_TURNS = 30
     const val COMPLEX_TURNS = 40
     const val COMPLEX_MAX_TURNS = 60
     // No longer a hard global ceiling — the coordinator assigns the budget and
@@ -569,7 +574,7 @@ object SubAgentKind {
     }
 
     /**
-     * Simple recon ≈ 10 turns; medium ≈ 20; complex implement/refactor ≈ 40–60.
+     * Simple recon ≈ 10 turns; medium ≈ 30; complex implement/refactor ≈ 40–60.
      * Callers still clamp to the user-facing settings cap.
      */
     fun inferTurns(kind: String, prompt: String): Int {
@@ -621,9 +626,19 @@ object SubAgentKind {
 
     private fun containsComplexHint(prompt: String): Boolean {
         val p = prompt.lowercase()
+        // [T-subagent-complex-hints] The verb list decides whether a short
+        // prompt gets the complex tier. It used to miss the everyday repair
+        // verbs (fix/debug/investigate/…), so "修复登录 bug" sized as plain
+        // medium and ran dry at 20 turns. False positives are cheap — turns
+        // are a cap, not a target — so err toward the higher tier.
         val keys = listOf(
             "implement", "refactor", "migrate", "rewrite", "fix all",
+            "fix", "repair", "debug", "investigate", "troubleshoot",
+            "analyze", "optimise", "optimize", "integrate", "compile",
+            "build", "port", "review", "audit", "test",
             "实现", "重构", "迁移", "重写", "全量",
+            "修复", "修好", "排查", "调试", "诊断", "分析", "优化",
+            "集成", "编译", "构建", "移植", "审查", "测试",
         )
         return keys.any { p.contains(it) }
     }

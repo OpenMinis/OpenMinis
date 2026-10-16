@@ -186,7 +186,7 @@ object AgentTools {
                 ),
                 "max_turns" to AgentToolParam(
                     "integer",
-                    "Omit to auto-size: simple ≈ 10, complex 40–60, clamped to Settings → Multi-agent.",
+                    "Omit to auto-size: simple ≈ 10, medium ≈ 30, complex 40–60, clamped to Settings → Multi-agent.",
                 ),
                 "token_budget" to AgentToolParam(
                     "integer",
@@ -212,7 +212,7 @@ Prefer ONE spawn_agent call with a tasks[] array. You choose how many tasks the 
 
 kind: explore (read-only recon, shell inspection allowed), plan (read-only design), worker (can write), general-purpose (fallback when the slice does not fit the others). Parallel workers MUST set non-overlapping write_paths, or write_paths=none if they must not write.
 
-Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Omit max_turns to auto-size (simple ≈ 10, complex 40–60). token_budget is optional: omit it for no token cap. Dependent phases: wait, verify Expected result, then dispatch the next wave. A single-task call may still pass prompt at the top level.
+Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Omit max_turns to auto-size (simple ≈ 10, medium ≈ 30, complex 40–60). token_budget is optional: omit it for no token cap. Dependent phases: wait, verify Expected result, then dispatch the next wave. A single-task call may still pass prompt at the top level.
 
 background=true detaches the wave: this call returns a dispatch_id at once instead of blocking, the lanes keep running, and you collect them later with check_agent. Use it for long waves you do not need before your next step — then actually collect them, an uncollected wave is wasted work. Every lane is filed on the agent_plan board automatically, so progress survives an interruption.""",
             parameters = mapOf(
@@ -232,7 +232,7 @@ background=true detaches the wave: this call returns a dispatch_id at once inste
                     enumValues = listOf("explore", "plan", "worker", "general-purpose"),
                 ),
                 "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify, or none. Required for parallel workers."),
-                "max_turns" to AgentToolParam("integer", "Omit to auto-size: simple ≈ 10, complex 40–60."),
+                "max_turns" to AgentToolParam("integer", "Omit to auto-size: simple ≈ 10, medium ≈ 30, complex 40–60."),
                 "thinking_level" to AgentToolParam("string", "Default ULTRA; clamped to model ceiling.", enumValues = listOf("OFF", "LOW", "MEDIUM", "HIGH", "XHIGH", "MAX", "ULTRA")),
                 "background" to AgentToolParam(
                     "boolean",

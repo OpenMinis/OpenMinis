@@ -1873,4 +1873,5 @@
     <string name="ma_role_prompt_label">Prompt del rol (vigilar / ignorar / a quién preguntar / cuándo callar)</string>
     <string name="ma_role_tools_label">Lista de herramientas permitidas (separadas por comas, vacío = sin límite)</string>
     <string name="ma_role_delete">Eliminar este rol</string>
+    <string name="tool_limits_main_session">Máx. de turnos de la sesión principal</string>
 </resources>

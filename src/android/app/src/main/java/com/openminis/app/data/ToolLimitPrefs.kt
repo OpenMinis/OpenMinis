@@ -6,9 +6,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * User-facing caps for shell timeout, file_read size, and sub-agent turns.
- * SharedPreferences; no Room bump. Unprimed reads return defaults so unit
- * tests and early tool calls stay safe.
+ * User-facing caps for shell timeout, file_read size, sub-agent turns, and
+ * the main-session agent-loop turn ceiling. SharedPreferences; no Room bump.
+ * Unprimed reads return defaults so unit tests and early tool calls stay
+ * safe.
  */
 object ToolLimitPrefs {
     const val PREFS = "minis_tool_limits"
@@ -32,6 +33,16 @@ object ToolLimitPrefs {
     const val MAX_SUBAGENT_MAX_TURNS = 200
     const val TURNS_STEP = 10
 
+    // [T-main-session-turn-cap] The main agent loop's runaway guard. It was a
+    // hardcoded 200 with no user escape hatch — long autonomous runs hit it
+    // with no way to raise it, while the sub-agent cap sat one screen away.
+    // Floor 50 keeps the guard meaningful (multi-step tool loops need room);
+    // ceiling 1000 still bounds a runaway model burning tokens forever.
+    const val DEFAULT_MAIN_MAX_TURNS = 200
+    const val MIN_MAIN_MAX_TURNS = 50
+    const val MAX_MAIN_MAX_TURNS = 1_000
+    const val MAIN_TURNS_STEP = 10
+
     fun idleShellCount(): Int = (prefs?.getInt("idleShellCount", 2) ?: 2).coerceIn(0, 8)
     fun idleShellMinutes(): Int = (prefs?.getInt("idleShellMinutes", 3) ?: 3).coerceIn(1, 30)
     fun setIdleShellCount(value: Int) = put("idleShellCount", value.coerceIn(0, 8))
@@ -53,6 +64,7 @@ object ToolLimitPrefs {
     private const val KEY_CHARS = "fileReadMaxChars"
     private const val KEY_LINES = "fileReadMaxLines"
     private const val KEY_TURNS = "subagentMaxTurns"
+    private const val KEY_MAIN_TURNS = "mainSessionMaxTurns"
 
     @Volatile private var prefs: android.content.SharedPreferences? = null
 
@@ -68,16 +80,19 @@ object ToolLimitPrefs {
     fun fileReadMaxChars(): Int = clampChars(prefs?.getInt(KEY_CHARS, DEFAULT_FILE_READ_MAX_CHARS) ?: DEFAULT_FILE_READ_MAX_CHARS)
     fun fileReadMaxLines(): Int = clampLines(prefs?.getInt(KEY_LINES, DEFAULT_FILE_READ_MAX_LINES) ?: DEFAULT_FILE_READ_MAX_LINES)
     fun subagentMaxTurns(): Int = clampTurns(prefs?.getInt(KEY_TURNS, DEFAULT_SUBAGENT_MAX_TURNS) ?: DEFAULT_SUBAGENT_MAX_TURNS)
+    fun mainSessionMaxTurns(): Int = clampMainTurns(prefs?.getInt(KEY_MAIN_TURNS, DEFAULT_MAIN_MAX_TURNS) ?: DEFAULT_MAIN_MAX_TURNS)
 
     fun setShellTimeoutSec(value: Int) = put(KEY_SHELL, clampShell(value))
     fun setFileReadMaxChars(value: Int) = put(KEY_CHARS, clampChars(value))
     fun setFileReadMaxLines(value: Int) = put(KEY_LINES, clampLines(value))
     fun setSubagentMaxTurns(value: Int) = put(KEY_TURNS, clampTurns(value))
+    fun setMainSessionMaxTurns(value: Int) = put(KEY_MAIN_TURNS, clampMainTurns(value))
 
     fun clampShell(value: Int): Int = value.coerceIn(MIN_SHELL_TIMEOUT_SEC, MAX_SHELL_TIMEOUT_SEC)
     fun clampChars(value: Int): Int = value.coerceIn(MIN_FILE_READ_MAX_CHARS, MAX_FILE_READ_MAX_CHARS)
     fun clampLines(value: Int): Int = if (value <= 0) 0 else value.coerceIn(FILE_LINES_STEP, MAX_FILE_READ_MAX_LINES)
     fun clampTurns(value: Int): Int = value.coerceIn(MIN_SUBAGENT_MAX_TURNS, MAX_SUBAGENT_MAX_TURNS)
+    fun clampMainTurns(value: Int): Int = value.coerceIn(MIN_MAIN_MAX_TURNS, MAX_MAIN_MAX_TURNS)
 
     fun resolveShellTimeoutSec(requested: Int?): Int {
         val cap = shellTimeoutSec()

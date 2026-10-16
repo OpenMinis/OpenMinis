@@ -1871,4 +1871,5 @@
     <string name="ma_role_prompt_label">Rol komut istemi (izle / yok say / kime sor / ne zaman sessiz kal)</string>
     <string name="ma_role_tools_label">Araç izin listesi (virgülle ayrılmış, boş = sınırsız)</string>
     <string name="ma_role_delete">Bu rolü sil</string>
+    <string name="tool_limits_main_session">Ana oturum azami tur sayısı</string>
 </resources>

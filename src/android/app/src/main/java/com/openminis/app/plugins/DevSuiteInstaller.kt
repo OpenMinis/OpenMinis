@@ -66,10 +66,36 @@ object DevSuiteInstaller {
     suspend fun probe(component: DevComponent): Boolean {
         val result = ExecutionCoordinator.execute(
             sessionId = SESSION_ID,
-            command = component.checkCommand,
+            command = probeCommand(component),
             timeout = 30_000L,
         )
         return result.exitCode == 0
+    }
+
+    // [T-devsuite-qemu-probe] Matches each `command -v <name>` clause so the
+    // probe can be expanded to the package's ACTUAL artifact names. Only
+    // command-v probes expand; test -x / file-glob probes run verbatim.
+    private val PROBE_COMMAND = Regex("""command -v ([A-Za-z0-9._+-]+)""")
+
+    /**
+     * [T-devsuite-qemu-probe] Expand a probe's `command -v` clauses to the
+     * package's actual artifact candidates: a package may ship the bare tool
+     * name (older Debian qemu-user-static) or the `-static` one (Ubuntu 24.04
+     * arm64 ships ONLY /usr/bin/qemu-x86_64-static, no bare qemu-x86_64), so
+     * one hardcoded name reported a finished install as missing. Names come
+     * from [DevSuiteCatalog.probeBinaryCandidates] (literal catalog names,
+     * quote-free by construction) and are interpolated into single-quoted
+     * strings. Anything without a command-v clause passes through verbatim.
+     * Pure so the expansion is unit-testable without a shell.
+     */
+    internal fun probeCommand(component: DevComponent): String {
+        val raw = component.checkCommand
+        val match = PROBE_COMMAND.find(raw) ?: return raw
+        val head = raw.substring(0, match.range.first)
+        val tail = raw.substring(match.range.last + 1)
+        val names = DevSuiteCatalog.probeBinaryCandidates(match.groupValues[1])
+            .joinToString(" || ") { "command -v '$it'" }
+        return head + names + tail
     }
 
     /**
@@ -314,8 +340,8 @@ object DevSuiteInstaller {
     /**
      * Uninstall: purge paths + links inside the guest, then clear the marker.
      * apt packages are left installed (dpkg state is shared; removing them
-     * could break other components) — same trade-off taixu makes for
-     * apt-backed components.
+     * could break other components), same trade-off as the setup scripts
+     * make for apt-backed components.
      *
      * [T-devsuite-uninstall] Reached from the "开发环境套件" card (installed
      * components used to have no way back out of the app).

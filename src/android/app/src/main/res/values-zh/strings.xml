@@ -425,6 +425,7 @@
     <string name="tool_limits_file_lines">file_read 行数上限</string>
     <string name="tool_limits_file_lines_unlimited">不限制</string>
     <string name="tool_limits_subagent">子代理最大轮次</string>
+    <string name="tool_limits_main_session">主会话轮次上限</string>
     <string name="tool_limits_decrease">减少</string>
     <string name="tool_limits_increase">增加</string>
     <string name="gate_approval_title">工具需要批准</string>

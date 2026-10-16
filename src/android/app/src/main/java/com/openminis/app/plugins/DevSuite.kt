@@ -3,7 +3,7 @@ package com.openminis.app.plugins
 /**
  * [T-dev-suite] Declarative dev-environment bundles for the guest sandbox.
  *
- * Modeled after taixu's PluginBundle/PluginComponent (DevEnvironmentSuite.kt):
+ * Declarative recipe model (PluginBundle/PluginComponent):
  * the APK ships only the *recipe* — apt package names, a setup script name,
  * a readiness probe — never the payload. Heavy ingredients (SDK toolchains,
  * Flutter, llama.cpp) download on demand inside the sandbox, which is what
@@ -199,7 +199,7 @@ object DevSuiteCatalog {
         DevBundle(
             id = "go-suite",
             name = "Go 开发套件",
-            summary = "golang-go 工具链（OpenMinis 独有，taixu 无此套件）",
+            summary = "golang-go 工具链（OpenMinis 独有套件）",
             components = listOf(
                 DevComponent(
                     id = "go-toolchain",
@@ -215,7 +215,7 @@ object DevSuiteCatalog {
     )
 
     /**
-     * Standalone online tools (taixu tools.json style): not part of a bundle,
+     * Standalone online tools (tools.json style): not part of a bundle,
      * installed one-shot from the "智能体生态" area of the same screen.
      */
     val onlineTools: List<DevComponent> = listOf(
@@ -224,7 +224,11 @@ object DevSuiteCatalog {
             name = "QEMU x86_64 兼容层",
             description = "qemu-user-static：在 ARM64 沙箱里显式运行 x86_64 Linux 二进制（PRoot 无 binfmt，需显式调用 qemu-x86_64 <bin>）",
             aptPackages = listOf("qemu-user-static"),
-            checkCommand = "command -v qemu-x86_64",
+            // [T-devsuite-qemu-probe] Ubuntu 24.04 arm64 的 qemu-user-static
+            // 只装 *-static 命名（/usr/bin/qemu-x86_64-static），不产生裸
+            // qemu-x86_64；Debian 老版本则相反。探测必须接受两种命名，而不是
+            // 把包名钉死在某一种——probeBinaryCandidates 就是这个判定的纯函数。
+            checkCommand = "command -v qemu-x86_64 || command -v qemu-x86_64-static",
             estimatedBytes = 60_000_000L,
         ),
         DevComponent(
@@ -242,6 +246,27 @@ object DevSuiteCatalog {
 
     fun bundleById(id: String): DevBundle? = bundles.firstOrNull { it.id == id }
     fun onlineToolById(id: String): DevComponent? = onlineTools.firstOrNull { it.id == id }
+
+    /**
+     * [T-devsuite-qemu-probe] Pure binary-name candidate decision: a package
+     * may provide the bare tool name (older Debian qemu-user-static) or a
+     * `-static`-suffixed one (Ubuntu 24.04 arm64 ships ONLY
+     * /usr/bin/qemu-x86_64-static, no bare qemu-x86_64). Probing a single
+     * hardcoded name mismatched the package's actual artifact and failed a
+     * finished install; the accepted set must be derived from the tool name
+     * instead. [name] is the canonical invocation name (e.g. "qemu-x86_64");
+     * returns every name whose presence should count as ready, first entry
+     * first. Pure so the probe contract is unit-testable without a shell.
+     */
+    internal fun probeBinaryCandidates(name: String): List<String> {
+        val base = name.substringBeforeLast(".")
+        return if (base.endsWith("-static")) {
+            val bare = base.removeSuffix("-static")
+            listOf(base, bare)
+        } else {
+            listOf(base, "$base-static")
+        }
+    }
 
     /**
      * [T-devsuite-tool-link] What `minis://devsuite/install/<id>` points at:

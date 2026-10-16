@@ -106,7 +106,7 @@ object DevSuiteStore {
     /**
      * Crash recovery: a component stuck in INSTALLING means the app process
      * died mid-install. Mark it FAILED so the UI offers a retry instead of
-     * pretending an install is still running (taixu's recover() equivalent,
+     * pretending an install is still running (the recover() equivalent,
      * scoped to the marker rather than a full snapshot).
      */
     fun recoverInterrupted(context: Context): List<String> {

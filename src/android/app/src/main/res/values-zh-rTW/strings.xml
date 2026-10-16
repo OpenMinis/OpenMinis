@@ -1962,4 +1962,5 @@
     <string name="ma_role_prompt_label">角色提示詞 (盯著/不管/該找誰/閉嘴)</string>
     <string name="ma_role_tools_label">工具白名單 (逗號分隔, 空=不限)</string>
     <string name="ma_role_delete">刪除此角色</string>
+    <string name="tool_limits_main_session">主會話輪次上限</string>
 </resources>

@@ -1870,4 +1870,5 @@
     <string name="ma_role_prompt_label">역할 프롬프트(주시/무시/누구에게 물을지/언제 침묵할지)</string>
     <string name="ma_role_tools_label">도구 허용 목록(쉼표 구분, 비어 있으면 무제한)</string>
     <string name="ma_role_delete">이 역할 삭제</string>
+    <string name="tool_limits_main_session">기본 세션 최대 턴 수</string>
 </resources>

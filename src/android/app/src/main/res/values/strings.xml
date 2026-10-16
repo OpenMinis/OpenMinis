@@ -467,6 +467,7 @@
     <string name="tool_limits_file_lines">file_read line cap</string>
     <string name="tool_limits_file_lines_unlimited">Unlimited</string>
     <string name="tool_limits_subagent">Sub-agent max turns</string>
+    <string name="tool_limits_main_session">Main-session max turns</string>
     <string name="tool_limits_decrease">Decrease</string>
     <string name="tool_limits_increase">Increase</string>
     <string name="gate_approval_title">Tool needs approval</string>

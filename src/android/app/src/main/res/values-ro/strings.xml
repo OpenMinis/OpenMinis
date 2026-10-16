@@ -1875,4 +1875,5 @@
     <string name="ma_role_prompt_label">Promptul rolului (urmărește / ignoră / pe cine întrebi / când taci)</string>
     <string name="ma_role_tools_label">Lista de instrumente permise (separate prin virgulă, goală = fără limită)</string>
     <string name="ma_role_delete">Șterge acest rol</string>
+    <string name="tool_limits_main_session">Max. de tururi ale sesiunii principale</string>
 </resources>

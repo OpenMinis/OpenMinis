@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Extension
 import com.openminis.app.data.BPETokenizer
+import com.openminis.app.data.ToolLimitPrefs
 import com.openminis.app.ui.chat.retention.HotWindow
 import com.openminis.app.ui.chat.retention.ResidentWindow
 import com.openminis.app.data.ContextPolicy
@@ -725,9 +726,13 @@ class ChatViewModel(
          * finalizes as resumable — see runAgentLoop's tail and
          * [finalizeAtTurnLimit] — so the user gets an inline explanation +
          * Resume button rather than a silently stuck "thinking" indicator.
-         * Mirrors iOS AIChatViewModel.maxAgentTurns.
+         * [T-main-session-turn-cap] This const is the shipped DEFAULT; the
+         * live ceiling is user-tunable in Settings → Tool Limits
+         * (ToolLimitPrefs.mainSessionMaxTurns) and runAgentLoop reads it
+         * once per run. Kept as a const so tests and log lines can pin the
+         * default.
          */
-        internal const val MAX_AGENT_TURNS = 200
+        internal const val MAX_AGENT_TURNS = ToolLimitPrefs.DEFAULT_MAIN_MAX_TURNS
         internal const val MAX_GOAL_CONTINUATIONS = 16
 
         /**
@@ -5196,7 +5201,7 @@ class ChatViewModel(
             _streamingById.value = _streamingById.value - assistantId
         }
         setInlineError(
-            "Stopped after $MAX_AGENT_TURNS agent turns to prevent runaway " +
+            "Stopped after ${ToolLimitPrefs.mainSessionMaxTurns()} agent turns to prevent runaway " +
             "tool use. The model kept calling tools without finishing — tap " +
             "Resume to continue from here, or send a new message to start over.",
         )

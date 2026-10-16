@@ -17,6 +17,9 @@ fun ToolLimitsSettingsScreen(onBack: () -> Unit) {
     val chars = remember(revision) { ToolLimitPrefs.fileReadMaxChars() }
     val lines = remember(revision) { ToolLimitPrefs.fileReadMaxLines() }
     val turns = remember(revision) { ToolLimitPrefs.subagentMaxTurns() }
+    // [T-main-session-turn-cap] The main agent loop's runaway guard, next to
+    // the sub-agent cap it used to be confused with.
+    val mainTurns = remember(revision) { ToolLimitPrefs.mainSessionMaxTurns() }
     var advanced by remember { mutableStateOf(false) }
     val idleCount = remember(revision) { ToolLimitPrefs.idleShellCount() }
     val idleMinutes = remember(revision) { ToolLimitPrefs.idleShellMinutes() }
@@ -99,6 +102,16 @@ fun ToolLimitsSettingsScreen(onBack: () -> Unit) {
                 max = ToolLimitPrefs.MAX_SUBAGENT_MAX_TURNS,
                 step = ToolLimitPrefs.TURNS_STEP,
                 onChange = { ToolLimitPrefs.setSubagentMaxTurns(it) },
+                showDivider = true,
+            )
+            LimitStepper(
+                title = stringResource(R.string.tool_limits_main_session),
+                valueLabel = mainTurns.toString(),
+                value = mainTurns,
+                min = ToolLimitPrefs.MIN_MAIN_MAX_TURNS,
+                max = ToolLimitPrefs.MAX_MAIN_MAX_TURNS,
+                step = ToolLimitPrefs.MAIN_TURNS_STEP,
+                onChange = { ToolLimitPrefs.setMainSessionMaxTurns(it) },
                 showDivider = false,
             )
         }
