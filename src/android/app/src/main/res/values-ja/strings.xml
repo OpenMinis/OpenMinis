@@ -1870,8 +1870,6 @@
     <string name="ma_role_tools_suffix"> ・ツール: %1$s</string>
     <string name="ma_add_role">+ ロールを追加</string>
     <string name="ma_add_role_sub">カスタムの名前/説明/プロンプト/ツール許可リスト。同名の内蔵ロールは上書きされます</string>
-    <string name="ma_subagent_types">サブエージェントのタイプ</string>
-    <string name="ma_subagent_types_footer">dispatch_agents はタイプ名で派閥します。内蔵の探索者/審査員/コーダー/リサーチャーはそれぞれ独自のツール許可リストを持ちます。</string>
     <string name="ma_team_lead_suffix"> ・チームリーダー</string>
     <string name="ma_thinking_depth">今回の思考深度</string>
     <string name="ma_role_dialog_title_builtin">内蔵ロール（カスタムコピーとして保存）</string>

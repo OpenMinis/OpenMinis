@@ -41,7 +41,6 @@ import com.openminis.app.provider.effectiveMaxThinkingLevel
 @Composable
 fun MultiAgentSettingsScreen(
     onBack: () -> Unit,
-    onOpenPermissions: () -> Unit = {},
     onOpenToolLimits: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -327,36 +326,24 @@ fun MultiAgentSettingsScreen(
             }
         }
 
+        // [T-multiagent-page-cleanup] The "工具权限模式" row used to live
+        // here: it displayed the gate's permission mode but jumped to
+        // OffloadPermissionScreen (Shizuku/offload), which never edits that
+        // mode — the real edit point is the in-chat approval UI
+        // (setSessionPermissionMode). A jump whose destination cannot change
+        // the displayed value violates this section's own footer contract
+        // ("只跳到拥有该设置的那一页"), so the row is gone. The read-only
+        // "子代理类型" mirror section is gone too: dispatch_agents' tool
+        // description already enumerates the types for the model, and the
+        // store has no save() caller — a static catalog is documentation, not
+        // a setting.
         SettingsSection(footer = stringResource(R.string.settings_shared_controls_footer)) {
             SettingsRow(
                 title = stringResource(R.string.settings_open_tool_limits),
                 subtitle = stringResource(R.string.settings_open_tool_limits_sub),
                 onClick = onOpenToolLimits,
-            )
-            SettingsRow(
-                title = stringResource(R.string.settings_open_permissions),
-                subtitle = stringResource(
-                    R.string.settings_open_permissions_sub,
-                    com.openminis.app.security.SecurityGateHolder.gate.getPermissionMode().labelZh(),
-                ),
-                onClick = onOpenPermissions,
                 showDivider = false,
             )
-        }
-
-        SettingsSection(
-            header = stringResource(R.string.ma_subagent_types),
-            footer = stringResource(R.string.ma_subagent_types_footer),
-        ) {
-            val types = com.openminis.app.tools.SubAgentTypeStore.load(context)
-            types.forEachIndexed { index, type ->
-                SettingsRow(
-                    title = type.name,
-                    subtitle = type.description.take(80) + " · " + type.toolNames.take(6).joinToString(),
-                    showChevron = false,
-                    showDivider = index < types.lastIndex,
-                )
-            }
         }
     }
 }

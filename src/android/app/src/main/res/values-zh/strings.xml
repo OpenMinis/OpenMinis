@@ -2204,8 +2204,6 @@
     <string name="settings_web_search_subtitle">Tavily、博查、Exa、Brave、Jina、智谱、Bing、SearXNG 或自定义</string>
     <string name="settings_open_tool_limits">工具上限</string>
     <string name="settings_open_tool_limits_sub">Shell 超时、文件读取和子代理轮数只在上限页修改</string>
-    <string name="settings_open_permissions">工具权限模式</string>
-    <string name="settings_open_permissions_sub">只在权限页修改。当前：%1$s</string>
     <string name="settings_shared_controls_footer">这里只跳到拥有该设置的那一页，不是第二套开关。</string>
     <string name="character_extras_tap_remove">点按删除</string>
     <string name="character_extras_confirm_remove">删除</string>
@@ -2519,8 +2517,6 @@
     <string name="ma_role_tools_suffix"> · 工具: %1$s</string>
     <string name="ma_add_role">+ 新增角色</string>
     <string name="ma_add_role_sub">自定义名字/描述/提示词/工具白名单, 同名覆盖内置</string>
-    <string name="ma_subagent_types">子代理类型</string>
-    <string name="ma_subagent_types_footer">dispatch_agents 按类型名派发。内置探索者 / 审查员 / 编码员 / 研究员，各自有独立工具白名单。</string>
     <string name="ma_team_lead_suffix"> · 组长</string>
     <string name="ma_thinking_depth">本次思考深度</string>
     <string name="ma_role_dialog_title_builtin">内置角色 (保存为自定义副本)</string>

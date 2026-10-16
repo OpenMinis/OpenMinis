@@ -1962,8 +1962,6 @@
     <string name="ma_role_tools_suffix"> · 工具: %1$s</string>
     <string name="ma_add_role">+ 新增角色</string>
     <string name="ma_add_role_sub">自訂名字/描述/提示詞/工具白名單, 同名覆蓋內建</string>
-    <string name="ma_subagent_types">子代理類型</string>
-    <string name="ma_subagent_types_footer">dispatch_agents 按類型名派發。內建探索者 / 審查員 / 編碼員 / 研究員，各自有獨立工具白名單。</string>
     <string name="ma_team_lead_suffix"> · 組長</string>
     <string name="ma_thinking_depth">本次思考深度</string>
     <string name="ma_role_dialog_title_builtin">內建角色 (儲存為自訂副本)</string>

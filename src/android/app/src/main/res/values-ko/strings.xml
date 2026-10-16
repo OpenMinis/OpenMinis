@@ -1870,8 +1870,6 @@
     <string name="ma_role_tools_suffix"> · 도구: %1$s</string>
     <string name="ma_add_role">+ 역할 추가</string>
     <string name="ma_add_role_sub">사용자 지정 이름/설명/프롬프트/도구 허용 목록, 같은 이름의 내장 역할은 덮어씁니다</string>
-    <string name="ma_subagent_types">하위 에이전트 유형</string>
-    <string name="ma_subagent_types_footer">dispatch_agents는 유형 이름으로 파견합니다. 내장 탐색자/검토자/코더/리서처는 각자 자체 도구 허용 목록을 가집니다.</string>
     <string name="ma_team_lead_suffix"> · 팀장</string>
     <string name="ma_thinking_depth">이번 실행의 사고 깊이</string>
     <string name="ma_role_dialog_title_builtin">내장 역할(사용자 지정 사본으로 저장)</string>

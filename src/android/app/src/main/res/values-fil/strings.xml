@@ -1871,8 +1871,6 @@
     <string name="ma_role_tools_suffix"> · mga tool: %1$s</string>
     <string name="ma_add_role">+ Magdagdag ng role</string>
     <string name="ma_add_role_sub">Custom na pangalan/paglalarawan/prompt/listahan ng tool; na-o-override ang built-in na role na may parehong pangalan</string>
-    <string name="ma_subagent_types">Mga uri ng sub-agent</string>
-    <string name="ma_subagent_types_footer">nagde-dispatch ang dispatch_agents ayon sa pangalan ng uri. Ang built-in na Explorer / Reviewer / Coder / Researcher ay may kanya-kanyang listahan ng tool.</string>
     <string name="ma_team_lead_suffix"> · pinuno ng koponan</string>
     <string name="ma_thinking_depth">Lalim ng pag-iisip para sa run na ito</string>
     <string name="ma_role_dialog_title_builtin">Built-in na role (ma-save bilang custom na kopya)</string>

@@ -12,14 +12,6 @@ enum class PermissionMode {
     PLAN,
     ;
 
-    fun labelZh(): String = when (this) {
-        ASK -> "审批"
-        ALLOW_ALL -> "YOYO"
-        READ_ONLY -> "只读"
-        PLAN -> "计划"
-        DENY_ALL -> "全部拒绝"
-    }
-
     /** Session-facing pair. Sub-agent fences still use READ_ONLY / PLAN / DENY_ALL. */
     fun isYoyo(): Boolean = this == ALLOW_ALL
 

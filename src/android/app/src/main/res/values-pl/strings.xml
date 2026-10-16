@@ -1879,8 +1879,6 @@
     <string name="ma_role_tools_suffix"> · narzędzia: %1$s</string>
     <string name="ma_add_role">+ Dodaj rolę</string>
     <string name="ma_add_role_sub">Własna nazwa/opis/prompt/lista dozwolonych narzędzi; wbudowana rola o tej samej nazwie zostanie nadpisana</string>
-    <string name="ma_subagent_types">Typy podagentów</string>
-    <string name="ma_subagent_types_footer">dispatch_agents przydziela według nazwy typu. Wbudowane role Explorer / Reviewer / Coder / Researcher mają każda własną listę dozwolonych narzędzi.</string>
     <string name="ma_team_lead_suffix"> · lider zespołu</string>
     <string name="ma_thinking_depth">Głębokość myślenia dla tego przebiegu</string>
     <string name="ma_role_dialog_title_builtin">Rola wbudowana (zapisywana jako własna kopia)</string>

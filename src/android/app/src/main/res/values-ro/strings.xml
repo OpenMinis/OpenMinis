@@ -1875,8 +1875,6 @@
     <string name="ma_role_tools_suffix"> · instrumente: %1$s</string>
     <string name="ma_add_role">+ Adaugă rol</string>
     <string name="ma_add_role_sub">Nume/descriere/prompt/listă de instrumente personalizate; un rol integrat cu același nume este suprascris</string>
-    <string name="ma_subagent_types">Tipuri de sub-agent</string>
-    <string name="ma_subagent_types_footer">dispatch_agents distribuie după numele tipului. Cele integrate Explorer / Reviewer / Coder / Researcher au fiecare propria listă de instrumente.</string>
     <string name="ma_team_lead_suffix"> · lider de echipă</string>
     <string name="ma_thinking_depth">Adâncimea de gândire pentru această rulare</string>
     <string name="ma_role_dialog_title_builtin">Rol integrat (salvat ca copie personalizată)</string>
