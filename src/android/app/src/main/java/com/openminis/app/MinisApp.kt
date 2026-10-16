@@ -503,18 +503,37 @@ class MinisApp : Application(), ImageLoaderFactory {
         appContainer.mcpRepository = MCPRepository(this)
         appContainer.memoryRepository = MemoryRepository(java.io.File(filesDir, "minis-global/memory"))
 
-        // [T-perf-async-db-init] Database + ChatRepository + EvolutionEngine
-        // init moved OFF the main thread. Room.databaseBuilder().build() is
-        // cheap, but the FIRST DAO call triggers SQLiteDatabase.open() +
-        // migrations on the calling thread. That was 1-5s ANR risk. Now
-        // MinisAppAsyncInit.startDatabaseInit does the heavy lift on
-        // Dispatchers.IO, and callers await it before touching the DAO (see
-        // MainActivity + SessionWorkspace.awaitWarmup()).
-        MinisAppAsyncInit.startDatabaseInit(
-            this, appContainer, memoryRepository, providerRepository, skillRepository
+        // [T-perf-async-db-init-v2] Sync construction + async first-open.
+        //
+        // History: PR43 (T-perf-async-db-init) moved the instance + repository
+        // CONSTRUCTION to Dispatchers.IO. But onCreate has synchronous,
+        // non-suspending readers of chatRepository below (ConfigRegistry.init,
+        // NativeOffloadServer, BackgroundTaskNotifier) and onCreate is not a
+        // coroutine — they can never await a deferred. They read a null
+        // container field and every launch died with
+        // IllegalStateException("Required value was null.") before the first
+        // frame. Room.databaseBuilder().build() is cheap and ChatRepository's
+        // constructor only stores DAO references (the SQLiteDatabase open
+        // happens on the FIRST DAO call, not at build time), so construction
+        // is synchronous again. Only the expensive first open (open + pending
+        // migrations) is pulled off the main thread by the IO warmup below.
+        appContainer.database = AppDatabase.getInstance(this)
+        appContainer.chatRepository = ChatRepository(
+            database.chatDao(), database.goalDao(), filesDir, database.messageVersionDao(), database,
         )
-        // EvolutionEngine moved to MinisAppAsyncInit (needs chatRepository, which is async now)
-        // WebAppShortcutRepository now assigned in MinisAppAsyncInit after DB ready
+        appContainer.evolutionEngine = runCatching {
+            EvolutionEngine(
+                context = this,
+                memoryRepository = memoryRepository,
+                evolutionDir = java.io.File(filesDir, "minis-global/evolution"),
+                chatRepository = chatRepository,
+                providerRepository = providerRepository,
+                skillRepository = skillRepository,
+            )
+        }.onFailure { Log.e("MinisApp", "evolution init failed", it) }.getOrNull()
+        EvolutionHooks.engine = appContainer.evolutionEngine
+        appContainer.webAppShortcutRepository = WebAppShortcutRepository(database.webAppShortcutDao())
+        MinisAppAsyncInit.startWarmup(appContainer)
 
         // T-android-safemode-lateinit-crash: every repository the UI layer
         // reads is now assigned, so MainActivity may safely compose. Set

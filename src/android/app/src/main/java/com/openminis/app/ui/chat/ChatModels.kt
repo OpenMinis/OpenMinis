@@ -225,3 +225,15 @@ data class AssistantBlock(
 ) {
     val isText: Boolean get() = kind == "text"
 }
+
+/**
+ * [P-process-card] Duration a thinking block ran for, measured from its
+ * recorded start to the moment reasoning ended (first text or tool call).
+ * Returns 0 when the start was never recorded (restored blocks) so the
+ * caller keeps whatever duration the block already carries.
+ */
+internal fun settleThinkingDurationMs(block: AssistantBlock): Long {
+    val start = block.startTimeMs
+    if (start <= 0L) return block.durationMs
+    return (System.currentTimeMillis() - start).coerceAtLeast(block.durationMs)
+}

@@ -2430,18 +2430,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
 }
 
 /**
- * [P-process-card] Duration a thinking block ran for, measured from its
- * recorded start to the moment reasoning ended (first text or tool call).
- * Returns 0 when the start was never recorded (restored blocks) so the
- * caller keeps whatever duration the block already carries.
- */
-internal fun settleThinkingDurationMs(block: AssistantBlock): Long {
-    val start = block.startTimeMs
-    if (start <= 0L) return block.durationMs
-    return (System.currentTimeMillis() - start).coerceAtLeast(block.durationMs)
-}
-
-/**
  * [T-android-model-switch-next-request] Persist a group-fallback model
  * switch onto the VM so the next sendMessage() starts from it. Extracted
  * from the fallback branch of runAgentLoop so the loop can gate the

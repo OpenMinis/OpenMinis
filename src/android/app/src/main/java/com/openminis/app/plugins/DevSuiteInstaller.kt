@@ -78,25 +78,20 @@ object DevSuiteInstaller {
     private val PROBE_COMMAND = Regex("""command -v ([A-Za-z0-9._+-]+)""")
 
     /**
-     * [T-devsuite-qemu-probe] Expand a probe's `command -v` clauses to the
-     * package's actual artifact candidates: a package may ship the bare tool
-     * name (older Debian qemu-user-static) or the `-static` one (Ubuntu 24.04
-     * arm64 ships ONLY /usr/bin/qemu-x86_64-static, no bare qemu-x86_64), so
-     * one hardcoded name reported a finished install as missing. Names come
-     * from [DevSuiteCatalog.probeBinaryCandidates] (literal catalog names,
-     * quote-free by construction) and are interpolated into single-quoted
-     * strings. Anything without a command-v clause passes through verbatim.
+     * [T-devsuite-qemu-probe] Quote every `command -v` clause so tool names
+     * with special characters can't break the guest shell, preserving the
+     * operators and every non-command-v probe (test -x / file globs)
+     * verbatim. The bare-vs-`-static` naming duality is owned by the
+     * catalog's checkCommand itself (it lists both names where a package
+     * ships either, e.g. qemu-x86_64 vs qemu-x86_64-static) — this pass
+     * must NOT inject candidate alternates, or a compound probe grows
+     * duplicate clauses and the operators between them are guessed wrong.
      * Pure so the expansion is unit-testable without a shell.
      */
-    internal fun probeCommand(component: DevComponent): String {
-        val raw = component.checkCommand
-        val match = PROBE_COMMAND.find(raw) ?: return raw
-        val head = raw.substring(0, match.range.first)
-        val tail = raw.substring(match.range.last + 1)
-        val names = DevSuiteCatalog.probeBinaryCandidates(match.groupValues[1])
-            .joinToString(" || ") { "command -v '$it'" }
-        return head + names + tail
-    }
+    internal fun probeCommand(component: DevComponent): String =
+        PROBE_COMMAND.replace(component.checkCommand) { m ->
+            "command -v '${m.groupValues[1]}'"
+        }
 
     /**
      * Install one component (apt → postInstall → probe). Returns true when

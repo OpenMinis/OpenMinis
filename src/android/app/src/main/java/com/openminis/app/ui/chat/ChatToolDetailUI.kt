@@ -1193,7 +1193,7 @@ internal fun extractShellCommand(args: org.json.JSONObject, block: AssistantBloc
 
 /**
  * Tolerant partial-JSON string extractor — UI-side mirror of
- * ChatViewModel.extractPartialStringValue. Used so detail-sheet renderers
+ * StreamChunkJsonHelper.extractPartialStringValue. Used so detail-sheet renderers
  * (shell command, file path, write content) can show live content while the
  * model is still streaming the tool input JSON.
  */
