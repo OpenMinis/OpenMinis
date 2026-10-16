@@ -1157,7 +1157,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // [T-first-event-watchdog] The operator cancels itself; nothing to clean here.
                 }
             } catch (e: Exception) {
-                if (e is CancellationException && e.cause == null) throw e  // real job cancellation
+                if (e is CancellationException && e.cause == null) { CancellationDiagnostic.log(provider.model.displayName, activeSessionId, e, _isStreaming.value); throw e }  // [T-cancel-diag] record timeline, real job cancellation
                 val actual = unwrapFlowException(e)
                 val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                 val is5xx = actual is com.openminis.app.data.model.LLMError.ProviderError &&

@@ -6,6 +6,7 @@ import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.ProviderCredential
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ProviderType
+import com.openminis.app.network.ConnectionWarmup
 import com.openminis.app.provider.anthropic.AnthropicProvider
 import com.openminis.app.provider.gemini.GeminiProvider
 import com.openminis.app.provider.openai.OpenAIProvider
@@ -290,6 +291,13 @@ object ProviderFactory {
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
         SamplingIdentity.bind(provider, instance.id)
+        // [T-llm-connection-warmup] This constructor path only runs on a
+        // provider-cache miss (cold start, provider/model switch) — exactly
+        // the moments where the FIRST request would otherwise pay the full
+        // DNS+TLS handshake inline. basePath is the effective API base
+        // (null on the official direct path); ConnectionWarmup resolves the
+        // host and fires a debounced HEAD into the shared pool.
+        ConnectionWarmup.warmAsync(basePath, instance.providerType)
         return provider
     }
 }
