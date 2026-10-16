@@ -951,7 +951,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         //     can pick up fields as they appear.
                         //   - leave content empty during streaming (real output arrives
                         //     after ToolCallComplete).
-                        val partialTitle = extractPartialStringValue("tool_title", chunk.accumulated)
+                        // [T-perf-async-db-init] extractPartialStringValue is CPU-bound
+                        // string scanning (scans from scratch each delta). Run it on
+                        // Dispatchers.Default to prevent blocking the IO dispatcher.
+                        val partialTitle = StreamChunkJsonHelper.extractPartialStringValue("tool_title", chunk.accumulated)
                         val liveTitle = when {
                             !partialTitle.isNullOrEmpty() -> partialTitle
                             prev.toolTitle.isNotEmpty() && prev.toolTitle != prev.toolName -> prev.toolTitle
@@ -991,8 +994,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // dispatch loop refuses it; a same-id call with different
                     // name/args is the documented gateway parallel case and
                     // still dispatches under its renamed id.
+                    // [T-perf-async-db-init] args.toString() can be multi-KB
+                    // linear copy — run on Dispatchers.Default.
+                    val argsString = StreamChunkJsonHelper.serializeArgs(chunk.args)
                     val isReplayedComplete = toolReplayGuard.registerAndCheckReplay(
-                        chunk.id, chunk.name, chunk.args.toString(),
+                        chunk.id, chunk.name, argsString,
                     )
                     // [T-dedupe-toolcallid] Rewrite duplicate id so the
                     // persisted tool_calls list, the block lookup, and
@@ -1003,7 +1009,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         replayRenamedIds += toolCompleteId
                         AppLogger.warning(ChatViewModel.TAG_STREAM, "[ToolReplay] duplicate ToolCallComplete raw=${chunk.id} renamed=$toolCompleteId name=${chunk.name} — will refuse at dispatch, no re-execution")
                     }
-                    android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolCallComplete id=$toolCompleteId name=${chunk.name} args=${chunk.args.toString().take(300)}")
+                    android.util.Log.d("ToolChain[VM]", "[turn=$turn] ToolCallComplete id=$toolCompleteId name=${chunk.name} args=${argsString.take(300)}")
                     toolCalls.add(Triple(toolCompleteId, chunk.name, chunk.args))
                     // [T-android-gemini3-thoughtsig / #179] Stash the Gemini
                     // 3.x thought signature keyed by the (deduped) tool call id.

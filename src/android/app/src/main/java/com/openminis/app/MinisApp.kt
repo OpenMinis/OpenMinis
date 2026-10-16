@@ -491,24 +491,6 @@ class MinisApp : Application(), ImageLoaderFactory {
                     "The database file is left completely untouched — upgrading restores everything."
             )
         }
-        appContainer.database = AppDatabase.getInstance(this)
-        appContainer.chatRepository = ChatRepository(
-            database.chatDao(), database.goalDao(), filesDir, database.messageVersionDao(), database,
-        )
-        // [T-android-startup-splash-hang] The workspace-owner warmup moved OFF
-        // this thread. It used to be a `runBlocking(Dispatchers.IO)` right here,
-        // which meant the first Room open, any pending schema migrations and a
-        // full hydration of the sessions table all ran on the main thread inside
-        // Application.onCreate — before `subsystemsInitialized` was set and
-        // before MainActivity existed. The system splash (a white
-        // `windowBackground`) stayed up for as long as the user's history took
-        // to load, and past ~5s that is an ANR. Cost scaled with session count,
-        // so only heavy users hit it.
-        //
-        // The ordering guarantee it was bought for ("must finish before the
-        // first file tool or shell") is now SessionWorkspace.awaitWarmup(),
-        // which the launch resolver awaits before mounting any destination. The
-        // single remaining call site is the async launch below.
         appContainer.providerRepository = ProviderRepository(this)
         appContainer.envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses
@@ -520,18 +502,19 @@ class MinisApp : Application(), ImageLoaderFactory {
         appContainer.skillRepository = SkillRepository(this)
         appContainer.mcpRepository = MCPRepository(this)
         appContainer.memoryRepository = MemoryRepository(java.io.File(filesDir, "minis-global/memory"))
-        appContainer.evolutionEngine = runCatching {
-            EvolutionEngine(
-                context = this,
-                memoryRepository = memoryRepository,
-                evolutionDir = java.io.File(filesDir, "minis-global/evolution"),
-                chatRepository = chatRepository,
-                providerRepository = providerRepository,
-                skillRepository = skillRepository,
-            )
-        }.onFailure { Log.e("MinisApp", "evolution init failed", it) }.getOrNull()
-        EvolutionHooks.engine = appContainer.evolutionEngine
-        appContainer.webAppShortcutRepository = WebAppShortcutRepository(database.webAppShortcutDao())
+
+        // [T-perf-async-db-init] Database + ChatRepository + EvolutionEngine
+        // init moved OFF the main thread. Room.databaseBuilder().build() is
+        // cheap, but the FIRST DAO call triggers SQLiteDatabase.open() +
+        // migrations on the calling thread. That was 1-5s ANR risk. Now
+        // MinisAppAsyncInit.startDatabaseInit does the heavy lift on
+        // Dispatchers.IO, and callers await it before touching the DAO (see
+        // MainActivity + SessionWorkspace.awaitWarmup()).
+        MinisAppAsyncInit.startDatabaseInit(
+            this, appContainer, memoryRepository, providerRepository, skillRepository
+        )
+        // EvolutionEngine moved to MinisAppAsyncInit (needs chatRepository, which is async now)
+        // WebAppShortcutRepository now assigned in MinisAppAsyncInit after DB ready
 
         // T-android-safemode-lateinit-crash: every repository the UI layer
         // reads is now assigned, so MainActivity may safely compose. Set
@@ -542,9 +525,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // late, non-UI subsystem from permanently locking the user out
         // of an app whose UI dependencies are in fact ready.
         subsystemsInitialized = true
-            appCoroutineScopes.io.launch {
-                runCatching { chatRepository.dao.backfillBlankPermissionModesToAsk() }
-            }
+            // backfillBlankPermissionModesToAsk moved to MinisAppAsyncInit post-init hook
             try {
                 Log.i("WebViewEngine", com.openminis.app.browser.WebViewEngine.snapshot(this).summary)
             } catch (t: Throwable) {
