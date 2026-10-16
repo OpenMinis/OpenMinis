@@ -269,6 +269,26 @@ object DevSuiteCatalog {
     }
 
     /**
+     * [T-devsuite-uncheck-converge] Whether the assembly dialog's checkbox
+     * can actually change this component's outcome. The checkbox is the
+     * TARGET state: checking installs, unchecking removes. It is only
+     * honest to offer the toggle when the assembly can deliver both
+     * directions —
+     *  * required components are locked on (the bundle needs them);
+     *  * an installed component is only removable when its recipe declares
+     *    purge targets ([DevComponent.purgePaths]/[purgeLinks]). apt-only
+     *    components (rg, fd, qemu) share packages with the whole rootfs,
+     *    so "uncheck = remove" cannot be delivered and the checkbox stays
+     *    locked — the same rule that gates the dialog's 移除 button.
+     * Before this rule the checkbox was `!isRequired || checked`, which is
+     * always true: required rows bounced back on tap and unchecking an
+     * installed optional component was a visual no-op (the assembly never
+     * uninstalled, and the next dialog open pre-checked it again).
+     */
+    internal fun checkboxEditable(isRequired: Boolean, installed: Boolean, purgeable: Boolean): Boolean =
+        !isRequired && (!installed || purgeable)
+
+    /**
      * [T-devsuite-tool-link] What `minis://devsuite/install/<id>` points at:
      * a bundle OR a standalone online tool. Resolving only bundles made an
      * online-tool link (the prompt advertises `/install/llama-cpp`) a silent

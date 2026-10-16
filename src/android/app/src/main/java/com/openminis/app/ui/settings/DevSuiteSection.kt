@@ -307,7 +307,17 @@ private fun DevComponentRow(
         Checkbox(
             checked = checked,
             onCheckedChange = onChecked,
-            enabled = component.isRequired.not() || checked,
+            // [T-devsuite-uncheck-converge] Toggleable only when the assembly
+            // can deliver BOTH directions of the checkbox: checking installs,
+            // unchecking removes. Required rows are locked on; installed
+            // apt-only rows (no purge targets) are locked because the shared
+            // rootfs packages cannot be removed by an uncheck — same rule
+            // that gates the 移除 button.
+            enabled = com.openminis.app.plugins.DevSuiteCatalog.checkboxEditable(
+                isRequired = component.isRequired,
+                installed = status == DevSuiteStore.Status.INSTALLED,
+                purgeable = component.purgePaths.isNotEmpty() || component.purgeLinks.isNotEmpty(),
+            ),
         )
         Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
             Text(

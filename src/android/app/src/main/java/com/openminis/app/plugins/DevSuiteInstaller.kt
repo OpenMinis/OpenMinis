@@ -259,6 +259,19 @@ object DevSuiteInstaller {
             // put a payload in it — create it here, at the start of the flow.
             run("mkdir -p $OFFLINE_DIR $CACHE_DIR 2>/dev/null || true", "dev-suite") {}
 
+            // [T-devsuite-uncheck-converge] The checkbox is the target state:
+            // an installed component the user unchecked must LEAVE the
+            // assembly, not merely be skipped. Without this, unchecking was a
+            // visual no-op — the install loop never ran for it, and the next
+            // dialog open pre-checked it again ("已安装插件保持勾选无法取消
+            // 勾选"). Probe-gated: only actually-installed targets are touched,
+            // and removals run BEFORE the disk gate because they can only free
+            // space. A failed removal marks that component FAILED but must not
+            // block installing the newly selected ones.
+            for (c in convergeUninstallTargets(bundle, includeIds)) {
+                if (probe(c)) uninstall(context, c)
+            }
+
             // Probe once up front: components that are already ready cost
             // nothing and must not count against the disk gate.
             val readyFromProbe = ordered.mapNotNullTo(mutableSetOf<String>()) {
@@ -312,6 +325,15 @@ object DevSuiteInstaller {
     /** Display name for a component id (bundles first, then online tools). */
     private fun nameOf(id: String): String =
         DevSuiteCatalog.allComponents().firstOrNull { it.id == id }?.name ?: id
+
+    /**
+     * [T-devsuite-uncheck-converge] Components this assembly must REMOVE so
+     * the dialog's checkbox target state converges: in the bundle, not
+     * required, and not selected. Pure so the selection contract is
+     * unit-testable; the caller probe-gates each target at runtime.
+     */
+    internal fun convergeUninstallTargets(bundle: DevBundle, includeIds: Set<String>): List<DevComponent> =
+        bundle.components.filter { !it.isRequired && it.id !in includeIds }
 
     /** Topological order over dependsOn within the selection. */
     internal fun orderComponents(bundle: DevBundle, includeIds: Set<String>): List<DevComponent> {
