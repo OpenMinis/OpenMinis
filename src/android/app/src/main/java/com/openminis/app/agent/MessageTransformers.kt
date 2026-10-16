@@ -113,153 +113,17 @@ object MessageTransformerChain {
     private object ReasoningTagStripper : MessageTransformer {
         override val id = "reasoning-tag-strip"
 
-        private val names = com.openminis.app.text.ReasoningTagVariants.ALTERNATION
-
-        private val namedBlocks = Regex(
-            """(?s)<\s*($names)\s*>(.*?)</\s*\1\s*>""",
-            RegexOption.IGNORE_CASE,
-        )
-        private val specialNames = com.openminis.app.text.ReasoningTagVariants.SPECIAL_NAMES.joinToString("|")
-        private val specialTokenBlocks = Regex(
-            """(?s)<\|($specialNames)\|>(.*?)<\|/\1\|>""",
-            RegexOption.IGNORE_CASE,
-        )
-
-        // [T-universal-think-tag-history] Unterminated blocks: a reasoning tag
-        // opened but never closed (provider cut off mid-turn, tool-loop splice,
-        // or a model that simply never emits the close). Strip from the LAST
-        // unclosed opener to end-of-text so the tail reasoning never renders in
-        // the bubble. This mirrors the stream parser's "unterminated = thinking"
-        // rule, applied to persisted/replayed text the parser can't reach.
-        // `.*$` (not `[^<]*$`): the negative lookahead already proved no close
-        // tag follows, so greedy-to-end is safe — `[^<]` bailed on the first
-        // `<` (a comparison, a code snippet) and leaked the whole reasoning
-        // tail back into the body.
-        private val unterminatedOpen = Regex(
-            """(?s)<\s*($names)\s*>(?!.*?</\s*\1\s*>).*$""",
-            RegexOption.IGNORE_CASE,
-        )
-        private val unterminatedSpecial = Regex(
-            """(?s)<\|($specialNames)\|>(?!.*<\|/\1\|>).*$""",
-            RegexOption.IGNORE_CASE,
-        )
-
-        override fun transform(text: String): String =
-            transformProtectingCode(text) { chunk ->
-                var out = specialTokenBlocks.replace(namedBlocks.replace(chunk, ""), "")
-                // Second pass only needed when a lone opener survived — cheap check.
-                if (out.contains('<')) {
-                    out = unterminatedSpecial.replace(unterminatedOpen.replace(out, ""), "")
-                }
-                out
-            }
-
-        /** Marker-wrapped index used to mask inline-code spans during matching.
- *  Private-use control chars (U+E000/U+E001) never appear in ordinary
- *  model output, and are written here as escapes, never raw. */
-        private const val MASK_OPEN = '\uE000'
-        private const val MASK_CLOSE = '\uE001'
-
-        private val inlineCode = Regex("`+[^`]*`+")
-        private val maskMarker = Regex("${MASK_OPEN}\\d+${MASK_CLOSE}")
-
-        /**
-         * Splits [text] into fenced / prose chunks (indices into the original,
-         * so untouched content round-trips byte-identical), masks inline-code
-         * spans inside prose, runs [transform] per prose chunk, and restores
-         * the masked spans afterwards.
-         */
-        private fun transformProtectingCode(text: String, transform: (String) -> String): String {
-            val sb = StringBuilder(text.length)
-            var from = 0
-            for ((range, isCode) in fenceSegments(text)) {
-                if (from < range.first) sb.append(text, from, range.first)
-                val chunk = text.substring(range)
-                sb.append(if (isCode) chunk else transformMasked(chunk, transform))
-                from = range.last + 1
-            }
-            if (from < text.length) sb.append(text, from, text.length)
-            return sb.toString()
-        }
-
-        private fun transformMasked(chunk: String, transform: (String) -> String): String {
-            if (!chunk.contains('`')) return transform(chunk)
-            val spans = mutableListOf<String>()
-            val masked = inlineCode.replace(chunk) { m ->
-                spans.add(m.value)
-                "$MASK_OPEN${spans.size - 1}$MASK_CLOSE"
-            }
-            val transformed = transform(masked)
-            if (spans.isEmpty()) return transformed
-            return maskMarker.replace(transformed) { m ->
-                spans.getOrNull(m.value.substring(1, m.value.length - 1).toInt()) ?: m.value
-            }
-        }
-
-        /** Contiguous (range, isCode) segments of [text]. */
-        private fun fenceSegments(text: String): List<Pair<IntRange, Boolean>> {
-            val out = mutableListOf<Pair<IntRange, Boolean>>()
-            var inFence = false
-            var fenceMark = ""
-            var segStart = 0
-            var searchFrom = 0
-            while (true) {
-                val nl = text.indexOf('\n', searchFrom)
-                val lineEnd = if (nl >= 0) nl else text.length
-                val line = text.substring(searchFrom, lineEnd)
-                val trimmed = line.trimStart()
-                if (!inFence && (trimmed.startsWith("```") || trimmed.startsWith("~~~"))) {
-                    // [T-think-tag-fence-open] Flush the prose that precedes the
-                    // fence and move segStart onto the fence line. Without this
-                    // only the CLOSE branch advanced segStart, so the segment
-                    // emitted at close ran from the PREVIOUS segment's start —
-                    // i.e. everything the model wrote before this fence was
-                    // classified isCode=true, and transformProtectingCode appends
-                    // isCode chunks VERBATIM (no transform). A `<thinking>` block
-                    // or a raw `<|...|>` special token sitting in prose before a
-                    // code block therefore survived into the replayed assistant
-                    // history untouched — the exact amplification the
-                    // T-think-tag-code-fence fix was for. The fence line itself
-                    // stays part of the code segment, as before.
-                    if (searchFrom > segStart) out += segStart until searchFrom to false
-                    segStart = searchFrom
-                    inFence = true
-                    fenceMark = trimmed.take(3)
-                } else if (inFence && trimmed.trimEnd().isNotEmpty() &&
-                    trimmed.trimEnd().all { it == fenceMark[0] } &&
-                    trimmed.trimEnd().length >= fenceMark.length
-                ) {
-                    // A closing fence is a line of nothing but the fence
-                    // character, at least as long as the opener (CommonMark):
-                    // ```` ```` and ``` followed by trailing spaces all close a
-                    // ``` block. Requiring an exact 3-character match left those
-                    // unclosed, so the rest of the reply was treated as one code
-                    // segment and its tags were never stripped.
-                    // The close fence is the last line with no trailing
-                    // newline: nl < 0 makes lineEnd == text.length, and
-                    // `until lineEnd + 1` would set range.last = text.length,
-                    // so the downstream text.substring(range) asks for
-                    // end = length + 1 → StringIndexOutOfBoundsException
-                    // (the reported "begin 0, end 376, length 375"; an
-                    // assistant turn whose closing ``` sits on the final
-                    // line without a trailing newline — DeepSeek/QwQ do
-                    // this). Coerce the upper bound to the text end: with a
-                    // real newline we keep it (lineEnd + 1 == nl + 1), without
-                    // one there is nothing past lineEnd to include anyway.
-                    out += segStart until (lineEnd + 1).coerceAtMost(text.length) to true
-                    segStart = lineEnd + 1
-                    inFence = false
-                }
-                if (nl < 0) break
-                searchFrom = nl + 1
-            }
-            if (inFence && segStart < text.length) {
-                out += segStart until text.length to true
-                segStart = text.length
-            }
-            if (segStart < text.length) out += segStart until text.length to false
-            return out
-        }
+        // [T-regex-bomb] The actual stripping moved to the linear scanner
+        // [ReasoningTagStrip]: the regex implementation this delegate used to
+        // carry created a fresh ICU RegexMatcher (native heap, finalizer
+        // freed) on every replace call of every assistant message of every
+        // request assembly, and its unterminated-block lookahead patterns
+        // backtracked deep enough to blow the 8 MB thread stack on
+        // pathological turns. See ReasoningTagStrip's KDoc for the
+        // tombstone forensics; behavior is pinned unchanged by
+        // MessageTransformerChainTest / ReasoningTagStripperCoverageTest /
+        // FenceAwareTagStripperTest / ReasoningTagStripTest.
+        override fun transform(text: String): String = ReasoningTagStrip.strip(text)
     }
 
     /**
