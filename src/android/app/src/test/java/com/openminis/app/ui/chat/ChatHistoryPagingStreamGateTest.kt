@@ -21,9 +21,15 @@ import org.junit.Test
  * suspension with no suspension between that read and the publish — so
  * main-thread serialization closes the lost-update window.
  *
- * If these assertions fail, someone reintroduced a streaming gate (or
- * dropped the single-flight / ledger serialization the gate wrongly stood
- * in for). Fix the code, not the test.
+ * If these assertions fail, someone reintroduced a streaming gate (or dropped
+ * the single-flight / ledger serialization the gate wrongly stood in for).
+ * Fix the code, not the test.
+ *
+ * Single-flight authority lives in loadOlderPage's CAS; the
+ * loadOlderMessages wrapper may claim or merely read the flag — both
+ * collapse concurrent taps. a4706d0f legitimately traded the outer
+ * claim-then-release dance for a plain flag read; the guard now pins that
+ * contract (either form, never a hard refusal) instead of one spelling.
  */
 class ChatHistoryPagingStreamGateTest {
 
@@ -58,10 +64,19 @@ class ChatHistoryPagingStreamGateTest {
                 "the pill is visible mid-run and a silent no-op reads as a dead button",
             "_isStreaming" in body,
         )
+        // Single-flight is a contract, not one fixed spelling. The
+        // authoritative CAS lives in loadOlderPage (pinned by the test
+        // below); this wrapper may either claim that CAS directly
+        // (claimOlderLoad) or cheaply read the in-flight flag
+        // (loadingOlderFlag.get) and let the inner claim collapse the race
+        // — both forms collapse concurrent taps instead of refusing them.
+        // What must never come back is an unconditional early return or a
+        // gate keyed on anything other than the in-flight flag.
         assertTrue(
-            "single-flight claim must stay: concurrent taps are collapsed, " +
-                "not refused outright",
-            "claimOlderLoad()" in body,
+            "concurrent taps must collapse on the in-flight flag — claim " +
+                "it (claimOlderLoad) or read it (loadingOlderFlag.get), " +
+                "never a hard refusal",
+            "claimOlderLoad()" in body || "loadingOlderFlag.get()" in body,
         )
     }
 

@@ -52,6 +52,79 @@ jobs:
       - name: Architecture policy ratchet
         run: python3 scripts/ci/check_architecture_policy.py
 
+  # [T-main-unit-test-gate] pr-check.yml only fires on pull_request, so a
+  # direct push to main never ran the JVM suite — a4706d0f landed with a
+  # source-drift guard failure and every later PR inherited a red merge
+  # ref. Same compile+test steps as pr-check.yml. Runs in PARALLEL with the
+  # build on purpose: a red commit gets its red X immediately, while the
+  # APK artifact still builds and isolates the failure; gating the long
+  # build behind the suite would only serialize wall-clock without
+  # changing what gets published.
+  unit-tests:
+    name: Unit tests (main push gate)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Restore Android SDK cache
+        uses: actions/cache@v4
+        with:
+          # Same key family as pr-check.yml's SDK cache (no cmake/ndk — the
+          # JVM suite needs neither), so both workflows share one cache.
+          path: |
+            /usr/local/lib/android/sdk/cmdline-tools
+            /usr/local/lib/android/sdk/platforms
+            /usr/local/lib/android/sdk/build-tools
+            /usr/local/lib/android/sdk/licenses
+          key: prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-cmdline-${{ env.ANDROID_CMDLINE_TOOLS }}
+          restore-keys: |
+            prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-bt-${{ env.ANDROID_BUILD_TOOLS }}-
+            prcheck-android-sdk-${{ runner.os }}-platform-${{ env.ANDROID_PLATFORM }}-
+
+      - name: Install Android SDK
+        run: |
+          set -e
+          mkdir -p /usr/local/lib/android/sdk/cmdline-tools
+          # Unprivileged on purpose: the cached dirs must stay owned by the
+          # runner user or actions/cache cannot extract into them on a hit.
+          if [ ! -x /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager ]; then
+            curl -fsSL -o /tmp/cmdline-tools.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-${{ env.ANDROID_CMDLINE_TOOLS }}_latest.zip"
+            unzip -q /tmp/cmdline-tools.zip -d /tmp/sdk
+            mv /tmp/sdk/cmdline-tools /usr/local/lib/android/sdk/cmdline-tools/latest
+          fi
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null || true
+          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
+
+      - name: Compile and unit-test (release variant)
+        working-directory: src/android
+        env:
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          # Phone-tuned gradle.properties leaks into CI: 2g Kotlin daemon
+          # OOMs on cold compile, workers.max=1 neuters --parallel. Same
+          # tuning as pr-check.yml.
+          sed -i 's|org.gradle.jvmargs=.*|org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8|' gradle.properties
+          sed -i 's|kotlin.daemon.jvmargs=.*|kotlin.daemon.jvmargs=-Xmx4g|' gradle.properties
+          sed -i 's|org.gradle.workers.max=.*|org.gradle.workers.max=4|' gradle.properties
+          chmod +x gradlew
+          ./gradlew :app:compileReleaseKotlin :app:testReleaseUnitTest --parallel --stacktrace
+
   build:
     name: Build Minis Ultra APK
     needs: [native-deps, sandbox-assets, arch-gate]
