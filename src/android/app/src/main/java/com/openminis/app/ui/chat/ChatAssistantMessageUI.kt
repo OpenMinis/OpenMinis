@@ -72,7 +72,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -857,51 +856,12 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     block.content
                 }
             }
-            // [T-android-thinking-inner-scroll] Pause auto-follow once the user
-            // scrolls away from the bottom; resume it when they return. iOS
-            // pulls the user back unconditionally — but that fights every
-            // touch on Compose's smaller pause-threshold scroller, so we
-            // honor the user's drag the way the outer chat list does.
-            // [T-android-scroll-policy] Renamed from `userScrolledAway` — same
-            // name, unrelated concept: this is the auto-follow switch of the
-            // thinking block's OWN inner scroll container, not the timeline's
-            // reading state (which lives in ChatScrollPolicy).
-            var innerAutoFollowPaused by remember(block.id) { mutableStateOf(false) }
-            LaunchedEffect(scrollState, block.id) {
-                snapshotFlow {
-                    Triple(
-                        scrollState.value,
-                        scrollState.maxValue,
-                        scrollState.isScrollInProgress,
-                    )
-                }.collect { (v, max, dragging) ->
-                    // A nonzero gap from the bottom while the user is actively
-                    // dragging counts as "they took control". We don't flip
-                    // back until the gap closes — gives them room to scroll
-                    // up briefly without ping-ponging.
-                    val gap = (max - v).coerceAtLeast(0)
-                    when {
-                        dragging && gap > 4 -> innerAutoFollowPaused = true
-                        gap <= 4 -> innerAutoFollowPaused = false
-                    }
-                }
-            }
-            // Auto-follow: on every content growth, scroll to the new bottom.
-            // `snapshotFlow { block.content.length }` is recomposition-cheap
-            // and only ticks when the block's text actually grew.
-            LaunchedEffect(scrollState, block.id, isStreaming) {
-                if (!isStreaming) return@LaunchedEffect
-                snapshotFlow { block.content.length }
-                    .collect {
-                        if (innerAutoFollowPaused) return@collect
-                        // scrollTo (not animateScrollTo) — animating fights
-                        // back-to-back token ticks; iOS uses a 0.15s linear
-                        // animation, but Compose's animateScrollTo cancels
-                        // any in-flight scroll, so streaming bursts get
-                        // jankier than a direct snap.
-                        scrollState.scrollTo(scrollState.maxValue)
-                    }
-            }
+            ThinkingAutoFollow(
+                blockId = block.id,
+                contentVersionValue = charCount,
+                isStreaming = isStreaming,
+                scrollState = scrollState,
+            )
             Column(
                 modifier = Modifier
                     .padding(top = 6.dp)
