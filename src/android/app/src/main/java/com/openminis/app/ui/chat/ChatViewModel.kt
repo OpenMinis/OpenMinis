@@ -1012,29 +1012,31 @@ class ChatViewModel(
      * point). See [loadOlderPage] for the single-page contract.
      */
     fun loadOlderMessages() {
-        if (_isStreaming.value) return
         if (!claimOlderLoad()) return
         loadingOlderFlag.set(false)
         viewModelScope.launch { loadOlderPage() }
     }
 
     /**
-     * Prepend one turn-aligned page. The newer side stays on screen.
-     * A live turn sits on that edge, so a database fetch waits until it ends.
-     * Returns true when rows were added to the painted window.
+     * Prepend one turn-aligned page. The newer side stays on screen — a live
+     * turn sits on THAT edge and never touches the old edge this page
+     * prepends to, so paging stays available mid-stream. Returns true when
+     * rows were added to the painted window.
      *
      * [T-android-timeline-ledger] The whole fetch+splice holds the ledger's
      * mutation mutex so a concurrent tail-attach drain cannot interleave its
      * own splice into the same `_messages` publish. Single-flight: a call
      * while a page is already loading is a no-op (the caller re-resolves on
-     * its next tap).
+     * its next tap). Stream-side publishes take no mutex but run on the main
+     * dispatcher; this splice re-reads `_messages` only after its last
+     * suspension with no suspension before the publish — main-thread
+     * serialization closes the lost-update window.
      *
      * [T-android-upbtn-no-scan] The up-button awaits this when its walk
      * reaches the window's oldest edge with history still above — one page
      * per tap keeps each click bounded.
      */
     internal suspend fun loadOlderPage(): Boolean {
-        if (_isStreaming.value) return false
         if (!claimOlderLoad()) return false
         _isLoadingHistory.value = true
         try {
@@ -3908,7 +3910,6 @@ class ChatViewModel(
     }
 
 
-
     /**
      * Mark every non-system UI message that falls before [marker]'s boundary
      * as [ChatMessage.isCompactedHistory]. Mirrors iOS Phase 2.5 boundary
@@ -4038,7 +4039,6 @@ class ChatViewModel(
             false
         }
     }
-
 
     fun selectGroup(groupId: String) {
         // [T-android-model-switch-next-request] User expressed a model
