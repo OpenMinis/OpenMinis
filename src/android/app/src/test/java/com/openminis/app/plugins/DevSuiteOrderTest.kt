@@ -12,7 +12,14 @@ import org.junit.Test
 class DevSuiteOrderTest {
 
     private fun bundle(vararg components: DevComponent) =
-        DevBundle(id = "test", name = "test", summary = "", components = components.toList())
+        DevBundle(
+            id = "test",
+            // Order test never resolves resources; real keys keep the stub
+            // constructing the same shape as production call sites.
+            nameRes = com.openminis.app.R.string.dev_suite_online_header,
+            summaryRes = com.openminis.app.R.string.dev_suite_online_footer,
+            components = components.toList(),
+        )
 
     private fun comp(id: String, vararg deps: String, required: Boolean = false) =
         DevComponent(

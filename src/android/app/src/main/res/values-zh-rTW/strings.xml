@@ -191,6 +191,18 @@
     <string name="settings_memory_subtitle">跨工作階段的持續性知識</string>
     <string name="settings_mcp">MCP 整合</string>
     <string name="settings_mcp_subtitle">連接 Model Context Protocol 伺服器</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; 行動全端開發套件</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK 工具鏈 · NDK r29 · 可選 Flutter/逆向/Rust</string>
+    <string name="dev_suite_code_search_name">程式碼檢索與終端效率套件</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat 四件套</string>
+    <string name="dev_suite_python_name">Python &amp; AI 開發者套件</string>
+    <string name="dev_suite_python_summary">Python 3 執行階段 · pip/venv · AI 科學運算編譯依賴</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web 全端套件</string>
+    <string name="dev_suite_nodejs_summary">Node.js 執行階段 · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go 開發套件</string>
+    <string name="dev_suite_go_summary">golang-go 工具鏈（OpenMinis 獨有套件）</string>
+
     <string name="mcp_status_running">執行中（連接埠 %1$d），已處理 %2$d 個請求</string>
     <string name="mcp_status_running_shifted">執行中（實際連接埠 %1$d · 設定 %2$d 被佔用已順延），已處理 %3$d 個請求</string>
     <string name="mcp_status_error">錯誤：%1$s</string>
@@ -1870,7 +1882,7 @@
     <string name="dev_suite_section_header">開發環境套件</string>
     <string name="dev_suite_section_footer">配方按需在沙箱內安裝工具鏈——安裝包不再內建重型載荷，首次裝配需要網路。 網路受限可執行 minis-devsuite-offline-list 產生離線匯入清單。</string>
     <string name="dev_suite_offline_hint_title">可離線匯入</string>
-    <string name="dev_suite_offline_hint_body">下載失敗？在終端機執行 minis-devsuite-offline-list 取得檔案清單，在其他裝置下載後放入 /var/minis/shared/offline/，再重新裝配——本機檔案優先，無需網路。</string>
+    <string name="dev_suite_offline_hint_body">下载失败？1) 在终端运行 minis-devsuite-offline-list 获取文件清单。2) 在 设置 → 环境变量 里设 MINIS_ALLOW_OFFLINE=1（/var/minis/shared 里的本地文件默认不被信任）。3) 在另一台设备下载文件，放进 /var/minis/shared/offline/（宿主同路径）。文件必须匹配 CHECKSUM；无发布校验和时用 MINIS_DEVSUITE_SHA256="文件名=sha256" 钉一个。4) 回到这里点装配 — 安装器优先使用本地文件，无需网络。</string>
     <string name="dev_suite_online_header">線上工具</string>
     <string name="dev_suite_online_footer">獨立工具，點擊即裝。</string>
     <string name="dev_suite_progress">%1$d/%2$d 已就緒</string>

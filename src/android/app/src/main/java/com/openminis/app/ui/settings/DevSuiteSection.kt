@@ -114,9 +114,9 @@ fun DevSuiteSection(
                 states[it.id]?.status == DevSuiteStore.Status.FAILED
             }
             SettingsRow(
-                title = bundle.name,
+                title = stringResource(bundle.nameRes),
                 subtitle = buildString {
-                    append(bundle.summary)
+                    append(stringResource(bundle.summaryRes))
                     append(" · ")
                     append(stringResource(R.string.dev_suite_progress, readyCount, bundle.components.size))
                     if (active != null) {
@@ -167,7 +167,12 @@ fun DevSuiteSection(
                         st == DevSuiteStore.Status.INSTALLED -> confirmRemove = tool
                         !busy -> DevSuiteInstaller.assembleBundleAsync(
                             context,
-                            DevBundle(id = "online", name = tool.name, summary = "", components = listOf(tool)),
+                            DevBundle(
+                                id = "online",
+                                nameRes = R.string.dev_suite_online_header,
+                                summaryRes = R.string.dev_suite_online_footer,
+                                components = listOf(tool),
+                            ),
                             includeIds = setOf(tool.id),
                         )
                     }
@@ -236,11 +241,11 @@ private fun DevSuiteBundleDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(bundle.name) },
+        title = { Text(stringResource(bundle.nameRes)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    bundle.summary,
+                    stringResource(bundle.summaryRes),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">セッションをまたいで保持される永続的な知識</string>
     <string name="settings_mcp">MCP 連携</string>
     <string name="settings_mcp_subtitle">Model Context Protocol サーバーを接続</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; モバイルフルスタック</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDKツールチェーン · NDK r29 · オプションのFlutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">コード検索とターミナル効率</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat カルテット</string>
+    <string name="dev_suite_python_name">Python &amp; AI開発者スイート</string>
+    <string name="dev_suite_python_summary">Python 3ランタイム · pip/venv · AI科学計算ビルド依存関係</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Webフルスタック</string>
+    <string name="dev_suite_nodejs_summary">Node.jsランタイム · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go開発スイート</string>
+    <string name="dev_suite_go_summary">golang-goツールチェーン（OpenMinis専用スイート）</string>
+
     <string name="mcp_status_running">実行中（ポート %1$d）、%2$d 件のリクエストを処理</string>
     <string name="mcp_status_running_shifted">実行中（実際のポート %1$d · 設定ポート %2$d が使用中のため繰り下げ）、%3$d 件処理</string>
     <string name="mcp_status_error">エラー：%1$s</string>
@@ -1778,7 +1790,7 @@
     <string name="dev_suite_section_header">開発環境スイート</string>
     <string name="dev_suite_section_footer">レシピはサンドボックス内にオンデマンドでツールチェーンを導入します——ペイロードはアプリに同梱されなくなり、初回のセットアップにはネットワークが必要です。 ネットワークが制限されている場合は minis-devsuite-offline-list を実行してオフライン取り込み用のリストを生成できます。</string>
     <string name="dev_suite_offline_hint_title">オフラインインポートが利用可能</string>
-    <string name="dev_suite_offline_hint_body">ダウンロードに失敗しましたか？ターミナルで minis-devsuite-offline-list を実行してファイル一覧を取得し、別のデバイスでダウンロードしたファイルを /var/minis/shared/offline/ に入れてから再度組み立ててください。ローカルファイルが優先され、ネットワークは不要です。</string>
+    <string name="dev_suite_offline_hint_body">ダウンロード失敗？ 1) ターミナルで minis-devsuite-offline-list を実行してファイルリストを取得します。2) 設定 → 環境変数で MINIS_ALLOW_OFFLINE=1 を設定します（/var/minis/shared のローカルファイルはデフォルトで信頼されません）。3) 別のデバイスでファイルをダウンロードし、/var/minis/shared/offline/ に配置します（ホスト上の同じパス）。ファイルは CHECKSUM と一致する必要があります。未公開の場合は、MINIS_DEVSUITE_SHA256="filename=sha256" で独自のものをピン留めします。4) ここに戻ってアセンブルします — インストーラーはローカルファイルを最初に使用し、ネットワークは不要です。</string>
     <string name="dev_suite_online_header">オンラインツール</string>
     <string name="dev_suite_online_footer">スタンドアロンのツール、タップで導入。</string>
     <string name="dev_suite_progress">%1$d/%2$d 準備完了</string>

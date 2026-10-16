@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">Oturumlar arasında kalıcı bilgi</string>
     <string name="settings_mcp">MCP Entegrasyonları</string>
     <string name="settings_mcp_subtitle">Model Context Protocol sunucularını bağlayın</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobil Tam Yığın</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK araç zinciri · NDK r29 · İsteğe bağlı Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Kod arama ve terminal verimliliği</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat dörtlüsü</string>
+    <string name="dev_suite_python_name">Python &amp; AI Geliştirici Paketi</string>
+    <string name="dev_suite_python_summary">Python 3 çalışma zamanı · pip/venv · AI bilimsel hesaplama derleme bağımlılıkları</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Tam Yığın</string>
+    <string name="dev_suite_nodejs_summary">Node.js çalışma zamanı · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go Geliştirme Paketi</string>
+    <string name="dev_suite_go_summary">golang-go araç zinciri (OpenMinis\'e özel paket)</string>
+
     <string name="mcp_status_running">Çalışıyor (bağlantı noktası %1$d), %2$d istek işlendi</string>
     <string name="mcp_status_running_shifted">Çalışıyor (gerçek port %1$d · yapılandırılan %2$d doluydu, kaydırıldı), %3$d istek işlendi</string>
     <string name="mcp_status_error">Hata: %1$s</string>
@@ -1779,7 +1791,7 @@
     <string name="dev_suite_section_header">Geliştirme ortamı paketleri</string>
     <string name="dev_suite_section_footer">Tarifler, araç zincirlerini gerektiğinde sandbox içinde kurar — yükler artık uygulamaya gömülü değil, ilk kurulum ağ gerektirir. Ağ kısıtlı mı? Çevrimdışı içe aktarma listesi için minis-devsuite-offline-list komutunu çalıştırın.</string>
     <string name="dev_suite_offline_hint_title">Çevrimdışı içe aktarım var</string>
-    <string name="dev_suite_offline_hint_body">İndirme başarısız mı? Dosya listesi için terminalde minis-devsuite-offline-list komutunu çalıştırın, dosyaları başka bir cihazda indirin, /var/minis/shared/offline/ klasörüne koyun ve kurulumu yeniden başlatın — yerel dosyalar önce kullanılır, ağ gerekmez.</string>
+    <string name="dev_suite_offline_hint_body">İndirme başarısız? 1) Dosya listesini almak için terminalde minis-devsuite-offline-list çalıştırın. 2) Ayarlar → Çevre Değişkenleri\'nde MINIS_ALLOW_OFFLINE=1 ayarlayın (/var/minis/shared\'deki yerel dosyalara varsayılan olarak güvenilmez). 3) Dosyaları başka bir cihazda indirin, /var/minis/shared/offline/\'a bırakın (ana bilgisayardaki aynı yol). Dosyalar CHECKSUM ile eşleşmelidir; yayınlanmamışsa, kendi CHECKSUM\'ınızı MINIS_DEVSUITE_SHA256="filename=sha256" ile sabitleyin. 4) Buraya dönün ve monte edin — yükleyiciler önce yerel dosyaları kullanır, ağ gerekmez.</string>
     <string name="dev_suite_online_header">Çevrimiçi araçlar</string>
     <string name="dev_suite_online_footer">Bağımsız araçlar, tek dokunuşla kurulur.</string>
     <string name="dev_suite_progress">%1$d/%2$d hazır</string>

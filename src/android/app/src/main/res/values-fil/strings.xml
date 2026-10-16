@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">Permanenteng kaalaman sa lahat ng session</string>
     <string name="settings_mcp">Mga MCP Integration</string>
     <string name="settings_mcp_subtitle">Ikonekta ang mga Model Context Protocol server</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK toolchain · NDK r29 · Opsyonal na Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Paghahanap ng code at kahusayan ng terminal</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat quartet</string>
+    <string name="dev_suite_python_name">Python &amp; AI Developer Suite</string>
+    <string name="dev_suite_python_summary">Python 3 runtime · pip/venv · AI scientific computing build deps</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Node.js runtime · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go Development Suite</string>
+    <string name="dev_suite_go_summary">golang-go toolchain (eksklusibong suite ng OpenMinis)</string>
+
     <string name="mcp_status_running">Tumatakbo (port %1$d), %2$d na kahilingan ang naproseso</string>
     <string name="mcp_status_running_shifted">Tumatakbo (aktwal na port %1$d · naka-configure na %2$d ay occupied, inilipat), %3$d ang naproseso</string>
     <string name="mcp_status_error">Error: %1$s</string>
@@ -1779,7 +1791,7 @@
     <string name="dev_suite_section_header">Mga dev environment suite</string>
     <string name="dev_suite_section_footer">Nag-i-install ang mga recipe ng toolchains sa loob ng sandbox kapag kailangan — hindi na kasama sa app ang mga payload, kailangan ng internet sa unang pag-setup. May limitasyon sa network? Patakbuhin ang minis-devsuite-offline-list para sa offline import list.</string>
     <string name="dev_suite_offline_hint_title">May offline na import</string>
-    <string name="dev_suite_offline_hint_body">Nabigo ang download? Patakbuhin ang minis-devsuite-offline-list sa terminal para makakuha ng listahan ng mga file, i-download ang mga ito sa ibang device, ilagay sa /var/minis/shared/offline/, saka i-assemble muli — ginagamit muna ang lokal na mga file, walang kailangang network.</string>
+    <string name="dev_suite_offline_hint_body">Nabigo ang pag-download? 1) Patakbuhin ang minis-devsuite-offline-list sa terminal para kunin ang listahan ng file. 2) Sa Settings → Environment Variables, itakda ang MINIS_ALLOW_OFFLINE=1 (ang mga lokal na file sa /var/minis/shared ay hindi pinagkakatiwalaan sa default). 3) Mag-download ng mga file sa ibang device, ilagay sa /var/minis/shared/offline/ (parehong path sa host). Ang mga file ay dapat tumugma sa CHECKSUM; kung hindi nai-publish, i-pin ang sarili mo gamit ang MINIS_DEVSUITE_SHA256="filename=sha256". 4) Bumalik dito at i-assemble — ang mga installer ay gumagamit ng lokal na file muna, walang kailangang network.</string>
     <string name="dev_suite_online_header">Mga online tool</string>
     <string name="dev_suite_online_footer">Standalone na tool, i-tap para i-install.</string>
     <string name="dev_suite_progress">%1$d/%2$d handa na</string>

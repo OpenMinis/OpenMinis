@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">세션 간에 유지되는 영구적 지식</string>
     <string name="settings_mcp">MCP 통합</string>
     <string name="settings_mcp_subtitle">Model Context Protocol 서버 연결</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; 모바일 풀스택</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK 툴체인 · NDK r29 · 선택적 Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">코드 검색 및 터미널 효율성</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat 쿼텟</string>
+    <string name="dev_suite_python_name">Python &amp; AI 개발자 스위트</string>
+    <string name="dev_suite_python_summary">Python 3 런타임 · pip/venv · AI 과학 컴퓨팅 빌드 종속성</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; 웹 풀스택</string>
+    <string name="dev_suite_nodejs_summary">Node.js 런타임 · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go 개발 스위트</string>
+    <string name="dev_suite_go_summary">golang-go 툴체인 (OpenMinis 전용 스위트)</string>
+
     <string name="mcp_status_running">실행 중 (포트 %1$d), %2$d개 요청 처리됨</string>
     <string name="mcp_status_running_shifted">실행 중 (실제 포트 %1$d · 설정된 %2$d 포트가 사용 중이어서 변경됨), %3$d개 처리됨</string>
     <string name="mcp_status_error">오류: %1$s</string>
@@ -1778,7 +1790,7 @@
     <string name="dev_suite_section_header">개발 환경 스위트</string>
     <string name="dev_suite_section_footer">레시피는 필요할 때 샌드박스 안에 툴체인을 설치합니다——페이로드는 더 이상 앱에 포함되지 않으며, 첫 설치에는 네트워크가 필요합니다. 네트워크가 제한된 환경이라면 minis-devsuite-offline-list를 실행해 오프라인 가져오기 목록을 생성하세요.</string>
     <string name="dev_suite_offline_hint_title">오프라인 가져오기 사용 가능</string>
-    <string name="dev_suite_offline_hint_body">다운로드에 실패했나요? 터미널에서 minis-devsuite-offline-list 를 실행해 파일 목록을 확인하고, 다른 기기에서 내려받은 파일을 /var/minis/shared/offline/ 에 넣은 뒤 다시 조립하세요. 로컬 파일이 우선 사용되며 네트워크가 필요 없습니다.</string>
+    <string name="dev_suite_offline_hint_body">다운로드 실패? 1) 터미널에서 minis-devsuite-offline-list를 실행하여 파일 목록을 가져옵니다. 2) 설정 → 환경 변수에서 MINIS_ALLOW_OFFLINE=1을 설정합니다 (/var/minis/shared의 로컬 파일은 기본적으로 신뢰되지 않음). 3) 다른 장치에서 파일을 다운로드하고 /var/minis/shared/offline/에 넣습니다 (호스트의 동일한 경로). 파일은 CHECKSUM과 일치해야 합니다. 게시되지 않은 경우 MINIS_DEVSUITE_SHA256="filename=sha256"로 고유한 것을 고정합니다. 4) 여기로 돌아와 조립하세요 — 설치 프로그램은 로컬 파일을 먼저 사용하며 네트워크가 필요하지 않습니다.</string>
     <string name="dev_suite_online_header">온라인 도구</string>
     <string name="dev_suite_online_footer">탭하여 설치하는 독립 도구.</string>
     <string name="dev_suite_progress">%1$d/%2$d 준비됨</string>

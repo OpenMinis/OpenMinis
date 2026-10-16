@@ -145,6 +145,18 @@
     <string name="settings_memory_subtitle">Постоянные знания между сессиями</string>
     <string name="settings_mcp">Интеграции MCP</string>
     <string name="settings_mcp_subtitle">Подключение серверов Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; мобильный полный стек</string>
+    <string name="dev_suite_android_summary">JDK17 · Набор инструментов aarch64 SDK · NDK r29 · Дополнительный Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Поиск кода и эффективность терминала</string>
+    <string name="dev_suite_code_search_summary">квартет rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Набор разработчиков Python &amp; ИИ</string>
+    <string name="dev_suite_python_summary">Среда выполнения Python 3 · pip/venv · Зависимости сборки научных вычислений ИИ</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; веб полный стек</string>
+    <string name="dev_suite_nodejs_summary">Среда выполнения Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Набор разработки Go</string>
+    <string name="dev_suite_go_summary">Набор инструментов golang-go (эксклюзивный набор OpenMinis)</string>
+
     <string name="mcp_status_running">Работает (порт %1$d), обработано запросов: %2$d</string>
     <string name="mcp_status_running_shifted">Работает (фактический порт %1$d · настроенный %2$d занят, смещён), обработано: %3$d</string>
     <string name="mcp_status_error">Ошибка: %1$s</string>
@@ -1789,7 +1801,7 @@
     <string name="dev_suite_section_header">Наборы сред разработки</string>
     <string name="dev_suite_section_footer">Рецепты устанавливают тулчейны по требованию внутри песочницы — полезная нагрузка больше не вшита в приложение, первая сборка требует сеть. Ограниченная сеть? Запустите minis-devsuite-offline-list — он выведет список для офлайн-импорта.</string>
     <string name="dev_suite_offline_hint_title">Доступен офлайн-импорт</string>
-    <string name="dev_suite_offline_hint_body">Ошибка загрузки? Запустите minis-devsuite-offline-list в терминале, чтобы получить список файлов, скачайте их на другом устройстве, положите в /var/minis/shared/offline/ и снова запустите сборку — локальные файлы используются в первую очередь, сеть не нужна.</string>
+    <string name="dev_suite_offline_hint_body">Загрузка не удалась? 1) Запустите minis-devsuite-offline-list в терминале, чтобы получить список файлов. 2) В разделе Настройки → Переменные окружения установите MINIS_ALLOW_OFFLINE=1 (локальные файлы в /var/minis/shared по умолчанию не доверяются). 3) Загрузите файлы на другое устройство, поместите их в /var/minis/shared/offline/ (тот же путь на хосте). Файлы должны соответствовать CHECKSUM; если не опубликованы, закрепите свой собственный с помощью MINIS_DEVSUITE_SHA256="filename=sha256". 4) Вернитесь сюда и соберите — установщики сначала используют локальные файлы, сеть не нужна.</string>
     <string name="dev_suite_online_header">Онлайн-инструменты</string>
     <string name="dev_suite_online_footer">Автономные инструменты, установка одним касанием.</string>
     <string name="dev_suite_progress">%1$d/%2$d готово</string>

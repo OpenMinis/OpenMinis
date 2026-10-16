@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">Pengetahuan kekal merentas sesi</string>
     <string name="settings_mcp">Integrasi MCP</string>
     <string name="settings_mcp_subtitle">Sambungkan pelayan Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · Toolchain aarch64 SDK · NDK r29 · Flutter/RE/Rust pilihan</string>
+    <string name="dev_suite_code_search_name">Carian kod dan kecekapan terminal</string>
+    <string name="dev_suite_code_search_summary">kuartet rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Suite pembangun Python &amp; AI</string>
+    <string name="dev_suite_python_summary">Runtime Python 3 · pip/venv · Kebergantungan binaan pengkomputeran saintifik AI</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Runtime Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Suite Pembangunan Go</string>
+    <string name="dev_suite_go_summary">Toolchain golang-go (suite eksklusif OpenMinis)</string>
+
     <string name="mcp_status_running">Berjalan (port %1$d), %2$d permintaan dikendalikan</string>
     <string name="mcp_status_running_shifted">Berjalan (port sebenar %1$d · port konfigurasi %2$d terpakai, dialihkan), %3$d dikendalikan</string>
     <string name="mcp_status_error">Ralat: %1$s</string>
@@ -1779,7 +1791,7 @@
     <string name="dev_suite_section_header">Suit persekitaran pembangunan</string>
     <string name="dev_suite_section_footer">Resipi memasang toolchain atas permintaan dalam sandbox — payload tidak lagi dibundel dalam aplikasi, pemasangan pertama memerlukan rangkaian. Rangkaian terhad? Jalankan minis-devsuite-offline-list untuk senarai import luar talian.</string>
     <string name="dev_suite_offline_hint_title">Import luar talian tersedia</string>
-    <string name="dev_suite_offline_hint_body">Muat turun gagal? Jalankan minis-devsuite-offline-list di terminal untuk mendapatkan senarai fail, muat turun fail di peranti lain, letakkan dalam /var/minis/shared/offline/, kemudian pasang semula — fail tempatan digunakan dahulu, tanpa rangkaian.</string>
+    <string name="dev_suite_offline_hint_body">Muat turun gagal? 1) Jalankan minis-devsuite-offline-list dalam terminal untuk dapatkan senarai fail. 2) Di Tetapan → Pembolehubah Persekitaran, tetapkan MINIS_ALLOW_OFFLINE=1 (fail tempatan dalam /var/minis/shared tidak dipercayai secara lalai). 3) Muat turun fail pada peranti lain, letakkan di /var/minis/shared/offline/ (laluan sama pada hos). Fail mesti sepadan dengan CHECKSUM; jika tidak diterbitkan, semat sendiri dengan MINIS_DEVSUITE_SHA256="filename=sha256". 4) Kembali ke sini dan pasang — pemasang gunakan fail tempatan dahulu, tiada rangkaian diperlukan.</string>
     <string name="dev_suite_online_header">Alat dalam talian</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan satu ketukan.</string>
     <string name="dev_suite_progress">%1$d/%2$d sedia</string>

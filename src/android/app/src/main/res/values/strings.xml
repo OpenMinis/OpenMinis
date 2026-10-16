@@ -270,13 +270,26 @@
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
     <string name="settings_mcp">MCP Integrations</string>
     <string name="settings_mcp_subtitle">Connect Model Context Protocol servers</string>
+
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK toolchain · NDK r29 · Optional Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Code Search &amp; Terminal Efficiency</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat quartet</string>
+    <string name="dev_suite_python_name">Python &amp; AI Developer Suite</string>
+    <string name="dev_suite_python_summary">Python 3 runtime · pip/venv · AI scientific computing build deps</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Node.js runtime · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go Development Suite</string>
+    <string name="dev_suite_go_summary">golang-go toolchain (OpenMinis-exclusive suite)</string>
+
     <string name="plugin_market_title">Plugin market</string>
     <string name="plugin_market_subtitle">Dev suites, local tools and online OpenAPI tools</string>
     <string name="plugin_market_section_online">Online APIs</string>
     <string name="dev_suite_section_header">Dev environment suites</string>
     <string name="dev_suite_section_footer">Recipes install toolchains on demand inside the sandbox — payloads are not bundled with the app, so first-time assembly needs network. Network-restricted? Run minis-devsuite-offline-list for the offline import manifest.</string>
     <string name="dev_suite_offline_hint_title">Offline import available</string>
-    <string name="dev_suite_offline_hint_body">Download failed? Run minis-devsuite-offline-list in a terminal to get the file list, download the files on another device, drop them into /var/minis/shared/offline/, then assemble again — local files are used first, no network needed.</string>
+    <string name="dev_suite_offline_hint_body">Download failed? 1) Run minis-devsuite-offline-list in terminal to get the file list. 2) In Settings → Environment Variables, set MINIS_ALLOW_OFFLINE=1 (local files in /var/minis/shared are untrusted by default). 3) Download files on another device, drop them into /var/minis/shared/offline/ (same path on host). Files must match the CHECKSUM; if unpublished, pin your own with MINIS_DEVSUITE_SHA256=\"filename=sha256\". 4) Return here and assemble — installers use local files first, no network needed.</string>
     <string name="dev_suite_online_header">Online tools</string>
     <string name="dev_suite_online_footer">Standalone tools installed on tap.</string>
     <string name="dev_suite_progress">%1$d/%2$d ready</string>

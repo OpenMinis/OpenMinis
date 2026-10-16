@@ -145,6 +145,18 @@
     <string name="settings_memory_subtitle">Trwała wiedza między sesjami</string>
     <string name="settings_mcp">Integracje MCP</string>
     <string name="settings_mcp_subtitle">Podłącz serwery Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · Łańcuch narzędzi aarch64 SDK · NDK r29 · Opcjonalny Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Wyszukiwanie kodu i wydajność terminala</string>
+    <string name="dev_suite_code_search_summary">kwartet rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Pakiet programistyczny Python &amp; AI</string>
+    <string name="dev_suite_python_summary">Środowisko uruchomieniowe Python 3 · pip/venv · Zależności kompilacji obliczeń naukowych AI</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Środowisko uruchomieniowe Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Pakiet programistyczny Go</string>
+    <string name="dev_suite_go_summary">Łańcuch narzędzi golang-go (pakiet wyłączny OpenMinis)</string>
+
     <string name="mcp_status_running">Działa (port %1$d), obsłużono %2$d żądań</string>
     <string name="mcp_status_running_shifted">Działa (rzeczywisty port %1$d · skonfigurowany %2$d zajęty, przesunięty), obsłużono %3$d</string>
     <string name="mcp_status_error">Błąd: %1$s</string>
@@ -1787,7 +1799,7 @@
     <string name="dev_suite_section_header">Pakiety środowisk programistycznych</string>
     <string name="dev_suite_section_footer">Przepisy instalują toolchainy na żądanie w sandboxie — ładunki nie są już wbudowane w aplikację, pierwsza instalacja wymaga sieci. Ograniczona sieć? Uruchom minis-devsuite-offline-list, aby uzyskać listę importu offline.</string>
     <string name="dev_suite_offline_hint_title">Import offline dostępny</string>
-    <string name="dev_suite_offline_hint_body">Pobieranie nie powiodło się? Uruchom minis-devsuite-offline-list w terminalu, aby uzyskać listę plików, pobierz je na innym urządzeniu, umieść w /var/minis/shared/offline/ i ponownie złóż pakiet — pliki lokalne mają pierwszeństwo, sieć nie jest potrzebna.</string>
+    <string name="dev_suite_offline_hint_body">Pobieranie nie powiodło się? 1) Uruchom minis-devsuite-offline-list w terminalu, aby uzyskać listę plików. 2) W Ustawienia → Zmienne środowiskowe ustaw MINIS_ALLOW_OFFLINE=1 (lokalne pliki w /var/minis/shared nie są domyślnie zaufane). 3) Pobierz pliki na inne urządzenie, umieść je w /var/minis/shared/offline/ (ta sama ścieżka na hoście). Pliki muszą pasować do CHECKSUM; jeśli nie opublikowano, przypnij własną za pomocą MINIS_DEVSUITE_SHA256="filename=sha256". 4) Wróć tutaj i złóż — instalatory używają najpierw plików lokalnych, sieć nie jest potrzebna.</string>
     <string name="dev_suite_online_header">Narzędzia online</string>
     <string name="dev_suite_online_footer">Niezależne narzędzia, instalacja jednym dotknięciem.</string>
     <string name="dev_suite_progress">%1$d/%2$d gotowe</string>
