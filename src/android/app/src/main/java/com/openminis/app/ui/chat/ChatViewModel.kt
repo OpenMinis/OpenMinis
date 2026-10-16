@@ -931,6 +931,11 @@ class ChatViewModel(
     val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages.asStateFlow()
     private val _hasNewerMessages = MutableStateFlow(false)
     val hasNewerMessages: StateFlow<Boolean> = _hasNewerMessages.asStateFlow()
+    // [T-task-anchor] Session-scoped copy of the first user message. Loaded
+    // once per session (DB read, immune to the UI window), consumed by the
+    // system prompt's dynamic tail every turn. Cleared with the session.
+    internal val _taskAnchorText = MutableStateFlow<String?>(null)
+    internal val taskAnchorText: StateFlow<String?> = _taskAnchorText.asStateFlow()
     internal val _isLoadingHistory = MutableStateFlow(false)
     val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory.asStateFlow()
 
@@ -3019,7 +3024,6 @@ class ChatViewModel(
     // mentionMenuUp / mentionMenuDown / executeSelectedMention / selectMention
     // moved to ChatViewModelMentionExt.kt as ChatViewModel extension functions.
 
-
     /** Toggle memory writes on/off, persist to DB, and append a system-info message. */
     internal fun toggleMemoryEnabled() {
         val newValue = !_memoryEnabled.value
@@ -3292,7 +3296,6 @@ class ChatViewModel(
         compactAll(anchorIdxOverride = idx)
     }
 
-
     /**
      * Revert the most recent compact on this session.
      *
@@ -3432,7 +3435,6 @@ class ChatViewModel(
         }
     }
 
-
     // dropOrphanedToolParts lives in ChatViewModelHistoryExt.kt
 
     /** Latest in-memory compact marker, used by [effectiveAgentHistory] to
@@ -3477,7 +3479,6 @@ class ChatViewModel(
             tailSize = DETACHED_TAIL_MESSAGES,
         )
 
-
     internal suspend fun splitCompactHalves(
         messages: List<LLMMessage>,
         previousSummary: String?,
@@ -3490,7 +3491,6 @@ class ChatViewModel(
         val summary2 = generateCompactSummaryWithSplitting(secondHalf, null, depth + 1)
         return summary1 + "\n\n" + summary2
     }
-
 
     internal data class CompactAttempt(
         val kind: String,
@@ -3513,8 +3513,6 @@ class ChatViewModel(
     /** Two-shot compact: one leaf call per stage, no in-stage split fan-out. */
     @Volatile
     internal var compactAllowSplit = false
-
-
 
     /**
      * Should a failed summary attempt be retried by splitting the input in half?
@@ -3558,7 +3556,6 @@ class ChatViewModel(
      */
     internal fun isSegmentRetryableError(error: Throwable): Boolean =
         shouldSplitOnError(error)
-
 
     /** What the pre-send context check decided. Mirrors iOS's send() branch. */
     internal enum class PreSendContextAction {
@@ -3649,7 +3646,6 @@ class ChatViewModel(
                 }
             }
         }
-
 
     // T203 part 2: these MUST be declared before `init { loadSession() }` below.
     // viewModelScope.launch defaults to Dispatchers.Main.immediate, which runs
@@ -3910,7 +3906,6 @@ class ChatViewModel(
             _sessionCategory.value = category
         }
     }
-
 
 
 
@@ -4294,6 +4289,9 @@ class ChatViewModel(
         _hasOlderMessages.value = false
         _hasNewerMessages.value = false
         _isLoadingHistory.value = false
+        // [T-task-anchor] Session-scoped — the next session re-reads its own
+        // opening turn; a cleared chat must not anchor on the old one.
+        _taskAnchorText.value = null
         pendingSendText = null
         _pendingCaret.value = null
         _showCompactBeforeSendPrompt.value = false

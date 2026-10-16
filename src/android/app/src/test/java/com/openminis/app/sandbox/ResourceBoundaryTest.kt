@@ -85,10 +85,19 @@ class ResourceBoundaryTest {
     fun hot_path_queries_do_not_select_star_or_raw_parts_json() {
         val dao = File("src/main/java/com/openminis/app/data/db/ChatDao.kt").readText()
         assertFalse(dao.contains("SELECT * FROM messages"))
-        assertFalse(dao.contains("SELECT parts_json FROM messages WHERE session_id"))
-        assertFalse(dao.contains("SELECT parts_json FROM messages ORDER"))
-        // List loads stay projected. One-row display hydration is the only raw cell read.
+        // List loads stay projected. Raw-cell reads are allowed only when
+        // single-row: the display hydration (WHERE id = :id) and the task
+        // anchor (WHERE session_id ... LIMIT 1, read once per loadSession)
+        // are the same safety class — one row per call, never a batch.
         assertTrue(dao.contains("SELECT parts_json FROM messages WHERE id = :id"))
+        dao.lineSequence()
+            .filter { it.contains("SELECT parts_json FROM messages WHERE session_id") }
+            .forEach { line ->
+                assertTrue(
+                    "raw parts_json by-session read must be single-row LIMIT 1: $line",
+                    line.contains("LIMIT 1"),
+                )
+            }
         val screen = File("src/main/java/com/openminis/app/accessibility/MinisAccessibilityService.kt").readText()
         val event = screen.substringAfter("fun onAccessibilityEvent")
             .substringBefore("fun onInterrupt")

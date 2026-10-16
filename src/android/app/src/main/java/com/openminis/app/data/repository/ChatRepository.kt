@@ -98,6 +98,10 @@ class ChatRepository(
         return loadMessagesBefore(sessionId, total, limit, pageSize, totalMessages = total)
     }
 
+    /** [T-task-anchor] The earliest user row's raw `parts_json` — see [ChatDao.firstUserPartsJson]. */
+    suspend fun firstUserPartsJson(sessionId: String): String? =
+        if (sessionId.isEmpty()) null else dao.firstUserPartsJson(sessionId)
+
     suspend fun loadMessagesBefore(
         sessionId: String,
         endExclusive: Int,
@@ -1199,10 +1203,6 @@ class ChatRepository(
         dao.updateLastMessage(sessionId, preview, System.currentTimeMillis())
     }
 
-
-
-
-    // ───────────────── T188: minis-sessions-cli backend ─────────────────
     //
     // Three high-level queries surfaced to SessionsOffloadHandler. The DAO
     // side handles raw SQL + result projection; we add the JSON parsing,

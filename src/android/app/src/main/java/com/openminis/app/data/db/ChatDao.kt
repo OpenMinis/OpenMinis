@@ -152,10 +152,7 @@ interface ChatDao {
      * exactly what `warmupWorkspaceOwners` consumes. Unfiled rows are excluded
      * because they cannot contribute an entry (see [SessionFolderId]).
      */
-    @Query(
-        "SELECT id AS id, folder_id AS folderId FROM sessions " +
-            "WHERE folder_id IS NOT NULL AND folder_id <> ''",
-    )
+    @Query("SELECT id AS id, folder_id AS folderId FROM sessions WHERE folder_id IS NOT NULL AND folder_id <> ''")
     suspend fun listSessionFolderIds(): List<SessionFolderId>
 
     @Query("SELECT * FROM sessions WHERE id = :id")
@@ -195,10 +192,7 @@ interface ChatDao {
      * legal in model ids and LIKE would read them as wildcards, which would
      * re-open the same over-match with a different spelling.
      */
-    @Query(
-        "UPDATE sessions SET model_binding = NULL, updated_at = :updatedAt " +
-            "WHERE instr(model_binding, '\"entryId\":\"' || :entryId || '\"') > 0",
-    )
+    @Query("UPDATE sessions SET model_binding = NULL, updated_at = :updatedAt WHERE instr(model_binding, '\"entryId\":\"' || :entryId || '\"') > 0")
     suspend fun clearBindingReferencing(entryId: String, updatedAt: Long = System.currentTimeMillis())
 
     @Query("DELETE FROM sessions WHERE id = :id")
@@ -299,6 +293,15 @@ interface ChatDao {
 
     @Query("SELECT sort_order FROM messages WHERE id = :id")
     suspend fun sortOrderOf(id: String): Int?
+
+    /**
+     * [T-task-anchor] The earliest user row's raw `parts_json` — the task
+     * description lives at the conversation head, outside every UI window.
+     * The body has no dedicated column; [TaskAnchor.firstUserTextFromParts]
+     * extracts the first `"type":"text"` value on the Kotlin side.
+     */
+    @Query("SELECT parts_json FROM messages WHERE session_id = :sessionId AND role = 'user' ORDER BY sort_order ASC, created_at ASC, id ASC LIMIT 1")
+    suspend fun firstUserPartsJson(sessionId: String): String?
 
     @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId AND sort_order < :sortOrder")
     suspend fun countMessagesBeforeSort(sessionId: String, sortOrder: Int): Int
@@ -451,10 +454,7 @@ interface ChatDao {
      * Kotlin (which is what iOS does) keeps an incremental build proportional
      * to what is actually new. [limit] bounds a first run over a long history.
      */
-    @Query(
-        "$SAFE_MESSAGE_FROM WHERE role = 'user' AND created_at > :since " +
-            "ORDER BY created_at ASC LIMIT :limit",
-    )
+    @Query("$SAFE_MESSAGE_FROM WHERE role = 'user' AND created_at > :since ORDER BY created_at ASC LIMIT :limit")
     suspend fun loadUserMessagesSince(since: Long, limit: Int): List<MessageEntity>
 
     @Query("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE session_id = :sessionId")

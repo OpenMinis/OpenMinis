@@ -3,6 +3,11 @@ package com.openminis.app.ui.chat
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.tools.MemoryTools
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 internal fun ChatViewModel.buildSystemPrompt(): String? {
     // Cache-friendly layout: keep `base` byte-stable by stripping out anything
@@ -328,6 +333,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 } else {
                     null
                 },
+                taskAnchor = taskAnchorFragment(),
             ),
         )
     }
@@ -352,12 +358,75 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
  * non-empty — that is WorldBook.injection's contract — so it is appended
  * verbatim rather than through the "\n\n" separator the other fragments use.
  */
+/**
+ * [T-task-anchor] The session's original task, re-injected every turn in
+ * the dynamic tail. Long autonomous runs window their history: the task
+ * description lives at the very head of the conversation and falls out of
+ * `_messages` once the tail cap covers it, so the model literally cannot
+ * see what it set out to do mid-run. The DB-backed copy (`_taskAnchorText`)
+ * is read once per session (immune to the UI window); new sessions fall
+ * back to the in-memory list, where the opening turn is still resident.
+ */
+internal object TaskAnchor {
+    const val MAX_CHARS = 1200
+
+    const val HEADER =
+        "Session task anchor (the session's original task, from its first user " +
+            "message; re-read this if long tool loops made you lose track — it still " +
+            "applies until the user completes it or replaces it):"
+
+    /**
+     * Extract the first `"type":"text"` element's `value` from a raw
+     * `parts_json` array. The message body has no dedicated column — it
+     * lives inside this JSON — so the DAO hands over the raw array and
+     * this does the extraction. Non-text parts (toolResult/toolUse) are
+     * skipped; a malformed array or no text element returns null.
+     * kotlinx.serialization, not org.json: this must stay testable on the
+     * pure JVM (the unit-test classpath only has the android.jar stub).
+     */
+    fun firstUserTextFromParts(partsJson: String?): String? {
+        if (partsJson.isNullOrBlank()) return null
+        val el = runCatching { Json.parseToJsonElement(partsJson) }.getOrNull() ?: return null
+        val arr = el as? JsonArray ?: return null
+        for (item in arr) {
+            val o = item as? JsonObject ?: continue
+            if (o["type"]?.jsonPrimitive?.contentOrNull != "text") continue
+            val v = o["value"]?.jsonPrimitive?.contentOrNull
+            if (!v.isNullOrBlank()) return v
+        }
+        return null
+    }
+
+    /** Pure decision core: DB copy wins, in-memory window is the fallback, blank is nothing. */
+    fun fragment(anchorFromDb: String?, firstUserInWindow: String?): String? {
+        val anchor = anchorFromDb?.takeIf { it.isNotBlank() }
+            ?: firstUserInWindow?.takeIf { it.isNotBlank() }
+            ?: return null
+        val clipped = if (anchor.length > MAX_CHARS) {
+            var cut = anchor.take(MAX_CHARS)
+            // Trim a dangling high surrogate so the cut never splits a code point.
+            if (cut.last().isHighSurrogate()) cut = cut.dropLast(1)
+            cut + "…"
+        } else {
+            anchor
+        }
+        return HEADER + "\n" + clipped
+    }
+}
+
+internal fun ChatViewModel.taskAnchorFragment(): String? = TaskAnchor.fragment(
+    anchorFromDb = _taskAnchorText.value,
+    firstUserInWindow = _messages.value
+        .firstOrNull { it.role == "user" && it.content.isNotBlank() }?.content,
+)
+
 internal fun assembleDynamicTail(
     worldBookFragment: String,
     learnedPrefsFragment: String?,
     recalledMemoryFragment: String?,
     runtimeContext: String,
     personalityReminder: String?,
+    taskAnchor: String? = null,
 ): String = buildString {
     if (worldBookFragment.isNotEmpty()) append(worldBookFragment)
     if (learnedPrefsFragment != null) {
@@ -367,6 +436,14 @@ internal fun assembleDynamicTail(
     if (recalledMemoryFragment != null && recalledMemoryFragment.isNotBlank()) {
         append("\n\n")
         append(recalledMemoryFragment)
+    }
+    // [T-task-anchor] Ahead of the runtime context: the anchor is stable
+    // across turns (unlike the date line below it) and belongs with the
+    // other per-turn fragments, not in the stable prefix where one session's
+    // opening turn would invalidate the shared cache for every other turn.
+    if (taskAnchor != null && taskAnchor.isNotBlank()) {
+        append("\n\n")
+        append(taskAnchor)
     }
     append(runtimeContext)
     if (personalityReminder != null) {

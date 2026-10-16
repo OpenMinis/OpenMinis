@@ -159,6 +159,12 @@ internal fun ChatViewModel.loadSession() {
         val loaded = withContext(Dispatchers.IO) {
             val tIoBeforeLoad = System.currentTimeMillis()
             val tail = chatRepository.loadSessionTail(sessionId)
+            // [T-task-anchor] One session-scoped read of the opening turn.
+            // Long sessions window their history — the task description
+            // lives at the very head and falls out of `_messages`, so a
+            // per-turn windowed read would anchor on the wrong message.
+            _taskAnchorText.value = chatRepository.firstUserPartsJson(sessionId)
+                ?.let { TaskAnchor.firstUserTextFromParts(it) }
             val totalMessages = tail.totalMessages
             var dbRows = tail.messages
             if (dbRows.isNotEmpty() && dbRows.first().role != "user" && tail.firstMessageOffset > 0) {
