@@ -1814,7 +1814,7 @@
     <string name="dev_suite_start_install">Начало установки</string>
     <string name="dev_suite_apt_failed">Сбой установки через apt (exit %1$d)</string>
     <string name="dev_suite_step_failed">Шаг завершился с ошибкой (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Установка завершена, но проверка готовности не пройдена</string>
+    <string name="dev_suite_probe_failed">Установка завершена, но проверка готовности не пройдена — %1$s</string>
     <string name="dev_suite_interrupted">Установка прервана</string>
     <string name="dev_suite_no_space">Недостаточно памяти: требуется около %1$d ГБ, доступно %2$d ГБ</string>
     <string name="dev_suite_skipped_dep">Пропущено: %1$s не установлен</string>

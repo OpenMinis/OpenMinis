@@ -1804,7 +1804,7 @@
     <string name="dev_suite_start_install">Iniciando a instalação</string>
     <string name="dev_suite_apt_failed">Falha na instalação do apt (exit %1$d)</string>
     <string name="dev_suite_step_failed">Etapa falhou (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Instalação concluída, mas o teste de prontidão não passou</string>
+    <string name="dev_suite_probe_failed">Instalação concluída, mas o teste de prontidão não passou — %1$s</string>
     <string name="dev_suite_interrupted">Instalação interrompida</string>
     <string name="dev_suite_no_space">Armazenamento insuficiente: são necessários cerca de %1$d GB, %2$d GB disponíveis</string>
     <string name="dev_suite_skipped_dep">Ignorado: %1$s não foi instalado</string>

@@ -1804,7 +1804,7 @@
     <string name="dev_suite_start_install">เริ่มการติดตั้ง</string>
     <string name="dev_suite_apt_failed">ติดตั้งด้วย apt ไม่สำเร็จ (exit %1$d)</string>
     <string name="dev_suite_step_failed">ขั้นตอนล้มเหลว (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">ติดตั้งเสร็จแล้วแต่ผ่านการตรวจสอบความพร้อมไม่สำเร็จ</string>
+    <string name="dev_suite_probe_failed">ติดตั้งเสร็จแล้วแต่ผ่านการตรวจสอบความพร้อมไม่สำเร็จ — %1$s</string>
     <string name="dev_suite_interrupted">การติดตั้งถูกขัดจังหวะ</string>
     <string name="dev_suite_no_space">พื้นที่เก็บข้อมูลไม่พอ: ต้องใช้ประมาณ %1$d GB ว่างอยู่ %2$d GB</string>
     <string name="dev_suite_skipped_dep">ข้าม: %1$s ติดตั้งไม่สำเร็จ</string>

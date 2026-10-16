@@ -1812,7 +1812,7 @@
     <string name="dev_suite_start_install">Rozpoczynanie instalacji</string>
     <string name="dev_suite_apt_failed">Instalacja apt nie powiodła się (exit %1$d)</string>
     <string name="dev_suite_step_failed">Krok nieudany (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Instalacja zakończona, ale test gotowości nie przeszedł</string>
+    <string name="dev_suite_probe_failed">Instalacja zakończona, ale test gotowości nie przeszedł — %1$s</string>
     <string name="dev_suite_interrupted">Instalacja przerwana</string>
     <string name="dev_suite_no_space">Za mało miejsca: potrzeba około %1$d GB, dostępnych %2$d GB</string>
     <string name="dev_suite_skipped_dep">Pominięto: %1$s nie zostało zainstalowane</string>

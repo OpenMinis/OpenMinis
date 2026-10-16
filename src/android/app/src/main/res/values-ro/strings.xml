@@ -1808,7 +1808,7 @@
     <string name="dev_suite_start_install">Se pornește instalarea</string>
     <string name="dev_suite_apt_failed">Instalarea apt a eșuat (exit %1$d)</string>
     <string name="dev_suite_step_failed">Pas eșuat (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Instalarea s-a încheiat, dar testul de pregătire nu a trecut</string>
+    <string name="dev_suite_probe_failed">Instalarea s-a încheiat, dar testul de pregătire nu a trecut — %1$s</string>
     <string name="dev_suite_interrupted">Instalare întreruptă</string>
     <string name="dev_suite_no_space">Spațiu insuficient: sunt necesari aproximativ %1$d GB, disponibil %2$d GB</string>
     <string name="dev_suite_skipped_dep">Omis: %1$s nu a fost instalat</string>

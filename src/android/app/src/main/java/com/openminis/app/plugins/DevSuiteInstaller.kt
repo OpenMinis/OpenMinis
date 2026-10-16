@@ -160,7 +160,12 @@ object DevSuiteInstaller {
             } else {
                 DevSuiteStore.update(
                     context, component.id, DevSuiteStore.Status.FAILED,
-                    context.getString(R.string.dev_suite_probe_failed),
+                    // [T-devsuite-probe-selfdescribe] The failure line must
+                    // carry the probe command: "安装完成但探针未通过" alone
+                    // gave the user nothing to self-diagnose (the qemu case
+                    // looked like a broken install while the probe was simply
+                    // looking for a name the package does not ship).
+                    context.getString(R.string.dev_suite_probe_failed, probeCommand(component)),
                 )
                 false
             }

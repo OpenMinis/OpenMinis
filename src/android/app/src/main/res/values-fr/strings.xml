@@ -1806,7 +1806,7 @@
     <string name="dev_suite_start_install">Démarrage de l\'installation</string>
     <string name="dev_suite_apt_failed">Échec de l\'installation apt (exit %1$d)</string>
     <string name="dev_suite_step_failed">Étape en échec (exit %1$d) : %2$s</string>
-    <string name="dev_suite_probe_failed">Installation terminée mais le test de préparation n\'a pas passé</string>
+    <string name="dev_suite_probe_failed">Installation terminée mais le test de préparation n\'a pas passé — %1$s</string>
     <string name="dev_suite_interrupted">Installation interrompue</string>
     <string name="dev_suite_no_space">Stockage insuffisant : environ %1$d GB nécessaires, %2$d GB disponibles</string>
     <string name="dev_suite_skipped_dep">Ignoré : %1$s n\'a pas été installé</string>

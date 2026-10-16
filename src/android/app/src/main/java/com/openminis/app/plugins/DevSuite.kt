@@ -222,7 +222,7 @@ object DevSuiteCatalog {
         DevComponent(
             id = "qemu-x86-64-compat",
             name = "QEMU x86_64 兼容层",
-            description = "qemu-user-static：在 ARM64 沙箱里显式运行 x86_64 Linux 二进制（PRoot 无 binfmt，需显式调用 qemu-x86_64 <bin>）",
+            description = "qemu-user-static：在 ARM64 沙箱里显式运行 x86_64 Linux 二进制（PRoot 无 binfmt，必须显式调用 qemu 运行 x86_64 程序）。注意命名二象性：Ubuntu 24.04 arm64 的 qemu-user-static 只装 /usr/bin/qemu-x86_64-static（裸名 qemu-x86_64 不存在），Debian 旧版相反——先 command -v 探测实际存在哪个名字再用它，不要假设其中一种。",
             aptPackages = listOf("qemu-user-static"),
             // [T-devsuite-qemu-probe] Ubuntu 24.04 arm64 的 qemu-user-static
             // 只装 *-static 命名（/usr/bin/qemu-x86_64-static），不产生裸

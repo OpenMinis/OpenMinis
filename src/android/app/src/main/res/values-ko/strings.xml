@@ -1803,7 +1803,7 @@
     <string name="dev_suite_start_install">설치 시작</string>
     <string name="dev_suite_apt_failed">apt 설치 실패 (exit %1$d)</string>
     <string name="dev_suite_step_failed">단계 실패 (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">설치는 완료되었으나 준비 확인을 통과하지 못했습니다</string>
+    <string name="dev_suite_probe_failed">설치는 완료되었으나 준비 확인을 통과하지 못했습니다 — %1$s</string>
     <string name="dev_suite_interrupted">설치가 중단되었습니다</string>
     <string name="dev_suite_no_space">저장 공간 부족: 약 %1$d GB 필요, 사용 가능 %2$d GB</string>
     <string name="dev_suite_skipped_dep">건너뜀: %1$s 설치 실패</string>

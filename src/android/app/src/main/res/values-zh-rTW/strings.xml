@@ -1895,7 +1895,7 @@
     <string name="dev_suite_start_install">開始安裝</string>
     <string name="dev_suite_apt_failed">apt 安裝失敗（exit %1$d）</string>
     <string name="dev_suite_step_failed">步驟失敗（exit %1$d）：%2$s</string>
-    <string name="dev_suite_probe_failed">安裝完成但探針未通過</string>
+    <string name="dev_suite_probe_failed">安裝完成但探針未通過 — %1$s</string>
     <string name="dev_suite_interrupted">安裝被中斷</string>
     <string name="dev_suite_no_space">儲存空間不足：需要約 %1$d GB，可用 %2$d GB</string>
     <string name="dev_suite_skipped_dep">已跳過：%1$s 未安裝成功</string>

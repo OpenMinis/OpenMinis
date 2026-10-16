@@ -1806,7 +1806,7 @@
     <string name="dev_suite_start_install">Installation wird gestartet</string>
     <string name="dev_suite_apt_failed">apt-Installation fehlgeschlagen (exit %1$d)</string>
     <string name="dev_suite_step_failed">Schritt fehlgeschlagen (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Installation abgeschlossen, aber die Bereitstellungsprüfung wurde nicht bestanden</string>
+    <string name="dev_suite_probe_failed">Installation abgeschlossen, aber die Bereitstellungsprüfung wurde nicht bestanden — %1$s</string>
     <string name="dev_suite_interrupted">Installation unterbrochen</string>
     <string name="dev_suite_no_space">Zu wenig Speicherplatz: etwa %1$d GB erforderlich, %2$d GB frei</string>
     <string name="dev_suite_skipped_dep">Übersprungen: %1$s wurde nicht installiert</string>

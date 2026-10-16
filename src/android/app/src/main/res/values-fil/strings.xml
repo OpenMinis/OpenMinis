@@ -1804,7 +1804,7 @@
     <string name="dev_suite_start_install">Sinisimulan ang pag-install</string>
     <string name="dev_suite_apt_failed">Nabigo ang pag-install ng apt (exit %1$d)</string>
     <string name="dev_suite_step_failed">Nabigo ang hakbang (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Tapos na ang pag-install ngunit hindi pumasa sa pagsusulit ng pagkahanda</string>
+    <string name="dev_suite_probe_failed">Tapos na ang pag-install ngunit hindi pumasa sa pagsusulit ng pagkahanda — %1$s</string>
     <string name="dev_suite_interrupted">Naantala ang pag-install</string>
     <string name="dev_suite_no_space">Kulang ang storage: kailangan mga %1$d GB, available %2$d GB</string>
     <string name="dev_suite_skipped_dep">Laktawan: hindi na-install ang %1$s</string>

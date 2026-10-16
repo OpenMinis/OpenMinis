@@ -1804,7 +1804,7 @@
     <string name="dev_suite_start_install">Kurulum başlatılıyor</string>
     <string name="dev_suite_apt_failed">apt kurulumu başarısız (exit %1$d)</string>
     <string name="dev_suite_step_failed">Adım başarısız (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Kurulum bitti ancak hazırlık denemesi geçilemedi</string>
+    <string name="dev_suite_probe_failed">Kurulum bitti ancak hazırlık denemesi geçilemedi — %1$s</string>
     <string name="dev_suite_interrupted">Kurulum yarıda kesildi</string>
     <string name="dev_suite_no_space">Depolama yetersiz: yaklaşık %1$d GB gerekli, %2$d GB boş</string>
     <string name="dev_suite_skipped_dep">Atlandı: %1$s kurulamadı</string>

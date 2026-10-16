@@ -302,7 +302,7 @@
     <string name="dev_suite_start_install">Starting install</string>
     <string name="dev_suite_apt_failed">apt install failed (exit %1$d)</string>
     <string name="dev_suite_step_failed">Step failed (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Install finished but the readiness probe did not pass</string>
+    <string name="dev_suite_probe_failed">Install finished but the readiness probe did not pass — %1$s</string>
     <string name="dev_suite_interrupted">Install was interrupted</string>
     <string name="dev_suite_no_space">Not enough storage: about %1$d GB needed, %2$d GB free</string>
     <string name="dev_suite_skipped_dep">Skipped: %1$s did not install</string>

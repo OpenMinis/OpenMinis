@@ -1804,7 +1804,7 @@
     <string name="dev_suite_start_install">Memulakan pemasangan</string>
     <string name="dev_suite_apt_failed">Pemasangan apt gagal (exit %1$d)</string>
     <string name="dev_suite_step_failed">Langkah gagal (exit %1$d): %2$s</string>
-    <string name="dev_suite_probe_failed">Pemasangan selesai tetapi pemeriksaan sedia tidak lulus</string>
+    <string name="dev_suite_probe_failed">Pemasangan selesai tetapi pemeriksaan sedia tidak lulus — %1$s</string>
     <string name="dev_suite_interrupted">Pemasangan terganggu</string>
     <string name="dev_suite_no_space">Ruang simpanan tidak cukup: perlu kira-kira %1$d GB, tersedia %2$d GB</string>
     <string name="dev_suite_skipped_dep">Dilangkau: %1$s gagal dipasang</string>
