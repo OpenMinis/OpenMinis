@@ -901,15 +901,6 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     }
 }
 
-/** Keep Compose text layout bounded while preserving the newest thinking. */
-internal fun visibleThinkingTail(content: String, window: Int): String {
-    if (window <= 0 || content.length <= window) return content
-    val start = content.length - window
-    val newline = content.indexOf('\n', start)
-    return if (newline in start until start + 200) content.substring(newline + 1)
-    else content.substring(start)
-}
-
 /**
  * [T-process-summary-duration] Formats an aggregated process duration for the
  * fold-bar suffix. Mirrors the OmniBot run-group header granularity: whole

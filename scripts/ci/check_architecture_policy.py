@@ -63,7 +63,12 @@ def main() -> int:
     baseline: dict[str, int] = policy["baseline"]
 
     files = watched_files(roots)
-    by_rel = {str(p.relative_to(REPO_ROOT)): count_lines(p) for p in files}
+    # Policy paths are repository-style POSIX paths.  pathlib returns
+    # backslashes on Windows, which made every baseline entry look stale and
+    # every existing oversized file look like an unregistered new file when
+    # the check was run locally.  Normalize once at the boundary so the same
+    # policy has identical results on Windows and Linux CI.
+    by_rel = {p.relative_to(REPO_ROOT).as_posix(): count_lines(p) for p in files}
 
     # Tighten FIRST so the check below validates the post-update state
     # (otherwise a just-lowered entry would still be reported as stale).

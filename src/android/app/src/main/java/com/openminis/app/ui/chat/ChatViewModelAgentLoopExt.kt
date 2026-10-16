@@ -149,7 +149,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
     val activeRun = com.openminis.app.service.ActiveRunContext.current()
     activeRun?.associateSession(activeSessionId)
     activeRun?.attachAssistantMessage(assistantId)
-
     // T94 fix 2: throttle text-delta UI updates to ~20fps (50ms).
     // Pre-T94 the LLMStreamChunk.Text branch hopped to Dispatchers.Main
     // for every chunk — Anthropic SSE on a slow turn fires 50-100 deltas
@@ -193,7 +192,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
         len < 128_000 -> 1_500L
         else          -> 2_000L
     }
-
     // Fallback state — mirrors iOS streamWithGroupFallback
     var currentProvider = provider
     val remainingFallbacks = fallbackProviders.toMutableList()
@@ -651,8 +649,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 val requestGoalState = withContext(Dispatchers.IO) {
                     goalManager.get(goalSessionId)
                 }
-                val goalMount = com.openminis.app.goal.goalMount(
-                    requestGoalState, goalManager::continuationPrompt)
+                val goalMount = com.openminis.app.goal.goalMount(requestGoalState, goalManager::continuationPrompt)
                 goalMountedForCurrentRequest = goalMount.canContinue
                 if (goalRunRequested && !goalMount.canContinue) {
                     withContext(Dispatchers.Main) {

@@ -118,10 +118,8 @@ import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import com.openminis.app.util.IsoTime
-
 // [T-android-split-chat] StreamingDelta / ChatMessage / QueuedPrompt /
 // ToolBlockStatus / SlashCommand / AssistantBlock moved verbatim to ChatModels.kt.
-
 class ChatViewModel(
     internal val sessionId: String,
     internal val chatRepository: ChatRepository,
@@ -131,13 +129,10 @@ class ChatViewModel(
     val skillRepository: com.openminis.app.data.repository.SkillRepository? = null,
     val mcpRepository: com.openminis.app.data.repository.MCPRepository? = null,
 ) : ViewModel(), com.openminis.app.session.ChatSessionPort {
-
     /** Whether this is a draft session (not yet persisted to DB). */
     internal val isDraft: Boolean = sessionId.startsWith("__new__")
-
     /** The real session ID, populated on first message for drafts. */
     internal var realSessionId: String = if (isDraft) "" else sessionId
-
     /**
      * [T-android-tts-scene-announcements] Speech sink for scene announcements,
      * injected by the UI layer (which owns the TTS engine binding). The agent
@@ -146,7 +141,6 @@ class ChatViewModel(
      */
     @Volatile
     var announcementSink: ((String) -> Unit)? = null
-
     /** [T-prompt-cache] Memoized session-scoped MemoryRepository;
      *  re-created only when the resolved session id changes (draft→real).
      *  Avoids per-turn allocation and allows fragment caches inside
@@ -155,7 +149,6 @@ class ChatViewModel(
     private var sessionMemoryRepoCache: MemoryRepository? = null
     @Volatile
     private var sessionMemoryRepoCacheSid: String? = null
-
     /** Daily logs and session GLOBAL.md live in this chat's workspace. */
     internal fun sessionMemoryRepo(): MemoryRepository {
         val sid = com.openminis.app.sandbox.ExecutionCoordinator.ownerSessionId(
@@ -170,11 +163,9 @@ class ChatViewModel(
         sessionMemoryRepoCacheSid = sid
         return repo
     }
-
     companion object {
         internal const val TAG = "ChatViewModel"
         internal val HTTP_5XX_STATUS_RE = Regex("""\[5\d{2}\]""")
-
         // ── [T-android-compact-runaway] Compaction budgets ──────────────
         //
         // Compaction had no ceiling of any kind. Its only time bound was the

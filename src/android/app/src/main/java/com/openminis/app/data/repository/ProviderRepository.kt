@@ -99,7 +99,6 @@ class ProviderRepository(private val context: Context) {
 
         /** [T-newchat-default-model-fallback-android] Global last-used model entry id. */
         internal const val KEY_LAST_USED_ENTRY = "lastUsedModelEntryId"
-
         /** Single source of truth for provider type × credential support. */
         internal fun supportedCredentials(type: ProviderType): List<ProviderCredential> = when (type) {
             ProviderType.anthropic, ProviderType.openAI, ProviderType.openRouter,
@@ -199,9 +198,7 @@ class ProviderRepository(private val context: Context) {
      */
     private val _configLoaded = MutableStateFlow(false)
     val configLoaded: StateFlow<Boolean> = _configLoaded.asStateFlow()
-    private val _credentialRevision = MutableStateFlow(0L)
-    val credentialRevision: StateFlow<Long> = _credentialRevision.asStateFlow()
-
+    private val _credentialRevision = MutableStateFlow(0L); val credentialRevision: StateFlow<Long> = _credentialRevision.asStateFlow()
     /** Internal scope for the one-shot async config load. */
     private val loadScope = kotlinx.coroutines.CoroutineScope(
         kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
