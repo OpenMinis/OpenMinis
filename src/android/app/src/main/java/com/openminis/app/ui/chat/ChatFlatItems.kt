@@ -1035,7 +1035,7 @@ internal fun buildFlatChatItems(
                             messageId = message.id,
                             block = block,
                             isLast = block.id == lastThinkingId,
-                            messageIsStreaming = message.isStreaming,
+                            messageIsStreaming = message.isStreaming && block.id == lastBlockId,
                             messageThinkingLevel = message.thinkingLevel,
                             isLastBlockOverall = block.id == lastBlockId,
                         )))

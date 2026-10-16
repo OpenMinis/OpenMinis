@@ -12,15 +12,37 @@ export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
 
 command -v npm >/dev/null 2>&1 || { echo "npm missing — install nodejs-core first" >&2; exit 1; }
 
+# Do not use npm's distro-wide global prefix. On the guest this can point at a
+# read-only or PRoot-translated /usr tree; npm then exits with opaque non-zero
+# values (including 217) before it prints a useful package error. A private,
+# stable prefix also makes a retry idempotent and keeps pnpm/yarn together.
+PREFIX=/opt/node-global
+mkdir -p "$PREFIX"
+export PATH="$PREFIX/bin:$PATH"
+
+install_global() {
+  package="$1"
+  echo "installing $package into $PREFIX"
+  if npm --prefix "$PREFIX" install --global --no-audit --no-fund \
+      --fetch-retries=3 --fetch-retry-mintimeout=2000 \
+      --fetch-retry-maxtimeout=15000 "$package" \
+      --registry=https://registry.npmmirror.com; then
+    return 0
+  fi
+  echo "$package mirror failed; retrying npmjs with the same prefix" >&2
+  npm --prefix "$PREFIX" install --global --no-audit --no-fund \
+    --fetch-retries=3 --fetch-retry-mintimeout=2000 \
+    --fetch-retry-maxtimeout=15000 "$package" \
+    --registry=https://registry.npmjs.org
+}
+
 if ! command -v pnpm >/dev/null 2>&1; then
-  echo "installing pnpm via npm -g (npmmirror registry fallback)..."
-  npm install -g pnpm --registry=https://registry.npmmirror.com \
-    || npm install -g pnpm
+  install_global pnpm
 fi
 if ! command -v yarn >/dev/null 2>&1; then
-  echo "installing yarn via npm -g..."
-  npm install -g yarn --registry=https://registry.npmmirror.com \
-    || npm install -g yarn
+  install_global yarn
 fi
 
+command -v pnpm >/dev/null 2>&1 || { echo "pnpm install completed but no executable is on PATH" >&2; exit 1; }
+command -v yarn >/dev/null 2>&1 || { echo "yarn install completed but no executable is on PATH" >&2; exit 1; }
 echo "pnpm $(pnpm --version 2>/dev/null || echo '?') / yarn $(yarn --version 2>/dev/null || echo '?')"

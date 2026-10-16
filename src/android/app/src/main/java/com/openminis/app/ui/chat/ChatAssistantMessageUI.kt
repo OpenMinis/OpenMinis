@@ -68,6 +68,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -706,15 +707,15 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
     val autoExpandThinking = remember { autoExpandThinkingEnabled(context) }
     var expanded by remember(block.id) { mutableStateOf(autoExpandThinking && isLast && isStreaming) }
     var userTouched by remember(block.id) { mutableStateOf(false) }
+    var wasStreaming by remember(block.id) { mutableStateOf(isStreaming) }
     LaunchedEffect(block.id, isStreaming) {
-        // [P-process-card] Collapse 500ms after this block finishes streaming,
-        // not on the same frame: the last tokens need a beat to be readable.
-        // A block the user collapsed by hand (userTouched) is never reopened
-        // and never auto-collapsed over their choice.
-        if (!isStreaming && !userTouched) {
+        // Collapse only on a real active->finished edge. Historic/non-active
+        // thinking blocks can be rendered while their assistant turn streams.
+        if (wasStreaming && !isStreaming && !userTouched) {
             delay(500)
             expanded = false
         }
+        wasStreaming = isStreaming
     }
     val thinkingBlue = Color(0xFF007AFF)
     val charCount = block.content.length
@@ -844,21 +845,20 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             // keyed on the length recomputes the substring on each token, but
             // the cost is O(window) not O(total). Snap the cut to the next
             // newline (within 200 chars) so we don't start mid-line.
-            val isTruncated = charCount > thinkingWindowSize
-            val displayContent = remember(charCount) {
-                if (isTruncated) {
-                    val full = block.content
-                    val start = charCount - thinkingWindowSize
-                    val nl = full.indexOf('\n', start)
-                    if (nl in start until start + 200) full.substring(nl + 1)
-                    else full.substring(start)
-                } else {
-                    block.content
+            var renderedContent by remember(block.id) { mutableStateOf(block.content) }
+            val latestContent by rememberUpdatedState(block.content)
+            LaunchedEffect(block.id, isStreaming) {
+                while (isStreaming) {
+                    delay(100)
+                    if (renderedContent != latestContent) renderedContent = latestContent
                 }
+                renderedContent = latestContent
             }
+            val isTruncated = renderedContent.length > thinkingWindowSize
+            val displayContent = visibleThinkingTail(renderedContent, thinkingWindowSize)
             ThinkingAutoFollow(
                 blockId = block.id,
-                contentVersionValue = charCount,
+                contentVersionValue = renderedContent.length,
                 isStreaming = isStreaming,
                 scrollState = scrollState,
             )
@@ -899,6 +899,15 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             )
         }
     }
+}
+
+/** Keep Compose text layout bounded while preserving the newest thinking. */
+internal fun visibleThinkingTail(content: String, window: Int): String {
+    if (window <= 0 || content.length <= window) return content
+    val start = content.length - window
+    val newline = content.indexOf('\n', start)
+    return if (newline in start until start + 200) content.substring(newline + 1)
+    else content.substring(start)
 }
 
 /**

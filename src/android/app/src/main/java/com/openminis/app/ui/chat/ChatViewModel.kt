@@ -931,6 +931,8 @@ class ChatViewModel(
     val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages.asStateFlow()
     private val _hasNewerMessages = MutableStateFlow(false)
     val hasNewerMessages: StateFlow<Boolean> = _hasNewerMessages.asStateFlow()
+    private val _sessionTailReady = MutableStateFlow(false)
+    val sessionTailReady: StateFlow<Boolean> = _sessionTailReady.asStateFlow()
     // [T-task-anchor] Session-scoped copy of the first user message. Loaded
     // once per session (DB read, immune to the UI window), consumed by the
     // system prompt's dynamic tail every turn. Cleared with the session.
@@ -968,6 +970,7 @@ class ChatViewModel(
         timeline.seedCounters(offset = before, total = before + loadedDbRows + after)
         _hasOlderMessages.value = before > 0
         _hasNewerMessages.value = after > 0
+        if (after == 0) _sessionTailReady.value = true
         // A newer gap means the painted window is not the session tail.
         // Attach it. Do not wait for a second control.
         if (scheduleTail && after > 0) ensureSessionTailLoaded()
@@ -1012,11 +1015,7 @@ class ChatViewModel(
      * point). See [loadOlderPage] for the single-page contract.
      */
     fun loadOlderMessages() {
-        if (!claimOlderLoad()) return
-        loadingOlderFlag.set(false)
-        // loadOlderPage owns the CAS for every caller. Claiming here as well
-        // is intentionally released before launch: the suspend operation
-        // performs the authoritative claim again when it starts.
+        if (loadingOlderFlag.get()) return
         viewModelScope.launch { loadOlderPage() }
     }
 
@@ -1047,6 +1046,11 @@ class ChatViewModel(
             timeline.mutationMutex.withLock {
                 val before = timeline.oldestSortOrder
                 if (before == null) return@withLock
+                val hardPageLimit = ChatHistoryWindow.PAGE_ROW_LIMIT
+                val oldestAnchor = withContext(Dispatchers.IO) {
+                    chatRepository.dao.loadOlderSortAnchors(sessionId, before, hardPageLimit)
+                        .lastOrNull()?.sortOrder
+                }
                 val start = withContext(Dispatchers.IO) {
                     olderTurnStart(before, ChatHistoryWindow.TURN_PAGE_SIZE)
                 }
@@ -1059,8 +1063,9 @@ class ChatViewModel(
                 // calls refreshHistoryEdges and returns: visible button, zero
                 // effect. Fall back to a non-turn-aligned load of all remaining
                 // rows instead of freezing at the boundary.
-                val loadStart = if (start != null && start < before) {
-                    start
+                val boundedStart = ChatHistoryWindow.boundedOlderStart(start, oldestAnchor, before)
+                val loadStart = if (boundedStart != null) {
+                    boundedStart
                 } else {
                     // Turn alignment failed. Do NOT walk all the way to the
                     // session start: that is how one tap re-materialised the
@@ -1081,7 +1086,7 @@ class ChatViewModel(
                         chatRepository.dao.loadOlderSortAnchors(
                             sessionId,
                             before,
-                            com.openminis.app.data.repository.ChatRepository.MAX_TAIL_MESSAGES,
+                            hardPageLimit,
                         )
                     }
                     anchors.lastOrNull()?.sortOrder
@@ -1160,6 +1165,7 @@ class ChatViewModel(
      */
     fun ensureSessionTailLoaded() {
         if (sessionId.isEmpty()) return
+        _sessionTailReady.value = false
         if (_isStreaming.value || tailAttachJob?.isActive == true) {
             tailAttachQueued = true
             return
@@ -1178,11 +1184,13 @@ class ChatViewModel(
                     if (!again) break
                     if (timeline.newestSortOrder == before) idlePasses++ else idlePasses = 0
                 }
+                _sessionTailReady.value = !_hasNewerMessages.value
             } finally {
                 val restart = tailAttachQueued && !_isStreaming.value
                 tailAttachJob = null
                 tailAttachQueued = false
                 _isLoadingHistory.value = false
+                if (!_isStreaming.value && !_hasNewerMessages.value) _sessionTailReady.value = true
                 if (restart) ensureSessionTailLoaded()
             }
         }
@@ -4288,6 +4296,7 @@ class ChatViewModel(
         tailAttachJob = null
         _hasOlderMessages.value = false
         _hasNewerMessages.value = false
+        _sessionTailReady.value = false
         _isLoadingHistory.value = false
         // [T-task-anchor] Session-scoped — the next session re-reads its own
         // opening turn; a cleared chat must not anchor on the old one.

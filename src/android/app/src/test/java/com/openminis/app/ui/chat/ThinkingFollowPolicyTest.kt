@@ -144,7 +144,7 @@ class ThinkingFollowPolicyTest {
         )
         assertTrue(
             "the streaming collector must observe the state holder, not a captured data class",
-            "snapshotFlow { contentVersion.intValue }" in followSource,
+            "snapshotFlow { contentVersion.intValue to scrollState.maxValue }" in followSource,
         )
         assertFalse(
             "snapshotFlow over a captured AssistantBlock cannot observe replacement objects",
@@ -152,7 +152,7 @@ class ThinkingFollowPolicyTest {
         )
         assertTrue(
             "ThinkingBlock must pass the latest content length to the follow owner",
-            "contentVersionValue = charCount" in renderSource,
+            "contentVersionValue = renderedContent.length" in renderSource,
         )
     }
 

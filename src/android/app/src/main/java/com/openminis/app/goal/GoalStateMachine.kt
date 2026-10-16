@@ -86,6 +86,7 @@ object GoalStateMachine {
         now: Long,
     ): SessionGoalEntity {
         require(tokens >= 0 && elapsedMs >= 0)
+        if (goal.status != GoalStatus.ACTIVE) return goal
         val used = if (Long.MAX_VALUE - goal.tokensUsed < tokens) Long.MAX_VALUE else goal.tokensUsed + tokens
         return goal.copy(
             tokensUsed = used,

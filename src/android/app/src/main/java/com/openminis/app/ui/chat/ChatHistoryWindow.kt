@@ -15,6 +15,7 @@ package com.openminis.app.ui.chat
  */
 internal object ChatHistoryWindow {
     const val TURN_PAGE_SIZE = 5
+    const val PAGE_ROW_LIMIT = 500
     const val TAIL_ATTACH_CHUNK = 50
     private const val ANCHOR_PROBE = 200
 
@@ -207,6 +208,14 @@ internal object ChatHistoryWindow {
     }
 
     fun probeLimit(): Int = ANCHOR_PROBE
+
+    /** Pick an older range that never exceeds the page row ceiling. */
+    fun boundedOlderStart(candidate: Int?, oldestInLimit: Int?, before: Int): Int? =
+        when {
+            candidate != null && candidate < before && oldestInLimit != null && candidate >= oldestInLimit -> candidate
+            oldestInLimit != null && oldestInLimit < before -> oldestInLimit
+            else -> candidate?.takeIf { it < before }
+        }
 
     /**
      * Up-button turn-walk decision — which user turn a tap should land on.

@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,42 +88,39 @@ private sealed class ProviderImportOutcome {
 }
 
 private data class ProviderRowSnapshot(
+    val loaded: Boolean = false,
     val modelCount: Int = 0,
     val apiKey: String? = null,
     val isConfigured: Boolean = false,
     val needsReauth: Boolean = false,
 )
 
-@Composable
-private fun rememberProviderRowSnapshot(
-    instance: ProviderInstance,
+private suspend fun loadProviderRowSnapshots(
+    instances: List<ProviderInstance>,
     providerRepository: ProviderRepository,
     context: android.content.Context,
-): ProviderRowSnapshot {
-    val snapshot by produceState(
-        initialValue = ProviderRowSnapshot(),
-        key1 = instance.id,
-        key2 = instance.credentialType,
-        key3 = instance.allowsEmptyAPIKey,
-    ) {
-        value = withContext(Dispatchers.IO) {
-            val apiKey = providerRepository.loadApiKey(instance.id)
-            val configured = if (instance.credentialType ==
-                com.openminis.app.data.model.ProviderCredential.oauth) {
-                val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                mgr?.isAuthenticated() == true
-            } else {
-                !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
-            }
-            ProviderRowSnapshot(
-                modelCount = providerRepository.visibleEntries(instance.id).size,
-                apiKey = apiKey,
-                isConfigured = configured,
-                needsReauth = com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id),
-            )
+): Map<String, ProviderRowSnapshot> = withContext(Dispatchers.IO) {
+    // One bounded IO snapshot for the whole page. The previous implementation
+    // launched one produceState/IO job per row; entering a list with many
+    // providers caused a burst of encrypted-prefs, OAuth and config reads and
+    // made the navigation transition wait behind dozens of continuations.
+    instances.associate { instance ->
+        val apiKey = providerRepository.loadApiKey(instance.id)
+        val configured = if (instance.credentialType ==
+            com.openminis.app.data.model.ProviderCredential.oauth) {
+            val mgr = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
+            mgr?.isAuthenticated() == true
+        } else {
+            !apiKey.isNullOrBlank() || instance.allowsEmptyAPIKey
         }
+        instance.id to ProviderRowSnapshot(
+            loaded = true,
+            modelCount = providerRepository.visibleEntries(instance.id).size,
+            apiKey = apiKey,
+            isConfigured = configured,
+            needsReauth = com.openminis.app.auth.OAuthManager.needsReauth(context, instance.id),
+        )
     }
-    return snapshot
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -135,9 +133,31 @@ fun ProviderListScreen(
     onVoiceServiceClick: (String) -> Unit = {},
 ) {
     val config by providerRepository.config.collectAsState()
-    val instances = config.instances
+    val credentialRevision by providerRepository.credentialRevision.collectAsState()
+    val configRevision = config.revision
+    val instances = config.instances.toList()
     val groupedInstances = instances.groupBy { it.providerType }
     val context = LocalContext.current
+    var refreshEpoch by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) { refreshEpoch++ }
+    val rowSnapshots by produceState<Map<String, ProviderRowSnapshot>>(
+        initialValue = emptyMap(),
+        configRevision,
+        credentialRevision,
+        refreshEpoch,
+    ) {
+        value = loadProviderRowSnapshots(instances, providerRepository, context)
+    }
+    val shadowProviders by produceState<List<ProviderRepository.ShadowVoiceProvider>>(
+        initialValue = emptyList(),
+        configRevision,
+        credentialRevision,
+        refreshEpoch,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            providerRepository.shadowVoiceProviders()
+        }
+    }
 
     var showMenu by remember { mutableStateOf(false) }
     var isSyncing by remember { mutableStateOf(false) }
@@ -323,10 +343,10 @@ fun ProviderListScreen(
                         ProviderSwipeableRow(
                             instance = instance,
                             providerRepository = providerRepository,
-                            context = context,
                             onProviderClick = onProviderClick,
                             onRequestDelete = { instanceToDelete = instance },
                             syncResult = syncMarks[instance.id],
+                            snapshot = rowSnapshots[instance.id] ?: ProviderRowSnapshot(),
                         )
                         if (index < pinnedInstances.size - 1) {
                             val divider = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
@@ -379,11 +399,7 @@ fun ProviderListScreen(
                         },
                     ) { index, instance, isDragging ->
                         key(instance.id) {
-                            val snapshot = rememberProviderRowSnapshot(
-                                instance,
-                                providerRepository,
-                                context,
-                            )
+                            val snapshot = rowSnapshots[instance.id] ?: ProviderRowSnapshot()
                             // Lift the dragged row above its neighbours so it
                             // reads as "picked up" (matches ModelGroupsScreen).
                             val elevation by animateDpAsState(
@@ -430,6 +446,7 @@ fun ProviderListScreen(
                                         apiKey = snapshot.apiKey,
                                         isConfigured = snapshot.isConfigured,
                                         needsReauth = snapshot.needsReauth,
+                                        isLoading = !snapshot.loaded,
                                         pinned = instance.pinned,
                                         onTogglePinned = {
                                             providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -459,7 +476,7 @@ fun ProviderListScreen(
         // every enabled instance that owns audio-modality models (mirrors iOS
         // ProviderInstancesView's Voice Services section). Rows are read-only
         // views onto the underlying instance — no stored entity.
-        val shadows = remember(config) { providerRepository.shadowVoiceProviders() }
+        val shadows = shadowProviders
         if (shadows.isNotEmpty()) {
             SettingsSection(
                 header = stringResource(R.string.voice_services_section),
@@ -564,17 +581,16 @@ fun ProviderListScreen(
 private fun ProviderSwipeableRow(
     instance: ProviderInstance,
     providerRepository: ProviderRepository,
-    context: android.content.Context,
     onProviderClick: (String) -> Unit,
     onRequestDelete: () -> Unit,
     syncResult: ModelRefreshResult? = null,
+    snapshot: ProviderRowSnapshot = ProviderRowSnapshot(),
 ) {
     // Provider rows used to perform model-store, key-store and OAuth reads
     // synchronously during composition. With several instances that made
     // entering Settings block the main thread before the first frame. Keep a
     // small row snapshot and populate it off-main; the row can render its
     // neutral state while the snapshot is being prepared.
-    val snapshot = rememberProviderRowSnapshot(instance, providerRepository, context)
     SwipeRowActions(
         actions = listOf(
             SwipeRowAction(
@@ -599,6 +615,7 @@ private fun ProviderSwipeableRow(
             apiKey = snapshot.apiKey,
             isConfigured = snapshot.isConfigured,
             needsReauth = snapshot.needsReauth,
+            isLoading = !snapshot.loaded,
             pinned = instance.pinned,
             onTogglePinned = {
                 providerRepository.setInstancePinned(instance.id, !instance.pinned)
@@ -620,6 +637,7 @@ private fun ProviderInstanceRow(
     onTogglePinned: () -> Unit,
     onClick: () -> Unit,
     syncResult: ModelRefreshResult? = null,
+    isLoading: Boolean = false,
 ) {
     val isActive = isConfigured && instance.isEnabled
 
@@ -638,6 +656,7 @@ private fun ProviderInstanceRow(
                         // [T-oauth-keep-credentials] Rejected bundle awaiting
                         // re-login: red, regardless of enabled state.
                         needsReauth -> Color(0xFFFF3B30)
+                        isLoading -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.15f)
                         isActive -> Color(0xFF34C759)
                         else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f)
                     },
@@ -674,7 +693,8 @@ private fun ProviderInstanceRow(
                 Text(
                     // [T-empty-key-compat-endpoints] Keyless compatible endpoint:
                     // say so instead of the alarming "No API key".
-                    text = if (!apiKey.isNullOrBlank()) maskKey(apiKey)
+                    text = if (isLoading) stringResource(R.string.loading)
+                        else if (!apiKey.isNullOrBlank()) maskKey(apiKey)
                         else if (instance.allowsEmptyAPIKey) stringResource(R.string.provider_no_key_required)
                         else stringResource(R.string.provider_list_no_api_key),
                     style = MaterialTheme.typography.bodySmall,

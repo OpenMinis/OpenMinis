@@ -40,10 +40,14 @@ internal fun ThinkingAutoFollow(
     SideEffect { contentVersion.intValue = contentVersionValue }
     LaunchedEffect(scrollState, blockId, isStreaming) {
         if (!isStreaming) return@LaunchedEffect
-        snapshotFlow { contentVersion.intValue }.collect {
+        // Observe both the throttled content revision and the measured max
+        // scroll. Content is published before LazyColumn/Column measurement,
+        // so watching only the revision races the layout and can leave the
+        // viewport one update behind. The max-value change is the second half
+        // of the handshake: once layout has committed the new height, follow
+        // again using the real latest max.
+        snapshotFlow { contentVersion.intValue to scrollState.maxValue }.collect {
             if (!ThinkingFollowPolicy.shouldFollowOnContentGrowth(paused)) return@collect
-            // Let layout publish its new maxValue; snapshotFlow conflates
-            // bursts while this effect waits, so at most one snap runs at once.
             withFrameNanos { }
             scrollState.scrollTo(scrollState.maxValue)
         }

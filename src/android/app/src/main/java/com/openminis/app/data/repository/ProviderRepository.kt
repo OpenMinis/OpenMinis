@@ -199,6 +199,8 @@ class ProviderRepository(private val context: Context) {
      */
     private val _configLoaded = MutableStateFlow(false)
     val configLoaded: StateFlow<Boolean> = _configLoaded.asStateFlow()
+    private val _credentialRevision = MutableStateFlow(0L)
+    val credentialRevision: StateFlow<Long> = _credentialRevision.asStateFlow()
 
     /** Internal scope for the one-shot async config load. */
     private val loadScope = kotlinx.coroutines.CoroutineScope(
@@ -2781,6 +2783,7 @@ class ProviderRepository(private val context: Context) {
     // API Key management
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
+        _credentialRevision.value = _credentialRevision.value + 1
         // [T-android-provider-memo] The memo keys on the credential fingerprint;
         // a rotated token already yields a new entry. Drop this instance's
         // entries so stale-keyed providers can't linger past the cap —

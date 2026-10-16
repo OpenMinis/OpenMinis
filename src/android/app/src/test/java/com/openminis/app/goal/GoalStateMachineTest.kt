@@ -85,4 +85,10 @@ class GoalStateMachineTest {
         assertFalse(GoalStateMachine.canContinue(paused, usefulActivity = true))
         assertEquals(GoalStatus.ACTIVE, GoalStateMachine.resume(paused, 3).status)
     }
+
+    @Test fun `paused goal does not accumulate ordinary request usage`() {
+        val goal = GoalStateMachine.create("s", "ship it", 500, 1)
+        val paused = GoalStateMachine.pause(goal, 2)
+        assertEquals(paused, GoalStateMachine.recordProgress(paused, 120, 900, 3))
+    }
 }

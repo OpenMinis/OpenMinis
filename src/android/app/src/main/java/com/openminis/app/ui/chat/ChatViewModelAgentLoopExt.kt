@@ -203,6 +203,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     val allToolInputs = mutableMapOf<String, String>()
     val goalManager = com.openminis.app.goal.GoalManager(chatRepository)
     val goalSessionId = activeSessionId
+    var goalMountedForCurrentRequest = false
     var goalContinuations = 0
     // [T-subagent-background] Bounded nudges for uncollected detached waves.
     var subAgentCollectNudges = 0
@@ -652,6 +653,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 }
                 val goalMount = com.openminis.app.goal.goalMount(
                     requestGoalState, goalManager::continuationPrompt)
+                goalMountedForCurrentRequest = goalMount.canContinue
                 if (goalRunRequested && !goalMount.canContinue) {
                     withContext(Dispatchers.Main) {
                         updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
@@ -1549,7 +1551,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
         }
 
         var goalAccountingSucceeded = true
-        if (toolCalls.isEmpty()) {
+        if (toolCalls.isEmpty() && goalMountedForCurrentRequest) {
             val turnUsageTokens = (lastUsage?.inputTokens ?: 0).toLong() + (lastUsage?.outputTokens ?: 0).toLong()
             goalAccountingSucceeded = runCatching {
                 goalManager.recordUsage(
@@ -2304,20 +2306,21 @@ internal suspend fun ChatViewModel.runAgentLoop(
             dbMessageId = toolResultDbId,
         ))
         val turnUsageTokens = (lastUsage?.inputTokens ?: 0).toLong() + (lastUsage?.outputTokens ?: 0).toLong()
-        val goalUsageResult = runCatching {
+        val goalUsageResult = if (goalMountedForCurrentRequest) runCatching {
             goalManager.recordUsage(
                 goalSessionId,
                 turnUsageTokens,
                 (System.currentTimeMillis() - turnStartedAtMs).coerceAtLeast(0),
             )
         }.onFailure { AppLogger.warning(ChatViewModel.TAG_STREAM, "Goal usage accounting failed: ${it.message}") }
+        else Result.success(null)
         val goalAfterTurn = goalUsageResult.getOrNull()
-        if (goalUsageResult.isFailure || goalAfterTurn?.status in setOf(
+        if (goalMountedForCurrentRequest && (goalUsageResult.isFailure || goalAfterTurn?.status in setOf(
                 com.openminis.app.data.db.GoalStatus.COMPLETE,
                 com.openminis.app.data.db.GoalStatus.BLOCKED,
                 com.openminis.app.data.db.GoalStatus.PAUSED,
                 com.openminis.app.data.db.GoalStatus.BUDGET_LIMITED,
-            )
+            ))
         ) {
             withContext(Dispatchers.Main) {
                 updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)

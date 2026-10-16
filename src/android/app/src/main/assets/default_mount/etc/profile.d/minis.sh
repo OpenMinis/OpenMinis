@@ -73,7 +73,7 @@ for _cm in $(ls -1d "$ANDROID_HOME"/cmake/*/bin/ 2>/dev/null | sort -rV); do
   _minis_path_add "${_cm%/}"
 done
 unset _bt _cm
-export PATH="$PATH:/opt/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:/opt/gradle/bin"
+export PATH="$PATH:/opt/bin:/opt/node-global/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:/opt/gradle/bin"
 unset -f _minis_path_add
 for _jdk in /usr/lib/jvm/java-21-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 /usr/lib/jvm/default-java; do
   if [ -d "$_jdk" ]; then

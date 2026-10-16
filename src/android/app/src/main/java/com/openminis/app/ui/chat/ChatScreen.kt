@@ -1344,42 +1344,13 @@ fun ChatScreen(
     // visible items' real partial overhang. Indices we've never seen still
     // contribute zero — that's a strict lower bound, so we can only
     // under-show the button, never flash it near an end.
-    val itemSizeByIndex = remember(listState) { mutableStateMapOf<Int, Int>() }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.layoutInfo.visibleItemsInfo }
-            .collect { vis ->
-                for (it in vis) {
-                    val cached = itemSizeByIndex[it.index]
-                    if (cached == null || cached != it.size) itemSizeByIndex[it.index] = it.size
-                }
-            }
-    }
-    // [T-android-scroll-fab-first-entry] Average observed item size, used to
-    // estimate the height of indices we've never had on-screen. The pure
-    // cache-only approach (b58e9515) was one-sided: belowSum (already-scrolled-
-    // past items, cached) worked, but aboveSum summed indices we hadn't reached
-    // yet, which are NEVER cached at the moment they're off-screen ABOVE — so
-    // aboveSum stayed 0 forever and the up-button never appeared (logged:
-    // aboveSum=0 across an entire top-scroll, even with all 68 items eventually
-    // cached). Estimating unknown indices by the running average makes BOTH
-    // ends symmetric and direction-independent. The average is a real measured
-    // mean (not a wild min/avg-of-visible extrapolation that the commit comment
-    // warned against), so it tracks actual pixel distance closely enough for a
-    // one-viewport threshold.
-    val avgItemSize = remember(listState, itemSizeByIndex) {
-        derivedStateOf {
-            val sizes = itemSizeByIndex.values
-            if (sizes.isEmpty()) 0 else sizes.sum() / sizes.size
-        }
-    }
+    // Per-index size cache and running-average estimation were removed: the
+    // current scroll policy uses stable item keys and direct edge actions, so
+    // maintaining an extra size map only caused state writes and recomposition.
     // [T-android-scrollbtn-turn-walk] The isFarFromTop / isFarFromBottom pair
     // that used to live here is gone, mirroring iOS dcdec3c5: the up-button's
     // visibility is now the shared `!isNearBottom` condition, so the separate
     // one-viewport-from-both-ends estimation has no remaining consumer.
-    // `itemSizeByIndex` / `avgItemSize` above are deliberately KEPT — the
-    // streaming glide (LE(streaming-content)) still uses the running average to
-    // size its per-frame steps.
-
     // [T-android-scroll-policy] Single scroll authority (ChatScrollPolicy KDoc
     // has the full history). Pinned = the viewport follows the newest edge and
     // content-driven scrolls are allowed. Reading = the user is reading
@@ -1400,7 +1371,7 @@ fun ChatScreen(
     // whether the previous run is still streaming or already finished. Wait
     // for the DB tail and flatten publish before pinning, otherwise a long
     // session can land on a restored middle anchor.
-    LaunchedEffect(sessionId, sessionLoaded, isStreaming, hasNewerMessages) {
+    LaunchedEffect(sessionId, sessionLoaded) {
         if (!sessionLoaded || entryPinRequested) return@LaunchedEffect
         entryPinRequested = true
         scrollPolicy.pin()
@@ -1408,7 +1379,7 @@ fun ChatScreen(
         // The initial tail load and any queued tail attach are asynchronous.
         // Waiting for the newest-edge flag here is what keeps long sessions
         // from landing on a mid-history restored viewport before this pin.
-        viewModel.hasNewerMessages.first { !it }
+        viewModel.sessionTailReady.first { it }
         withFrameNanos { }
         tracedScrollToItem("SESSION-REENTRY/tail", 0, 0)
         kotlinx.coroutines.delay(100)
@@ -3352,7 +3323,7 @@ fun ChatScreen(
         // tap on the button. One page per tap keeps each click bounded.
         var jumped = lastJumpedUserId
         var target: String? = null
-        var attempt = 0
+        var pagesLoaded = 0
         while (true) {
             target = ChatHistoryWindow.previousUserTurnTarget(
                 loaded = loaded,
@@ -3360,12 +3331,20 @@ fun ChatScreen(
                 lastJumpedUserId = jumped,
                 fullyVisibleUserIds = fullyVisibleUserIds,
             )
-            val atFloor = target != null && target == loaded.filter { it.second }.map { it.first }.first()
-            if (!atFloor || !viewModel.hasOlderMessages.value || attempt >= 1) break
-            attempt++
+            val oldestLoadedUser = loaded.firstOrNull { it.second }?.first
+            val atFloor = target != null && target == oldestLoadedUser
+            if (!atFloor || !viewModel.hasOlderMessages.value || pagesLoaded >= 20) break
+            // Preserve the floor we just reached. The newly prepended page is
+            // published below it; resolving with `jumped = null` re-anchored
+            // against the old viewport-top row and selected the same floor
+            // again, so the following scroll jumped back to the fixed
+            // position the user had just escaped. Treat the old floor as the
+            // walk cursor and step to its predecessor after the page arrives.
+            val floorBeforeLoad = oldestLoadedUser
             val added = viewModel.loadOlderPage()
             if (!added) break
-            jumped = target
+            pagesLoaded++
+            jumped = floorBeforeLoad
             // `messages` is a composition snapshot. Paging publishes a newer
             // list asynchronously, so re-resolve from the VM after the load.
             loaded = viewModel.uiMessages.value.map { it.id to (it.role == "user") }

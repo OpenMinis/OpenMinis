@@ -200,4 +200,11 @@ class ChatHistoryWindowTest {
         )
         assertEquals(before, after)
     }
+
+    @Test
+    fun boundedOlderStartNeverExpandsPastTheHardPage() {
+        assertEquals(500, ChatHistoryWindow.boundedOlderStart(100, 500, 1000))
+        assertEquals(800, ChatHistoryWindow.boundedOlderStart(800, 500, 1000))
+        assertEquals(900, ChatHistoryWindow.boundedOlderStart(900, null, 1000))
+    }
 }
