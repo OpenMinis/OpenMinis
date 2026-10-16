@@ -207,6 +207,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // [T-subagent-background] Bounded nudges for uncollected detached waves.
     var subAgentCollectNudges = 0
     val goalRunRequested = goalExecutionRun
+    // [T-perf-ui-batch] Non-text mutations batch through a 200ms window on Dispatchers.Default.
+    val uiBatcher = UiUpdateBatcher(viewModelScope, ::updateAssistantMessage)
+    uiBatcher.start()
     // [T-android-stream-drop-autocontinue] Per-run budget of silent
     // auto-continuations after a relay-side stream cut (see the
     // turnFinishReason == null branch below).
@@ -715,9 +718,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     } else {
                         allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
                     }
-                    withContext(Dispatchers.Main) {
-                        updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
-                    }
+                    uiBatcher.enqueue(assistantId, messageTextSnapshot(), true, allToolBlocks.toList())
                 }
                 is LLMStreamChunk.Text -> {
                     // [T-android-readaloud-stop-stale] First actual text of
@@ -916,9 +917,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             toolTitle = friendlyToolTitle(chunk.name),
                             startTimeMs = System.currentTimeMillis(),
                         ))
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
-                        }
+                        uiBatcher.enqueue(assistantId, messageTextSnapshot(), true, allToolBlocks.toList())
                     }
                 }
                 is LLMStreamChunk.ToolInputDelta -> {
@@ -1031,9 +1030,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                             // this chunk lacked one.
                             thoughtSignature = chunk.thoughtSignature ?: allToolBlocks[idx].thoughtSignature,
                         )
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, messageTextSnapshot(), true, allToolBlocks)
-                        }
+                        uiBatcher.enqueue(assistantId, messageTextSnapshot(), true, allToolBlocks.toList())
                     }
                 }
                 is LLMStreamChunk.Usage -> {
@@ -2404,6 +2401,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // (b) is the only case that needs the inline-error/Resume hand-holding;
     // (a) must NOT be touched or every normal completion gets a fake "hit
     // 200 turns" sticker (the bug user hit at v1.4.0-dev tip).
+    // [P-perf-async-db-init] Flush pending UI batches before the final update.
+    uiBatcher.flush()
+    uiBatcher.stop()
     if (!loopExitedNormally) {
         AppLogger.warning(
             ChatViewModel.TAG_STREAM,
