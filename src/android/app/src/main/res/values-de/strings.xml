@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">Sitzungsübergreifend persistentes Wissen</string>
     <string name="settings_mcp">MCP-Integrationen</string>
     <string name="settings_mcp_subtitle">Model-Context-Protocol-Server verbinden</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK-Toolchain · NDK r29 · Optional Flutter/RE/Rust</string>
+    <string name="dev_suite_code_search_name">Code-Suche &amp; Terminal-Effizienz</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat Quartett</string>
+    <string name="dev_suite_python_name">Python &amp; AI-Entwickler-Suite</string>
+    <string name="dev_suite_python_summary">Python 3-Laufzeit · pip/venv · AI wissenschaftliche Berechnungs-Build-Abhängigkeiten</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Node.js-Laufzeit · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go-Entwicklungssuite</string>
+    <string name="dev_suite_go_summary">golang-go Toolchain (exklusiv für OpenMinis)</string>
+
     <string name="mcp_status_running">Läuft (Port %1$d), %2$d Anfragen bearbeitet</string>
     <string name="mcp_status_running_shifted">Läuft (tatsächlicher Port %1$d · konfigurierter %2$d belegt, verschoben), %3$d Anfragen bearbeitet</string>
     <string name="mcp_status_error">Fehler: %1$s</string>
@@ -1781,7 +1793,7 @@
     <string name="dev_suite_section_header">Entwicklungsumgebungen</string>
     <string name="dev_suite_section_footer">Rezepte installieren Toolchains bei Bedarf in der Sandbox — Pakete sind nicht mehr in der App gebündelt, die erste Einrichtung benötigt Netz. Netzwerk eingeschränkt? minis-devsuite-offline-list listet die Dateien für den Offline-Import auf.</string>
     <string name="dev_suite_offline_hint_title">Offline-Import verfügbar</string>
-    <string name="dev_suite_offline_hint_body">Download fehlgeschlagen? Führen Sie minis-devsuite-offline-list im Terminal aus, um die Dateiliste abzurufen, laden Sie die Dateien auf einem anderen Gerät herunter, legen Sie sie in /var/minis/shared/offline/ ab und starten Sie die Assembly erneut — lokale Dateien werden zuerst verwendet, kein Netzwerk nötig.</string>
+    <string name="dev_suite_offline_hint_body">Download fehlgeschlagen? 1) Führen Sie minis-devsuite-offline-list im Terminal aus, um die Dateiliste zu erhalten. 2) Setzen Sie in Einstellungen → Umgebungsvariablen MINIS_ALLOW_OFFLINE=1 (lokale Dateien in /var/minis/shared sind standardmäßig nicht vertrauenswürdig). 3) Laden Sie Dateien auf einem anderen Gerät herunter und legen Sie sie in /var/minis/shared/offline/ ab (gleicher Pfad auf dem Host). Dateien müssen mit CHECKSUM übereinstimmen; falls unveröffentlicht, fixieren Sie Ihre eigene mit MINIS_DEVSUITE_SHA256="filename=sha256". 4) Kehren Sie hierher zurück und assemblieren — Installer verwenden zuerst lokale Dateien, kein Netzwerk nötig.</string>
     <string name="dev_suite_online_header">Online-Tools</string>
     <string name="dev_suite_online_footer">Eigenständige Tools, per Tipp installiert.</string>
     <string name="dev_suite_progress">%1$d/%2$d bereit</string>

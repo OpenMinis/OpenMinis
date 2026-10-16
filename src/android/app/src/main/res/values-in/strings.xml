@@ -148,6 +148,18 @@
     <string name="settings_memory_subtitle">Pengetahuan permanen lintas sesi</string>
     <string name="settings_mcp">Integrasi MCP</string>
     <string name="settings_mcp_subtitle">Hubungkan server Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · Toolchain aarch64 SDK · NDK r29 · Flutter/RE/Rust opsional</string>
+    <string name="dev_suite_code_search_name">Pencarian kode dan efisiensi terminal</string>
+    <string name="dev_suite_code_search_summary">kuartet rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Suite pengembang Python &amp; AI</string>
+    <string name="dev_suite_python_summary">Runtime Python 3 · pip/venv · Dependensi build komputasi ilmiah AI</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Runtime Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Suite Pengembangan Go</string>
+    <string name="dev_suite_go_summary">Toolchain golang-go (suite eksklusif OpenMinis)</string>
+
     <string name="mcp_status_running">Berjalan (port %1$d), %2$d permintaan ditangani</string>
     <string name="mcp_status_running_shifted">Berjalan (port aktual %1$d · port terkonfigurasi %2$d terpakai, digeser), %3$d ditangani</string>
     <string name="mcp_status_error">Kesalahan: %1$s</string>
@@ -1784,7 +1796,7 @@
     <string name="dev_suite_section_header">Suite lingkungan pengembangan</string>
     <string name="dev_suite_section_footer">Resep memasang toolchain sesuai permintaan di dalam sandbox — payload tidak lagi dibundel di aplikasi, pemasangan pertama butuh jaringan. Jaringan terbatas? Jalankan minis-devsuite-offline-list untuk daftar impor offline.</string>
     <string name="dev_suite_offline_hint_title">Impor luring tersedia</string>
-    <string name="dev_suite_offline_hint_body">Unduhan gagal? Jalankan minis-devsuite-offline-list di terminal untuk mendapatkan daftar berkas, unduh berkasnya di perangkat lain, letakkan di /var/minis/shared/offline/, lalu rakit kembali — berkas lokal dipakai lebih dulu, tanpa jaringan.</string>
+    <string name="dev_suite_offline_hint_body">Unduhan gagal? 1) Jalankan minis-devsuite-offline-list di terminal untuk mendapatkan daftar file. 2) Di Pengaturan → Variabel Lingkungan, setel MINIS_ALLOW_OFFLINE=1 (file lokal di /var/minis/shared tidak dipercaya secara default). 3) Unduh file di perangkat lain, taruh di /var/minis/shared/offline/ (jalur yang sama di host). File harus cocok dengan CHECKSUM; jika tidak dipublikasikan, pin milik Anda dengan MINIS_DEVSUITE_SHA256="filename=sha256". 4) Kembali ke sini dan rakit — installer menggunakan file lokal terlebih dahulu, tidak perlu jaringan.</string>
     <string name="dev_suite_online_header">Alat daring</string>
     <string name="dev_suite_online_footer">Alat mandiri, pasang dengan sekali ketuk.</string>
     <string name="dev_suite_progress">%1$d/%2$d siap</string>

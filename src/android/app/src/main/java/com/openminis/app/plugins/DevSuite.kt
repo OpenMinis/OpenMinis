@@ -46,8 +46,8 @@ data class DevComponent(
 
 data class DevBundle(
     val id: String,
-    val name: String,
-    val summary: String,
+    @androidx.annotation.StringRes val nameRes: Int,
+    @androidx.annotation.StringRes val summaryRes: Int,
     val components: List<DevComponent>,
 ) {
     fun component(id: String): DevComponent? = components.firstOrNull { it.id == id }
@@ -59,8 +59,8 @@ object DevSuiteCatalog {
     val bundles: List<DevBundle> = listOf(
         DevBundle(
             id = "android-suite",
-            name = "Android & 移动全栈开发套件",
-            summary = "JDK17 · aarch64 SDK 工具链 · NDK r29 · 可选 Flutter/逆向/Rust",
+            nameRes = com.openminis.app.R.string.dev_suite_android_name,
+            summaryRes = com.openminis.app.R.string.dev_suite_android_summary,
             components = listOf(
                 DevComponent(
                     id = "android-core",
@@ -131,8 +131,8 @@ object DevSuiteCatalog {
         ),
         DevBundle(
             id = "code-search-suite",
-            name = "代码检索与终端效率套件",
-            summary = "rg / fd / fzf / bat 四件套",
+            nameRes = com.openminis.app.R.string.dev_suite_code_search_name,
+            summaryRes = com.openminis.app.R.string.dev_suite_code_search_summary,
             components = listOf(
                 DevComponent(
                     id = "code-search-toolkit",
@@ -147,8 +147,8 @@ object DevSuiteCatalog {
         ),
         DevBundle(
             id = "python-suite",
-            name = "Python & AI 开发者套件",
-            summary = "Python 3 运行时 · pip/venv · AI 科学计算编译依赖",
+            nameRes = com.openminis.app.R.string.dev_suite_python_name,
+            summaryRes = com.openminis.app.R.string.dev_suite_python_summary,
             components = listOf(
                 DevComponent(
                     id = "python-core",
@@ -172,8 +172,8 @@ object DevSuiteCatalog {
         ),
         DevBundle(
             id = "nodejs-suite",
-            name = "Node.js & Web 全栈套件",
-            summary = "Node.js 运行时 · npm · pnpm/yarn",
+            nameRes = com.openminis.app.R.string.dev_suite_nodejs_name,
+            summaryRes = com.openminis.app.R.string.dev_suite_nodejs_summary,
             components = listOf(
                 DevComponent(
                     id = "nodejs-core",
@@ -198,8 +198,8 @@ object DevSuiteCatalog {
         ),
         DevBundle(
             id = "go-suite",
-            name = "Go 开发套件",
-            summary = "golang-go 工具链（OpenMinis 独有套件）",
+            nameRes = com.openminis.app.R.string.dev_suite_go_name,
+            summaryRes = com.openminis.app.R.string.dev_suite_go_summary,
             components = listOf(
                 DevComponent(
                     id = "go-toolchain",
@@ -279,7 +279,15 @@ object DevSuiteCatalog {
      * but 装配 remains the only thing that starts a download.
      */
     fun installTargetById(id: String): DevBundle? = bundleById(id) ?: onlineToolById(id)?.let {
-        DevBundle(id = it.id, name = it.name, summary = it.description, components = listOf(it))
+        DevBundle(
+            id = it.id,
+            // [T-devsuite-online-res] Wrapper bundle reuses the online-tools
+            // header/footer strings; the component row below shows the tool's
+            // own name/description, so the dialog still lands coherently.
+            nameRes = com.openminis.app.R.string.dev_suite_online_header,
+            summaryRes = com.openminis.app.R.string.dev_suite_online_footer,
+            components = listOf(it),
+        )
     }
 
     /** True when [id] names a standalone online tool rather than a bundle. */

@@ -143,6 +143,18 @@
     <string name="settings_memory_subtitle">Connaissances persistantes entre les sessions</string>
     <string name="settings_mcp">Intégrations MCP</string>
     <string name="settings_mcp_subtitle">Connecter des serveurs Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · Chaîne d\'outils aarch64 SDK · NDK r29 · Flutter/RE/Rust optionnel</string>
+    <string name="dev_suite_code_search_name">Recherche de code et efficacité du terminal</string>
+    <string name="dev_suite_code_search_summary">quatuor rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Suite développeurs Python &amp; IA</string>
+    <string name="dev_suite_python_summary">Runtime Python 3 · pip/venv · Dépendances de compilation de calcul scientifique IA</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Runtime Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Suite de développement Go</string>
+    <string name="dev_suite_go_summary">Chaîne d\'outils golang-go (suite exclusive OpenMinis)</string>
+
     <string name="mcp_status_running">En cours (port %1$d), %2$d requêtes traitées</string>
     <string name="mcp_status_running_shifted">En cours (port réel %1$d · port configuré %2$d occupé, décalé), %3$d requêtes traitées</string>
     <string name="mcp_status_error">Erreur : %1$s</string>
@@ -1781,7 +1793,7 @@
     <string name="dev_suite_section_header">Environnements de développement</string>
     <string name="dev_suite_section_footer">Les recettes installent les toolchains à la demande dans le sandbox — les payloads ne sont plus intégrés à l\'appli, le premier assemblage nécessite le réseau. Réseau restreint ? Exécutez minis-devsuite-offline-list pour la liste d\'import hors ligne.</string>
     <string name="dev_suite_offline_hint_title">Import hors ligne disponible</string>
-    <string name="dev_suite_offline_hint_body">Échec du téléchargement ? Exécutez minis-devsuite-offline-list dans un terminal pour obtenir la liste des fichiers, téléchargez-les sur un autre appareil, déposez-les dans /var/minis/shared/offline/, puis relancez l\'assemblage — les fichiers locaux sont utilisés en priorité, sans réseau.</string>
+    <string name="dev_suite_offline_hint_body">Échec du téléchargement ? 1) Exécutez minis-devsuite-offline-list dans le terminal pour obtenir la liste des fichiers. 2) Dans Paramètres → Variables d\'environnement, définissez MINIS_ALLOW_OFFLINE=1 (les fichiers locaux dans /var/minis/shared ne sont pas fiables par défaut). 3) Téléchargez les fichiers sur un autre appareil, placez-les dans /var/minis/shared/offline/ (même chemin sur l\'hôte). Les fichiers doivent correspondre à CHECKSUM ; si non publié, épinglez le vôtre avec MINIS_DEVSUITE_SHA256="filename=sha256". 4) Revenez ici et assemblez : les installateurs utilisent d\'abord les fichiers locaux, pas besoin de réseau.</string>
     <string name="dev_suite_online_header">Outils en ligne</string>
     <string name="dev_suite_online_footer">Outils autonomes, installés en un appui.</string>
     <string name="dev_suite_progress">%1$d/%2$d prêts</string>

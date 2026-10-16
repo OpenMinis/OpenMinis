@@ -144,6 +144,18 @@
     <string name="settings_memory_subtitle">Cunoștințe permanente între sesiuni</string>
     <string name="settings_mcp">Integrări MCP</string>
     <string name="settings_mcp_subtitle">Conectează servere Model Context Protocol</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
+    <string name="dev_suite_android_summary">JDK17 · Lanț de instrumente aarch64 SDK · NDK r29 · Flutter/RE/Rust opțional</string>
+    <string name="dev_suite_code_search_name">Căutare cod și eficiență terminal</string>
+    <string name="dev_suite_code_search_summary">cvartet rg / fd / fzf / bat</string>
+    <string name="dev_suite_python_name">Suită dezvoltatori Python &amp; AI</string>
+    <string name="dev_suite_python_summary">Runtime Python 3 · pip/venv · Dependențe de compilare calcul științific AI</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web Full Stack</string>
+    <string name="dev_suite_nodejs_summary">Runtime Node.js · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Suită de dezvoltare Go</string>
+    <string name="dev_suite_go_summary">Lanț de instrumente golang-go (suită exclusivă OpenMinis)</string>
+
     <string name="mcp_status_running">Rulează (port %1$d), %2$d cereri procesate</string>
     <string name="mcp_status_running_shifted">Rulează (port real %1$d · portul configurat %2$d era ocupat, mutat), %3$d procesate</string>
     <string name="mcp_status_error">Eroare: %1$s</string>
@@ -1783,7 +1795,7 @@
     <string name="dev_suite_section_header">Sușite de medii de dezvoltare</string>
     <string name="dev_suite_section_footer">Rețetele instalează toolchain-uri la cerere în sandbox — payload-urile nu mai sunt incluse în aplicație, prima asamblare necesită rețea. Rețea restricționată? Rulați minis-devsuite-offline-list pentru lista de import offline.</string>
     <string name="dev_suite_offline_hint_title">Import offline disponibil</string>
-    <string name="dev_suite_offline_hint_body">Descărcarea a eșuat? Rulați minis-devsuite-offline-list într-un terminal pentru lista de fișiere, descărcați-le pe alt dispozitiv, puneți-le în /var/minis/shared/offline/, apoi asamblați din nou — fișierele locale sunt folosite mai întâi, fără rețea.</string>
+    <string name="dev_suite_offline_hint_body">Descărcarea eșuată? 1) Rulați minis-devsuite-offline-list în terminal pentru a obține lista de fișiere. 2) În Setări → Variabile de Mediu, setați MINIS_ALLOW_OFFLINE=1 (fișierele locale din /var/minis/shared nu sunt de încredere implicit). 3) Descărcați fișiere pe alt dispozitiv, puneți-le în /var/minis/shared/offline/ (aceeași cale pe gazdă). Fișierele trebuie să corespundă CHECKSUM; dacă nepublicate, fixați-vă propriul cu MINIS_DEVSUITE_SHA256="filename=sha256". 4) Reveniți aici și asamblați — instalatorii folosesc fișierele locale mai întâi, nu este necesară rețeaua.</string>
     <string name="dev_suite_online_header">Instrumente online</string>
     <string name="dev_suite_online_footer">Instrumente independente, instalate la o atingere.</string>
     <string name="dev_suite_progress">%1$d/%2$d gata</string>

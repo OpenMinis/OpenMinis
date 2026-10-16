@@ -236,13 +236,25 @@
     <string name="settings_memory_subtitle">跨会话保留的持久化知识</string>
     <string name="settings_mcp">MCP 集成</string>
     <string name="settings_mcp_subtitle">连接 Model Context Protocol 服务器</string>
+    <!-- Dev Suite bundle names/summaries -->
+    <string name="dev_suite_android_name">Android &amp; 移动全栈开发套件</string>
+    <string name="dev_suite_android_summary">JDK17 · aarch64 SDK 工具链 · NDK r29 · 可选 Flutter/逆向/Rust</string>
+    <string name="dev_suite_code_search_name">代码检索与终端效率套件</string>
+    <string name="dev_suite_code_search_summary">rg / fd / fzf / bat 四件套</string>
+    <string name="dev_suite_python_name">Python &amp; AI 开发者套件</string>
+    <string name="dev_suite_python_summary">Python 3 运行时 · pip/venv · AI 科学计算编译依赖</string>
+    <string name="dev_suite_nodejs_name">Node.js &amp; Web 全栈套件</string>
+    <string name="dev_suite_nodejs_summary">Node.js 运行时 · npm · pnpm/yarn</string>
+    <string name="dev_suite_go_name">Go 开发套件</string>
+    <string name="dev_suite_go_summary">golang-go 工具链（OpenMinis 独有套件）</string>
+
     <string name="plugin_market_title">插件市场</string>
     <string name="plugin_market_subtitle">开发环境套件、本地工具与在线 OpenAPI 工具</string>
     <string name="plugin_market_section_online">在线 API</string>
     <string name="dev_suite_section_header">开发环境套件</string>
     <string name="dev_suite_section_footer">配方按需在沙箱内安装工具链——安装包不再内置重型载荷，首次装配需要网络。 网络受限可运行 minis-devsuite-offline-list 生成离线导入清单。</string>
     <string name="dev_suite_offline_hint_title">可离线导入</string>
-    <string name="dev_suite_offline_hint_body">下载失败？在终端运行 minis-devsuite-offline-list 获取文件清单，在其他设备下载后放入 /var/minis/shared/offline/，再重新装配——本地文件优先，无需网络。</string>
+    <string name="dev_suite_offline_hint_body">下载失败？1) 在终端运行 minis-devsuite-offline-list 获取文件清单。2) 在 设置 → 环境变量 里设 MINIS_ALLOW_OFFLINE=1（/var/minis/shared 里的本地文件默认不被信任）。3) 在另一台设备下载文件，放进 /var/minis/shared/offline/（宿主同路径）。文件必须匹配 CHECKSUM；无发布校验和时用 MINIS_DEVSUITE_SHA256="文件名=sha256" 钉一个。4) 回到这里点装配 — 安装器优先使用本地文件，无需网络。</string>
     <string name="dev_suite_online_header">在线工具</string>
     <string name="dev_suite_online_footer">独立工具，点击即装。</string>
     <string name="dev_suite_progress">%1$d/%2$d 已就绪</string>
