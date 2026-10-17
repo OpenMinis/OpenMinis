@@ -269,7 +269,7 @@
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
     <string name="settings_mcp">MCP Integrations</string>
-    <string name="settings_mcp_subtitle">Connect Model Context Protocol servers</string>
+    <string name="settings_mcp_subtitle">Connect MCP servers, enable built-in presets, and toggle each server\'s tools</string>
 
     <!-- Dev Suite bundle names/summaries -->
     <string name="dev_suite_android_name">Android &amp; Mobile Full Stack</string>
@@ -359,7 +359,7 @@
     <string name="mcp_add">Add MCP Server</string>
     <string name="mcp_edit">Edit MCP Server</string>
     <string name="mcp_section_servers">Servers</string>
-    <string name="mcp_section_footer">MCP servers let the Agent call external tools via minis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible).</string>
+    <string name="mcp_section_footer">MCP servers let the Agent call external tools via minis-mcp-cli. Configs are stored in /var/minis/mcp-servers/servers.json (Claude Desktop compatible). Presets start off — flip a switch to add one.</string>
     <string name="mcp_section_presets">Presets</string>
     <string name="mcp_section_presets_footer">One tap adds a server. Git is the official Python mcp-server-git (status, diff, log, commit, blame). Tap a server below to see its tools.</string>
     <string name="mcp_manage">Manage</string>
@@ -579,7 +579,7 @@
     <string name="settings_section_storage">Storage</string>
     <string name="settings_storage_subtitle">Manage Ubuntu Linux rootfs and browse files</string>
     <string name="settings_section_permissions">Permissions</string>
-    <string name="settings_permissions_subtitle">System privileges: accessibility, Shizuku, storage. Tool gate is YOYO / Approval in the chat menu.</string>
+    <string name="settings_permissions_subtitle">System privileges and per-tool access: accessibility, Shizuku, host su, privacy level. Agent permission for each tool is set on this page.</string>
     <string name="chat_menu_perm_yoyo">YOYO · full auto</string>
     <string name="chat_menu_perm_ask">Approval · confirm actions</string>
     <string name="settings_section_logs">Logs</string>

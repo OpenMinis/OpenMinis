@@ -501,13 +501,6 @@ fun SessionListScreen(
      * prepends the same placeholder in split mode.
      */
     draftPlaceholderId: String? = null,
-    /**
-     * [P1-6] Render the list WITHOUT its own top bar, for embedding inside
-     * the compact-width session drawer (ChatSplitScaffold owns the drawer
-     * chrome and the close affordance). Default false keeps the full-screen
-     * and two-pane-sidebar renderings byte-identical.
-     */
-    embedded: Boolean = false,
 ) {
     val context = LocalContext.current
     // T46: hoist VM ownership to the NavBackStackEntry's ViewModelStore so
@@ -577,22 +570,10 @@ fun SessionListScreen(
     // doesn't flash the "add a provider" onboarding before the real config emits.
     val configLoaded by providerRepository.configLoaded.collectAsState()
     val scope = rememberCoroutineScope()
+    // [T-android-entry-ime-guard] Blank-search collapse + focus release before
+    // any navigation into a chat; the policy lives in SessionListFocusGate.kt.
+    val focusGate = rememberSessionListFocusGate(viewModel)
     val isDark = ChatColors.isDark
-
-    // [T-android-search-focus-sticky] When the user opens search but types
-    // nothing (or only whitespace) and then navigates into a chat, the
-    // VM-backed search state survives the navigation, so on return the search
-    // bar is still open and focused — the user has to manually tap the X to
-    // close it. Collapse search BEFORE navigating when the query is blank;
-    // keep it (query + results) when there's a real query so returning lands
-    // back on the same search. Collapsing flips isSearchActive false, which
-    // removes the search TextField from composition and releases its focus.
-    fun exitSearchIfQueryBlank() {
-        if (viewModel.isSearchActive.value && viewModel.searchQuery.value.isBlank()) {
-            viewModel.searchQuery.value = ""
-            viewModel.isSearchActive.value = false
-        }
-    }
 
     // [T-android-new-chat-shortcut] Ctrl/⌘+F, raised at the split scaffold's
     // root so it fires from either pane. Opening the search is all that is
@@ -623,14 +604,17 @@ fun SessionListScreen(
     // through untouched. The stash is consumed by ChatScreen's
     // (sessionId, revision)-keyed effect — see DeepLinkCoordinator.SearchFocus.
     val onSessionClickGuarded: (String) -> Unit = { id ->
-        exitSearchIfQueryBlank()
         searchAnchors[id]?.let { messageId ->
             com.openminis.app.deeplink.DeepLinkCoordinator
                 .setPendingSearchFocus(id, messageId)
         }
+        focusGate.prepareNavigation()
         onSessionClick(id)
     }
-    val onNewChatGuarded: (String) -> Unit = { id -> exitSearchIfQueryBlank(); onNewChat(id) }
+    val onNewChatGuarded: (String) -> Unit = { id ->
+        focusGate.prepareNavigation()
+        onNewChat(id)
+    }
 
     var showDeleteDialog by remember { mutableStateOf(false) }
     var deleteTargetId by remember { mutableStateOf<String?>(null) }
@@ -797,7 +781,7 @@ fun SessionListScreen(
 
     Scaffold(
         topBar = {
-            if (!embedded) MinisCenterTopBar(
+            MinisCenterTopBar(
                 title = {
                     Text(
                             stringResource(R.string.app_name),

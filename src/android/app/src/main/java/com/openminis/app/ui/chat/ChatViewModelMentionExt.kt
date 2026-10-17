@@ -81,6 +81,21 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
 /**
+ * `@` addresses models ONLY while AI group chat is on.
+ *
+ * [T-android-at-mentions-not-group-chat] This used to also return true whenever
+ * the multi-agent roster had non-host members, so a user who had configured
+ * sub-agent slots saw the MODEL list on `@` even with group chat OFF — while
+ * the feature that list belongs to was disabled. Mentioning a speaker only
+ * means something inside a group chat; outside it, `@` must keep offering the
+ * file/skill picker.
+ */
+internal fun ChatViewModel.shouldListGroupModels(): Boolean {
+    adoptStoredGroupChatEnabled()
+    return groupChatEnabled.value
+}
+
+/**
  * Inspect the input + caret position; if the caret sits inside an
  * `@<token>` (preceded by start-of-text or whitespace, no whitespace
  * between `@` and caret) open the mention picker and refresh the
@@ -91,21 +106,6 @@ import java.io.ByteArrayOutputStream
  * substituting the full-width form still trigger the picker — same
  * convention as slash commands accepting `／`.
  */
-internal fun looksLikeFileMention(filter: String): Boolean =
-    filter.contains('/') || filter.contains('\\') || filter.startsWith(".")
-
-/**
- * `@` addresses models when group chat is on, and also when a team roster
- * exists. Skill paths were winning that second case: the switch looked off
- * after a restart, so the file picker opened and ranked `skills/` first.
- * A path-shaped filter still means a file, but only while group chat is off.
- */
-internal fun ChatViewModel.shouldListGroupModels(filter: String): Boolean {
-    adoptStoredGroupChatEnabled()
-    if (groupChatEnabled.value) return true
-    return currentGroupMentions().any { !it.host } && !looksLikeFileMention(filter)
-}
-
 internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
     val safeCaret = caret.coerceIn(0, text.length)
     // Walk back from caret to find an `@` that opens the active token.
@@ -131,7 +131,7 @@ internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
     }
     val filter = text.substring(anchor + 1, safeCaret)
     val filterChanged = _mentionFilter.value != filter
-    val listModels = shouldListGroupModels(filter)
+    val listModels = shouldListGroupModels()
     // Skill commands (`/`) must not stay on top of an @ that addresses a model.
     // Slash still wins for a plain file mention.
     if (listModels) {
@@ -202,7 +202,7 @@ internal fun ChatViewModel.executeSelectedMention(
     currentText: String,
     currentCaret: Int,
 ): Pair<String, Int>? {
-    if (shouldListGroupModels(_mentionFilter.value)) {
+    if (shouldListGroupModels()) {
         val models = groupMentions.value
         if (models.isEmpty()) return null
         val idx = _mentionSelectedIndex.value.let {
@@ -275,7 +275,7 @@ internal fun ChatViewModel.currentGroupMentions(): List<GroupChat.MentionCandida
 }
 
 private fun ChatViewModel.activeMentionCount(): Int =
-    if (shouldListGroupModels(_mentionFilter.value)) groupMentions.value.size else mentionEntries.value.size
+    if (shouldListGroupModels()) groupMentions.value.size else mentionEntries.value.size
 
 /**
  * Replace the active `@<token>` in [currentText] with `@<linuxPath> ` and

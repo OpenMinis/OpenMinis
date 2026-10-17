@@ -235,7 +235,7 @@
     <string name="settings_memory">记忆</string>
     <string name="settings_memory_subtitle">跨会话保留的持久化知识</string>
     <string name="settings_mcp">MCP 集成</string>
-    <string name="settings_mcp_subtitle">连接 Model Context Protocol 服务器</string>
+    <string name="settings_mcp_subtitle">连接 MCP 服务器、一键启用内置预设，并按服务器开关工具</string>
     <!-- Dev Suite bundle names/summaries -->
     <string name="dev_suite_android_name">Android &amp; 移动全栈开发套件</string>
     <string name="dev_suite_android_summary">JDK17 · aarch64 SDK 工具链 · NDK r29 · 可选 Flutter/逆向/Rust</string>
@@ -324,7 +324,7 @@
     <string name="mcp_add">添加 MCP 服务器</string>
     <string name="mcp_edit">编辑 MCP 服务器</string>
     <string name="mcp_section_servers">服务器</string>
-    <string name="mcp_section_footer">MCP 服务器让 AI 通过 minis-mcp-cli 调用外部工具。配置保存在 /var/minis/mcp-servers/servers.json（与 Claude Desktop 兼容）。</string>
+    <string name="mcp_section_footer">MCP 服务器让 AI 通过 minis-mcp-cli 调用外部工具。配置保存在 /var/minis/mcp-servers/servers.json（与 Claude Desktop 兼容）。预设默认关闭，打开开关即添加。</string>
     <string name="mcp_section_presets">预设</string>
     <string name="mcp_section_presets_footer">点一下就加入。Git 是官方 Python 的 mcp-server-git，提供 status、diff、log、commit、blame。点下面的服务器可查看工具。</string>
     <string name="mcp_manage">管理</string>
@@ -536,7 +536,7 @@
     <string name="settings_section_storage">存储</string>
     <string name="settings_storage_subtitle">管理 Ubuntu rootfs 并浏览文件</string>
     <string name="settings_section_permissions">权限</string>
-    <string name="settings_permissions_subtitle">系统权限：无障碍、Shizuku、存储。工具闸门在会话菜单的 YOYO / 审批。</string>
+    <string name="settings_permissions_subtitle">系统权限与逐工具访问：无障碍、Shizuku、主机 su、隐私档位；各工具的 Agent 权限在此页逐项配置。</string>
     <string name="chat_menu_perm_yoyo">YOYO · 全授权</string>
     <string name="chat_menu_perm_ask">审批 · 部分授权</string>
     <string name="settings_section_logs">日志</string>

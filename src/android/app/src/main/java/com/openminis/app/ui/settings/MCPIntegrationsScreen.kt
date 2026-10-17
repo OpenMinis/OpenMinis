@@ -119,105 +119,12 @@ fun MCPIntegrationsScreen(
             }
         },
     ) {
-        SettingsSection(
-            header = stringResource(R.string.mcp_section_presets),
-            footer = stringResource(R.string.mcp_section_presets_footer),
-        ) {
-            com.openminis.app.plugins.PluginCatalog.MCP_PRESETS.forEachIndexed { index, preset ->
-                val on = servers.any { preset.matches(it) }
-                SettingsSwitchRow(
-                    title = preset.name,
-                    subtitle = preset.description,
-                    checked = on,
-                    onCheckedChange = { checked ->
-                        if (checked) {
-                            preset.url?.let { url ->
-                                com.openminis.app.tools.FetchUrlGuard.blockedReason(url)?.let { return@SettingsSwitchRow }
-                            }
-                            mcpRepository.add(preset.toServer())
-                        } else {
-                            mcpRepository.delete(preset.id)
-                        }
-                    },
-                    showDivider = index < com.openminis.app.plugins.PluginCatalog.MCP_PRESETS.lastIndex,
-                )
-            }
-        }
-        SettingsSection(
-            header = stringResource(R.string.mcp_section_servers),
-            footer = stringResource(R.string.mcp_section_footer),
-        ) {
-            if (servers.isEmpty()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.Extension,
-                        contentDescription = null,
-                        modifier = Modifier.size(36.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                    )
-                    Text(
-                        stringResource(R.string.mcp_empty_title),
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        stringResource(R.string.mcp_empty_action),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            } else {
-                servers.forEachIndexed { index, server ->
-                    val transportIcon = if (server.isStdio) Icons.Outlined.Terminal else Icons.Outlined.Language
-                    SettingsRow(
-                        title = server.id,
-                        subtitle = server.transportSummary.takeIf { it.isNotBlank() },
-                        showDivider = index < servers.size - 1,
-                        // [T-mcp-fix-delete-entry] Plain tap opens the EDIT
-                        // form (delete lives there). A previous change rewired
-                        // this to the tools screen, which left the edit sheet
-                        // — and with it the delete button — with zero entry
-                        // points: editServer was never set anywhere.
-                        onClick = { editServer = server },
-                        trailing = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                // Tools list (per-tool enable/disable) stays
-                                // one tap away without stealing the edit entry.
-                                IconButton(
-                                    onClick = { onOpenTools(server) },
-                                    modifier = Modifier.size(32.dp),
-                                ) {
-                                    Icon(
-                                        Icons.Outlined.Construction,
-                                        contentDescription = stringResource(R.string.mcp_tools_title, server.id),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(16.dp),
-                                    )
-                                }
-                                Spacer(Modifier.width(4.dp))
-                                Icon(
-                                    transportIcon,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                SettingsSwitch(
-                                    checked = server.enabled,
-                                    onCheckedChange = { mcpRepository.setEnabled(server.id, it) },
-                                )
-                            }
-                        },
-                    )
-                }
-            }
-        }
+        MCPMergedServerList(
+            servers = servers,
+            mcpRepository = mcpRepository,
+            onEditServer = { editServer = it },
+            onOpenTools = onOpenTools,
+        )
         // ─── 内置 MCP Server（实验）──────────────────────────────────────────
         val builtInPort = mcpConfig.port
         SettingsSection(

@@ -20,12 +20,8 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfo
 import androidx.compose.material3.adaptive.currentWindowSize
@@ -289,15 +285,6 @@ fun ChatSplitScaffold(
          */
         draftPlaceholderId: String?,
         onSessionSelected: (String) -> Unit,
-        /**
-         * [P1-6] True when the list is drawn inside the compact-width modal
-         * drawer rather than as a full screen or the two-pane sidebar. The
-         * list drops its own top bar then — the drawer sheet carries the
-         * chrome. Same composable either way; the pane navigator stays the
-         * single owner of list-vs-detail, which is what keeps chat switching
-         * identical across the three presentations.
-         */
-        embedded: Boolean,
     ) -> Unit,
     detailPane: @Composable (
         sessionId: String,
@@ -312,13 +299,6 @@ fun ChatSplitScaffold(
         onToggleSidebar: (() -> Unit)?,
         /** Whether the list is currently hidden — picks the icon direction. */
         sidebarCollapsed: Boolean,
-        /**
-         * [P1-6] Open the compact-width session drawer, or null in two-pane
-         * (the sidebar is already the list). The drawer state lives inside
-         * [ChatSplitScaffold], so the slot hands the opener to the detail
-         * pane instead of the pane reaching into scaffold internals.
-         */
-        onOpenSessionDrawer: (() -> Unit)?,
     ) -> Unit,
 ) {
     val twoPane = shouldUseTwoPane()
@@ -473,13 +453,6 @@ fun ChatSplitScaffold(
         )
         val scope = rememberCoroutineScope()
 
-        // [P1-6] Compact-width session drawer. State lives here, inside the
-        // navigator's key block, so a window-size rebuild (rotation, fold,
-        // split-screen) starts the drawer closed rather than resurrecting it
-        // over a layout that may now be two-pane.
-        val sessionDrawerState = rememberDrawerState(DrawerValue.Closed)
-        val openSessionDrawer: () -> Unit = { scope.launch { sessionDrawerState.open() } }
-
         val currentSessionId = navigator.currentDestination
             ?.takeIf { it.pane == ListDetailPaneScaffoldRole.Detail }
             ?.contentKey
@@ -500,22 +473,14 @@ fun ChatSplitScaffold(
         }
 
         // [T-android-session-select-one-place] One owner for "the user picked a
-        // session". The same four lines were written out three times — the
-        // drawer row, the list pane (full screen and two-pane sidebar share the
-        // one slot) and the detail pane's move-to — with only the drawer copy
-        // closing the sheet. Duplicated, they drift: a future change to how a
-        // selection is committed (persistence, pane-history semantics, adding a
-        // RouteFuse note) would have to be made in three places and silently
-        // apply to only some of the three presentations.
-        //
-        // A local function rather than a value lambda so the drawer variant can
-        // pass the one difference as an argument instead of carrying its own
-        // copy of the navigation.
-        fun selectSession(sessionId: String, fromDrawer: Boolean = false) {
+        // session". The list pane (single-pane full screen and two-pane
+        // sidebar share the one slot) and the detail pane's move-to used to
+        // write the same navigation out twice; keeping it in one place stops
+        // them drifting.
+        fun selectSession(sessionId: String) {
             selectedSessionId = sessionId
             scope.launch {
                 navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, sessionId)
-                if (fromDrawer) sessionDrawerState.close()
             }
         }
 
@@ -555,43 +520,12 @@ fun ChatSplitScaffold(
     // focus owner's ancestors, so this sees the chord without competing for
     // focus with the composer's text field.
     //
-    // [P1-6] Compact-width session drawer. Wraps the WHOLE list/detail pair
-    // (including the two-pane layout) so the gesture surface is one thing at
-    // every window size: edge-swipe opens it, but the sheet only mounts while
-    // single-pane — at ≥840dp the persistent sidebar already shows the list
-    // and a second copy would be two lists of the same sessions. Switching a
-    // chat from the drawer goes through the SAME pane navigator as the
-    // full-screen list and the two-pane sidebar (see the selection callback
-    // below), so the three presentations cannot drift.
-    ModalNavigationDrawer(
-        drawerState = sessionDrawerState,
-        gesturesEnabled = !twoPane,
-        drawerContent = {
-            if (!twoPane) {
-                ModalDrawerSheet(modifier = Modifier.width(320.dp)) {
-                    listPane(
-                        // The drawer sits OVER the chat, so the current chat
-                        // is highlighted — same row the two-pane sidebar marks.
-                        if (currentSessionId != null) {
-                            com.openminis.app.ui.chat.ChatViewModelStore
-                                .rememberPersistedId(currentSessionId)
-                        } else null,
-                        if (currentSessionId != null &&
-                            isDraftSessionId(
-                                com.openminis.app.ui.chat.ChatViewModelStore
-                                    .rememberPersistedId(currentSessionId),
-                            )
-                        ) currentSessionId else null,
-                        { sessionId -> selectSession(sessionId, fromDrawer = true) },
-                        // [P1-6] Drawer presentation — positional args: the
-                        // listPane slot is a function TYPE, whose call sites
-                        // cannot use named arguments.
-                        true,
-                    )
-                }
-            }
-        },
-    ) {
+    // [T-android-no-swipe-session-drawer] There is deliberately NO edge-swipe
+    // session drawer here. The sessions already live on the home screen, and
+    // the drawer's list was a second, always-composed copy of the same rows —
+    // it duplicated navigation and, worse, could re-open the IME when a list
+    // field still held focus. Switching chats on a phone is done from the list
+    // screen; the detail pane's back arrow returns there.
     Box(
         Modifier
             .fillMaxSize()
@@ -643,10 +577,6 @@ fun ChatSplitScaffold(
                         )
                     ) currentSessionId else null,
                     { sessionId -> selectSession(sessionId) },
-                    // Full screen / sidebar presentation — own top bar.
-                    // Positional: the listPane slot is a function TYPE, whose
-                    // call sites cannot use named arguments.
-                    false,
                 )
             }
         },
@@ -728,9 +658,6 @@ fun ChatSplitScaffold(
                             null
                         },
                         listCollapsed,
-                        // [P1-6] Drawer opener for compact width; null when
-                        // the sidebar already is the list.
-                        if (twoPane) null else openSessionDrawer,
                     )
                 }
                     }
@@ -790,7 +717,6 @@ fun ChatSplitScaffold(
                     ),
             )
         }
-    }
     }
     }
 }
@@ -961,7 +887,7 @@ fun ChatSplitScaffoldRoute(
 ) {
     ChatSplitScaffold(
         initialSessionId = initialSessionId,
-        listPane = { selectedSessionId, draftPlaceholderId, onSessionSelected, embedded ->
+        listPane = { selectedSessionId, draftPlaceholderId, onSessionSelected ->
             com.openminis.app.ui.sessions.SessionListScreen(
                 chatRepository = chatRepository,
                 providerRepository = providerRepository,
@@ -982,12 +908,10 @@ fun ChatSplitScaffoldRoute(
                 // [T-android-draft-placeholder-row] Synthetic "New Chat" row,
                 // never persisted — see the listPane param docs.
                 draftPlaceholderId = draftPlaceholderId,
-                // [P1-6] Drawer presentation drops the list's own top bar.
-                embedded = embedded,
             )
         },
         detailPane = { sessionId, onBackInPane, onNewChatInPane, onMoveToInPane,
-            onToggleSidebar, sidebarCollapsed, onOpenSessionDrawer ->
+            onToggleSidebar, sidebarCollapsed ->
             com.openminis.app.ui.chat.ChatScreen(
                 // The pane navigator's contentKey IS the session id, so a
                 // draft ("__new__…") flows through unchanged and ChatScreen's
@@ -1011,9 +935,6 @@ fun ChatSplitScaffoldRoute(
                 // looks for "get me back to the list".
                 onToggleSidebar = onToggleSidebar,
                 sidebarCollapsed = sidebarCollapsed,
-                // [P1-6] Compact width only — the drawer is not composed in
-                // two-pane (the sidebar is already the list).
-                onOpenSessionDrawer = onOpenSessionDrawer,
                 // Draft handling: the pane navigator gets a fresh `__new__…`
                 // key, so the list keeps its scroll position and simply stops
                 // highlighting a row (no persisted id matches a draft) — the

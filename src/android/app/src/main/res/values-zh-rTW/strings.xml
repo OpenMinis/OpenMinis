@@ -190,7 +190,7 @@
     <string name="settings_memory">記憶</string>
     <string name="settings_memory_subtitle">跨工作階段的持續性知識</string>
     <string name="settings_mcp">MCP 整合</string>
-    <string name="settings_mcp_subtitle">連接 Model Context Protocol 伺服器</string>
+    <string name="settings_mcp_subtitle">連接 MCP 伺服器、一鍵啟用內建預設，並按伺服器開關工具</string>
     <!-- Dev Suite bundle names/summaries -->
     <string name="dev_suite_android_name">Android &amp; 行動全端開發套件</string>
     <string name="dev_suite_android_summary">JDK17 · aarch64 SDK 工具鏈 · NDK r29 · 可選 Flutter/逆向/Rust</string>
@@ -213,7 +213,7 @@
     <string name="mcp_add">新增 MCP 伺服器</string>
     <string name="mcp_edit">編輯 MCP 伺服器</string>
     <string name="mcp_section_servers">伺服器</string>
-    <string name="mcp_section_footer">MCP 伺服器讓 AI 透過 minis-mcp-cli 呼叫外部工具。設定儲存在 /var/minis/mcp-servers/servers.json（與 Claude Desktop 相容）。</string>
+    <string name="mcp_section_footer">MCP 伺服器讓 AI 透過 minis-mcp-cli 呼叫外部工具。設定儲存在 /var/minis/mcp-servers/servers.json（與 Claude Desktop 相容）。預設關閉，開啟開關即新增。</string>
     <string name="mcp_empty_title">尚無 MCP 伺服器</string>
     <string name="mcp_empty_action">點擊 + 按鈕新增伺服器。</string>
     <string name="mcp_transport_http">HTTP</string>
@@ -346,7 +346,7 @@
     <string name="settings_section_storage">儲存空間</string>
     <string name="settings_storage_subtitle">管理 Ubuntu rootfs 並瀏覽檔案</string>
     <string name="settings_section_permissions">權限</string>
-    <string name="settings_permissions_subtitle">控管 Agent 對隱私相關功能的存取</string>
+    <string name="settings_permissions_subtitle">系統權限與逐工具存取：無障礙、Shizuku、主機 su、隱私等級；各工具的 Agent 權限在此頁逐項設定。</string>
     <string name="settings_section_logs">記錄</string>
     <string name="settings_logs_subtitle">檢視並匯出應用程式記錄</string>
     <string name="settings_section_about">關於</string>
