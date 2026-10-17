@@ -1214,11 +1214,8 @@ fun ChatScreen(
     //     was fighting that.
     //   - userScrolledAway state mutation in two snapshotFlow collectors —
     //     replaced by a single derivedStateOf<Boolean>.
-    //   - LE(isStreaming) edge force-follow.
-    //   - LE(lastToolCount) force-follow.
-    //   - LE(lastAwaiting) force-follow.
-    //   - LE(bottomReserve) inside the toolbar block.
-    //   - LE(messages.size) for assistant/tool/system rows — only the
+    //   - Edge force-follow LEs: isStreaming, lastToolCount,
+    //     lastAwaiting, bottomReserve, and messages.size — only the
     //     user-send branch survives, because sending is the one event
     //     where "follow the new turn" is unambiguously the user's intent.
     //
@@ -1228,20 +1225,18 @@ fun ChatScreen(
     //   - reverseLayout=true on the LazyColumn — handles "stick to
     //     bottom while user is at bottom" natively.
 
-    // T128: tightened from 90 dp (google-ai-edge/gallery) to 32 dp.
+    // T128: tightened from 90 dp (google-ai-edge/gallery) to 32 dp —
     // 90 dp made the JumpToBottom FAB appear well before the user had
-    // really left the bottom — users reported the "Quick to bottom" button
-    // appearing too often. 32 dp is roughly half the floating tool-bar height, so the
-    // visual definition of "at bottom" lines up with what the user sees.
+    // really left the bottom. 32 dp is roughly half the floating
+    // tool-bar height, aligning "at bottom" with what the user sees.
     val nearBottomThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
     // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
     // LazyList currently renders the visual-bottom item (data-index 0
     // under reverseLayout) and its bottom edge sits within `threshold`
     // px of the viewport bottom, the user is visually at the bottom.
-    // `firstVisibleItemIndex` is unreliable here: when a single message
-    // emission expands into N tool / text flat items, firstVisible
-    // drifts by N in one frame (logcat showed jumps of 5+ on a
-    // multi-tool turn). Anchor on the rendered set instead.
+    // `firstVisibleItemIndex` is unreliable here: one message emission
+    // can expand into N flat items and firstVisible drifts by N in a
+    // single frame. Anchor on the rendered set instead.
     val isNearBottom = remember(listState, nearBottomThresholdPx) {
         derivedStateOf {
             val info = listState.layoutInfo
@@ -1636,17 +1631,23 @@ fun ChatScreen(
             var growth: Long = m.content.length.toLong()
             var blockSig: Long = 1469598103934665603L // FNV-1a 64-bit offset basis
             for (b in m.toolBlocks) {
+                // [T-android-thinking-follow-scope] Thinking grows inside
+                // its own 300dp box (ThinkingAutoFollow); counting its
+                // length here scrolled the whole PAGE per token during
+                // reasoning. Keep id/kind/status so block appearance and
+                // RUNNING→SUCCESS transitions still wake the collector.
+                val isThinking = b.kind == "thinking"
+                if (!isThinking) growth += b.content.length.toLong()
                 blockSig = blockSig xor b.id.hashCode().toLong()
                 blockSig *= 1099511628211L
                 blockSig = blockSig xor b.kind.hashCode().toLong()
                 blockSig *= 1099511628211L
                 blockSig = blockSig xor (b.toolStatus?.ordinal?.toLong() ?: -1L)
                 blockSig *= 1099511628211L
-                if (b.kind != "thinking") {
-                    growth += b.content.length.toLong()
+                if (!isThinking) {
                     blockSig = blockSig xor b.content.length.toLong()
+                    blockSig *= 1099511628211L
                 }
-                blockSig *= 1099511628211L
             }
             ScrollFollowKey(
                 lastIndex = effective.lastIndex,
@@ -1664,13 +1665,10 @@ fun ChatScreen(
             // Diagnostics with a 350ms sample showed GLIDE starting from
             // fIdx=1..5 — the viewport was whole items behind, and
             // animateScrollToItem across multiple items snaps most of the
-            // distance instantly then animates only the last sliver, so it
-            // read as "no animation". With the VM-side dual-path flush already
-            // pacing content updates to 200–500ms, a 120ms scroll sample keeps
-            // the viewport within the SAME item (fIdx=0, small fOff), where
-            // animateScrollToItem is a genuine smooth glide. (The "accumulate
-            // then glide" the user asked for now lives in the VM flush; here we
-            // just keep up smoothly.)
+            // distance instantly then animates only the last sliver. With the
+            // VM-side dual-path flush pacing content to 200–500ms, a 120ms
+            // sample keeps the viewport within the SAME item (fIdx=0), where
+            // animateScrollToItem is a genuine smooth glide.
             .sample(120L)
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
@@ -4402,17 +4400,17 @@ fun ChatScreen(
                                 // T300's intent of not splashing unsolicited
                                 // reasoning across the chat.
                                 if (item.block.content.isNotBlank() || item.messageIsStreaming) {
-                                    // [T-android-thinking-auto-collapse] Use
-                                    // `isLastBlockOverall` (not `isLast` =
-                                    // last-thinking-only) so the block flips
-                                    // to !isStreaming the moment a sibling
-                                    // text/tool_use arrives — that's the
-                                    // edge ThinkingBlock's LaunchedEffect
-                                    // hooks for auto-collapse, matching iOS
-                                    // ThinkingBlockView semantics.
+                                    // [T-android-thinking-stable-expand] The
+                                    // builder folds the complete signal into
+                                    // messageIsStreaming (streaming AND no
+                                    // reply text after this block — see
+                                    // hasReplyTextAfter); it flips only when
+                                    // the reply starts or the stream ends, so
+                                    // the 500ms auto-collapse fires once per
+                                    // reasoning phase, not per tool round.
                                     ThinkingBlock(
                                         block = item.block,
-                                        isStreaming = item.isLastBlockOverall && item.messageIsStreaming,
+                                        isStreaming = item.messageIsStreaming,
                                         isLast = item.isLast,
                                     )
                                 }

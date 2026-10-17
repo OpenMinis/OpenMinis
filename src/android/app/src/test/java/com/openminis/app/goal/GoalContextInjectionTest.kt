@@ -112,4 +112,29 @@ class GoalContextInjectionTest {
         assertTrue(!mount.canContinue)
         assertNull(mount.prompt)
     }
+
+    // [T-android-goal-early-exit] shouldExitForGoalState contract: the loop
+    // only ends for a MOUNTED goal whose usage lookup failed (a broken mount
+    // must not keep spinning) or whose status reached a terminal/paused
+    // state. Unmounted turns and healthy active goals never exit early.
+    @Test fun `unmounted goal never exits even on usage failure`() {
+        assertTrue(!shouldExitForGoalState(Result.failure(IllegalStateException("db")), false))
+    }
+
+    @Test fun `mounted goal with failed usage lookup exits`() {
+        assertTrue(shouldExitForGoalState(Result.failure(IllegalStateException("db")), true))
+    }
+
+    @Test fun `mounted goal with missing entity or active status does not exit`() {
+        val active = GoalStateMachine.create("s", "ship it", 500, 1)
+        assertTrue(!shouldExitForGoalState(Result.success(null), true))
+        assertTrue(!shouldExitForGoalState(Result.success(active), true))
+    }
+
+    @Test fun `terminal and paused goal statuses exit`() {
+        val active = GoalStateMachine.create("s", "ship it", 500, 1)
+        for (status in listOf(GoalStatus.COMPLETE, GoalStatus.BLOCKED, GoalStatus.PAUSED, GoalStatus.BUDGET_LIMITED)) {
+            assertTrue(shouldExitForGoalState(Result.success(active.copy(status = status)), true))
+        }
+    }
 }

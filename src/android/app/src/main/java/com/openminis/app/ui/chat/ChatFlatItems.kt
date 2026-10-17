@@ -151,21 +151,18 @@ internal sealed class FlatChatItem {
         val messageId: String,
         val block: AssistantBlock,
         val isLast: Boolean,
+        // [T-android-thinking-stable-expand] Complete stream signal: message
+        // streaming AND no readable reply text after this block (see
+        // hasReplyTextAfter). The old trailing-block signal flipped on every
+        // tool_use / new thinking block in a multi-round loop, re-triggering
+        // the 500ms auto-collapse each round — the reported show/hide
+        // flicker. Now it only flips when the reply starts or the stream
+        // ends: one collapse per reasoning phase.
         val messageIsStreaming: Boolean,
         // T300: thinking level captured at the message's creation. Null
         // for assistant messages restored from DB (legacy / pre-T300) —
         // the renderer falls back to the chat's current level.
         val messageThinkingLevel: com.openminis.app.data.model.ThinkingLevel? = null,
-        // [T-android-thinking-auto-collapse] True when this thinking block
-        // is the LAST block of any kind in the message (including text /
-        // tool_use), not merely the last thinking block. Drives the
-        // auto-collapse `isStreaming` signal so a thinking block flips to
-        // collapsed the moment a subsequent text or tool block arrives —
-        // mirrors iOS ThinkingBlockView, which only sees `isStreaming=true`
-        // while it really is the trailing block. Defaults false so DB-
-        // restored / legacy items render collapsed (the pre-change
-        // behaviour for non-trailing thinking).
-        val isLastBlockOverall: Boolean = false,
         private val keySuffix: String = "",
     ) : FlatChatItem() {
         override val key = FlatKeys.of(FlatKeys.KIND_THINKING, messageId, block.id) + keySuffix
@@ -863,11 +860,6 @@ internal fun buildFlatChatItems(
         val blocks = message.toolBlocks
         val toolPillBlocks = blocks.filter { it.kind == "tool_use" }
         val lastThinkingId = blocks.lastOrNull { it.kind == "thinking" }?.id
-        // [T-android-thinking-auto-collapse] Id of the last block of ANY
-        // kind — used to flip the trailing thinking block's auto-collapse
-        // signal the moment a subsequent text / tool_use arrives. See
-        // AssistantThinking.isLastBlockOverall KDoc.
-        val lastBlockId = blocks.lastOrNull()?.id
         val lastTextIdx = blocks.indexOfLast { it.kind == "text" }
         val hasAnyTextBlock = lastTextIdx >= 0
         // Only the last cancelled tool_use in the message gets the Retry button —
@@ -958,27 +950,21 @@ internal fun buildFlatChatItems(
                         // `message.isStreaming==true`; the moment it flipped
                         // false the fragments coalesced into fewer rows, all
                         // mdblock:msgId:parentBlockId:N keys for N >= K
-                        // suddenly vanished from the flatItems list. That
-                        // wipe-and-rebuild was the "整个页面像被重刷" the
-                        // user reported — LazyColumn lost every key it was
-                        // using to anchor the viewport, fell back to numeric
+                        // suddenly vanished from the flatItems list — the
+                        // "整个页面像被重刷" the user reported: LazyColumn
+                        // lost every viewport anchor, fell back to numeric
                         // firstVisibleItemIndex, and parked the viewport on
-                        // whatever row happened to take that numeric slot
-                        // (often the previous assistant message).
+                        // whatever row took that numeric slot.
                         //
                         // Fix: keep the live (== last in the list) text block
-                        // on rawFragments regardless of isStreaming. The
-                        // boundary that actually warrants coalesce is "a
-                        // NEWER message exists below this one" — i.e. a
-                        // subsequent user turn pushed this assistant turn
-                        // into history. Until then, the same key set the
-                        // user was scrolled into stays valid.
-                        // [T-android-flatitems-sublist-cme] Index-based scan
-                        // instead of messages.subList(idx+1, size).all{} — a
-                        // subList is a live view sharing the parent's modCount,
-                        // which threw ConcurrentModificationException when the
-                        // backing list changed under it. A plain index loop
-                        // touches no view.
+                        // on rawFragments regardless of isStreaming; the
+                        // boundary that warrants coalesce is "a NEWER
+                        // message exists below this one". Until then the key
+                        // set the user is scrolled into stays valid.
+                        // [T-android-flatitems-sublist-cme] Index scan, not
+                        // messages.subList().all{} — subList shares the
+                        // parent's modCount and threw CME when the backing
+                        // list changed under it.
                         val isLastAssistantTurn = idx == messages.lastIndex ||
                             (idx + 1 until messages.size).all { messages[it].role != "assistant" }
                         val fragments = if (isLastText && isLastAssistantTurn) {
@@ -1035,9 +1021,8 @@ internal fun buildFlatChatItems(
                             messageId = message.id,
                             block = block,
                             isLast = block.id == lastThinkingId,
-                            messageIsStreaming = message.isStreaming && block.id == lastBlockId,
+                            messageIsStreaming = message.isStreaming && !hasReplyTextAfter(blocks, index),
                             messageThinkingLevel = message.thinkingLevel,
-                            isLastBlockOverall = block.id == lastBlockId,
                         )))
                     }
                 }
@@ -1282,4 +1267,19 @@ internal fun flatItemTopGap(prev: FlatChatItem?, cur: FlatChatItem): Dp = when {
     isProcessRow(prev) && isTextRow(cur) -> 4.dp
     prev is FlatChatItem.AssistantHeader -> 4.dp
     else -> ChatRowDefaultGap
+}
+
+/**
+ * [T-android-thinking-stable-expand] True when a readable text block sits
+ * after [idx] — the reply has started, so this block's reasoning phase is
+ * over. A tool_use does NOT count: in a multi-round tool loop the next
+ * round's thinking follows it. Blank text ("\n\n" before a tool call) is
+ * not reply text, matching flushSegment's isNotBlank() contract.
+ */
+internal fun hasReplyTextAfter(blocks: List<AssistantBlock>, idx: Int): Boolean {
+    for (i in idx + 1 until blocks.size) {
+        val b = blocks[i]
+        if (b.kind == "text" && b.content.isNotBlank()) return true
+    }
+    return false
 }

@@ -1,5 +1,6 @@
 package com.openminis.app.goal
 
+import com.openminis.app.data.db.GoalStatus
 import com.openminis.app.data.db.SessionGoalEntity
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
@@ -56,6 +57,29 @@ internal fun goalMount(
     val canContinue = state != null &&
         GoalStateMachine.canContinue(state, usefulActivity = true)
     return GoalMount(canContinue, state?.takeIf { canContinue }?.let(continuationPrompt))
+}
+
+/**
+ * The loop's early-exit decision after per-turn goal usage accounting.
+ * A mounted goal ends the loop when the usage lookup failed (a broken
+ * mount must not keep spinning the run) or the stored goal reached a
+ * state that can no longer continue (terminal, paused, or budget-limited
+ * — the next /goal resume re-mounts it). Unmounted requests never exit
+ * here: ordinary user turns have no goal to follow.
+ */
+internal fun shouldExitForGoalState(
+    goalUsageResult: Result<SessionGoalEntity?>,
+    goalMountedForCurrentRequest: Boolean,
+): Boolean {
+    if (!goalMountedForCurrentRequest) return false
+    if (goalUsageResult.isFailure) return true
+    val status = goalUsageResult.getOrNull()?.status ?: return false
+    return status in setOf(
+        GoalStatus.COMPLETE,
+        GoalStatus.BLOCKED,
+        GoalStatus.PAUSED,
+        GoalStatus.BUDGET_LIMITED,
+    )
 }
 
 internal fun withGoalContext(

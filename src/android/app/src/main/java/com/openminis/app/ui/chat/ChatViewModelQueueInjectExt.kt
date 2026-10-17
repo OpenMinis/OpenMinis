@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import android.util.Log
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
@@ -10,6 +11,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     finishedAssistantId: String,
     finishedAccumulatedText: String,
     finishedAllToolBlocks: List<AssistantBlock>,
+    uiBatcher: UiUpdateBatcher,
 ): ChatViewModel.InjectedTurn? {
     // [T-android-queue-atomic-mutation] CAS claim shared with drainQueuedPrompts
     // — see the note there for why a read-then-clear lost prompts (and re-sent
@@ -128,6 +130,10 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
     // queued user ChatMessage + a NEW empty assistant placeholder so
     // the next iteration's streaming writes target the new bubble.
     val newAssistantId = "assistant_${System.currentTimeMillis()}"
+    // [T-android-batcher-seal] Retire the finished bubble in the batcher
+    // BEFORE sealing it on Main below — a coalesced isStreaming=true push
+    // landing after the seal would resurrect the old thinking box.
+    uiBatcher.seal(finishedAssistantId)
     withContext(Dispatchers.Main) {
         // (a) + (b) one emit: build the post-finalize list.
         _messages.value = msgsAfterUnqueue
@@ -175,4 +181,73 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             "finishedId=$finishedAssistantId newId=$newAssistantId",
     )
     return ChatViewModel.InjectedTurn(newAssistantId)
+}
+
+/**
+ * [T-android-queued-message-interrupt-thinking] Guard for the stream
+ * collector's thinking-phase cut: a queued prompt arrived while the model
+ * is STILL reasoning (no reply text, no tool call yet). Once text or a
+ * tool call has been emitted the reply has visibly started — the cut must
+ * NOT fire there (the tool-close boundary or the post-loop drain picks the
+ * prompt up in seconds).
+ */
+internal fun ChatViewModel.hasQueuedPromptDuringPureThinking(
+    toolCalls: List<*>,
+    turnTextSb: CharSequence,
+): Boolean = toolCalls.isEmpty() && turnTextSb.isEmpty() && _promptQueue.value.isNotEmpty()
+
+/**
+ * [T-android-queued-message-interrupt-*] Shared drain for both mid-loop
+ * queued-prompt injection sites — the post-tool-result boundary and the
+ * thinking-phase cut: claim the queue and inject it as a standalone user
+ * turn (bridge + persisted row + fresh assistant bubble; see
+ * injectQueuedPromptsAsNewTurn), returning the new bubble's id.
+ *
+ * Null = the queue was drained by a concurrent path or the prompts
+ * produced no content; the caller falls through to its normal boundary
+ * handling so the loop can't spin on an empty claim.
+ */
+internal suspend fun ChatViewModel.drainQueueIntoStandaloneTurn(
+    finishedAssistantId: String,
+    finishedAccumulatedText: String,
+    finishedAllToolBlocks: List<AssistantBlock>,
+    uiBatcher: UiUpdateBatcher,
+): String? = try {
+    injectQueuedPromptsAsNewTurn(
+        finishedAssistantId = finishedAssistantId,
+        finishedAccumulatedText = finishedAccumulatedText,
+        finishedAllToolBlocks = finishedAllToolBlocks,
+        uiBatcher = uiBatcher,
+    )?.newAssistantId
+} catch (e: Exception) {
+    Log.e(ChatViewModel.TAG, "injectQueuedPromptsAsNewTurn failed", e)
+    null
+}
+
+/**
+ * [T-android-queued-message-interrupt-thinking] Success-path cleanup for
+ * the deliberate thinking-phase cut: settle the partial thinking block
+ * (first text or a tool call normally ends the reasoning phase and records
+ * the duration process cards sum — a deliberate cut is the same kind of
+ * phase end), close the generation run, and clear lingering auto-retry UI
+ * state. The stream attempt itself was healthy, so nothing here is an
+ * error path.
+ */
+internal fun ChatViewModel.settleInterruptedThinkingTurn(
+    turn: Int,
+    allToolBlocks: MutableList<AssistantBlock>,
+    generationRunId: String,
+) {
+    val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
+    if (thinkIdx >= 0 && allToolBlocks[thinkIdx].toolStatus != ToolBlockStatus.SUCCESS) {
+        allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(
+            toolStatus = ToolBlockStatus.SUCCESS,
+            durationMs = settleThinkingDurationMs(allToolBlocks[thinkIdx]),
+        )
+    }
+    com.openminis.app.agent.GenerationRunStore.finish(context, generationRunId, ok = true)
+    if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
+        _autoRetryAttempt.value = 0
+        _autoRetryCountdown.value = 0
+    }
 }

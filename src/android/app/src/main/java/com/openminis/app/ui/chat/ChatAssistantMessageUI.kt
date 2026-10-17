@@ -172,11 +172,6 @@ internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? =
         // text ↔ tool_use transitions, which must be preserved for coherent reading).
         val toolPillBlocks = message.toolBlocks.filter { it.kind == "tool_use" }
         val lastThinkingId = message.toolBlocks.lastOrNull { it.kind == "thinking" }?.id
-        // [T-android-thinking-auto-collapse] Mirror the FlatChatItem path's
-        // `isLastBlockOverall` so the legacy renderer's ThinkingBlock also
-        // flips !isStreaming when a sibling block arrives (id of the last
-        // block of ANY kind in the message). See ChatFlatItems builder.
-        val lastBlockIdOverall = message.toolBlocks.lastOrNull()?.id
         // Backward compat: if there are no text blocks but message.content is non-empty
         // (e.g. legacy sessions saved before the text-block migration), fall back to
         // rendering message.content after all tool blocks.
@@ -192,14 +187,13 @@ internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? =
                     // hiding by level swallows that thinking and the user
                     // sees "model isn't thinking".
                     if (block.content.isNotBlank() || message.isStreaming) {
-                        // [T-android-thinking-auto-collapse] Stream signal
-                        // requires THIS block to be the trailing block of
-                        // any kind, not just the last thinking — see
-                        // FlatChatItem path + iOS ThinkingBlockView parity.
-                        val isTrailingThinking = block.id == lastBlockIdOverall
+                        // [T-android-thinking-stable-expand] Same complete
+                        // signal as the FlatChatItem path (message streaming
+                        // AND no reply text after this block) — flips once
+                        // per reasoning phase, not once per tool round.
                         ThinkingBlock(
                             block,
-                            isStreaming = isTrailingThinking && message.isStreaming,
+                            isStreaming = message.isStreaming && !hasReplyTextAfter(message.toolBlocks, index),
                             isLast = block.id == lastThinkingId,
                         )
                     }
@@ -831,8 +825,19 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         // the next token.
         AnimatedVisibility(visible = expanded && !overHardCap) {
             val scrollState = rememberScrollState()
-            val isTruncated = block.content.length > thinkingWindowSize
-            val displayContent = visibleThinkingTail(block.content, thinkingWindowSize)
+            // [T-thinking-render-perf-android] Render only the tail window so
+            // Compose lays out at most `thinkingWindowSize` chars. `remember`
+            // keyed on the length recomputes the substring on each token, but
+            // the cost is O(window) not O(total). Snap the cut to the next
+            // newline (within 200 chars) so we don't start mid-line.
+            // [T-android-thinking-poll-removal] Read block.content directly —
+            // the VM-side UiUpdateBatcher already paces recomposition at
+            // 200-500ms, so the old 100ms poll only added lag between the
+            // state write and the frame that showed it. ThinkingAutoFollow
+            // publishes its SideEffect on recomposition, not on the poll.
+            val renderedContent = block.content
+            val isTruncated = renderedContent.length > thinkingWindowSize
+            val displayContent = visibleThinkingTail(renderedContent, thinkingWindowSize)
             ThinkingAutoFollow(
                 blockId = block.id,
                 contentVersionValue = block.content.length,
@@ -875,70 +880,6 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                 onDismiss = { showFullContent = false },
             )
         }
-    }
-}
-
-/**
- * [T-process-summary-duration] Formats an aggregated process duration for the
- * fold-bar suffix. Mirrors the OmniBot run-group header granularity: whole
- * seconds under a minute, m+s under an hour, h+m beyond. Returns null for
- * non-positive totals so the bar simply omits the suffix (blocks without a
- * recorded duration must not render "0s").
- */
-internal fun formatProcessDuration(totalMs: Long): String? {
-    if (totalMs <= 0L) return null
-    val totalSeconds = totalMs / 1000L
-    return when {
-        totalSeconds < 60L -> "${totalSeconds}s"
-        totalSeconds < 3600L -> "${totalSeconds / 60L}m ${totalSeconds % 60L}s"
-        else -> "${totalSeconds / 3600L}h ${totalSeconds % 3600L / 60L}m"
-    }
-}
-
-/**
- * [P-process-card] What the card is doing right now. Pure so the header
- * copy is testable without composition.
- *
- *  - a settled run reads "思考 N · 工具 M · 时长" — the counts stay so a
- *    finished run is still scannable; no ✅ emoji (user direction: the
- *    check mark reads as noise next to the status icon);
- *  - a running run, collapsed, is the fixed "AI 过程" label with the
- *    counts, with the duration ticking;
- *  - a running run, expanded, drops the counts: the steps are on screen,
- *    so the header is only the current state.
- *
- * "输出中" is deliberately absent. Reply text ends the card on arrival, so
- * that state would render for a single frame and then vanish.
- */
-internal fun processCardHeader(
-    thinkingCount: Int,
-    toolCount: Int,
-    running: Boolean,
-    expanded: Boolean,
-    activity: String,
-    activityTitle: String,
-    duration: String?,
-): String {
-    val counts = buildString {
-        append("思考 ").append(thinkingCount)
-        append(" · 工具 ").append(toolCount)
-        if (duration != null) append(" · ").append(duration)
-    }
-    val state = when (activity) {
-        "thinking" -> "思考中"
-        "tool" -> if (activityTitle.isBlank()) "调用工具" else "调用工具 $activityTitle"
-        else -> ""
-    }
-    return when {
-        // Settled (reply text arrived, or a pure-tool/error/timeout round
-        // ended): always the done summary.
-        !running -> counts
-        // Running + expanded: the steps are on screen, so the header shows
-        // only the live state; fall back to the generic label when idle.
-        expanded -> state.ifEmpty { "AI 过程" }
-        // Running + collapsed: fixed label with ticking duration. The live
-        // state stays out — that is what the expanded header is for.
-        else -> "AI 过程 · $counts"
     }
 }
 

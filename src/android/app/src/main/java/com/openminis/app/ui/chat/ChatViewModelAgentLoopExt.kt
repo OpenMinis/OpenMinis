@@ -283,6 +283,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // per run so a mid-run settings change can't shift the range end under
     // an in-flight iteration.
     val maxTurns = ToolLimitPrefs.mainSessionMaxTurns()
+    // [T-android-queued-message-interrupt-*] Shared by both mid-loop
+    // injection sites: switch loop-scope state to the injected bubble.
+    fun swapLoopStateToInjectedBubble(newAssistantId: String) {
+        assistantId = newAssistantId
+        accumulatedText = ""
+        allToolBlocks.clear()
+        allToolInputs.clear()
+        toolInputChunkRings.clear()
+        _canResume.value = false
+    }
     for (turn in 0 until maxTurns) {
         currentCoroutineContext().ensureActive()
         // Sanitize history before each API call (mirrors iOS pre-API validation)
@@ -630,6 +640,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // consumed by the retried requestHistory, cleared once a stream attempt
         // succeeds (a normal `continue` never reaches the rollback that sets it).
         var stallResumeContext: String? = null
+        // [T-android-queued-message-interrupt-thinking] Set by the dedicated
+        // catch below; read after the stream loop to inject as a new turn.
+        var queuedPromptInterrupted = false
+        // [T-android-queued-message-interrupt-thinking] iOS d14174d3 parity:
+        // a prompt queued while the model is still reasoning must not wait
+        // out the stream — cut it (both branches below call this).
+        fun cutForQueuedPrompt(phase: String) {
+            AppLogger.info(ChatViewModel.TAG_STREAM, "📨[QueueInterrupt] turn=$turn $phase cut — answering queued prompt directly")
+            throw QueuedPromptInterrupt()
+        }
         while (!collectDone) {
             try {
                 // [T-android-enhanced-cache] Stamp the per-turn Enhanced
@@ -717,6 +737,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                         allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
                     }
                     uiBatcher.enqueue(assistantId, messageTextSnapshot(), true, allToolBlocks.toList())
+                    if (hasQueuedPromptDuringPureThinking(toolCalls, turnTextSb)) cutForQueuedPrompt("thinking-phase")
                 }
                 is LLMStreamChunk.Text -> {
                     // [T-android-readaloud-stop-stale] First actual text of
@@ -1076,6 +1097,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // turns and we must round-trip exactly that). No live UI surface;
                     // the thinking panel is driven by ThinkingDelta events above.
                     turnReasoningBlob = chunk.content
+                    // DeepSeek/Kimi emit opaque reasoning_content in the same window.
+                    if (hasQueuedPromptDuringPureThinking(toolCalls, turnTextSb)) cutForQueuedPrompt("reasoning_content-phase")
                 }
                 is LLMStreamChunk.Finished -> {
                     // T321: stash for empty-turn diagnostic logging below.
@@ -1154,6 +1177,14 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 } finally {
                     // [T-first-event-watchdog] The operator cancels itself; nothing to clean here.
                 }
+            } catch (e: QueuedPromptInterrupt) {
+                // [T-android-queued-message-interrupt-thinking] Deliberate
+                // cut, NOT a provider failure — must precede the generic
+                // Exception catch so retry/fallback never sees it.
+                settleInterruptedThinkingTurn(turn, allToolBlocks, generationRunId)
+                stallResumeContext = null
+                queuedPromptInterrupted = true
+                break
             } catch (e: Exception) {
                 if (e is CancellationException && e.cause == null) { CancellationDiagnostic.log(provider.model.displayName, activeSessionId, e, _isStreaming.value); throw e }  // [T-cancel-diag] record timeline, real job cancellation
                 val actual = unwrapFlowException(e)
@@ -1495,6 +1526,21 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 }
             }
         }  // end while (!collectDone)
+
+        // [T-android-queued-message-interrupt-thinking] The thinking-phase
+        // cut landed here: skip normal bookkeeping and inject as a standalone
+        // turn. Not persisted: a row here would sort AFTER the queued user
+        // row and render below the prompt it preceded on every reload.
+        if (queuedPromptInterrupted) {
+            if (turn == 0) generateSessionTitleIfNeeded()
+            val handled = drainQueueIntoStandaloneTurn(assistantId, accumulatedText, allToolBlocks, uiBatcher)
+            if (handled != null) {
+                swapLoopStateToInjectedBubble(handled)
+                continue
+            }
+            // null = queue drained concurrently / no content — the normal
+            // empty-turn handling below persists the thinking-only turn once.
+        }
 
         // T307: materialise the per-turn StringBuilder ONCE at the
         // turn boundary. After this point everything is plain String
@@ -2311,14 +2357,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
             )
         }.onFailure { AppLogger.warning(ChatViewModel.TAG_STREAM, "Goal usage accounting failed: ${it.message}") }
         else Result.success(null)
-        val goalAfterTurn = goalUsageResult.getOrNull()
-        if (goalMountedForCurrentRequest && (goalUsageResult.isFailure || goalAfterTurn?.status in setOf(
-                com.openminis.app.data.db.GoalStatus.COMPLETE,
-                com.openminis.app.data.db.GoalStatus.BLOCKED,
-                com.openminis.app.data.db.GoalStatus.PAUSED,
-                com.openminis.app.data.db.GoalStatus.BUDGET_LIMITED,
-            ))
-        ) {
+        // [T-android-goal-early-exit] Broken usage lookup or terminal /
+        // paused state ends the loop. See GoalContextInjection.
+        if (com.openminis.app.goal.shouldExitForGoalState(goalUsageResult, goalMountedForCurrentRequest)) {
             withContext(Dispatchers.Main) {
                 updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
             }
@@ -2326,69 +2367,23 @@ internal suspend fun ChatViewModel.runAgentLoop(
             break
         }
 
-        // Auto-title after first exchange (mirrors iOS generateSessionTitleIfNeeded)
-        if (turn == 0) {
-            generateSessionTitleIfNeeded()
-        }
+        if (turn == 0) generateSessionTitleIfNeeded()  // auto-title after first exchange
 
-        // [T-android-queued-message-interrupt-on-toolclose] iOS d14174d3
-        // parity. User report: "怎么样了" queued bubble (dashed border,
-        // red X) stayed pending behind a long sync→export→read→gh-issue
-        // tool chain — drainQueuedPrompts() only fires when the WHOLE
-        // tool loop converges, so the queued prompt waited for the
-        // entire plan to finish even though the user wanted to
-        // interrupt the moment a tool closed.
-        //
-        // Fix: at the post-tool-result boundary (we just appended the
-        // tool_result to agentHistory above), if there's anything in
-        // the queue, abandon the rest of the running plan and inject
-        // the queued prompt as a fresh user turn — the next iteration
-        // makes a brand-new API call whose response targets the
-        // queued prompt directly.
-        //
-        // Why not just append-and-continue: the agentHistory tail is
-        // user(tool_result). Anthropic's mergeConsecutiveSameRole would
-        // fold a directly-appended user(queued_text) into that
-        // tool_result, so the model would read the queued prompt as
-        // in-loop context for the previous turn (#579 / iOS regression).
-        // Inject a minimal assistant bridge first so the sequence is
-        //   …user(tool_result) → assistant(bridge) → user(queued) →
-        //   …assistant(responds-to-queued).
-        // The bridge lives in agentHistory only (NOT persisted) —
-        // it's purely a wire-format spacer for the API call.
+        // [T-android-queued-message-interrupt-on-toolclose] At the post-tool-
+        // result boundary a queued prompt abandons the running plan and
+        // starts a standalone turn. See drainQueueIntoStandaloneTurn.
         if (_promptQueue.value.isNotEmpty()) {
             AppLogger.info(
                 ChatViewModel.TAG_STREAM,
                 "📨[QueueInterrupt] turn=$turn ${_promptQueue.value.size} queued prompt(s) — interrupting after current tool call to start a standalone turn",
             )
-            val handled = try {
-                injectQueuedPromptsAsNewTurn(
-                    finishedAssistantId = assistantId,
-                    finishedAccumulatedText = accumulatedText,
-                    finishedAllToolBlocks = allToolBlocks,
-                )
-            } catch (e: Exception) {
-                Log.e(ChatViewModel.TAG, "injectQueuedPromptsAsNewTurn failed", e)
-                null
-            }
+            val handled = drainQueueIntoStandaloneTurn(assistantId, accumulatedText, allToolBlocks, uiBatcher)
             if (handled != null) {
-                // Switch loop-scope state to the new bubble. Subsequent
-                // iterations populate `handled.newAssistantId` and slice
-                // `allToolBlocks` from the freshly-zeroed start index
-                // (turnStartBlockIndex captures allToolBlocks.size at
-                // iteration top, so clearing means new turn's blocks
-                // span [0..size).
-                assistantId = handled.newAssistantId
-                accumulatedText = ""
-                allToolBlocks.clear()
-                allToolInputs.clear()
-                toolInputChunkRings.clear()
-                _canResume.value = false
+                swapLoopStateToInjectedBubble(handled)
                 continue
             }
-            // null return = empty-after-build / drain rejected; fall
-            // through to normal next-turn dispatch so the queue doesn't
-            // pin the loop indefinitely.
+            // null = empty-after-build / drain rejected; fall through to
+            // normal next-turn dispatch so the queue doesn't pin the loop.
         }
     }
     // Two ways to leave the for-loop above:
