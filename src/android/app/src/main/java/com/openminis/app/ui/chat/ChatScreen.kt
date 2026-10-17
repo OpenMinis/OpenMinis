@@ -2215,20 +2215,12 @@ fun ChatScreen(
                                     ) { showModelPicker = true }
                                     .padding(horizontal = 4.dp, vertical = 1.dp),
                             ) {
-                                // Line 1: green dot + group name + dropdown arrow (iOS: "● Default ⌄")
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .background(
-                                                if (modelName.isNotEmpty()) Color(0xFF34C759) else Color(0xFFFF9500),
-                                                CircleShape,
-                                            ),
-                                    )
-                                    // T-android-topbar-group-name-fallback:
+                                // Line 1: group name + dropdown arrow (iOS: "Default ⌄").
+                                // [T-usage-topbar-brand-icon] Old green status dot removed
+                                // (clashed with picker's provider-brand dots); row hides
+                                // entirely when no group is bound.
+                                //
+                                // T-android-topbar-group-name-fallback:
                                     // _selectedGroupName is empty during the
                                     // brief window before loadSession's group
                                     // resolve runs, or whenever a binding
@@ -2271,6 +2263,10 @@ fun ChatScreen(
                                     // bound — an empty label would still leave
                                     // a dangling chevron pointing at nothing.
                                     if (groupNameDisplay.isNotEmpty()) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                        ) {
                                         Text(
                                             text = groupNameDisplay,
                                             fontSize = 12.sp,
@@ -2286,13 +2282,10 @@ fun ChatScreen(
                                             tint = ChatColors.tertiaryText,
                                             modifier = Modifier.size(14.dp),
                                         )
+                                        }
                                     }
-                                }
-                                // Line 2: "provider · model" (iOS: "MiniMax ·
-                                // MiniMax-M2.7") + the thinking-level badge laid
-                                // out as a Row of two SEPARATE tappable siblings
-                                // (mirrors iOS AIChatView row-2 HStack).
-                                //
+                                // Line 2: "provider · model" + thinking badge as two
+                                // SEPARATE tappable siblings (iOS AIChatView row-2 HStack).
                                 // [T-android-thinking-badge-navbar] Gesture
                                 // separation: the whole subtitle Column above owns
                                 // `clickable { showModelPicker = true }`, so a tap
@@ -2339,12 +2332,18 @@ fun ChatScreen(
                                                 )
                                             }
                                         }
+                                // [T-usage-topbar-brand-icon] Vendor logo (lobe-icons,
+                                // res/raw) by model-name keyword scoring.
+                                val brandSlug = remember(modelName) { ModelBrandResolver.resolve(null, modelName, null) }
+                                        if (providerName.isNotEmpty() && modelName.isNotEmpty()) {
+                                            Text(
+                                                "$providerName · ", fontSize = 11.sp, lineHeight = 13.sp,
+                                                color = ChatColors.tertiaryText, maxLines = 1, style = noFontPad,
+                                            )
+                                        }
+                                        ModelBrandIcon(slug = brandSlug, sizeDp = 13.dp)
                                         Text(
-                                            text = if (providerName.isNotEmpty() && modelName.isNotEmpty()) {
-                                                "$providerName · $modelName"
-                                            } else {
-                                                modelName.ifEmpty { providerName }
-                                            },
+                                            text = modelName.ifEmpty { providerName },
                                             fontSize = 11.sp,
                                             lineHeight = 13.sp,
                                             color = ChatColors.tertiaryText,

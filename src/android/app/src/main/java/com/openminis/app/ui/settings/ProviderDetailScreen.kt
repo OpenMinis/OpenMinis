@@ -1,6 +1,8 @@
 package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import com.openminis.app.ui.chat.ModelBrandIcon
+import com.openminis.app.ui.chat.ModelBrandResolver
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -598,28 +600,15 @@ fun ProviderDetailScreen(
                         .then(if (entry.isHidden) Modifier.alpha(0.45f) else Modifier)
                         .combinedClickable(
                             onClick = { onModelEntryClick(entry.id) },
-                            // [T-android-model-row-hide-action] Long-press now
-                            // opens a menu instead of going straight to delete.
-                            // Hiding was previously reachable ONLY by opening
-                            // the model's detail screen, flipping the
-                            // Visibility switch and pressing Save — five steps
-                            // for what iOS does with one tap on an eye button
-                            // in this very list (ProviderInstanceDetailView).
-                            //
-                            // A menu rather than a trailing icon button because
-                            // the row's trailing slot is a FIXED 72dp capability
-                            // -badge area, deliberately sized so the chevron
-                            // lands at the same x on every row; adding a button
-                            // there would reintroduce the ragged column that
-                            // sizing exists to prevent.
-                            //
-                            // It also fills a dead gesture: long-press used to
-                            // be null for built-in entries, so they had no
-                            // context action at all. They still cannot be
-                            // deleted (the repo re-creates them from
-                            // ProviderType.builtInModels on the next refresh),
-                            // but hiding is exactly the supported way to get one
-                            // out of the picker.
+                            // [T-android-model-row-hide-action] Long-press opens a
+                            // menu (hide/delete) instead of straight delete:
+                            // hiding was reachable only via the detail screen
+                            // (five steps vs iOS's one tap on an eye button).
+                            // A menu, not a trailing icon — the trailing slot
+                            // is a fixed 72dp badge area keeping the chevron
+                            // column aligned; a button there would rag it.
+                            // Built-ins can't be deleted (repo re-creates
+                            // them) but hiding works.
                             onLongClick = { menuEntryId = entry.id },
                         ),
                 ) {
@@ -634,12 +623,23 @@ fun ProviderDetailScreen(
                     val outputModalities = entry.model.outputModalities.orEmpty()
                     val hasBadge = inputModalities.any { it in modalityIconKeys } ||
                         outputModalities.any { it in modalityOutputIconKeys }
+                    // [T-usage-topbar-brand-icon] Vendor logo ahead of the model
+                    // name, resolved by keyword scoring over id + displayName
+                    // (the instance type is a relay, not a brand).
+                    val brandSlug = remember(entry.model.id, entry.model.displayName) {
+                        ModelBrandResolver.resolve(null, entry.model.id, entry.model.displayName)
+                    }
                     SettingsRow(
                         title = entry.model.displayName,
                         subtitle = buildString {
                             append(entry.model.id)
                             if (entry.isHidden) append(" • Hidden")
                         },
+                        leading = if (brandSlug != null) {
+                            {
+                                ModelBrandIcon(slug = brandSlug, sizeDp = 24.dp)
+                            }
+                        } else null,
                         // onClick = null so SettingsRow doesn't add a second
                         // clickable that would swallow the long-press. The
                         // wrapping Box owns both gestures.

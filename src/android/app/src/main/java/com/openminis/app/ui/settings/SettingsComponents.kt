@@ -286,6 +286,10 @@ fun SettingsRow(
     showDivider: Boolean = true,
     titleColor: Color = MaterialTheme.colorScheme.onSurface,
     trailing: (@Composable () -> Unit)? = null,
+    // [T-usage-topbar-brand-icon] Async leading slot (e.g. a vendor logo
+    // rendered by Coil) for callers whose artwork is not an ImageVector.
+    // Renders after the icon chip at the same rhythm; null = unchanged.
+    leading: (@Composable () -> Unit)? = null,
     // [T-android-settings-ui-md3] #8 single-line List Item is 56dp; a caller with
     // two-line content (e.g. the model list: name + id) passes 72dp for the MD3
     // double-line height. Default keeps every other row at the single-line 56dp.
@@ -341,6 +345,10 @@ fun SettingsRow(
                         modifier = Modifier.size(18.dp),
                     )
                 }
+                Spacer(Modifier.width(14.dp))
+            }
+            if (leading != null) {
+                leading()
                 Spacer(Modifier.width(14.dp))
             }
 
