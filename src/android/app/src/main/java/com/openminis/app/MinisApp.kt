@@ -15,6 +15,7 @@ import org.acra.config.CoreConfigurationBuilder
 import org.acra.data.StringFormat
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import coil.decode.SvgDecoder
 import com.openminis.app.browser.BrowserTabPool
 import com.openminis.app.data.db.AppDatabase
 import com.openminis.app.data.db.DatabaseVersionGuard
@@ -1061,14 +1062,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         Log.i("MinisApp", "T268 ghost alarm migration: migrated=$migrated skipped=$skipped (prefs cleared)")
     }
 
-    /**
-     * Coil global ImageLoader — registers [MinisImageFetcher] so `minis://`
-     * URIs in Markdown images (e.g. `![alt](minis://attachments/x.png)`)
-     * resolve to local files under /var/minis/.
-     */
+    /** Coil global ImageLoader: MinisImageFetcher resolves `minis://` URIs
+     * to local files; SvgDecoder is REQUIRED for the res/raw vendor logos —
+     * Coil 2.x does not auto-discover it from coil-svg (icons-invisible #65). */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .components {
+                add(SvgDecoder.Factory())
                 add(MinisImageFetcher.Factory())
                 add(MinisImageFetcher.UriFactory())
                 // T-image-cache-mtime-35133: include File.lastModified() in
