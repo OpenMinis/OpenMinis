@@ -115,8 +115,8 @@ private sealed class UpdateStatus {
 fun SkillsManagementScreen(
     skillRepository: SkillRepository,
     onBack: () -> Unit,
-    onSkillClick: (String) -> Unit = {},
-    onMinisSkillsClick: () -> Unit = {},
+    onSkillClick: (String) -> Unit,
+    onMinisSkillsClick: () -> Unit,
 ) {
     val skills by skillRepository.skills.collectAsState()
     var showImportSheet by remember { mutableStateOf(false) }

@@ -260,6 +260,8 @@
     <string name="dev_suite_progress">%1$d/%2$d 已就绪</string>
     <string name="dev_suite_installing">安装中…</string>
     <string name="dev_suite_failed">失败</string>
+    <string name="dev_suite_view_details">查看详情</string>
+    <string name="dev_suite_failure_details">安装失败详情</string>
     <string name="dev_suite_ready">已就绪</string>
     <string name="dev_suite_not_installed">未安装</string>
     <string name="dev_suite_required">必需</string>

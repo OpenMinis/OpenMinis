@@ -219,6 +219,10 @@ object ExecutionCoordinator {
                 shell.applyEnvironment(envVars, previousKeys = previousKeys)
                 lastInjectedKeys[sessionId] = envVars.keys.toSet()
             }
+            // Plugin installers add command links to the guest PATH while this
+            // persistent shell remains alive. Refresh both PATH and bash's
+            // command hash before every command so the next command sees it.
+            shell.refreshPath()
 
             val (rawOutput, exitCode) = shell.executeCommand(
                 command = command,

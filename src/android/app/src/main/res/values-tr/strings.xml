@@ -1797,6 +1797,8 @@
     <string name="dev_suite_progress">%1$d/%2$d hazır</string>
     <string name="dev_suite_installing">Kuruluyor…</string>
     <string name="dev_suite_failed">başarısız</string>
+    <string name="dev_suite_view_details">Details</string>
+    <string name="dev_suite_failure_details">Installation failure details</string>
     <string name="dev_suite_ready">Hazır</string>
     <string name="dev_suite_not_installed">Kurulu değil</string>
     <string name="dev_suite_required">zorunlu</string>

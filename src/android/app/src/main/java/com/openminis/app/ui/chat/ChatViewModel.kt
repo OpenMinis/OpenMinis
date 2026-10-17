@@ -863,7 +863,7 @@ class ChatViewModel(
     // [T-android-timeline-ledger] Cursors, counters and the operation mutex
     // live in [TimelineWindow] (single owner — see its KDoc for what the old
     // scattered-vars shape used to break).
-    internal val timeline = TimelineWindow()
+    internal val timeline = HistoryWindowController()
     // [T-window-flag-cas] Single-flight for loadOlderPage. A plain Boolean
     // check-then-set here is only safe on the main thread — and loadOlderPage
     // is internal suspend, so any future caller from another dispatcher would

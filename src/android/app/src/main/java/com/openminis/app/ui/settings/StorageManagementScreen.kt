@@ -66,7 +66,7 @@ fun StorageManagementScreen(
     chatDao: ChatDao,
     onBack: () -> Unit,
     onRootfsClick: () -> Unit,
-    onSessionClick: (sessionId: String) -> Unit = {},
+    onSessionClick: (sessionId: String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -190,7 +190,7 @@ fun SessionStorageDetailScreen(
     sessionId: String,
     chatDao: ChatDao,
     onBack: () -> Unit,
-    onBrowseFiles: (rootPath: String) -> Unit = {},
+    onBrowseFiles: (rootPath: String) -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

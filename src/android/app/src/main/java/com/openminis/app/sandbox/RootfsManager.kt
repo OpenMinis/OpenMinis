@@ -1550,7 +1550,7 @@ class RootfsManager private constructor(private val context: Context) {
      * cheap; correctness beats memoising a value that changes the moment
      * minis-android-sdk-setup lands a new build-tools or CMake revision.
      */
-    private fun guestPath(): String {
+    internal fun currentGuestPath(): String {
         val sdkDir = File(rootfsDir, "opt/android-sdk")
         val resolved = StringBuilder(UBUNTU_GUEST_PATH_BASE)
 
@@ -1582,7 +1582,7 @@ class RootfsManager private constructor(private val context: Context) {
     private fun prootLoaderEnv(): Map<String, String> {
         ensureResolvConfCurrent()
         val env = mutableMapOf(
-            "PATH" to guestPath(),
+            "PATH" to currentGuestPath(),
             "PROOT_TMP_DIR" to PRootKernel.getProotTmpDir(context).absolutePath,
             "LD_LIBRARY_PATH" to nativeLibDir.absolutePath,
             "TMPDIR" to "/tmp",

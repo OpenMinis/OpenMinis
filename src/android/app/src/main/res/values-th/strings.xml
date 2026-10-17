@@ -1797,6 +1797,8 @@
     <string name="dev_suite_progress">%1$d/%2$d พร้อม</string>
     <string name="dev_suite_installing">กำลังติดตั้ง…</string>
     <string name="dev_suite_failed">ล้มเหลว</string>
+    <string name="dev_suite_view_details">Details</string>
+    <string name="dev_suite_failure_details">Installation failure details</string>
     <string name="dev_suite_ready">พร้อม</string>
     <string name="dev_suite_not_installed">ยังไม่ติดตั้ง</string>
     <string name="dev_suite_required">จำเป็น</string>

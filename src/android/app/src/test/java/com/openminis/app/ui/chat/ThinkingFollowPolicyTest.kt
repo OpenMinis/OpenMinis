@@ -152,7 +152,7 @@ class ThinkingFollowPolicyTest {
         )
         assertTrue(
             "ThinkingBlock must pass the latest content length to the follow owner",
-            "contentVersionValue = renderedContent.length" in renderSource,
+            "contentVersionValue = block.content.length" in renderSource,
         )
     }
 

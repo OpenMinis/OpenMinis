@@ -68,7 +68,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -723,15 +722,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         charCount >= 1000 -> "${charCount / 1000}K"
         else -> "$charCount"
     }
-    // [T-thinking-render-perf-android] Compose `Text` measures/lays out the
-    // ENTIRE string even when only ~300dp is visible, so a 200k-char thinking
-    // block froze the UI (and a per-token recomposition re-measured all 200k
-    // each tick). Two tiers guard this:
-    //  • > HARD_CAP: the inline scroller can't render it at all — show a
-    //    "View full content" entry that opens a native TextView dialog
-    //    (Android TextView handles large text far better than Compose Text).
-    //  • otherwise: render only the last WINDOW chars (tail) — capping layout
-    //    cost to O(WINDOW) regardless of total length.
+    // Keep layout bounded; shorter content renders only the newest tail.
     val thinkingWindowSize = 8000
     val thinkingHardCap = 100_000
     val overHardCap = charCount > thinkingHardCap
@@ -840,25 +831,11 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
         // the next token.
         AnimatedVisibility(visible = expanded && !overHardCap) {
             val scrollState = rememberScrollState()
-            // [T-thinking-render-perf-android] Render only the tail window so
-            // Compose lays out at most `thinkingWindowSize` chars. `remember`
-            // keyed on the length recomputes the substring on each token, but
-            // the cost is O(window) not O(total). Snap the cut to the next
-            // newline (within 200 chars) so we don't start mid-line.
-            var renderedContent by remember(block.id) { mutableStateOf(block.content) }
-            val latestContent by rememberUpdatedState(block.content)
-            LaunchedEffect(block.id, isStreaming) {
-                while (isStreaming) {
-                    delay(100)
-                    if (renderedContent != latestContent) renderedContent = latestContent
-                }
-                renderedContent = latestContent
-            }
-            val isTruncated = renderedContent.length > thinkingWindowSize
-            val displayContent = visibleThinkingTail(renderedContent, thinkingWindowSize)
+            val isTruncated = block.content.length > thinkingWindowSize
+            val displayContent = visibleThinkingTail(block.content, thinkingWindowSize)
             ThinkingAutoFollow(
                 blockId = block.id,
-                contentVersionValue = renderedContent.length,
+                contentVersionValue = block.content.length,
                 isStreaming = isStreaming,
                 scrollState = scrollState,
             )
@@ -1208,17 +1185,40 @@ private fun ProcessStepRow(step: ProcessStepRef, onOpen: () -> Unit) {
         if (isThinking) {
             AnimatedVisibility(visible = stepExpanded && block.content.isNotEmpty()) {
                 val scrollState = rememberScrollState()
-                Text(
-                    text = block.content,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
-                    color = muted,
+                val thinkingWindowSize = 8000
+                val isTruncated = block.content.length > thinkingWindowSize
+                val displayContent = visibleThinkingTail(block.content, thinkingWindowSize)
+                ThinkingAutoFollow(
+                    blockId = block.id,
+                    contentVersionValue = block.content.length,
+                    isStreaming = step.running,
+                    scrollState = scrollState,
+                )
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(start = 22.dp, top = 2.dp, bottom = 6.dp)
                         .heightIn(max = 300.dp)
                         .verticalScroll(scrollState),
-                )
+                ) {
+                    if (isTruncated) {
+                        Text(
+                            text = stringResource(
+                                R.string.thinking_truncated_hint,
+                                displayContent.length / 1000,
+                                block.content.length / 1000,
+                            ),
+                            fontSize = 11.sp,
+                            color = muted.copy(alpha = 0.75f),
+                        )
+                    }
+                    Text(
+                        text = displayContent,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        color = muted,
+                    )
+                }
             }
         }
     }

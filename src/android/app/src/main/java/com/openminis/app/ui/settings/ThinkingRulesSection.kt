@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,6 +40,8 @@ import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.provider.thinking.ThinkingRule
 import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * [T-android-thinking-rules-phase2 §3 / parity with iOS ThinkingRulesSection.swift]
@@ -91,17 +94,20 @@ fun ThinkingRulesSection(
     var defaultsExpanded by remember { mutableStateOf(false) }
     var editorRequest by remember { mutableStateOf<ThinkingRuleEditorRequest?>(null) }
 
-    val customRules = remember(instance.id, reloadKey) { providerRepository.thinkingRules(instance.id) }
+    val rulesSnapshot by produceState(
+        initialValue = ProviderRepository.ThinkingRulesSnapshot(),
+        instance.id,
+        reloadKey,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            providerRepository.thinkingRulesSnapshot(instance.id)
+        }
+    }
+    val customRules = rulesSnapshot.customRules
     // The persisted ids parallel the custom rules in stored order (for edit/delete/reorder).
-    val customIds = remember(instance.id, reloadKey) {
-        providerRepository.thinkingRuleIds(instance.id)
-    }
-    val builtIns = remember(instance.id, reloadKey) {
-        providerRepository.builtInThinkingRulesForDisplay(instance.id)
-    }
-    val sampleModelId = remember(instance.id, reloadKey) {
-        providerRepository.firstModelId(instance.id)
-    }
+    val customIds = customRules.map { it.id }
+    val builtIns = rulesSnapshot.builtIns
+    val sampleModelId = rulesSnapshot.sampleModelId
 
     SettingsSection(
         header = stringResource(R.string.thinking_rules_section),

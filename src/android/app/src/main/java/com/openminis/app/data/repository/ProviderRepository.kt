@@ -252,6 +252,12 @@ class ProviderRepository(private val context: Context) {
             // Completed in every path, including the failure one: awaitConfigLoaded()
             // callers (refreshAllModelsIfNeeded) would otherwise suspend forever.
             if (!configLoadComplete.isCompleted) configLoadComplete.complete(Unit)
+            // The async loader sets _configLoaded directly, so normal readers
+            // no longer pass through ensureConfigLoaded(). Warm the synchronous
+            // request-builder cache explicitly here; otherwise the first cold
+            // start after this refactor would silently resolve built-in-only
+            // thinking rules until a later mutation happened to warm it.
+            loadAllThinkingRulesIntoCache()
             // [T-android-provider-voice] Reconcile voice-template seeds after
             // the initial load (add new template models, drop retired seeds,
             // heal corrupted modality). Mirrors iOS ProviderConfigStore.init.
@@ -1788,17 +1794,9 @@ class ProviderRepository(private val context: Context) {
     // never stored. On every mutation we publish the instance's rules into the
     // ThinkingRuleResolver cache so the (sync) request-builder can read them.
 
-    /**
-     * Load one instance's custom rules.
-     *
-     * [T-android-save-off-main-thread] Reads the warm [thinkingRulesCache] when
-     * available: this is called straight from `remember { }` during composition
-     * (ui/settings/ThinkingRulesSection.kt), and the old `runBlocking { DAO }`
-     * shape froze the frame on every recomposition. Callers on a suspend path
-     * should use [thinkingRulesSuspending], which always reads the store.
-     */
+    /** Read the last off-thread snapshot; suspend callers can read Room directly. */
     fun thinkingRules(instanceId: String): List<ThinkingRule> =
-        thinkingRulesCache[instanceId] ?: runBlocking { thinkingRulesSuspending(instanceId) }
+        thinkingRulesCache[instanceId].orEmpty()
 
     /** Suspend variant of [thinkingRules] — reads provider.db on IO, never the caller's thread. */
     suspend fun thinkingRulesSuspending(instanceId: String): List<ThinkingRule> =
@@ -1807,31 +1805,36 @@ class ProviderRepository(private val context: Context) {
                 .getOrDefault(emptyList())
         }
 
-    /** The persisted ids for one instance's custom rules, parallel to [thinkingRules]. */
     fun thinkingRuleIds(instanceId: String): List<String> =
         thinkingRules(instanceId).map { it.id }
 
-    /** Suspend variant of [thinkingRuleIds]. */
     suspend fun thinkingRuleIdsSuspending(instanceId: String): List<String> =
         thinkingRulesSuspending(instanceId).map { it.id }
 
-    /** First model id served by [instanceId], for the resolution-trace sample. Null if none. */
+    data class ThinkingRulesSnapshot(
+        val customRules: List<ThinkingRule> = emptyList(),
+        val builtIns: List<ThinkingRule> = emptyList(),
+        val sampleModelId: String? = null,
+    )
+
+    suspend fun thinkingRulesSnapshot(instanceId: String): ThinkingRulesSnapshot =
+        withContext(kotlinx.coroutines.Dispatchers.IO) {
+            ensureConfigLoaded()
+            val customRules = runCatching {
+                providerDao.loadThinkingRules(instanceId).map { it.toRule() }
+            }.getOrDefault(emptyList())
+            val builtIns = builtInThinkingRulesForDisplay(instanceId)
+            val sampleModelId = _config.value.modelEntries
+                .firstOrNull { it.providerInstanceId == instanceId }?.model?.id
+            ThinkingRulesSnapshot(customRules, builtIns, sampleModelId)
+        }
+
     fun firstModelId(instanceId: String): String? {
         ensureConfigLoaded()
         return _config.value.modelEntries.firstOrNull { it.providerInstanceId == instanceId }?.model?.id
     }
 
-    /**
-     * [T-android-thinking-rules-phase2] Warm the resolver's custom-rule cache once
-     * config is available, so the (sync) request builder can read user rules.
-     *
-     * [T-android-save-off-main-thread] The read itself is queued to the persistence
-     * worker: this used to run `runBlocking { providerDao.loadAllThinkingRules() }`
-     * inline, and `ensureConfigLoaded()` — which is called from Compose mutators on
-     * the main thread — reached it on the very first access, so a cold provider.db
-     * read stalled the first frame. The rules screen reads
-     * [thinkingRules] from the cache this fills.
-     */
+    /** Warm the resolver cache on the persistence worker. */
     fun loadAllThinkingRulesIntoCache() {
         ensurePersistWorker()
         persistRequests.trySend(ProviderPersistRequest.Task {
@@ -2359,18 +2362,25 @@ class ProviderRepository(private val context: Context) {
         val outputModels: List<ModelEntry>,  // audio-out entries (TTS)
     )
 
+    data class ShadowVoiceSnapshot(
+        val providers: List<ShadowVoiceProvider>,
+        val hasFoldedDuplicates: Boolean,
+    )
+
     /**
      * All shadow voice providers: one per enabled instance that has audio
      * models and isn't shadow-disabled, FOLDED by normalized base URL so two
      * instances on one host show a single deterministic representative row.
      */
-    fun shadowVoiceProviders(): List<ShadowVoiceProvider> {
+    fun shadowVoiceSnapshot(): ShadowVoiceSnapshot {
         ensureConfigLoaded()
         val config = _config.value
-        // [T-android-reorder-unlocked-mutation] Snapshot first — same
-        // main-thread composition reader as hasFoldedShadowDuplicates.
         val candidates = config.instances.toList().filter { inst ->
-            inst.isEnabled && hasVoiceModels(inst.id) && !isVoiceShadowDisabled(inst.id) &&
+            inst.isEnabled &&
+                config.modelEntries.any { entry ->
+                    entry.providerInstanceId == inst.id && entry.model.hasVoiceModality
+                } &&
+                !isVoiceShadowDisabled(inst.id) &&
                 com.openminis.app.provider.voice.VoiceProviderFactory.supports(inst, loadApiKey(inst.id))
         }
         val byKey = candidates.groupBy { inst ->
@@ -2383,10 +2393,7 @@ class ProviderRepository(private val context: Context) {
                 .mapNotNull { it.userModifiedAt }
                 .maxOrNull() ?: Long.MIN_VALUE
 
-        return byKey.values.map { insts ->
-            // Representative selection — deterministic across devices: enabled
-            // first, then most-recently-modified entries, then oldest createdAt,
-            // then id.
+        val providers = byKey.values.map { insts ->
             val rep = insts.sortedWith(
                 compareByDescending<ProviderInstance> { it.isEnabled }
                     .thenByDescending { mostRecentModified(it.id) }
@@ -2401,27 +2408,18 @@ class ProviderRepository(private val context: Context) {
                 outputModels = entries.filter { it.model.hasAudioOutput },
             )
         }.sortedWith(compareBy({ it.displayName }, { it.instanceId }))
+        val hasFoldedDuplicates = candidates
+            .map { normalizedShadowKey(it.customBaseURL) }
+            .filter { it.isNotEmpty() }
+            .let { keys -> keys.size != keys.toSet().size }
+        return ShadowVoiceSnapshot(providers, hasFoldedDuplicates)
     }
 
-    /**
-     * True when ≥2 enabled instances share a normalized base URL AND have voice
-     * models — the folded-duplicate case; UI shows a non-destructive hint.
-     */
+    fun shadowVoiceProviders(): List<ShadowVoiceProvider> =
+        shadowVoiceSnapshot().providers
+
     fun hasFoldedShadowDuplicates(): Boolean {
-        val seen = mutableSetOf<String>()
-        // [T-android-reorder-unlocked-mutation] Snapshot before iterating.
-        // This runs on the MAIN thread from ProviderListScreen's composition,
-        // so taking configLock here would block the UI behind a DB write.
-        // toList() copies under no contention and removes the CME risk
-        // outright — the writer's structural edits can no longer be observed
-        // mid-iteration.
-        for (inst in _config.value.instances.toList()) {
-            if (!inst.isEnabled || !hasVoiceModels(inst.id)) continue
-            val key = normalizedShadowKey(inst.customBaseURL)
-            if (key.isEmpty()) continue
-            if (!seen.add(key)) return true
-        }
-        return false
+        return shadowVoiceSnapshot().hasFoldedDuplicates
     }
 
 
@@ -2810,6 +2808,7 @@ class ProviderRepository(private val context: Context) {
 
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()
+        _credentialRevision.value = _credentialRevision.value + 1
         // [T-key-cache-invalidate] 删 key 同样要让 ProviderFactory 的
         // memo 缓存失效 —— 否则已构造的 provider 继续用旧 key 存活，
         // 删 key 后重加同实例仍是旧 key 生效。

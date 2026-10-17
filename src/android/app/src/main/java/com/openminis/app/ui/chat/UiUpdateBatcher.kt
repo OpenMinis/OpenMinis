@@ -1,12 +1,16 @@
 package com.openminis.app.ui.chat
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 
 /**
  * [T-perf-ui-batch] UI update batcher: queue non-text UI mutations during the
@@ -29,9 +33,12 @@ import kotlinx.coroutines.withContext
  *   batcher.flush()
  *   batcher.stop()
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class UiUpdateBatcher(
     private val scope: CoroutineScope,
     private val updateFn: (String, String, Boolean, List<AssistantBlock>, Boolean) -> Unit,
+    private val batchWindowMs: Long = 200L,
+    private val consumerDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
     private data class Update(
         val id: String,
@@ -42,47 +49,82 @@ class UiUpdateBatcher(
     )
 
     private val queue = Channel<Update>(Channel.UNLIMITED)
+    private val flushRequests = Channel<CompletableDeferred<Unit>>(Channel.UNLIMITED)
     private var consumerJob: Job? = null
-    private var lastPushMs = 0L
+
+    private sealed interface BatchEvent {
+        data class Item(val update: Update) : BatchEvent
+        data class Flush(val completion: CompletableDeferred<Unit>) : BatchEvent
+        data object WindowElapsed : BatchEvent
+        data object Closed : BatchEvent
+    }
 
     /**
      * Start the consumer coroutine that pulls from the queue and pushes
      * batched updates to the main thread every 200ms.
      */
     fun start() {
-        consumerJob = scope.launch(Dispatchers.Default) {
-            var pending: Update? = null
-            while (true) {
-                // Wait for the first item or until the batch window expires
-                val item = if (pending == null) {
-                    queue.receiveCatching().getOrNull() ?: break
-                } else {
-                    val nowMs = System.currentTimeMillis()
-                    val elapsed = nowMs - lastPushMs
-                    if (elapsed >= 200L) {
-                        // Batch window expired — push immediately
-                        pushToMain(pending)
-                        pending = null
-                        lastPushMs = System.currentTimeMillis()
-                        continue
-                    } else {
-                        // Wait for the remainder of the window
-                        delay(200L - elapsed)
-                        // After delay, try to receive more (non-blocking peek)
-                        queue.tryReceive().getOrNull()
+        if (consumerJob?.isActive == true) return
+        consumerJob = scope.launch(consumerDispatcher) {
+            consumeUpdates()
+        }
+    }
+
+    private suspend fun consumeUpdates() {
+        var pending: Update? = null
+        while (true) {
+            val event = if (pending == null) {
+                select {
+                    queue.onReceiveCatching { result ->
+                        result.getOrNull()?.let { BatchEvent.Item(it) } ?: BatchEvent.Closed
                     }
+                    flushRequests.onReceive { BatchEvent.Flush(it) }
                 }
-                if (item == null) {
-                    // Channel closed or delay expired without new item
-                    if (pending != null) {
-                        pushToMain(pending)
-                        pending = null
-                        lastPushMs = System.currentTimeMillis()
+            } else {
+                // The timeout starts with the first item. Items arriving in
+                // the window replace pending but never extend the window.
+                withTimeoutOrNull(batchWindowMs) {
+                    while (true) {
+                        when (val incoming = select<BatchEvent> {
+                            queue.onReceiveCatching { result ->
+                                result.getOrNull()?.let { BatchEvent.Item(it) } ?: BatchEvent.Closed
+                            }
+                            flushRequests.onReceive { BatchEvent.Flush(it) }
+                        }) {
+                            is BatchEvent.Item -> pending = incoming.update
+                            else -> return@withTimeoutOrNull incoming
+                        }
                     }
-                    continue
+                } ?: BatchEvent.WindowElapsed
+            }
+
+            when (event) {
+                is BatchEvent.Item -> pending = event.update
+                BatchEvent.WindowElapsed -> {
+                    pending?.let { pushToMain(it) }
+                    pending = null
                 }
-                // Coalesce: keep the LATEST update for this assistant message
-                pending = item
+                is BatchEvent.Flush -> {
+                    var latest = pending
+                    while (true) {
+                        val next = queue.tryReceive()
+                        if (!next.isSuccess) break
+                        latest = next.getOrThrow()
+                    }
+                    latest?.let { pushToMain(it) }
+                    pending = null
+                    event.completion.complete(Unit)
+                }
+                BatchEvent.Closed -> {
+                    var latest = pending
+                    while (true) {
+                        val next = queue.tryReceive()
+                        if (!next.isSuccess) break
+                        latest = next.getOrThrow()
+                    }
+                    latest?.let { pushToMain(it) }
+                    return
+                }
             }
         }
     }
@@ -106,9 +148,11 @@ class UiUpdateBatcher(
      * loop is interrupted).
      */
     suspend fun flush() {
-        // Send a sentinel to wake the consumer, then wait briefly for it to drain
-        queue.close()
-        consumerJob?.join()
+        val job = consumerJob ?: return
+        if (!job.isActive) return
+        val completion = CompletableDeferred<Unit>()
+        flushRequests.send(completion)
+        completion.await()
     }
 
     /** Stop the consumer (call on cleanup or when the loop exits). */
@@ -118,7 +162,7 @@ class UiUpdateBatcher(
     }
 
     private suspend fun pushToMain(update: Update) {
-        withContext(Dispatchers.Main) {
+        withContext(Dispatchers.Main.immediate) {
             updateFn(update.id, update.content, update.isStreaming, update.toolBlocks, update.isAwaitingModelResponse)
         }
     }

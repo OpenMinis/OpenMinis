@@ -44,7 +44,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -130,7 +129,7 @@ fun ProviderListScreen(
     onBack: () -> Unit,
     onAddProvider: () -> Unit,
     onProviderClick: (String) -> Unit,
-    onVoiceServiceClick: (String) -> Unit = {},
+    onVoiceServiceClick: (String) -> Unit,
 ) {
     val config by providerRepository.config.collectAsState()
     val credentialRevision by providerRepository.credentialRevision.collectAsState()
@@ -138,24 +137,20 @@ fun ProviderListScreen(
     val instances = config.instances.toList()
     val groupedInstances = instances.groupBy { it.providerType }
     val context = LocalContext.current
-    var refreshEpoch by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) { refreshEpoch++ }
     val rowSnapshots by produceState<Map<String, ProviderRowSnapshot>>(
         initialValue = emptyMap(),
         configRevision,
         credentialRevision,
-        refreshEpoch,
     ) {
         value = loadProviderRowSnapshots(instances, providerRepository, context)
     }
-    val shadowProviders by produceState<List<ProviderRepository.ShadowVoiceProvider>>(
-        initialValue = emptyList(),
+    val shadowSnapshot by produceState(
+        initialValue = ProviderRepository.ShadowVoiceSnapshot(emptyList(), false),
         configRevision,
         credentialRevision,
-        refreshEpoch,
     ) {
         value = withContext(Dispatchers.Default) {
-            providerRepository.shadowVoiceProviders()
+            providerRepository.shadowVoiceSnapshot()
         }
     }
 
@@ -476,11 +471,11 @@ fun ProviderListScreen(
         // every enabled instance that owns audio-modality models (mirrors iOS
         // ProviderInstancesView's Voice Services section). Rows are read-only
         // views onto the underlying instance — no stored entity.
-        val shadows = shadowProviders
+        val shadows = shadowSnapshot.providers
         if (shadows.isNotEmpty()) {
             SettingsSection(
                 header = stringResource(R.string.voice_services_section),
-                footer = if (providerRepository.hasFoldedShadowDuplicates()) {
+                footer = if (shadowSnapshot.hasFoldedDuplicates) {
                     stringResource(R.string.voice_services_duplicate_hint)
                 } else {
                     null

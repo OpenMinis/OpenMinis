@@ -45,6 +45,7 @@ class PersistentShell(
          */
         private const val OUTPUT_HEAD_MAX = 1024
         private const val OUTPUT_TAIL_MAX = 2048
+
     }
 
     @Volatile
@@ -731,20 +732,7 @@ class PersistentShell(
         }
     }
 
-    /**
-     * Apply environment variables to the running shell.
-     *
-     * The shell is long-lived and reused across commands, so a stale `export`
-     * from a previous turn lingers until something overwrites it. Caller can
-     * supply [previousKeys] — the set of variable names injected on the prior
-     * call — so any name absent from the new [envVars] is `unset` first. That
-     * gives whole-snapshot semantics matching the per-command isolation iOS
-     * gets for free with one `/bin/sh` process per command.
-     *
-     * Empty default for [previousKeys] preserves the original behaviour for
-     * system broadcasts (TZ, proxy) that are only meant to overlay specific
-     * keys, never wipe the user's env-var snapshot.
-     */
+    /** Apply a full environment snapshot to the running shell. */
     suspend fun applyEnvironment(
         envVars: Map<String, String>,
         previousKeys: Set<String> = emptySet(),
@@ -765,6 +753,18 @@ class PersistentShell(
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to apply env vars: ${e.message}")
             }
+        }
+    }
+
+    suspend fun refreshPath() {
+        if (!isAlive) return
+        val writer = stdinWriter ?: return
+        withContext(Dispatchers.IO) {
+            try {
+                writer.write(PersistentShellEnvironment.pathRefreshCommand(
+                    RootfsManager.getInstance(context).currentGuestPath()))
+                writer.flush()
+            } catch (e: Exception) { Log.w(TAG, "PATH refresh failed: ${e.message}") }
         }
     }
 

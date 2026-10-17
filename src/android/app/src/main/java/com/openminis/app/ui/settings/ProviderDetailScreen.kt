@@ -87,9 +87,9 @@ fun ProviderDetailScreen(
     instanceId: String,
     providerRepository: ProviderRepository,
     onBack: () -> Unit,
-    onModelEntryClick: (String) -> Unit = {},
-    onAddCustomModel: () -> Unit = {},
-    onVoiceServiceClick: (String) -> Unit = {},
+    onModelEntryClick: (String) -> Unit,
+    onAddCustomModel: () -> Unit,
+    onVoiceServiceClick: (String) -> Unit,
 ) {
     val config by providerRepository.config.collectAsState()
     val instance = config.instances.find { it.id == instanceId }

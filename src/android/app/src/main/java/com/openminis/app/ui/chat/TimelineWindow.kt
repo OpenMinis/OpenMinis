@@ -1,6 +1,9 @@
 package com.openminis.app.ui.chat
 
 import com.openminis.app.data.db.MessageEntity
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 
 /**
@@ -25,7 +28,7 @@ import kotlinx.coroutines.sync.Mutex
  *    drain) hold [mutationMutex] around their fetch+splice so they cannot
  *    interleave; the offset/total pair below is diagnostics only.
  */
-internal class TimelineWindow {
+internal class HistoryWindowController {
     /** Stable page cursors. Not an offset, not created_at. */
     var oldestSortOrder: Int? = null
         private set
@@ -42,12 +45,25 @@ internal class TimelineWindow {
 
     val mutationMutex = Mutex()
 
+    /**
+     * Monotonic render-generation for the loaded history window. Consumers
+     * must wait for a generation change after a paging request instead of
+     * guessing how long the asynchronous DB/flatten pipeline will take.
+     */
+    private val _version = MutableStateFlow(0L)
+    val version: StateFlow<Long> = _version.asStateFlow()
+
+    private fun changed() {
+        _version.value++
+    }
+
     /** Session (re)load: forget the old window and its counters. */
     fun reset() {
         oldestSortOrder = null
         newestSortOrder = null
         offset = 0
         total = 0
+        changed()
     }
 
     /**
@@ -56,8 +72,10 @@ internal class TimelineWindow {
      * Never touches the cursors.
      */
     fun seedCounters(offset: Int, total: Int) {
+        if (this.offset == offset && this.total == total) return
         this.offset = offset
         this.total = total
+        changed()
     }
 
     /**
@@ -66,10 +84,12 @@ internal class TimelineWindow {
      */
     fun noteBounds(rows: List<MessageEntity>) {
         if (rows.isEmpty()) return
+        val before = oldestSortOrder to newestSortOrder
         val oldest = rows.minOf { it.sortOrder }
         val newest = rows.maxOf { it.sortOrder }
         loadedOldest(oldest)
         loadedNewest(newest)
+        if (before != oldestSortOrder to newestSortOrder) changed()
     }
 
     /**
@@ -78,12 +98,18 @@ internal class TimelineWindow {
      * ChatViewModel.notePersistedUiRow).
      */
     fun extendNewest(sort: Int) {
+        if (newestSortOrder != null && sort <= newestSortOrder!!) return
         loadedNewest(sort)
+        changed()
     }
 
     fun forceNewestAtLeast(sort: Int) {
         val current = newestSortOrder
-        newestSortOrder = maxOf(current ?: sort, sort)
+        val next = maxOf(current ?: sort, sort)
+        if (next != current) {
+            newestSortOrder = next
+            changed()
+        }
     }
 
     private fun loadedOldest(sort: Int) {
@@ -96,3 +122,6 @@ internal class TimelineWindow {
         newestSortOrder = maxOf(current ?: sort, sort)
     }
 }
+
+/** Source-compatibility name for older call sites; new code uses the controller name. */
+internal typealias TimelineWindow = HistoryWindowController

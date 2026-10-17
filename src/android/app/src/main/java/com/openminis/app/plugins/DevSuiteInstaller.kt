@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.StatFs
 import android.util.Log
 import com.openminis.app.R
-import com.openminis.app.sandbox.ExecutionCoordinator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,12 +33,6 @@ import kotlinx.coroutines.sync.withLock
  */
 object DevSuiteInstaller {
 
-    /** Dedicated session id: never collides with chat sessions. */
-    private const val SESSION_ID = "dev-suite-installer"
-
-    /** Long wall clock: SDK/NDK/llama.cpp installs run tens of minutes. */
-    private const val INSTALL_TIMEOUT_MS = 30 * 60_000L
-
     /** How long the installer waits for the guest-wide apt lock (seconds). */
     private const val APT_LOCK_WAIT_SEC = 1800
 
@@ -64,12 +57,7 @@ object DevSuiteInstaller {
 
     /** Run the readiness probe in the guest. Exit 0 = ready. */
     suspend fun probe(component: DevComponent): Boolean {
-        val result = ExecutionCoordinator.execute(
-            sessionId = SESSION_ID,
-            command = probeCommand(component),
-            timeout = 30_000L,
-        )
-        return result.exitCode == 0
+        return probeResult(component).exitCode == 0
     }
 
     // [T-devsuite-qemu-probe] Matches each `command -v <name>` clause so the
@@ -92,6 +80,9 @@ object DevSuiteInstaller {
         PROBE_COMMAND.replace(component.checkCommand) { m ->
             "command -v '${m.groupValues[1]}'"
         }
+
+    private suspend fun probeResult(component: DevComponent): DevSuiteCommandResult =
+        DevSuiteCommandRunner.run(probeCommand(component), timeoutMs = 30_000L) {}
 
     /**
      * Install one component (apt → postInstall → probe). Returns true when
@@ -122,36 +113,53 @@ object DevSuiteInstaller {
             }
 
             if (component.aptPackages.isNotEmpty()) {
-                val aptResult = run(aptCommand(component), component.id) { line ->
+                val aptResult = DevSuiteCommandRunner.run(aptCommand(component)) { line ->
                     DevSuiteStore.update(
                         context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
                     )
                 }
-                if (aptResult != 0) {
+                if (aptResult.exitCode != 0) {
                     DevSuiteStore.update(
                         context, component.id, DevSuiteStore.Status.FAILED,
-                        context.getString(R.string.dev_suite_apt_failed, aptResult),
+                        DevSuiteInstallDiagnostics.text(
+                            DevSuiteInstallError(
+                                component.id,
+                                DevSuiteInstallError.Stage.APT,
+                                aptResult.exitCode,
+                                aptCommand(component),
+                                aptResult.outputTail,
+                            ),
+                        ),
                     )
                     return false
                 }
             }
 
             for (step in component.postInstallSteps) {
-                val rc = run(step, component.id) { line ->
+                val result = DevSuiteCommandRunner.run(step) { line ->
                     DevSuiteStore.update(
                         context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
                     )
                 }
-                if (rc != 0) {
+                if (result.exitCode != 0) {
                     DevSuiteStore.update(
                         context, component.id, DevSuiteStore.Status.FAILED,
-                        context.getString(R.string.dev_suite_step_failed, rc, step.substringAfterLast('/').take(60)),
+                        DevSuiteInstallDiagnostics.text(
+                            DevSuiteInstallError(
+                                component.id,
+                                DevSuiteInstallError.Stage.POST_INSTALL,
+                                result.exitCode,
+                                step,
+                                result.outputTail,
+                            ),
+                        ),
                     )
                     return false
                 }
             }
 
-            if (probe(component)) {
+            val probe = probeResult(component)
+            if (probe.exitCode == 0) {
                 DevSuiteStore.update(
                     context, component.id, DevSuiteStore.Status.INSTALLED,
                     context.getString(R.string.dev_suite_ready),
@@ -165,7 +173,15 @@ object DevSuiteInstaller {
                     // gave the user nothing to self-diagnose (the qemu case
                     // looked like a broken install while the probe was simply
                     // looking for a name the package does not ship).
-                    context.getString(R.string.dev_suite_probe_failed, probeCommand(component)),
+                    DevSuiteInstallDiagnostics.text(
+                        DevSuiteInstallError(
+                            component.id,
+                            DevSuiteInstallError.Stage.PROBE,
+                            probe.exitCode,
+                            probeCommand(component),
+                            probe.outputTail,
+                        ),
+                    ),
                 )
                 false
             }
@@ -193,7 +209,7 @@ object DevSuiteInstaller {
         return "( . /usr/local/lib/minis/apt-lock.sh; " +
             "if minis_acquire_apt_lock $APT_LOCK_WAIT_SEC; then " +
             "trap minis_release_apt_lock EXIT; " +
-            "apt-get update || true; " +
+            "apt-get update && " +
             "apt-get install -y --no-install-recommends $pkgs; " +
             "else echo \"devsuite: apt lock busy, waited ${APT_LOCK_WAIT_SEC}s\" >&2; exit 75; " +
             "fi )"
@@ -262,7 +278,7 @@ object DevSuiteInstaller {
             if (ordered.isEmpty()) { onDone(emptyList()); return@launch }
             // The documented offline drop target has to exist before anyone can
             // put a payload in it — create it here, at the start of the flow.
-            run("mkdir -p $OFFLINE_DIR $CACHE_DIR 2>/dev/null || true", "dev-suite") {}
+            DevSuiteCommandRunner.run("mkdir -p $OFFLINE_DIR $CACHE_DIR 2>/dev/null || true") {}
 
             // [T-devsuite-uncheck-converge] The checkbox is the target state:
             // an installed component the user unchecked must LEAVE the
@@ -383,8 +399,8 @@ object DevSuiteInstaller {
         }
         val script = cmds.joinToString(" && ")
         _busy.value = true
-        val rc = try {
-            run("sh -c \"$script\"", component.id) { line ->
+        val result = try {
+            DevSuiteCommandRunner.run("sh -c \"$script\"") { line ->
                 DevSuiteStore.update(
                     context, component.id, DevSuiteStore.Status.INSTALLING, line.take(120)
                 )
@@ -392,12 +408,20 @@ object DevSuiteInstaller {
         } finally {
             _busy.value = false
         }
-        val ok = rc == 0
+        val ok = result.exitCode == 0
         DevSuiteStore.update(
             context, component.id,
             if (ok) DevSuiteStore.Status.NOT_INSTALLED else DevSuiteStore.Status.FAILED,
             if (ok) context.getString(R.string.dev_suite_not_installed)
-            else context.getString(R.string.dev_suite_uninstall_failed, rc),
+            else DevSuiteInstallDiagnostics.text(
+                DevSuiteInstallError(
+                    component.id,
+                    DevSuiteInstallError.Stage.UNINSTALL,
+                    result.exitCode,
+                    script,
+                    result.outputTail,
+                ),
+            ),
         )
         return ok
     }
@@ -407,17 +431,4 @@ object DevSuiteInstaller {
         scope.launch { onDone(uninstall(context, component)) }
     }
 
-    private suspend fun run(
-        command: String,
-        componentId: String,
-        onLine: (String) -> Unit,
-    ): Int {
-        val result = ExecutionCoordinator.execute(
-            sessionId = SESSION_ID,
-            command = command,
-            timeout = INSTALL_TIMEOUT_MS,
-            lineCallback = onLine,
-        )
-        return result.exitCode
-    }
 }

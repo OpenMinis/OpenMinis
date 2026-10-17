@@ -1799,6 +1799,8 @@
     <string name="dev_suite_progress">%1$d/%2$d bereit</string>
     <string name="dev_suite_installing">Installation…</string>
     <string name="dev_suite_failed">fehlgeschlagen</string>
+    <string name="dev_suite_view_details">Details</string>
+    <string name="dev_suite_failure_details">Installation failure details</string>
     <string name="dev_suite_ready">Bereit</string>
     <string name="dev_suite_not_installed">Nicht installiert</string>
     <string name="dev_suite_required">erforderlich</string>

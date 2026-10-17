@@ -6,23 +6,24 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * [T-devsuite-probe-selfdescribe] The FAILED status line must carry the probe
- * command. The qemu case looked like a broken install while the probe was
- * simply looking for a name the package does not ship — "安装完成但探针未通过"
- * alone gave the user (and the agent reading the status row) nothing to
- * self-diagnose. The wiring is one getString call, so the guard is a
- * source-grep: if someone reverts to the bare string resource, this fails
- * instead of the message silently regressing.
+ * [T-devsuite-probe-selfdescribe] A probe failure must retain its stage,
+ * command and bounded output tail. The qemu case looked like a broken install
+ * while the probe was simply looking for a name the package does not ship;
+ * the structured error keeps that distinction visible to the user.
  */
 class DevSuiteProbeSelfDescribeTest {
 
     @Test
-    fun `failed status line passes the probe command to the string resource`() {
+    fun `failed status line uses the structured probe error`() {
         val src = ProductionSources.read("plugins/DevSuiteInstaller.kt")
         assertNotNull("DevSuiteInstaller.kt not found", src)
         assertTrue(
-            "the FAILED update must format dev_suite_probe_failed WITH the probe command:\n$src",
-            Regex("dev_suite_probe_failed,\\s*probeCommand\\(component\\)").containsMatchIn(src),
+            "the FAILED update must record the probe stage:\n$src",
+            "DevSuiteInstallError.Stage.PROBE" in src,
+        )
+        assertTrue(
+            "the probe failure must retain its command and output tail:\n$src",
+            "probeCommand(component)" in src && "probe.outputTail" in src,
         )
     }
 

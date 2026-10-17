@@ -1802,6 +1802,8 @@
     <string name="dev_suite_progress">%1$d/%2$d siap</string>
     <string name="dev_suite_installing">Memasang…</string>
     <string name="dev_suite_failed">gagal</string>
+    <string name="dev_suite_view_details">Details</string>
+    <string name="dev_suite_failure_details">Installation failure details</string>
     <string name="dev_suite_ready">Siap</string>
     <string name="dev_suite_not_installed">Belum terpasang</string>
     <string name="dev_suite_required">wajib</string>

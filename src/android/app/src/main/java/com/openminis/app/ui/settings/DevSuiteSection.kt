@@ -59,7 +59,7 @@ fun DevSuiteSection(
      * gigabytes on a metered connection.
      */
     pendingInstallBundleId: String? = null,
-    onPendingInstallConsumed: () -> Unit = {},
+    onPendingInstallConsumed: () -> Unit,
 ) {
     val context = LocalContext.current
     val states by DevSuiteStore.states.collectAsState()
@@ -67,6 +67,7 @@ fun DevSuiteSection(
     var confirmBundle by remember { mutableStateOf<DevBundle?>(null) }
     var preselectEverything by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf<DevComponent?>(null) }
+    var failureDetails by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(pendingInstallBundleId) {
         val id = pendingInstallBundleId ?: return@LaunchedEffect
@@ -193,6 +194,7 @@ fun DevSuiteSection(
                 DevSuiteInstaller.assembleBundleAsync(context, bundle, selected)
             },
             onRemove = { confirmRemove = it },
+            onShowDetails = { failureDetails = it },
         )
     }
 
@@ -217,6 +219,19 @@ fun DevSuiteSection(
             },
         )
     }
+
+    failureDetails?.let { details ->
+        AlertDialog(
+            onDismissRequest = { failureDetails = null },
+            title = { Text(stringResource(R.string.dev_suite_failure_details)) },
+            text = { Text(details) },
+            confirmButton = {
+                TextButton(onClick = { failureDetails = null }) {
+                    Text(stringResource(R.string.common_close))
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -228,6 +243,7 @@ private fun DevSuiteBundleDialog(
     onDismiss: () -> Unit,
     onAssemble: (Set<String>) -> Unit,
     onRemove: (DevComponent) -> Unit,
+    onShowDetails: (String) -> Unit,
 ) {
     var selected by remember(bundle.id, preselectEverything) {
         mutableStateOf(
@@ -264,6 +280,9 @@ private fun DevSuiteBundleDialog(
                             }
                         },
                         onRemove = { onRemove(c) },
+                        onShowDetails = if (st == DevSuiteStore.Status.FAILED) {
+                            { onShowDetails(states[c.id]?.progressLine.orEmpty()) }
+                        } else null,
                     )
                 }
                 if (busy) {
@@ -299,6 +318,7 @@ private fun DevComponentRow(
     canRemove: Boolean,
     onChecked: (Boolean) -> Unit,
     onRemove: () -> Unit,
+    onShowDetails: (() -> Unit)?,
 ) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -347,6 +367,14 @@ private fun DevComponentRow(
         if (canRemove) {
             TextButton(onClick = onRemove, enabled = true) {
                 Text(stringResource(R.string.common_remove), style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (onShowDetails != null) {
+            TextButton(onClick = onShowDetails) {
+                Text(
+                    stringResource(R.string.dev_suite_view_details),
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
         }
     }

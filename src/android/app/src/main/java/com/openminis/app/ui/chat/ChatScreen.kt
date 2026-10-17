@@ -184,6 +184,7 @@ import com.openminis.app.ui.markdown.LocalMarkdownCodeRunner
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -1154,6 +1155,7 @@ fun ChatScreen(
     // the old TEMP ScrollSrc log built a long string on every programmatic
     // scroll in production.
     val verboseScrollLogs = false
+    val scrollController = remember(listState) { ChatScrollController(listState) }
     val tracedScrollToItem: suspend (source: String, idx: Int, off: Int) -> Unit = { source, idx, off ->
         if (verboseScrollLogs) {
             AppLogger.debug(
@@ -1161,8 +1163,7 @@ fun ChatScreen(
                 "scrollToItem src=$source idx=$idx off=$off canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset} inProgress=${listState.isScrollInProgress}",
             )
         }
-        runCatching { listState.scrollToItem(idx, off) }
-        Unit
+        scrollController.scrollToItem(source, idx, off)
     }
     val tracedScrollBy: suspend (source: String, delta: Float) -> Unit = { source, delta ->
         if (verboseScrollLogs) {
@@ -1171,8 +1172,7 @@ fun ChatScreen(
                 "scrollBy src=$source delta=$delta canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
             )
         }
-        runCatching { listState.scrollBy(delta) }
-        Unit
+        scrollController.scrollBy(source, delta)
     }
 
     // [T-android-scroll-policy] Reading-mode anchor = the OLDEST visible row
@@ -1408,13 +1408,6 @@ fun ChatScreen(
     // ("点翻页按钮又退回到一定值"). With stable keys and no anchor-restore
     // effect, list growth no longer invalidates the walk — the chain resets
     // only on drag, jump-to-bottom and session switch.
-    // [T-android-upbtn-single-flight] One walk in flight; extra taps queue
-    // exactly one continuation instead of stacking concurrent scroll jobs.
-    var upWalkJob by remember(sessionId) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    // Backlog of taps that arrived while a walk was in flight, capped at 2:
-    // N rapid taps used to collapse to ONE continuation ("按钮吞点击"); two
-    // queued walks keep the response responsive without unbounded chasing.
-    var upWalkQueuedCount by remember(sessionId) { mutableStateOf(0) }
 
     // [T-android-scroll-fab-reversed] TEMP diagnostic — capture BOTH FABs'
     // gates so we can verify the matrix (bottom=none, middle=both, top=down
@@ -1640,24 +1633,19 @@ fun ChatScreen(
         ) { msgs, stream ->
             val effective = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
             val m = effective.lastOrNull { it.role == "assistant" } ?: return@combine null
-            // [T-android-tool-autoscroll] Trigger tuple includes a per-block
-            // signature (FNV-1a hash over id/kind/status/length) so the
-            // collector wakes on RUNNING→SUCCESS transitions, new-block
-            // appearances, kind flips, and per-token content growth alike.
-            // Without blockSig the previous (lastIdx, growth, size, awaiting)
-            // tuple missed several mid-loop transitions and the auto-follow
-            // skipped scroll ticks during tool swaps.
             var growth: Long = m.content.length.toLong()
             var blockSig: Long = 1469598103934665603L // FNV-1a 64-bit offset basis
             for (b in m.toolBlocks) {
-                growth += b.content.length.toLong()
                 blockSig = blockSig xor b.id.hashCode().toLong()
                 blockSig *= 1099511628211L
                 blockSig = blockSig xor b.kind.hashCode().toLong()
                 blockSig *= 1099511628211L
                 blockSig = blockSig xor (b.toolStatus?.ordinal?.toLong() ?: -1L)
                 blockSig *= 1099511628211L
-                blockSig = blockSig xor b.content.length.toLong()
+                if (b.kind != "thinking") {
+                    growth += b.content.length.toLong()
+                    blockSig = blockSig xor b.content.length.toLong()
+                }
                 blockSig *= 1099511628211L
             }
             ScrollFollowKey(
@@ -3093,6 +3081,7 @@ fun ChatScreen(
                 var flatItems by remember(sessionId) {
                     mutableStateOf<List<FlatChatItem>>(emptyList())
                 }
+                var flatItemsVersion by remember(sessionId) { mutableLongStateOf(0L) }
 
                 // [P-process-card] Which process cards are mid-run, read off
                 // the rows the pipeline already published. This used to be
@@ -3209,6 +3198,7 @@ fun ChatScreen(
                     // works mid-stream (the old edge never touches the live
                     // turn's new edge); the loop breaks and the fallback
                     // below logs instead of scrolling blind.
+                    val requestedFlatVersion = flatItemsVersion
                     var pages = 0
                     while (pages < 60) {
                         if (viewModel.uiMessages.value.any { it.id == focus.messageId }) break
@@ -3220,10 +3210,13 @@ fun ChatScreen(
                     // between frames — wait for a row of the target message
                     // to exist before resolving its index.
                     withFrameNanos { }
-                    withTimeoutOrNull(800) {
-                        snapshotFlow { flatItems }.first { list ->
-                            list.any { FlatKeys.parse(it.key)?.messageId == focus.messageId }
-                        }
+                    if (flatItems.none { FlatKeys.parse(it.key)?.messageId == focus.messageId }) {
+                        // The publisher may still be processing the page. Wait
+                        // for a versioned publish; never land on a guessed row.
+                        ChatScrollController.awaitPublishedVersion(
+                            snapshotFlow { flatItemsVersion },
+                            requestedFlatVersion = requestedFlatVersion,
+                        )
                     }
                     val flatIdx = flatItems.indexOfFirst {
                         FlatKeys.parse(it.key)?.messageId == focus.messageId
@@ -3321,6 +3314,8 @@ fun ChatScreen(
         // continues past the window edge instead of bouncing off it. The
         // re-resolve chains through lastJumpedUserId, exactly like a second
         // tap on the button. One page per tap keeps each click bounded.
+        val requestedFlatVersion = flatItemsVersion
+        val requestedHistoryVersion = viewModel.timeline.version.value
         var jumped = lastJumpedUserId
         var target: String? = null
         var pagesLoaded = 0
@@ -3351,21 +3346,19 @@ fun ChatScreen(
         }
         if (target == null) return@scrollToPreviousUserTurn
         val targetKey = FlatKeys.of(FlatKeys.KIND_USER, target)
-        // [T-android-upbtn-fresh-state] A page loaded inside the walk above
-        // lands in `messages` and `flatItems` ASYNCHRONOUSLY (flatten runs on
-        // Dispatchers.Default and publishes between frames). Without this
-        // wait, the index resolution below read the stale pre-load flat list,
-        // missed the freshly loaded target row, and hopped to the OLD oldest
-        // row — the data arrived but the viewport never crossed the window
-        // edge in the same tap. One frame + a bounded snapshotFlow wait
-        // synchronizes with the publisher; on timeout we fall through to the
-        // defensive hop below (self-limiting, as before).
+        // [T-android-upbtn-fresh-state] A page lands in `messages` and
+        // `flatItems` asynchronously. Wait for its versioned publish before
+        // resolving the index; a missing target keeps the viewport.
         withFrameNanos { }
-        withTimeoutOrNull(500) {
-            snapshotFlow { flatItems }.first { list -> list.any { it.key == targetKey } }
+        if (flatItems.none { it.key == targetKey } && pagesLoaded > 0) {
+            ChatScrollController.awaitPublishedVersion(
+                snapshotFlow { flatItemsVersion },
+                requestedFlatVersion = requestedFlatVersion,
+                historyVersion = viewModel.timeline.version,
+                requestedHistoryVersion = requestedHistoryVersion,
+            )
         }
         // Re-capture layoutInfo: `info` is from before any page load.
-        val jumpInfo = listState.layoutInfo
         // Direct index resolution — no scanning. flatItems is oldest-first;
         // the LazyColumn declares compact/resume items BEFORE the message
         // items and the pill after, so a flat index mirrors into a lazy index
@@ -3379,10 +3372,10 @@ fun ChatScreen(
                 itemsBeforeMessages = historyItemsBeforeMessages(),
             )
         } else {
-            // Defensive: the target produced no row (upstream anomaly). One
-            // bounded hop to the oldest row instead of a scan.
-            AppLogger.warning("ChatUpBtn", "target $target has no flat row — hopping to oldest")
-            (jumpInfo.totalItemsCount - 1).coerceAtLeast(0)
+            // The target is not published yet or was removed. Preserve the
+            // current viewport; a guessed oldest index is never a valid target.
+            AppLogger.warning("ChatUpBtn", "target $target has no flat row — keeping viewport")
+            return@scrollToPreviousUserTurn
         }
         lastJumpedUserId = target
         // Land the user bubble's TOP edge just under the header — iOS's
@@ -3651,6 +3644,7 @@ fun ChatScreen(
                                 }
                             }
                             flatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
+                            flatItemsVersion++
                             com.openminis.app.diagnostics.StreamPerfMonitor.tick(
                                 flattenNanos = System.nanoTime() - tickStartNs,
                                 frozenReused = frozenReused,
@@ -4830,18 +4824,7 @@ fun ChatScreen(
                             // here for the same reason.)
                             val anchor = visibleTopAnchor()
                             scrollPolicy.landReading(anchor?.first, anchor?.second ?: 0)
-                            val job = upWalkJob
-                            if (job != null && job.isActive) {
-                                upWalkQueuedCount = (upWalkQueuedCount + 1).coerceAtMost(2)
-                            } else {
-                                upWalkJob = coroutineScope.launch {
-                                    scrollToPreviousUserTurn()
-                                    while (upWalkQueuedCount > 0) {
-                                        upWalkQueuedCount--
-                                        scrollToPreviousUserTurn()
-                                    }
-                                }
-                            }
+                            scrollController.enqueuePreviousTurn(coroutineScope, scrollToPreviousUserTurn)
                         },
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
