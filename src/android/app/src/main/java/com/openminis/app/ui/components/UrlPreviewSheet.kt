@@ -1,6 +1,16 @@
 package com.openminis.app.ui.components
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.DisposableEffect
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
+import android.net.Uri
 import com.openminis.app.ui.preview.WebPreviewBottomSheet
 import com.openminis.app.ui.preview.rememberWebViewHolder
 
@@ -21,6 +31,33 @@ fun UrlPreviewSheet(
     onDismiss: () -> Unit,
 ) {
     val holder = rememberWebViewHolder(url)
+    var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    val fileChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val callback = pendingFileCallback
+        pendingFileCallback = null
+        callback?.onReceiveValue(
+            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data),
+        )
+    }
+    DisposableEffect(holder) {
+        holder.onShowFileChooser = { params, callback ->
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = callback
+            try {
+                fileChooserLauncher.launch(params.createIntent())
+            } catch (t: Throwable) {
+                pendingFileCallback = null
+                callback.onReceiveValue(null)
+            }
+        }
+        onDispose {
+            holder.onShowFileChooser = null
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = null
+        }
+    }
     WebPreviewBottomSheet(
         holder = holder,
         onDismiss = {

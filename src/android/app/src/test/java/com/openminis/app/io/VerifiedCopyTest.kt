@@ -74,13 +74,42 @@ class VerifiedCopyTest {
     }
 
     @Test
-    fun writeThatCannotBeReadBackIsNotReportedAsSuccess() {
+    fun bytesWrittenButUnreadableAreStillVerifiedFromTheWriteCount() {
         val src = sourceFile(64)
         val target = uri()
-        // The copy "succeeds" into a void; no readable stream is registered.
+        // No readable stream is registered: provider readback is unavailable,
+        // but the output stream accepted and closed 64 bytes. OEM SAF providers
+        // with this shape must not turn a successful copy into a deleted file.
         val result = VerifiedCopy.copyFileToDocument(resolver, src, target)
-        assertEquals(VerifiedCopy.Status.UNVERIFIED, result.status)
+        assertEquals(result.reason, VerifiedCopy.Status.VERIFIED, result.status)
+        assertTrue(result.ok)
+    }
+
+    @Test
+    fun emptySourceIsRejectedInsteadOfPublishingAnEmptyShell() {
+        val src = sourceFile(0)
+        val target = uri()
+        shadow.registerOutputStream(target, ByteArrayOutputStream())
+
+        val result = VerifiedCopy.copyFileToDocument(resolver, src, target)
+        assertEquals(VerifiedCopy.Status.FAILED, result.status)
         assertFalse(result.ok)
+        assertTrue(result.reason.contains("0 bytes"))
+    }
+
+    @Test
+    fun providerThatReadsBackEmptyStillKeepsTheWrittenCopy() {
+        val src = sourceFile(64)
+        val target = uri()
+        shadow.registerOutputStream(target, ByteArrayOutputStream())
+        shadow.registerInputStream(target, ByteArrayInputStream(ByteArray(0)))
+
+        // Some SAF providers return an empty readback for a valid write. The
+        // 64 bytes accepted by the output stream are authoritative; deleting
+        // here was the 0-byte regression.
+        val result = VerifiedCopy.copyFileToDocument(resolver, src, target)
+        assertEquals(result.reason, VerifiedCopy.Status.VERIFIED, result.status)
+        assertTrue(result.ok)
     }
 
     @Test

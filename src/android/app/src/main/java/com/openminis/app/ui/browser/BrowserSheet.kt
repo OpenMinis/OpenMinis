@@ -2,6 +2,10 @@ package com.openminis.app.ui.browser
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.webkit.WebChromeClient
+import android.webkit.ValueCallback
 import com.openminis.app.R
 import androidx.compose.ui.res.stringResource
 import androidx.compose.animation.AnimatedVisibility
@@ -116,6 +120,40 @@ fun BrowserSheet(
     // [T-android-browser-download-ux] Downloads panel + badge state.
     var showDownloads by remember { mutableStateOf(false) }
     val downloadEntries by tabPool.downloads.collectAsState()
+
+    // <input type="file"> support. WebView hands us a one-shot callback; the
+    // ActivityResultLauncher owns the picker lifecycle so rotation/process
+    // recreation cannot strand WebView's file chooser.
+    var pendingFileCallback by remember { mutableStateOf<ValueCallback<Array<Uri>>?>(null) }
+    val fileChooserLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val callback = pendingFileCallback
+        pendingFileCallback = null
+        callback?.onReceiveValue(
+            WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data),
+        )
+    }
+    androidx.compose.runtime.DisposableEffect(selectedTab?.manager) {
+        val manager = selectedTab?.manager
+        manager?.onShowFileChooser = { params, callback ->
+            // A second chooser request supersedes the first; answer the old
+            // one with null so WebView never waits forever.
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = callback
+            try {
+                fileChooserLauncher.launch(params.createIntent())
+            } catch (t: Throwable) {
+                pendingFileCallback = null
+                callback.onReceiveValue(null)
+            }
+        }
+        onDispose {
+            manager?.onShowFileChooser = null
+            pendingFileCallback?.onReceiveValue(null)
+            pendingFileCallback = null
+        }
+    }
 
     val accent = MaterialTheme.colorScheme.primary
     val secondaryBg = MaterialTheme.colorScheme.surfaceContainer

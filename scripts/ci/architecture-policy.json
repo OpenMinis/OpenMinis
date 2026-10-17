@@ -18,7 +18,7 @@
     "src/android/app/src/main/java/com/openminis/app/backup/BackupExporter.kt": 877,
     "src/android/app/src/main/java/com/openminis/app/backup/BackupImporter.kt": 1167,
     "src/android/app/src/main/java/com/openminis/app/browser/BrowserTabPool.kt": 1388,
-    "src/android/app/src/main/java/com/openminis/app/browser/BrowserUseManager.kt": 1914,
+    "src/android/app/src/main/java/com/openminis/app/browser/BrowserUseManager.kt": 1912,
     "src/android/app/src/main/java/com/openminis/app/config/ConfigBridge.kt": 927,
     "src/android/app/src/main/java/com/openminis/app/config/ConfigBuiltins.kt": 1217,
     "src/android/app/src/main/java/com/openminis/app/crash/CrashFrequencyDetector.kt": 917,

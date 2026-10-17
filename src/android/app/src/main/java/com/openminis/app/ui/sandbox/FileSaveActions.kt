@@ -9,6 +9,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import com.openminis.app.io.VerifiedCopy
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,7 +36,12 @@ internal suspend fun saveAsToDocumentUri(
     src: File,
     uri: Uri,
 ): SaveAsOutcome = withContext(Dispatchers.IO) {
+    // Name + length only; never file content. This is the line to check if a
+    // future report says the saved file is empty: len=0 means the SOURCE was
+    // empty, not that the SAF write failed.
+    AppLogger.info("FileSave", "save-as start name=${src.name} len=${src.length()}")
     val result = VerifiedCopy.copyFileToDocument(context.contentResolver, src, uri)
+    AppLogger.info("FileSave", "save-as result ok=${result.ok} reason=${result.reason}")
     SaveAsOutcome(result.ok, result.reason)
 }
 

@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import java.io.File
 import java.io.IOException
@@ -153,7 +154,6 @@ object VerifiedCopy {
         resolver: ContentResolver,
         src: File,
         uri: Uri,
-        exact: Boolean = false,
     ): Result {
         val expected = src.length()
         val out = try {
@@ -161,15 +161,57 @@ object VerifiedCopy {
         } catch (e: Exception) {
             null
         } ?: return Result(Status.FAILED, "openOutputStream returned null", uri)
+
+        // Count what WE actually wrote. The destination provider's reported
+        // length is unreliable (several SAF providers return 0/UNKNOWN until
+        // a later scan, and some throw from openAssetFileDescriptor). Trusting
+        // that readback made the post-#62 save path delete a correctly written
+        // file and leave/return an empty husk. The output stream closing
+        // successfully after N bytes is the strongest evidence this layer can
+        // obtain without provider cooperation.
+        var copied = 0L
         try {
-            out.use { o -> src.inputStream().use { input -> input.copyTo(o) } }
+            out.use { o ->
+                src.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buffer)
+                        if (n < 0) break
+                        if (n == 0) continue
+                        o.write(buffer, 0, n)
+                        copied += n
+                    }
+                    o.flush()
+                }
+            }
         } catch (e: Exception) {
             deleteQuietly(resolver, uri)
-            return Result(Status.FAILED, "copy failed: ${e.message ?: e.javaClass.simpleName}", uri)
+            return Result(Status.FAILED, "copy failed: ${e.message ?: e.javaClass.simpleName}", uri, copied)
         }
-        val result = verifyDocument(resolver, uri, expected, exact)
-        if (result.status == Status.FAILED) deleteQuietly(resolver, uri)
-        return result
+        if (copied <= 0L) {
+            // A genuinely empty source used to verify as 0 == 0 and publish a
+            // 0-byte shell with a success toast. Refuse it explicitly; the
+            // user can see the source itself is empty instead of a corrupt
+            // download.
+            deleteQuietly(resolver, uri)
+            return Result(
+                Status.FAILED,
+                "source produced 0 bytes (len=$expected)",
+                uri,
+                copied,
+            )
+        }
+        // Provider readback is diagnostic only. A successful close after N
+        // bytes is authoritative; several DocumentsProviders return 0/UNKNOWN
+        // (or refuse openInputStream) even for a valid write. Treating that as
+        // failure was the rolling-build regression that deleted valid saves.
+        val probe = probeBytes(resolver, uri)
+        return Result(
+            Status.VERIFIED,
+            "copied=$copied srcLen=$expected probe=${probe ?: -1}",
+            uri,
+            copied,
+        )
     }
 
     /**
@@ -318,9 +360,14 @@ object VerifiedCopy {
         collection: Uri,
         values: ContentValues,
         src: File,
-    ): Result = writeToMediaStore(resolver, collection, values, src.length(), exact = true) { out ->
-        src.inputStream().use { input -> input.copyTo(out) }
-        true
+    ): Result {
+        if (src.length() <= 0L) {
+            return Result(Status.FAILED, "source is empty")
+        }
+        return writeToMediaStore(resolver, collection, values, src.length(), exact = true) { out ->
+            src.inputStream().use { input -> input.copyTo(out) }
+            true
+        }
     }
 
     private fun documentLength(resolver: ContentResolver, uri: Uri): Long = try {
@@ -341,6 +388,14 @@ object VerifiedCopy {
     }
 
     private fun deleteQuietly(resolver: ContentResolver, uri: Uri) {
+        // DocumentsProvider-backed SAF URIs sometimes reject ContentResolver
+        // delete while accepting DocumentsContract.deleteDocument (and vice
+        // versa). Try both so a failed save cannot leave a 0-byte husk.
+        try {
+            DocumentsContract.deleteDocument(resolver, uri)
+        } catch (_: Exception) {
+            // fall through
+        }
         try {
             resolver.delete(uri, null, null)
         } catch (_: Exception) {

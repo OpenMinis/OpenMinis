@@ -2,7 +2,9 @@ package com.openminis.app.ui.preview
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
 import android.graphics.Bitmap
+import android.webkit.ValueCallback
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
@@ -47,6 +49,10 @@ class WebViewHolder(
 
     private var mobileUserAgent: String = ""
     private var destroyed = false
+
+    /** Host hook for `<input type="file">`; wired by [UrlPreviewSheet]. */
+    var onShowFileChooser:
+        ((android.webkit.WebChromeClient.FileChooserParams, ValueCallback<Array<Uri>>) -> Unit)? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     val webView: WebView = WebView(appContext).apply {
@@ -120,6 +126,14 @@ class WebViewHolder(
             }
         }
         webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean = com.openminis.app.browser.dispatchWebFileChooser(
+                onShowFileChooser, filePathCallback, fileChooserParams,
+            )
+
             override fun onReceivedTitle(view: WebView?, title: String?) {
                 if (!title.isNullOrEmpty()) pageTitle = title
             }

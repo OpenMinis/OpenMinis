@@ -5,11 +5,13 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
 import android.os.Message
 import android.util.Base64
 import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -48,6 +50,10 @@ class BrowserUseManager(
     /** App context for the session-scoped path resolver. Null disables it. */
     private val appContext: android.content.Context? = null,
 ) {
+    /** Host hook for `<input type="file">`; null on agent-only tabs. */
+    var onShowFileChooser:
+        ((WebChromeClient.FileChooserParams, ValueCallback<Array<Uri>>) -> Unit)? = null
+
     companion object {
         private const val TAG = "BrowserUseManager"
         private const val NAVIGATION_TIMEOUT_MS = 30_000L
@@ -604,6 +610,14 @@ class BrowserUseManager(
 
     private fun setupWebChromeClient() {
         webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?,
+            ): Boolean = dispatchWebFileChooser(
+                onShowFileChooser, filePathCallback, fileChooserParams,
+            )
+
             override fun onReceivedTitle(view: WebView, title: String?) {
                 _pageTitle.value = title ?: ""
             }
@@ -619,25 +633,9 @@ class BrowserUseManager(
                 onCloseWindow?.invoke()
             }
 
-            // [T-android-js-dialogs-256] Answer JS dialogs with a conservative
-            // default INSTEAD of showing them, and record what happened.
-            //
-            // This is unattended automation: showing a modal would block the
-            // page's JS thread on a human who isn't there, wedging the agent
-            // loop until the action dead-timeout fires. So the page is always
-            // answered immediately and never actually blocks — the only change
-            // versus the old silent-swallow behaviour is that the model now
-            // finds out it happened (see drainInterceptedDialogReport).
-            //
-            // confirm() answers false and prompt() answers null deliberately:
-            // the agent must not silently consent on the user's behalf to
-            // whatever was asked. The user-facing web preview does the exact
-            // opposite and shows real dialogs; see WebViewHolder.
-            //
-            // Returning true is what claims the dialog. Returning false (the
-            // WebChromeClient default) would let WebView apply the same default
-            // itself, but with no record — which is exactly the bug.
-
+            // JS dialogs are answered conservatively (alert=true, confirm=false,
+            // prompt=null) and recorded. Blocking on a modal would wedge
+            // unattended automation; returning true claims it and preserves the record.
             override fun onJsAlert(
                 view: WebView?,
                 url: String?,
