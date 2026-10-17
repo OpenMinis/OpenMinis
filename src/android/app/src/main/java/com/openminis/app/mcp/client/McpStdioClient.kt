@@ -81,7 +81,7 @@ class McpStdioClient(
     // reply was dropped SILENTLY and the call then hung until the 300s timeout
     // even though the server had answered. A 1-slot LinkedBlockingQueue always
     // accepts the offer, and the caller still removes its own entry.
-    private val pending = ConcurrentHashMap<Int, java.util.concurrent.LinkedBlockingQueue<JSONObject>>()
+    private val pending = ConcurrentHashMap<String, java.util.concurrent.LinkedBlockingQueue<JSONObject>>()
     private val stderrTail = StringBuilder()
     private val lock = Any()
 
@@ -128,19 +128,29 @@ class McpStdioClient(
                     val line = stdout?.readLine() ?: break
                     if (line.isBlank()) continue
                     val obj = runCatching { JSONObject(line) }.getOrNull() ?: continue
-                    val id = obj.optInt("id", Int.MIN_VALUE)
-                    if (id != Int.MIN_VALUE && (obj.has("result") || obj.has("error"))) {
+                    // JSON-RPC allows string OR numeric ids. Keying the map by
+                    // the string form makes an echo of `5` and `"5"` the same
+                    // request; `optInt` used to drop every string id.
+                    val rawId = obj.opt("id")
+                    if (rawId != null && rawId != JSONObject.NULL &&
+                        (obj.has("result") || obj.has("error"))
+                    ) {
                         // [T-mcp-stdio-reply-loss] Offer into the caller's bounded
                         // queue WITHOUT removing the map entry: the reply may land
                         // before the caller has reached `poll`, and removal here is
                         // what made the delivery race with the caller's own cleanup.
-                        // The caller's `finally { pending.remove(id) }` owns the
+                        // The caller's `finally { pending.remove(key) }` owns the
                         // lifetime. A second reply for the same id (protocol
                         // violation) is dropped by the 1-slot capacity.
-                        pending[id]?.offer(obj)
+                        McpJsonRpc.idKey(rawId)?.let { pending[it]?.offer(obj) }
                     }
                 }
             } catch (_: Exception) {
+            } finally {
+                // The reader is the only writer of replies. Once it exits,
+                // every in-flight call must fail now instead of each waiting
+                // out its own timeout.
+                failAllPending("stdio reader exited")
             }
         }, "mcp-stdio-$serverName-reader").apply { isDaemon = true; start() }
 
@@ -168,8 +178,9 @@ class McpStdioClient(
             )
         }
         val id = McpJsonRpc.nextId()
+        val key = id.toString()
         val queue = java.util.concurrent.LinkedBlockingQueue<JSONObject>(1)
-        pending[id] = queue
+        pending[key] = queue
         try {
             val payload = McpJsonRpc.request(id, method, params)
             synchronized(lock) {
@@ -182,12 +193,29 @@ class McpStdioClient(
                 // [T-mcp-stdio-reply-loss] Late-delivery re-check: a reply can land
                 // in the window between the poll timing out and the entry being
                 // removed. Take it rather than failing a call the server answered.
-                ?: pending.remove(id)?.poll()
+                ?: pending.remove(key)?.poll()
                 ?: throw McpError(McpError.TIMEOUT, "no reply to '$method' within ${timeoutMs / 1000}s")
             return McpJsonRpc.unwrapResult(reply)
         } finally {
-            pending.remove(id)
+            pending.remove(key)
         }
+    }
+
+    /** Wake every waiting caller after the reader thread dies. */
+    private fun failAllPending(reason: String) {
+        if (pending.isEmpty()) return
+        val error = JSONObject().apply {
+            put("jsonrpc", "2.0")
+            put("id", JSONObject.NULL)
+            put(
+                "error",
+                JSONObject().apply {
+                    put("code", -32000)
+                    put("message", reason)
+                },
+            )
+        }
+        for (queue in pending.values) queue.offer(error)
     }
 
     private fun notify(method: String, params: JSONObject? = null) {

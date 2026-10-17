@@ -113,6 +113,12 @@ jobs:
             "${{ github.event.pull_request.base.sha }}" \
             "${{ github.sha }}"
 
+      # [T-ui-cjk-ratchet] The l10n gate only sees strings.xml. Freeze the
+      # existing hardcoded Chinese literals in ui/ and reject any new/growing
+      # file (25 files / 100 literals at adoption).
+      - name: No new hardcoded CJK in UI
+        run: python3 scripts/ci/check_cjk_literals.py
+
       # [T-arch-ratchet] UI review report P2-2: oversized files are on a
       # one-way diet. Baseline ceilings never rise; new files cap at 800
       # lines. Runs on every event (tree state, not diff state).

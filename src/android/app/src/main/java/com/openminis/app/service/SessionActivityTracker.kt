@@ -9,6 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Singleton that tracks two independent kinds of "session is alive":
@@ -332,6 +333,7 @@ object SessionActivityTracker {
      * loop's cancel callback — captured here so the notification's Stop
      * action can fan out to every running session.
      */
+    @Synchronized
     fun setActive(sessionId: String, onStop: (() -> Unit)? = null) {
         // [T-fgs-stop-linger] A new run cancels any deferred stop — the
         // service is needed again, and the next startForegroundService()
@@ -342,7 +344,7 @@ object SessionActivityTracker {
         // "begins" only on the empty → non-empty edge. A second concurrent
         // session joining an in-flight run must not restart the clock.
         val wasRunIdle = _activeSessions.value.isEmpty()
-        _activeSessions.value = _activeSessions.value + sessionId
+        _activeSessions.update { it + sessionId }
         if (onStop != null) {
             synchronized(streamCancellers) { streamCancellers[sessionId] = onStop }
         }
@@ -378,9 +380,10 @@ object SessionActivityTracker {
      * sessions remain active *and* the user is no longer present in any
      * chat.
      */
+    @Synchronized
     fun setInactive(sessionId: String) {
         val wasActive = sessionId in _activeSessions.value
-        _activeSessions.value = _activeSessions.value - sessionId
+        _activeSessions.update { it - sessionId }
         synchronized(streamCancellers) { streamCancellers.remove(sessionId) }
         val wasError = synchronized(pendingErrorFlag) { pendingErrorFlag.remove(sessionId) }
         Log.d(TAG, "Session deactivated: $sessionId (total: ${_activeSessions.value.size})")
@@ -450,13 +453,14 @@ object SessionActivityTracker {
      * at adj=200 across Home / app-switcher / lock-screen, even when no
      * stream is in flight.
      */
+    @Synchronized
     fun setPresent(sessionId: String) {
         if (sessionId in _presentSessions.value) return
         // [T-fgs-stop-linger] Presence re-holds the service the same way a
         // new active session does — cancel any deferred stop.
         stopLinger.cancel()
         val wasIdle = !shouldRunService()
-        _presentSessions.value = _presentSessions.value + sessionId
+        _presentSessions.update { it + sessionId }
         Log.d(TAG, "Presence set: $sessionId (present total: ${_presentSessions.value.size})")
         if (wasIdle) {
             startServiceIfNeeded()
@@ -471,9 +475,10 @@ object SessionActivityTracker {
      * MainActivity when the user leaves the chat route or the Activity
      * is paused.
      */
+    @Synchronized
     fun setAbsent(sessionId: String) {
         if (sessionId !in _presentSessions.value) return
-        _presentSessions.value = _presentSessions.value - sessionId
+        _presentSessions.update { it - sessionId }
         Log.d(TAG, "Presence cleared: $sessionId (present total: ${_presentSessions.value.size})")
         if (!shouldRunService()) {
             // [T-fgs-stop-linger] see setInactive — deferred, cancellable.
@@ -491,9 +496,10 @@ object SessionActivityTracker {
      * pinned at adj=200 across the user's brief absence. Backgrounding
      * is the entire scenario this exists to protect against.
      */
+    @Synchronized
     fun clearPresence() {
         if (_presentSessions.value.isEmpty()) return
-        _presentSessions.value = emptySet()
+        _presentSessions.update { emptySet() }
         Log.d(TAG, "Presence cleared (all)")
         if (!shouldRunService()) {
             // [T-fgs-stop-linger] see setInactive — deferred, cancellable.

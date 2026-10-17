@@ -59,7 +59,8 @@ internal object ResidentWindow {
     fun countCut(history: List<LLMMessage>, maxMessages: Int): Int {
         val overflow = history.size - maxMessages
         if (overflow <= 0) return 0
-        return firstLegalCut(history, overflow) ?: 0
+        val legal = legalBoundaries(history)
+        return firstLegal(legal, overflow) ?: 0
     }
 
     /**
@@ -72,6 +73,10 @@ internal object ResidentWindow {
      * advancing. Skipping straight to `cut + 1` would walk past a legal
      * boundary sitting at `cut` itself — a plain-text head followed by bare
      * tool results is the common shape, and it must be cuttable at the head.
+     *
+     * The legality of every cut is precomputed in one right-to-left pass
+     * ([legalBoundaries]); asking per candidate used to scan the whole suffix
+     * each time, i.e. O(N²) on a 4,000-message session.
      */
     fun byteCut(history: List<LLMMessage>, budget: Long = RESIDENT_BYTES): Int {
         if (history.size <= 1) return 0
@@ -84,56 +89,78 @@ internal object ResidentWindow {
             suffix[i] = suffix[i + 1] + messageBytes(history[i])
         }
         if (suffix[0] <= budget) return 0
-        var cut = 0
-        while (cut < history.size - 1) {
-            if (isLegalBoundary(history, cut)) {
-                if (suffix[cut] <= budget) return cut
-            }
-            val next = firstLegalCut(history, cut + 1) ?: break
-            cut = next
+        val legal = legalBoundaries(history)
+        var cut = firstLegal(legal, 0)
+        var lastLegal = cut
+        while (cut != null && cut < history.size - 1) {
+            if (suffix[cut] <= budget) return cut
+            cut = firstLegal(legal, cut + 1)
+            if (cut != null) lastLegal = cut
         }
         // The last legal cut is the best that can be done: everything after
         // it is either over budget or uncuttable without orphaning.
-        if (cut > 0 && isLegalBoundary(history, cut)) return cut
+        if (lastLegal != null && lastLegal > 0) return lastLegal
         return 0
     }
 
     /**
-     * Validate the complete retained suffix, not just its first message. A
-     * result must follow an unmatched use with the same id and name. This is
-     * important when a provider stores the use in an assistant message and
-     * the result in a following user message: cutting between those rows would
-     * leave a valid-looking first row but orphan the result later in the suffix.
-     * An unmatched use is allowed only in the final assistant message because
-     * that is the in-flight turn and may legitimately await execution.
+     * Precompute every legal cut in one right-to-left pass.
+     *
+     * Forward rule (the original [isLegalBoundary]): walking the suffix, a
+     * ToolResult must match an earlier ToolUse with the same id/name; at the
+     * end, any unmatched use is allowed only in the final assistant message.
+     *
+     * Backward recurrence while extending the suffix to the left:
+     *  - a ToolResult can only match a use to its LEFT, so it joins
+     *    [pendingResults] and waits;
+     *  - a ToolUse first tries to consume a waiting result to its right;
+     *    otherwise it is unmatched, and it is "bad" unless it sits in the
+     *    final assistant message.
+     *
+     * A cut is legal iff no result is still waiting and no non-final use is
+     * unmatched. Results waiting at the current message boundary stay in the
+     * state when extending further left — an earlier use may still match them.
      */
-    private fun isLegalBoundary(history: List<LLMMessage>, index: Int): Boolean {
-        if (index >= history.size) return false
-        data class Use(val id: String, val name: String, val messageIndex: Int)
-        val pending = ArrayList<Use>()
-        history.subList(index, history.size).forEachIndexed { offset, message ->
-            val messageIndex = index + offset
-            message.contentParts.forEach { part ->
-                when (part) {
-                    is AgentContentPart.ToolUse -> pending += Use(part.id, part.name, messageIndex)
+    private fun legalBoundaries(history: List<LLMMessage>): BooleanArray {
+        val n = history.size
+        val legal = BooleanArray(n + 1)
+        val pendingResults = HashMap<String, Int>()
+        var badUses = 0
+        for (i in n - 1 downTo 0) {
+            val message = history[i]
+            val inFlightTurn = i == n - 1 && message.role == LLMMessage.Role.ASSISTANT
+            val parts = message.contentParts
+            for (p in parts.asReversed()) {
+                when (p) {
                     is AgentContentPart.ToolResult -> {
-                        val match = pending.indexOfFirst { it.id == part.id && it.name == part.name }
-                        if (match < 0) return false
-                        pending.removeAt(match)
+                        val key = toolKey(p.id, p.name)
+                        pendingResults[key] = (pendingResults[key] ?: 0) + 1
+                    }
+                    is AgentContentPart.ToolUse -> {
+                        val key = toolKey(p.id, p.name)
+                        val waiting = pendingResults[key] ?: 0
+                        if (waiting > 0) {
+                            if (waiting == 1) pendingResults.remove(key) else pendingResults[key] = waiting - 1
+                        } else if (!inFlightTurn) {
+                            badUses++
+                        }
                     }
                     else -> Unit
                 }
             }
+            legal[i] = pendingResults.isEmpty() && badUses == 0
         }
-        val finalIndex = history.lastIndex
-        return pending.all { it.messageIndex == finalIndex && history[finalIndex].role == LLMMessage.Role.ASSISTANT }
+        legal[n] = false
+        return legal
     }
 
-    /** Smallest index >= [from] that is a legal cut point, or `null`. */
-    private fun firstLegalCut(history: List<LLMMessage>, from: Int): Int? {
-        var i = from.coerceIn(0, history.size)
-        while (i < history.size) {
-            if (isLegalBoundary(history, i)) return i
+    private fun toolKey(id: String, name: String): String = "$id\u0000$name"
+
+    /** First legal cut index >= [from], or null. Built once, O(1) per query. */
+    private fun firstLegal(legal: BooleanArray, from: Int): Int? {
+        var i = from.coerceIn(0, legal.size)
+        while (i < legal.size) {
+            if (legal[i]) return i
             i++
         }
         return null

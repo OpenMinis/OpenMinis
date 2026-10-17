@@ -180,13 +180,10 @@ class MainActivity : ComponentActivity() {
                 return@registerForActivityResult
             }
             try {
-                contentResolver.openOutputStream(targetUri)?.use { out ->
-                    java.io.FileInputStream(zip).use { input -> input.copyTo(out) }
-                } ?: throw java.io.IOException("openOutputStream returned null")
-                // Auto-open the saved file so the user sees where it
-                // landed. ACTION_VIEW with the SAF URI hands control to
-                // whatever app the system associates with .zip /
-                // application/zip (file managers, archive viewers).
+                // Verify before opening: a provider that accepts the write but
+                // keeps the document empty must not look like success.
+                val saved = com.openminis.app.io.VerifiedCopy.copyFileToDocument(contentResolver, zip, targetUri)
+                if (!saved.ok) throw java.io.IOException(saved.reason.ifBlank { "save not verified" })
                 try {
                     val view = Intent(Intent.ACTION_VIEW).apply {
                         setDataAndType(targetUri, "application/zip")

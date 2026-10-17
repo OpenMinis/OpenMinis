@@ -3,6 +3,7 @@ package com.openminis.app.service
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import java.util.UUID
 
@@ -98,7 +99,7 @@ object SubAgentActivityTracker {
             kind = kind,
             turnCap = turnCap,
         )
-        _members.value = _members.value + member
+        _members.update { it + member }
         SubAgentEventBus.publish(
             SubAgentEvent.Spawned(
                 runId = id,
@@ -139,8 +140,8 @@ object SubAgentActivityTracker {
         parentToolId.isNotBlank() && _members.value.any { it.parentToolId == parentToolId }
 
     fun updateStep(id: String, step: String) {
-        _members.value = _members.value.map { m ->
-            if (m.id == id) m.copy(lastStep = step) else m
+        _members.update { list ->
+            list.map { m -> if (m.id == id) m.copy(lastStep = step) else m }
         }
     }
 
@@ -149,16 +150,18 @@ object SubAgentActivityTracker {
             append("turn $turn/$cap")
             if (tool.isNotBlank()) append(" · $tool")
         }
-        _members.value = _members.value.map { m ->
-            if (m.id == id) {
-                m.copy(
-                    lastStep = step,
-                    turnIndex = turn,
-                    turnCap = cap,
-                    currentTool = tool,
-                )
-            } else {
-                m
+        _members.update { list ->
+            list.map { m ->
+                if (m.id == id) {
+                    m.copy(
+                        lastStep = step,
+                        turnIndex = turn,
+                        turnCap = cap,
+                        currentTool = tool,
+                    )
+                } else {
+                    m
+                }
             }
         }
         if (turn > 0) {
@@ -194,16 +197,20 @@ object SubAgentActivityTracker {
     fun finish(id: String, success: Boolean, error: String? = null) {
         jobs.remove(id)
         userStopped.remove(id)
-        val member = memberById(id)
-        _members.value = _members.value.filterNot { it.id == id }
-        if (member != null) {
+        var member: Member? = null
+        _members.update { list ->
+            member = list.find { it.id == id }
+            list.filterNot { it.id == id }
+        }
+        val finished = member
+        if (finished != null) {
             SubAgentEventBus.publish(
                 SubAgentEvent.Completed(
                     runId = id,
-                    parentSessionId = member.parentSessionId,
+                    parentSessionId = finished.parentSessionId,
                     success = success,
-                    turnsUsed = member.turnIndex,
-                    toolCalls = member.steps.count { it.kind == "tool" },
+                    turnsUsed = finished.turnIndex,
+                    toolCalls = finished.steps.count { it.kind == "tool" },
                     atMs = System.currentTimeMillis(),
                 ),
             )
@@ -349,8 +356,8 @@ object SubAgentActivityTracker {
     private fun memberById(id: String): Member? = _members.value.find { it.id == id }
 
     private fun mutate(id: String, block: (Member) -> Member) {
-        synchronized(this) {
-            _members.value = _members.value.map { m -> if (m.id == id) block(m) else m }
+        _members.update { list ->
+            list.map { m -> if (m.id == id) block(m) else m }
         }
     }
 
@@ -363,8 +370,8 @@ object SubAgentActivityTracker {
 
     fun appendLog(id: String, line: String) {
         if (line.isBlank()) return
-        synchronized(this) {
-            _members.value = _members.value.map { m ->
+        _members.update { list ->
+            list.map { m ->
                 if (m.id != id) m else {
                     val next = if (m.transcript.isEmpty()) line else m.transcript + "\n" + line
                     val clipped = if (next.length > 40_000) next.takeLast(32_000) else next
@@ -404,7 +411,7 @@ object SubAgentActivityTracker {
             jobs.remove(id.id)?.cancel()
             userStopped.remove(id.id)
         }
-        _members.value = _members.value.filter { it.parentSessionId != parentSessionId }
+        _members.update { list -> list.filter { it.parentSessionId != parentSessionId } }
     }
 
     fun membersFor(parentSessionId: String): List<Member> =

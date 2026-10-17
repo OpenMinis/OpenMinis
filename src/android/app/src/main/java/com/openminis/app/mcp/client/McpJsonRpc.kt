@@ -60,6 +60,14 @@ object McpJsonRpc {
             if (params != null) put("params", params)
         }
 
+    /**
+     * JSON-RPC 2.0 allows a string OR number id. Compare on the wire string
+     * form so a server echoing `5` as `"5"` still matches; `optInt` silently
+     * treated every string id as absent. Null/JSON null is a notification.
+     */
+    fun idKey(raw: Any?): String? =
+        if (raw == null || raw == JSONObject.NULL) null else raw.toString()
+
     fun initializeParams(): JSONObject = JSONObject().apply {
         put("protocolVersion", PROTOCOL_VERSION)
         put("capabilities", JSONObject())
@@ -103,7 +111,7 @@ object McpJsonRpc {
 
     private fun isReplyFor(obj: JSONObject, wantId: Int): Boolean =
         obj.has("jsonrpc") &&
-            obj.optInt("id", Int.MIN_VALUE) == wantId &&
+            idKey(obj.opt("id")) == wantId.toString() &&
             (obj.has("result") || obj.has("error"))
 
     /**

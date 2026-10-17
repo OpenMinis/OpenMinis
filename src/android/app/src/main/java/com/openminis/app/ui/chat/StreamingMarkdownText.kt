@@ -626,7 +626,7 @@ internal fun parseMarkdownBlocksBlocking(content: String): List<MdBlock> =
 internal sealed class MdBlock(val raw: String) {
     class Paragraph(raw: String) : MdBlock(raw)
     class Heading(raw: String, val level: Int, val text: String) : MdBlock(raw)
-    class CodeBlock(raw: String, val language: String, val code: String) : MdBlock(raw)
+    class CodeBlock(raw: String, val language: String, val code: String, val closed: Boolean = true) : MdBlock(raw)
     class BlockQuote(raw: String, val innerBlocks: List<MdBlock>) : MdBlock(raw)
     class UnorderedList(raw: String, val items: List<ListItem>) : MdBlock(raw)
     class OrderedList(raw: String, val items: List<ListItem>, val startNum: Int = 1) : MdBlock(raw)
@@ -896,14 +896,14 @@ internal fun MutableList<MdBlock>.addParagraphChunks(text: String) {
     }
 }
 
-internal fun MutableList<MdBlock>.addCodeChunks(raw: String, lang: String, code: String) {
+internal fun MutableList<MdBlock>.addCodeChunks(raw: String, lang: String, code: String, closed: Boolean = true) {
     val chunks = BoundedText.splitForCompose(code)
     if (chunks.size <= 1) {
-        add(MdBlock.CodeBlock(raw, lang, code))
+        add(MdBlock.CodeBlock(raw, lang, code, closed))
         return
     }
     for ((idx, c) in chunks.withIndex()) {
-        add(MdBlock.CodeBlock(c, if (idx == 0) lang else "", c))
+        add(MdBlock.CodeBlock(c, if (idx == 0) lang else "", c, closed))
     }
 }
 

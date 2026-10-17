@@ -169,7 +169,7 @@ fun ConfigAuditScreen(modifier: Modifier = Modifier) {
                     revertCandidate = null
                     scope.launch {
                         val res = withContext(Dispatchers.IO) {
-                            ConfigBridge.auditRevert(
+                            ConfigBridge.auditRevertSuspending(
                                 id = target.id,
                                 actorRaw = "user-revert",
                                 sessionId = null,

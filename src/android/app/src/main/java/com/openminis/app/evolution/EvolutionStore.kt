@@ -13,9 +13,21 @@ class EvolutionStore(dir: File) {
     private val helper = Helper(File(dir, "evolution.db"))
     private val _proposals = MutableStateFlow<List<EvolutionProposal>>(emptyList())
     val proposals: StateFlow<List<EvolutionProposal>> = _proposals.asStateFlow()
+    private var writesSincePrune = 0
+
+    private companion object {
+        /** ~90 days of learning signal; older rows are diagnostics only. */
+        const val MAX_AGE_MS = 90L * 24 * 60 * 60 * 1000
+        const val MAX_OBSERVATIONS = 5_000
+        const val MAX_TOOL_FAILS = 2_000
+        const val PRUNE_EVERY = 64
+    }
 
     init {
         dir.mkdirs()
+        // Retention runs before the first read so a long-lived install does
+        // not keep paying for old observations on every query.
+        prune()
         reload()
     }
 
@@ -43,6 +55,7 @@ class EvolutionStore(dir: File) {
             put("created_at", System.currentTimeMillis())
         }
         db.insert("observations", null, values)
+        maybePrune()
     }
 
     @Synchronized
@@ -231,6 +244,50 @@ class EvolutionStore(dir: File) {
             put("error", error.take(EvolutionPrefs.MAX_EVIDENCE_CHARS))
             put("created_at", System.currentTimeMillis())
         })
+        maybePrune()
+    }
+
+    /**
+     * Bounded retention for the two append-only diagnostics tables.
+     * `beliefs`/`proposals` are deliberately excluded: they are the learned
+     * state the user can inspect and revert, not a log.
+     *
+     * @return rows deleted, for tests and metrics.
+     */
+    internal fun prune(
+        maxObservations: Int = MAX_OBSERVATIONS,
+        maxToolFails: Int = MAX_TOOL_FAILS,
+        maxAgeMs: Long = MAX_AGE_MS,
+        now: Long = System.currentTimeMillis(),
+    ): Int {
+        val db = helper.writableDatabase
+        var deleted = 0
+        db.beginTransaction()
+        try {
+            val cutoff = (now - maxAgeMs).toString()
+            deleted += db.delete("observations", "created_at < ?", arrayOf(cutoff))
+            deleted += db.delete("tool_fails", "created_at < ?", arrayOf(cutoff))
+            deleted += db.delete(
+                "observations",
+                "id NOT IN (SELECT id FROM observations ORDER BY created_at DESC LIMIT ?)",
+                arrayOf(maxObservations.toString()),
+            )
+            deleted += db.delete(
+                "tool_fails",
+                "rowid NOT IN (SELECT rowid FROM tool_fails ORDER BY created_at DESC LIMIT ?)",
+                arrayOf(maxToolFails.toString()),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return deleted
+    }
+
+    private fun maybePrune() {
+        if (++writesSincePrune < PRUNE_EVERY) return
+        writesSincePrune = 0
+        runCatching { prune() }
     }
 
     @Synchronized

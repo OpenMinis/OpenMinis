@@ -35,6 +35,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
+    abstract fun chatSearchDao(): ChatSearchDao
     abstract fun webAppShortcutDao(): WebAppShortcutDao
     abstract fun codeIndexDao(): CodeIndexDao
     abstract fun goalDao(): GoalDao
@@ -471,16 +472,37 @@ abstract class AppDatabase : RoomDatabase() {
                 db.beginTransaction()
                 try {
                     db.execSQL("DROP INDEX IF EXISTS `index_messages_session_id_sort_order`")
-                    db.execSQL("""
-                        UPDATE messages
-                        SET sort_order = (
-                            SELECT COUNT(*) - 1
-                            FROM messages AS prior
-                            WHERE prior.session_id = messages.session_id
-                              AND (prior.created_at < messages.created_at OR
-                                   (prior.created_at = messages.created_at AND prior.id <= messages.id))
-                        )
-                    """.trimIndent())
+                    // The old statement was a correlated `UPDATE … SET sort_order =
+                    // (SELECT COUNT(*) FROM messages prior WHERE prior.session_id =
+                    // messages.session_id AND …)` — one full per-session scan per
+                    // row, i.e. O(N²). A 100k-message history spent minutes under
+                    // the upgrade lock and ANR'd. SQLite window functions are not
+                    // available on the older Android versions this app supports, so
+                    // renumber with one prepared UPDATE per row inside this single
+                    // transaction: O(N) statements, no repeated scans.
+                    val renumber = db.compileStatement(
+                        "UPDATE messages SET sort_order = ? WHERE id = ?",
+                    )
+                    val sessions = ArrayList<String>()
+                    db.query("SELECT DISTINCT session_id FROM messages").use { c ->
+                        while (c.moveToNext()) sessions.add(c.getString(0))
+                    }
+                    for (session in sessions) {
+                        val ids = ArrayList<String>()
+                        db.query(
+                            "SELECT id FROM messages WHERE session_id = ? " +
+                                "ORDER BY created_at ASC, id ASC",
+                            arrayOf(session),
+                        ).use { c ->
+                            while (c.moveToNext()) ids.add(c.getString(0))
+                        }
+                        ids.forEachIndexed { index, id ->
+                            renumber.clearBindings()
+                            renumber.bindLong(1, index.toLong())
+                            renumber.bindString(2, id)
+                            renumber.executeUpdateDelete()
+                        }
+                    }
                     db.execSQL(
                         "CREATE UNIQUE INDEX IF NOT EXISTS `index_messages_session_id_sort_order` " +
                             "ON `messages` (`session_id`, `sort_order`)"

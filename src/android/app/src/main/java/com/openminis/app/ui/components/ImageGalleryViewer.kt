@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
+import com.openminis.app.ui.sandbox.saveBitmapToGallery
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -310,11 +311,12 @@ fun ImageGalleryViewer(
                                 onClick = {
                                     scope.launch {
                                         val bmp = loadBitmap(context, currentItem.model)
-                                        if (bmp != null) {
-                                            val saved = saveToGallery(context, bmp)
-                                            val msg = if (saved) savedToAlbumMsg else saveFailedMsg
-                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                        }
+                                        val saved = bmp != null && saveBitmapToGallery(context, bmp)
+                                        Toast.makeText(
+                                            context,
+                                            if (saved) savedToAlbumMsg else saveFailedMsg,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
                                     }
                                 },
                             )

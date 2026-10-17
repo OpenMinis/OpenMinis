@@ -122,6 +122,7 @@ internal fun RenderBlock(block: MdBlock) {
             //     本渲染器的其它使用方零改动。
             val codeRunner = LocalMarkdownCodeRunner.current
             val showRun = codeRunner != null &&
+                block.closed &&
                 CodeBlockRunRouter.isSupported(block.language) &&
                 !LocalLiveIncremental.current &&
                 !LocalAppendOnlyFade.current
@@ -141,9 +142,16 @@ internal fun RenderBlock(block: MdBlock) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = block.language.ifEmpty { "code" },
+                        // A fence that never closed is a truncated snippet.
+                        // "⚠ " is a universal marker (no new translatable
+                        // string); the run button is disabled for it.
+                        text = if (block.closed) {
+                            block.language.ifEmpty { "code" }
+                        } else {
+                            "⚠ " + block.language.ifEmpty { "code" }
+                        },
                         fontSize = 11.sp,
-                        color = MdCodeLangColor,
+                        color = if (block.closed) MdCodeLangColor else ToolCancelColor,
                         modifier = Modifier.weight(1f),
                     )
                     if (showRun) {

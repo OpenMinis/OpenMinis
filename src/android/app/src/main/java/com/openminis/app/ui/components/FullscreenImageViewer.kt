@@ -2,13 +2,9 @@ package com.openminis.app.ui.components
 
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -58,6 +54,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
+import com.openminis.app.ui.sandbox.saveBitmapToGallery
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,7 +72,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.OutputStream
 
 /**
  * Full-screen immersive image preview with pinch-to-zoom, pan, tap-to-toggle chrome,
@@ -319,11 +315,15 @@ fun FullscreenImageViewer(
                         onClick = {
                             scope.launch {
                                 val bmp = loadBitmap(context, model)
-                                if (bmp != null) {
-                                    val saved = saveToGallery(context, bmp)
-                                    val msg = if (saved) savedToAlbumMsg else saveFailedMsg
-                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                }
+                                // A decode failure used to be a silent no-op:
+                                // the user tapped Save and got no feedback at
+                                // all. Treat it as a failed save.
+                                val saved = bmp != null && saveBitmapToGallery(context, bmp)
+                                Toast.makeText(
+                                    context,
+                                    if (saved) savedToAlbumMsg else saveFailedMsg,
+                                    Toast.LENGTH_SHORT,
+                                ).show()
                             }
                         },
                     )
@@ -483,65 +483,6 @@ internal suspend fun shareImage(context: Context, model: Any) {
         }
     }
 }
-
-internal suspend fun saveToGallery(context: Context, bitmap: Bitmap): Boolean =
-    withContext(Dispatchers.IO) {
-        try {
-            val filename = "minis_${System.currentTimeMillis()}.png"
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Minis")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                }
-                val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                    ?: return@withContext false
-                // [T-android-save-as-null-stream] Mirrors FilePreviewScreen:
-                // a null stream or empty result must not publish a 0-byte
-                // gallery entry — delete the pending row instead.
-                var copied = false
-                try {
-                    val out = context.contentResolver.openOutputStream(uri)
-                    if (out == null) {
-                        com.openminis.app.logging.AppLogger.warning(
-                            "ImageGallery", "saveToGallery: openOutputStream returned null",
-                        )
-                    } else {
-                        out.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                        // bitmap.compress returns success but may emit 0
-                        // bytes for recycled/empty bitmaps — verify.
-                        val dstLen = runCatching {
-                            context.contentResolver.openAssetFileDescriptor(uri, "r")
-                                ?.use { it.length } ?: -1L
-                        }.getOrDefault(-1L)
-                        copied = dstLen != 0L
-                    }
-                } finally {
-                    if (copied) {
-                        values.clear()
-                        values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                        context.contentResolver.update(uri, values, null, null)
-                    } else {
-                        runCatching { context.contentResolver.delete(uri, null, null) }
-                    }
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val minisDir = File(dir, "Minis Ultra").also { it.mkdirs() }
-                val file = File(minisDir, filename)
-                // file.outputStream() is platform-type non-null (it throws
-                // FileNotFoundException instead of returning null); keep the
-                // non-null type so `use`'s block receives OutputStream.
-                val stream: OutputStream = file.outputStream()
-                stream.use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            }
-            true
-        } catch (e: Exception) {
-            false
-        }
-    }
 
 // ── Window helpers ─────────────────────────────────────────────────────────────
 

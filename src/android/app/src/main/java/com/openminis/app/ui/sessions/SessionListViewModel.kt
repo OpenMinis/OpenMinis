@@ -1164,7 +1164,7 @@ class SessionListViewModel(
      * ~100-char snippet around it. Sessions with no content hit are omitted
      * — the row falls back to its existing lastMessage preview.
      *
-     * The matched row's id rides along as the anchor: `findFirstMessageSnippet`
+     * The matched row's id rides along as the anchor: `firstSnippetPerSession`
      * already selects it, so the anchor costs nothing here and saves ChatScreen
      * a re-query when the tap lands.
      *
@@ -1181,21 +1181,21 @@ class SessionListViewModel(
     ): ContentHits {
         if (query.isBlank() || sessions.isEmpty()) return ContentHits(emptyMap(), emptyMap())
         val q = query.lowercase()
-        val snippets = HashMap<String, String>()
-        val anchors = HashMap<String, String>()
-        for (session in sessions) {
-            val title = session.title.orEmpty()
-            if (title.lowercase().contains(q)) continue
-            val hit = chatRepository.dao.findFirstMessageSnippet(session.id, query, 50, query.length + 100)
-            var foundSnippet: String? = hit?.headText?.replace('\n', ' ')?.replace('\r', ' ')
-            if (!foundSnippet.isNullOrBlank()) foundSnippet = "…$foundSnippet…"
-            if (foundSnippet != null) {
-                snippets[session.id] = foundSnippet
-                // headText non-null implies the row exists, but the id is the
-                // anchor's whole value — never publish a blank one.
-                val anchorId = hit?.id
-                if (!anchorId.isNullOrBlank()) anchors[session.id] = anchorId
-            }
+        val needingSnippet = sessions.filterNot { it.title.orEmpty().lowercase().contains(q) }
+        if (needingSnippet.isEmpty()) return ContentHits(emptyMap(), emptyMap())
+        val rows = chatRepository.searchDao().firstSnippetPerSession(
+            sessionIds = needingSnippet.map { it.id },
+            query = query,
+            radius = 50,
+            windowChars = query.length + 100,
+        )
+        val snippets = HashMap<String, String>(rows.size)
+        val anchors = HashMap<String, String>(rows.size)
+        for (row in rows) {
+            val body = row.headText.replace('\n', ' ').replace('\r', ' ')
+            if (body.isBlank()) continue
+            snippets[row.sessionId] = "…$body…"
+            if (row.id.isNotBlank()) anchors[row.sessionId] = row.id
         }
         return ContentHits(snippets, anchors)
     }

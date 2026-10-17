@@ -79,7 +79,11 @@ class CorrectionInstrumentedTest {
 
     @Test fun textInputEditLearnsAfterConsent() {
         VoiceCorrectionConsent.setEnabled(ctx, true)
-        recorder().recordTextInputEdit("石塘", "食堂")
+        // Keep the edit local to a sentence: the admission policy deliberately
+        // rejects a whole 2-character field as too_global (see
+        // CorrectionAdmissionTest.`locality alone flips the verdict`). A
+        // select-replace inside a sentence is the text-input path's real case.
+        recorder().recordTextInputEdit("我们约在石塘见面", "我们约在食堂见面")
         val rows = db().lookupConfusion(
             listOf(PinyinNormalizer.normalize("石塘")), "zh", 0.0, 10)
         assertTrue("got $rows", rows.isNotEmpty())

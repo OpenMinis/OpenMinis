@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -76,6 +77,21 @@ class ConfigConfirmationGateNotifyTest {
         ),
         caption = caption,
     )
+
+    @Test
+    fun `cancelling the caller clears the pending dialog`() = runTest(dispatcher) {
+        val c = change()
+        val job = launch { ConfigConfirmationGate.requestConfirmation(c) }
+        runCurrent()
+        assertEquals(c.id, ConfigConfirmationGate.pending.value?.id)
+
+        // CFG-1: the offload watchdog cancels at 20 s; the gate must not leave
+        // a dead request in front of the queue for the full 120 s.
+        job.cancel()
+        runCurrent()
+        assertNull(ConfigConfirmationGate.pending.value)
+        assertTrue("cancel notification cleared", c.id in cancelled)
+    }
 
     @Test
     fun `backgrounded front-of-queue change is notified once`() = runTest(dispatcher) {

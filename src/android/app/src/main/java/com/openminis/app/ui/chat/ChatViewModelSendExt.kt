@@ -348,7 +348,8 @@ internal fun ChatViewModel.sendMessage(
                 // acquired", the turn is parked in acquireSlot — and this
                 // line already records who was holding the slots, so the
                 // leak is diagnosable from a single log.
-                println(
+                AppLogger.info(
+                    ChatViewModel.TAG_STREAM,
                     "[T-STALL-DIAG] send PRE-ACQUIRE sid=$activeSessionId " +
                         SessionConcurrencyManager.diagSnapshot(),
                 )

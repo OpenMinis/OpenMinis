@@ -22,6 +22,7 @@ import com.openminis.app.provider.SamplingIdentity
 import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.ssePayloads
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
@@ -158,7 +159,12 @@ class AnthropicProvider(
             headerMap[name] = request.headers[name] ?: ""
         }
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        // Install before execute: cancelling while waiting for headers must
+        // unblock the socket too, not only a parked readLine.
+        val cancelOnExit = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+            ?.invokeOnCompletion { call.cancel() }
+        val response = com.openminis.app.provider.StreamTtfb.execute(call, "Anthropic")
         val durationMs = System.currentTimeMillis() - startTime
 
         if (!response.isSuccessful) {
@@ -215,22 +221,9 @@ class AnthropicProvider(
         var lastSentToolInputLen = 0
 
         try {
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // [T-sse-data-prefix-tolerance] Tolerate `data:` with or without
-                // the optional space, exactly as OpenAIRawStream does: the SSE
-                // spec treats only ONE leading space as part of the field
-                // separator, and Anthropic-compatible relays behind a custom
-                // base (DeepSeek / GLM / Kimi — a core routing path here) emit
-                // `data:{...}` with no space. Strict `data: ` matching dropped
-                // EVERY chunk on those relays, which surfaced as the generic
-                // "Server returned an empty response" TransientError from
-                // failOnSilentEmptyCompletion rather than as a parse problem.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
+            // Shared SSE assembler: multi-line `data:` is joined, `data:{...}`
+            // with no space is tolerated, and `[DONE]` is preserved.
+            for (payload in ssePayloads(reader)) {
                 if (payload == "[DONE]") break
 
                 val event = try { JSONObject(payload) } catch (_: Exception) { continue }
@@ -328,7 +321,11 @@ class AnthropicProvider(
             response.close()
         }
         channel.close()
-        awaitClose()
+        awaitClose {
+            cancelOnExit?.dispose()
+            call.cancel()
+            runCatching { response.close() }
+        }
     }
 
     /**

@@ -595,20 +595,8 @@ class SecurityGateImpl : SecurityGate {
      * of the same command line. A blank pattern authorises nothing — it used to
      * authorise everything.
      */
-    private fun matchesAllowPattern(pattern: String, unit: String): Boolean {
-        val p = pattern.trim()
-        if (p.isEmpty()) return false
-        if (p == "*") return true
-        val body = buildString {
-            for (c in p) when (c) {
-                '*' -> append(".*")
-                '?' -> append('.')
-                else -> append(Regex.escape(c.toString()))
-            }
-        }
-        val target = unit.trim()
-        return runCatching { Regex("^$body(\\s.*)?$").matches(target) }.getOrDefault(false)
-    }
+    private fun matchesAllowPattern(pattern: String, unit: String): Boolean =
+        RulePattern.allowMatches(pattern, unit)
 
     private fun toolFilterMatches(filter: String, toolName: String): Boolean = when {
         filter == "*" || filter.isBlank() -> true
@@ -616,27 +604,8 @@ class SecurityGateImpl : SecurityGate {
         else -> filter == toolName || ToolAliases.canonical(toolName) == filter
     }
 
-    private fun patternMatches(pattern: String, target: String): Boolean {
-        if (pattern.isBlank()) return true
-        val regex = buildString {
-            append("^")
-            for (c in pattern) when (c) {
-                '*' -> append(".*")
-                '?' -> append('.')
-                '.', '(', ')', '[', ']', '{', '}', '+', '^', '$', '|', '\\' -> {
-                    append('\\'); append(c)
-                }
-                else -> append(c)
-            }
-            append("$")
-        }
-        return try {
-            Regex(regex).containsMatchIn(target) || Regex(regex).matches(target) ||
-                target.contains(pattern.trim('*'))
-        } catch (_: Exception) {
-            target.contains(pattern)
-        }
-    }
+    private fun patternMatches(pattern: String, target: String): Boolean =
+        RulePattern.denyMatches(pattern, target)
 
     private fun extractCommand(cmd: GateCommand): String = when (cmd.toolName) {
         "shell_exec", "shell_execute", "su_exec", "env_exec" -> {

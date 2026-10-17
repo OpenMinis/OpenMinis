@@ -30,6 +30,7 @@ import android.widget.TextView
 import android.widget.EditText
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.MinisApp
 import com.openminis.app.R
 import kotlin.math.abs
@@ -59,7 +60,11 @@ import kotlin.math.abs
  * (10 dp from each edge). Tap dismisses to bring Minis back to the
  * foreground; drag moves the capsule.
  */
-class ToolOverlayController(private val context: Context) {
+class ToolOverlayController(
+    private val context: Context,
+    private val backgroundRepo: BackgroundSettingsRepository? =
+        (context.applicationContext as? MinisApp)?.backgroundSettingsRepository,
+) {
 
     companion object {
         private const val TAG = "ToolOverlayController"
@@ -83,14 +88,9 @@ class ToolOverlayController(private val context: Context) {
         // reply, both single-line). Reply excerpt is single-line w/
         // ellipsize so it never grows the row.
         private const val CAPSULE_HEIGHT_DP = 44
-        // [T-android-overlay-fixed-half-width] User-facing requirement:
-        // the capsule must be a fixed half-screen-wide pill — no jitter
-        // as content cycles through spinner / completed / reply / error.
-        // 0.50 of displayMetrics.widthPixels, floored at
-        // CAPSULE_WIDTH_FLOOR_DP for tiny screens. Applied to the
-        // WindowManager.LayoutParams.width AND to the text-row maxWidth
-        // so labels ellipsize within the same envelope instead of
-        // pushing the box outward.
+        // Fixed half-screen width, floored for tiny screens and applied to
+        // both the window params and the text row so labels ellipsize in the
+        // same envelope instead of pushing the pill outward.
         private const val CAPSULE_WIDTH_FRACTION = 0.50f
         private const val CAPSULE_WIDTH_FLOOR_DP = 180
         // [T-android-overlay-landscape-width-rotation-drift] Upper bound on
@@ -109,8 +109,6 @@ class ToolOverlayController(private val context: Context) {
     private val windowManager =
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val backgroundRepo =
-        (context.applicationContext as MinisApp).backgroundSettingsRepository
 
     private var view: View? = null
     private var logoView: ImageView? = null
@@ -260,8 +258,8 @@ class ToolOverlayController(private val context: Context) {
             val metrics = context.resources.displayMetrics
             val maxX = (metrics.widthPixels - width).coerceAtLeast(0)
             val maxY = (metrics.heightPixels - height).coerceAtLeast(0)
-            val savedX = backgroundRepo.getOverlayX()
-            val savedY = backgroundRepo.getOverlayY()
+            val savedX = backgroundRepo?.getOverlayX() ?: -1
+            val savedY = backgroundRepo?.getOverlayY() ?: -1
             if (savedX >= 0 && savedY >= 0) {
                 x = savedX.coerceIn(0, maxX)
                 y = savedY.coerceIn(0, maxY)
@@ -749,7 +747,7 @@ class ToolOverlayController(private val context: Context) {
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
-                        backgroundRepo.setOverlayPosition(params.x, params.y)
+                        backgroundRepo?.setOverlayPosition(params.x, params.y)
                     } else {
                         onTap()
                     }
@@ -857,7 +855,7 @@ class ToolOverlayController(private val context: Context) {
             params.y = clampedY
             try {
                 windowManager.updateViewLayout(v, params)
-                backgroundRepo.setOverlayPosition(clampedX, clampedY)
+                backgroundRepo?.setOverlayPosition(clampedX, clampedY)
             } catch (e: Throwable) {
                 Log.w(TAG, "onConfigurationChanged relayout failed: ${e.message}")
             }

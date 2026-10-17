@@ -1,5 +1,14 @@
 import java.util.Properties
 
+// Local instrumentation escape hatch. The release build type is minified by
+// R8, and the minified androidTest APK shares the app's classloader; runner
+// dependencies that the app never calls (androidx.tracing, Kotlin lazy
+// helpers) can be stripped from both dex files, crashing the test process
+// before the first test. Production builds keep minification; connected tests
+// may pass `-Pminis.skipMinifyForTests=true` to install an unminified pair.
+val skipMinifyForTests =
+    providers.gradleProperty("minis.skipMinifyForTests").orNull == "true"
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -202,8 +211,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = !skipMinifyForTests
+            isShrinkResources = !skipMinifyForTests
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

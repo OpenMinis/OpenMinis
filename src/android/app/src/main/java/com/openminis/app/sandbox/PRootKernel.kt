@@ -761,7 +761,7 @@ object PRootKernel {
         val env = SandboxHttpProxy.envBlock() ?: systemProxyEnv(context)
         customEnvironment.putAll(env)
         val hasProxy = env["http_proxy"].orEmpty().isNotEmpty()
-        Log.i(TAG, "Updated proxy — ${if (hasProxy) "active=${env["http_proxy"]}" else "cleared"}")
+        Log.i(TAG, "Updated proxy — ${if (hasProxy) "active" else "cleared"}")
         return env
     }
 

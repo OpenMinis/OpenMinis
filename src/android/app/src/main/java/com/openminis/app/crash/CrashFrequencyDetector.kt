@@ -36,7 +36,7 @@ import java.util.zip.ZipOutputStream
  * next foreground Activity gets a one-shot AlertDialog offering to share
  * the logs via ACTION_SEND_MULTIPLE.
  *
- * Self-contained on purpose: zero Minis-internal dependencies (no
+ * Self-contained on purpose: zero app-state dependencies (no
  * AppLogger / ChatViewModel / ProviderRepository etc), uses
  * `android.util.Log` directly, every entry point wrapped in try/catch.
  * Runs early enough that a partial-init / pre-DI launch can't break it.
@@ -839,12 +839,13 @@ object CrashFrequencyDetector {
                     put(MediaStore.Downloads.MIME_TYPE, "application/zip")
                     put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
                 }
-                val target = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("MediaStore insert returned null")
-                resolver.openOutputStream(target).use { out ->
-                    requireNotNull(out) { "MediaStore openOutputStream returned null" }
-                    FileInputStream(zip).use { input -> input.copyTo(out) }
-                }
+                val result = com.openminis.app.io.VerifiedCopy.copyFileToMediaStore(
+                    resolver,
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    values,
+                    zip,
+                )
+                if (!result.ok) throw IllegalStateException("zip verify failed: ${result.reason}")
                 "Downloads/${zip.name}"
             } else {
                 @Suppress("DEPRECATION")
@@ -853,9 +854,8 @@ object CrashFrequencyDetector {
                 )
                 downloads.mkdirs()
                 val dest = File(downloads, zip.name)
-                FileInputStream(zip).use { input ->
-                    FileOutputStream(dest).use { out -> input.copyTo(out) }
-                }
+                val result = com.openminis.app.io.VerifiedCopy.copyFileToFile(zip, dest)
+                if (!result.ok) throw IllegalStateException("zip verify failed: ${result.reason}")
                 dest.absolutePath
             }
             Toast.makeText(

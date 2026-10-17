@@ -263,6 +263,31 @@ class AnthropicProviderTest {
     }
 
     @Test
+    fun `streamMessage joins a multi-line data event`() = runBlocking {
+        // A proxy may fold one JSON event across several `data:` lines. SSE
+        // says those lines are one payload joined by "\n"; parsing them
+        // independently used to drop the event.
+        val sseBody = buildString {
+            appendLine("event: content_block_delta")
+            appendLine("data: {\"type\":\"content_block_delta\",\"delta\":")
+            appendLine("data: {\"type\":\"text_delta\",\"text\":\"joined\"}}")
+            appendLine()
+            appendLine("data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}")
+            appendLine()
+        }
+        server.enqueue(MockResponse().setBody(sseBody).setHeader("Content-Type", "text/event-stream"))
+
+        val chunks = provider.streamMessage(
+            listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024,
+        ).toList()
+
+        val texts = chunks.filterIsInstance<LLMStreamChunk.Text>()
+        assertEquals(1, texts.size)
+        assertEquals("joined", texts[0].text)
+        assertEquals("end_turn", chunks.filterIsInstance<LLMStreamChunk.Finished>().single().stopReason)
+    }
+
+    @Test
     fun `streamMessage ignores non-data lines`() = runBlocking {
         val sseBody = buildString {
             appendLine("event: message_start")

@@ -2,6 +2,7 @@ package com.openminis.app.sandbox
 
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.os.Process
 import android.util.Log
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -50,6 +51,12 @@ data class NativeOffloadResult(
 
 fun interface NativeOffloadHandler {
     fun handle(request: NativeOffloadRequest): NativeOffloadResult
+
+    /**
+     * CFG-1: handlers with a suspending confirmation gate override this so the
+     * watchdog can cancel the wait. Default preserves every existing handler.
+     */
+    suspend fun handleAsync(request: NativeOffloadRequest): NativeOffloadResult = handle(request)
 }
 
 object NativeOffloadServer {
@@ -252,6 +259,20 @@ object NativeOffloadServer {
     }
 
     private fun handleClient(client: LocalSocket) {
+        // SEC-1: the abstract socket has no filesystem permissions and is
+        // reachable by any process that can connect to the namespace. The
+        // proot guest runs as this app's UID, so peer credentials are the
+        // boundary: reject every other UID before reading the request.
+        val peerUid = try {
+            client.peerCredentials.uid
+        } catch (t: Throwable) {
+            Log.w(TAG, "peer credentials unavailable — refusing client: ${t.message}")
+            return
+        }
+        if (peerUid != Process.myUid()) {
+            Log.w(TAG, "rejected native_offload client uid=$peerUid (expected ${Process.myUid()})")
+            return
+        }
         val input = DataInputStream(client.inputStream)
         val output = DataOutputStream(client.outputStream)
 
@@ -283,7 +304,9 @@ object NativeOffloadServer {
         val cwd = input.readLEString()
 
         val name = argv.firstOrNull().orEmpty().substringAfterLast('/')
-        Log.d(TAG, "recv pid=$pid name='$name' argc=$argc argv=$argv cwd=$cwd envc=$envc")
+        // S-14: argv may carry credentials (`curl -H Authorization: …`).
+        // Name + count are enough to diagnose routing; never the full vector.
+        Log.d(TAG, "recv pid=$pid name='$name' argc=$argc cwdHash=${cwd.hashCode()} envc=$envc")
 
         val t0 = System.nanoTime()
         val handler = handlers[name]
@@ -417,10 +440,21 @@ object NativeOffloadServer {
         handler: NativeOffloadHandler,
         request: NativeOffloadRequest,
     ): NativeOffloadResult {
+        val timeoutMs = handlerDeadlineMs(name, request.argv)
         val slot = ArrayBlockingQueue<NativeOffloadResult>(1)
         thread(name = "native-offload-handler", isDaemon = true) {
             val result = try {
-                handler.handle(request)
+                // The coroutine deadline is what lets a suspending confirmation
+                // gate observe cancellation instead of sitting in runBlocking.
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeout(timeoutMs) {
+                        handler.handleAsync(request)
+                    }
+                }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                handlerTimeoutResult(name, timeoutMs, request)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                handlerTimeoutResult(name, timeoutMs, request)
             } catch (e: Exception) {
                 Log.w(TAG, "handler '$name' threw: ${e.message}", e)
                 NativeOffloadResult(exitCode = 1, output = "native_offload: ${e.message}\n")
@@ -432,14 +466,21 @@ object NativeOffloadServer {
             }
             slot.offer(result)
         }
-        val timeoutMs = handlerDeadlineMs(name, request.argv)
-        val result = slot.poll(timeoutMs, TimeUnit.MILLISECONDS)
-        if (result != null) return result
+        // Grace on top of the coroutine deadline: a handler that ignores
+        // cancellation (blocking IO) still must not hold the connection.
+        return slot.poll(timeoutMs + 2_000L, TimeUnit.MILLISECONDS)
+            ?: handlerTimeoutResult(name, timeoutMs, request)
+    }
 
+    private fun handlerTimeoutResult(
+        name: String,
+        timeoutMs: Long,
+        request: NativeOffloadRequest,
+    ): NativeOffloadResult {
         Log.w(
             TAG,
             "handler '$name' exceeded ${timeoutMs}ms — replying on its behalf " +
-                "(argv=${request.argv}, session=${request.sessionId})",
+                "(argc=${request.argv.size}, session=${request.sessionId})",
         )
         return NativeOffloadResult(
             exitCode = 124,

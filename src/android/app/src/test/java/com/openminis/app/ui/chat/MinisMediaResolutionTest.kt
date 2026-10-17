@@ -85,7 +85,10 @@ class MinisMediaResolutionTest {
     fun `fallback finds the own-session file by basename`() {
         sessionFile("sess-a", "chart.png")
         val hit = resolveMdMediaFallback(tmp.root, "attachments/chart.png", "sess-a")
-        assertTrue(hit?.absolutePath?.endsWith("minis-sessions/sess-a/attachments/chart.png") == true)
+        // invariantSeparatorsPath keeps the assertion portable to Windows
+        // (absolutePath uses backslashes there, which is not what this test is
+        // about).
+        assertTrue(hit?.invariantSeparatorsPath?.endsWith("minis-sessions/sess-a/attachments/chart.png") == true)
     }
 
     @Test
@@ -117,7 +120,7 @@ class MinisMediaResolutionTest {
         val dir = File(tmp.root, "minis-global/skills").apply { mkdirs() }
         File(dir, "icon.png").writeText("img")
         val hit = resolveMdMediaFallback(tmp.root, "skills/icon.png", "sess-a")
-        assertTrue(hit?.absolutePath?.endsWith("minis-global/skills/icon.png") == true)
+        assertTrue(hit?.invariantSeparatorsPath?.endsWith("minis-global/skills/icon.png") == true)
     }
 
     // ─── Display names ──────────────────────────────────────────────────

@@ -139,13 +139,22 @@ internal fun MarkdownBlockBody(
     // composition of the live block becomes a pure cache hit.
     val mdColors = currentMdColors()
     var blocks by remember { mutableStateOf<List<MdBlock>>(emptyList()) }
+    // Previous parse result for this fragment. Kept in composition (not in the
+    // process-wide LRU) so the incremental splice is exact even when the same
+    // text appears in another message.
+    var parseSnapshot by remember { mutableStateOf<BlockParseSnapshot?>(null) }
     LaunchedEffect(displayContent) {
         // [T-android-stream-render-profile] Time the whole off-main tick
         // (block split + prewarm/incremental inline+math) — this is what the
         // incremental optimization shrinks.
         val parseStartNs = System.nanoTime()
+        val previous = parseSnapshot
         val computed = withContext(Dispatchers.Default) {
-            parseMarkdownBlocks(displayContent).also {
+            // Block-level incremental parse: reuse every frozen block and
+            // re-parse only the growing tail. Before this the live fragment
+            // ran the full block classifier (ICU regex per line) every tick.
+            parseMarkdownBlocksIncremental(previous, displayContent).also { snapshot ->
+                val parsed = snapshot.blocks
                 // [T-android-streaming-incremental-inline] Prewarm the frozen
                 // blocks (all but the last) normally. The last block is the
                 // growing live tail: when it's a Paragraph, warm it
@@ -154,11 +163,11 @@ internal fun MarkdownBlockBody(
                 // re-scanning the whole accumulated paragraph; when it's a
                 // table/list/etc. (which RenderBlock parses non-incrementally)
                 // fall back to the normal per-block prewarm for it.
-                if (it.size > 1) MarkdownParseCaches.prewarm(it.dropLast(1), mdColors)
-                if (it.lastOrNull() is MdBlock.Paragraph) {
-                    MarkdownParseCaches.prewarmLiveTail(it, mdColors)
+                if (parsed.size > 1) MarkdownParseCaches.prewarm(parsed.dropLast(1), mdColors)
+                if (parsed.lastOrNull() is MdBlock.Paragraph) {
+                    MarkdownParseCaches.prewarmLiveTail(parsed, mdColors)
                 } else {
-                    it.lastOrNull()?.let { last -> MarkdownParseCaches.prewarm(listOf(last), mdColors) }
+                    parsed.lastOrNull()?.let { last -> MarkdownParseCaches.prewarm(listOf(last), mdColors) }
                 }
                 // [T-android-review-p1-fixes] F2(a): deposit the live parse
                 // into the blocks cache so the freeze edge (isStreaming →
@@ -169,13 +178,15 @@ internal fun MarkdownBlockBody(
                 // synchronously anyway, and skipping them keeps live ticks
                 // from churning the LRU.
                 if (displayContent.length > COLD_PARSE_OFFMAIN_THRESHOLD_CHARS) {
-                    MarkdownParseCaches.putBlocks(displayContent, it)
+                    MarkdownParseCaches.putBlocks(displayContent, parsed)
                 }
             }
         }
         coroutineContext.ensureActive()
+        BlockParseMetrics.record(displayContent.length, computed.reparsedChars)
         StreamRenderProfiler.recordParse(displayContent.length, (System.nanoTime() - parseStartNs) / 1_000_000.0)
-        blocks = computed
+        parseSnapshot = computed
+        blocks = computed.blocks
     }
     // [T-android-stream-grow-anim] No height/scroll animation here. We tried
     // animateContentSize to ease the bottom-pinned item's exposed height into a

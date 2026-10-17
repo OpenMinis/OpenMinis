@@ -25,6 +25,7 @@ import com.openminis.app.provider.VendorMedia
 import com.openminis.app.provider.VendorMediaKind
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.ssePayloads
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -520,23 +521,14 @@ internal fun OpenAIProvider.rawStreamMessage(
 
         try {
             send(LLMStreamChunk.Started)
-            var line: String?
 
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // Tolerate `data:` with or without the optional space — the
-                // HTML5 SSE spec only treats one leading space as ignorable,
-                // and some OpenAI-compatible servers (e.g. China Telecom's
-                // eaichat.ctyun.cn deepseek-v4-oc endpoint) emit `data:{...}`
-                // with no space. Strict `data: ` matching dropped every
-                // chunk on those providers, surfacing as empty-stream errors.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
+            // Shared SSE assembler: an event ends at a blank line and may
+            // carry multiple `data:` lines. It also tolerates `data:{...}`
+            // with no space and preserves `[DONE]` verbatim.
+            for (payload in ssePayloads(reader)) {
                 if (payload == "[DONE]") {
                     // [T-android-think-prefix-stream] Flush whatever the parser
                     // still holds (a cross-chunk tag tail, or an unterminated

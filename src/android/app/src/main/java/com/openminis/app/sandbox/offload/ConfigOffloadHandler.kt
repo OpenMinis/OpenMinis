@@ -1,6 +1,7 @@
 package com.openminis.app.sandbox.offload
 
 import com.openminis.app.config.ConfigBridge
+import com.openminis.app.config.writeFieldsSuspending
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
@@ -19,10 +20,10 @@ import java.io.File
  * `--actor`, `--session` follow exact iOS semantics.
  *
  * Collection-level writes:
- *   set models.append '{"provider_id":"â€¦","model_id":"â€¦", â€¦}'
- *     â†’ ModelsCollection.add(); creates a custom (is_custom=true) entry.
+ *   set models.append '{"provider_id":"â€?,"model_id":"â€?, â€¦}'
+ *     â†?ModelsCollection.add(); creates a custom (is_custom=true) entry.
  *   set models.remove '"<entry-id>"'
- *     â†’ ModelsCollection.remove(); rejected for non-custom entries.
+ *     â†?ModelsCollection.remove(); rejected for non-custom entries.
  *
  * Future: per-entry hide via the existing
  *   set models.<entryId>.isHidden true
@@ -69,17 +70,17 @@ class ConfigOffloadHandler : NativeOffloadHandler {
                 "  set <path> --file <f>        Read value-json from file <f> instead of an\n" +
                 "                               argv positional. Use this when the value\n" +
                 "                               contains quotes / backslashes / newlines /\n" +
-                "                               $ / backticks (e.g. soul.body) â€” it bypasses\n" +
+                "                               $ / backticks (e.g. soul.body) â€?it bypasses\n" +
                 "                               shell escaping. Write the JSON to a temp file\n" +
                 "                               first, then: set <path> --file /tmp/v.json\n" +
                 "  set <path>.append <elem>     Append one element to an array-typed field,\n" +
-                "                               or â€” when <path> is a collection (e.g.\n" +
-                "                               `models`) â€” add a new custom child. Payload\n" +
+                "                               or â€?when <path> is a collection (e.g.\n" +
+                "                               `models`) â€?add a new custom child. Payload\n" +
                 "                               for collections is a JSON object, e.g.\n" +
                 "                                 set models.append '{\"provider_id\":\"<uuid>\",\n" +
                 "                                   \"model_id\":\"gpt-foo\",\"display_name\":\"GPT Foo\"}'\n" +
                 "  set <path>.remove <elem>     Drop every occurrence of <elem> from an\n" +
-                "                               array-typed field, or â€” for collections â€”\n" +
+                "                               array-typed field, or â€?for collections â€”\n" +
                 "                               remove a custom child by its entry id, e.g.\n" +
                 "                                 set models.remove '\"<entry-uuid>\"'\n" +
                 "                               Built-in / API-reported entries cannot be\n" +
@@ -114,11 +115,22 @@ class ConfigOffloadHandler : NativeOffloadHandler {
                 "  126  permission denied (master switch off, or hidden field)\n" +
                 "\n" +
                 "Every write requires user confirmation in-app. The response includes\n" +
-                "a `user_message` field â€” relay it to the user so they know how to\n" +
-                "review or revert via Logs â†’ Config Changes.\n"
+                "a `user_message` field â€?relay it to the user so they know how to\n" +
+                "review or revert via Logs â†?Config Changes.\n"
     }
 
-    override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
+    override fun handle(request: NativeOffloadRequest): NativeOffloadResult =
+        kotlinx.coroutines.runBlocking { handleInternal(request) }
+
+    /**
+     * CFG-1: the confirmation gate is suspendable; running it on the offload
+     * worker's coroutine lets the 20 s handler watchdog cancel the wait instead
+     * of leaving a thread parked in runBlocking for up to 120 s.
+     */
+    override suspend fun handleAsync(request: NativeOffloadRequest): NativeOffloadResult =
+        handleInternal(request)
+
+    private suspend fun handleInternal(request: NativeOffloadRequest): NativeOffloadResult {
         // argv[0] is the program name; subcommand and options follow.
         val args = OffloadArgs(request.argv.drop(1))
         if (args.hasFlag("h", "help")) {
@@ -144,6 +156,8 @@ class ConfigOffloadHandler : NativeOffloadHandler {
                     appendHelp = true,
                 )
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Throwable) {
             AppLogger.warning(TAG, "uncaught: ${e.message}")
             errorResult(args, EXIT_INVALID_ARGS, "INTERNAL", e.message ?: "unknown error")
@@ -201,13 +215,13 @@ class ConfigOffloadHandler : NativeOffloadHandler {
         return envelopeResult(args, envelope)
     }
 
-    private fun cmdSet(args: OffloadArgs): NativeOffloadResult {
+    private suspend fun cmdSet(args: OffloadArgs): NativeOffloadResult {
         val path = args.positional.getOrNull(1)
         // [T-android-minis-config-set-shell-escape] (issue #36) `--file <path>`
         // reads the value-json from a file instead of an argv positional. The
         // value normally rides through the guest shell as a positional arg, so
         // busybox ash mangles embedded double-quotes / backslashes / newlines /
-        // $ / backticks before this handler sees them â€” breaking large free-text
+        // $ / backticks before this handler sees them â€?breaking large free-text
         // writes like soul.body. Reading from a file bypasses shell escaping
         // entirely. Mirrors iOS 5dcff277.
         val fileArg = args.get("file")
@@ -233,12 +247,12 @@ class ConfigOffloadHandler : NativeOffloadHandler {
             put("path", path)
             put("value_json", valueJSON)
         })
-        val envelope = ConfigBridge.writeFields(items, caption, actor, sessionId)
+        val envelope = writeFieldsSuspending(items, caption, actor, sessionId)
         return envelopeResult(args, envelope)
     }
 
     /**
-     * `add <topic> <value-json>` â€” create a new child in an addable collection
+     * `add <topic> <value-json>` â€?create a new child in an addable collection
      * (e.g. `add providers â€¦`, `add groups â€¦`). Sugar over `set
      * <topic>.append <value-json>`: it reuses the exact same collection-add
      * path in the bridge, so the confirm dialog, audit row, redaction, exit
@@ -246,7 +260,7 @@ class ConfigOffloadHandler : NativeOffloadHandler {
      * applied[0].new) are all identical. Mirrors iOS `cmd_add`. (The bridge's
      * collection-add suffix is `.append` on Android.)
      */
-    private fun cmdAdd(args: OffloadArgs): NativeOffloadResult {
+    private suspend fun cmdAdd(args: OffloadArgs): NativeOffloadResult {
         val topic = args.positional.getOrNull(1)
         val fileArg = args.get("file")
         val valueJSON = if (fileArg != null) {
@@ -272,12 +286,12 @@ class ConfigOffloadHandler : NativeOffloadHandler {
             put("path", "$topic.append")
             put("value_json", valueJSON)
         })
-        val envelope = ConfigBridge.writeFields(items, caption, actor, sessionId)
+        val envelope = writeFieldsSuspending(items, caption, actor, sessionId)
         return envelopeResult(args, envelope)
     }
 
-    private fun cmdSetBatch(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
-        // Batch JSON is passed positionally on Android â€” there is no
+    private suspend fun cmdSetBatch(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
+        // Batch JSON is passed positionally on Android â€?there is no
         // stdin pipe on the native_offload protocol. Support either:
         //   set-batch <json-array>      (shell can pass literal)
         //   set-batch --batch <json>    (env-friendly form)
@@ -304,7 +318,7 @@ class ConfigOffloadHandler : NativeOffloadHandler {
         val caption = args.get("caption")
         val actor = args.get("actor") ?: "agent"
         val sessionId = args.get("session")
-        val envelope = ConfigBridge.writeFields(parsed, caption, actor, sessionId)
+        val envelope = writeFieldsSuspending(parsed, caption, actor, sessionId)
         return envelopeResult(args, envelope)
     }
 
@@ -324,14 +338,14 @@ class ConfigOffloadHandler : NativeOffloadHandler {
         return envelopeResult(args, envelope)
     }
 
-    private fun cmdAuditRevert(args: OffloadArgs): NativeOffloadResult {
+    private suspend fun cmdAuditRevert(args: OffloadArgs): NativeOffloadResult {
         val id = args.positional.getOrNull(1) ?: return errorResult(
             args, EXIT_INVALID_ARGS, "INVALID_ARGS",
             "audit-revert <audit-id> requires an id."
         )
         val actor = args.get("actor") ?: "agent-revert"
         val sessionId = args.get("session")
-        val envelope = ConfigBridge.auditRevert(id, actor, sessionId, skipConfirmation = false)
+        val envelope = ConfigBridge.auditRevertSuspending(id, actor, sessionId, skipConfirmation = false)
         return envelopeResult(args, envelope)
     }
 
@@ -377,8 +391,7 @@ class ConfigOffloadHandler : NativeOffloadHandler {
     /**
      * [T-android-minis-config-set-shell-escape] Read a file's text by its
      * guest (Linux) path, resolving it to the host path through the rootfs /
-     * bind mounts. Same helper shape as ModelUseOffloadHandler.readLinuxPath â€”
-     * used by `set --file` so the value-json never transits the shell. Returns
+     * bind mounts. Same helper shape as ModelUseOffloadHandler.readLinuxPath â€?     * used by `set --file` so the value-json never transits the shell. Returns
      * null when the path can't be resolved, doesn't exist, or read fails.
      */
     private fun readLinuxPath(linuxPath: String): String? {

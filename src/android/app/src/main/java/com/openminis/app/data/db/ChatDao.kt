@@ -198,15 +198,6 @@ interface ChatDao {
     @Query("DELETE FROM sessions WHERE id = :id")
     suspend fun deleteSession(id: String)
 
-    // Full-text search across session titles and message content
-    @Query("""
-        SELECT DISTINCT s.* FROM sessions s
-        LEFT JOIN messages m ON m.session_id = s.id
-        WHERE s.title LIKE :pattern OR m.parts_json LIKE :pattern
-        ORDER BY s.updated_at DESC
-    """)
-    suspend fun searchSessions(pattern: String): List<ChatSessionEntity>
-
     // ─── Folders (session groups) ──────────────────────────────────────────
     // [T-android-session-grouping] "Folder" in code, "Group" in the UI.
 
@@ -874,24 +865,6 @@ interface ChatDao {
         headChars: Int,
         limit: Int,
     ): List<MessageHeadRow>
-
-    @Query("""
-        SELECT id, role, created_at,
-               substr(parts_json,
-                      max(1, instr(lower(parts_json), lower(:query)) - :radius),
-                      :windowChars) AS head_text
-        FROM messages
-        WHERE session_id = :sessionId
-          AND instr(lower(parts_json), lower(:query)) > 0
-        ORDER BY sort_order ASC, created_at ASC
-        LIMIT 1
-    """)
-    suspend fun findFirstMessageSnippet(
-        sessionId: String,
-        query: String,
-        radius: Int,
-        windowChars: Int,
-    ): MessageHeadRow?
 
     /**
      * [T-android-sessions-cli-messages-daterange] Count under the SAME range as

@@ -35,11 +35,11 @@ class ChatRepository(
     // [T-msg-version-archive] Optional so JVM tests that never truncate keep
     // constructing with the old three-arg shape.
     private val versionDao: MessageVersionDao? = null,
-    // [T-archive-truncate-txn] Database handle so archive+truncate can run
-    // in one Room transaction; null keeps the JVM-test old shapes working
-    // (they then get the sequential fallback, still fail-closed).
+    // [T-archive-truncate-txn] DB handle for the archive+truncate transaction; null → sequential fallback.
     private val db: AppDatabase? = null,
 ) {
+    internal fun searchDao(): com.openminis.app.data.db.ChatSearchDao = checkNotNull(db).chatSearchDao()
+
     fun observeSessions(): Flow<List<ChatSessionEntity>> = dao.observeSessions()
 
     suspend fun createSession(
@@ -701,7 +701,7 @@ class ChatRepository(
     }
 
     suspend fun searchSessions(query: String): List<ChatSessionEntity> =
-        dao.searchSessions("%$query%")
+        searchDao().searchSessions("%$query%")
 
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>> =
         dao.observeMessages(sessionId)

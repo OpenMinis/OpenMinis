@@ -155,15 +155,14 @@ private fun fileTransferPull(deps: McpToolDeps, arguments: JSONObject): McpServe
         )
     }
     return runCatching {
-        val bytes = file.readBytes()
-        val sha = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(bytes)
-            .joinToString("") { "%02x".format(it) }
-        // Structured payload so the client can machine-parse instead of
-        // scraping text: a header line then the base64 block.
-        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        // Stream + hash in chunks; no full-file byte[] and no one-shot base64.
+        val encoded = FileTransferCodec.encode(file)
         McpServerCore.CallResult(
-            JSONArray().put(McpToolShared.text("[path: $normalized | size: ${bytes.size} | sha256: $sha]\n$b64")),
+            JSONArray().put(
+                McpToolShared.text(
+                    "[path: $normalized | size: ${encoded.size} | sha256: ${encoded.sha256}]\n${encoded.base64}"
+                )
+            ),
         )
     }.getOrElse {
         McpToolShared.error("Error reading file: ${it.message}")

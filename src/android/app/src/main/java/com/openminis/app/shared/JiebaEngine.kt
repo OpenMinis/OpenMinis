@@ -108,18 +108,33 @@ internal class JiebaEngine(context: Context) {
             // the dictionary *content* is unchanged, and already-extracted
             // copies in filesDir remain valid (allPresent short-circuits
             // before assets are touched).
-            copyAsset("jieba/$name.gz", File(targetDir, name))
+            copyAsset("jieba/$name", File(targetDir, name))
         }
         prefs.edit().putInt(KEY_DICT_VERSION, DICT_VERSION).apply()
         return targetDir
     }
 
-    /** Gunzip one Asset to [dest] (Assets can't be read by path). */
-    private fun copyAsset(assetPath: String, dest: File) {
-        appContext.assets.open(assetPath).use { input ->
-            java.util.zip.GZIPInputStream(input).use { gz ->
+    /**
+     * Copy one dictionary Asset to [dest]. The APK packaging path may either
+     * keep the committed `.gz` asset or unpack it to the plain `.utf8` name
+     * (observed with AGP 8.7's asset merge), so accept both: prefer `.gz`,
+     * fall back to the already-plain asset. Getting this wrong made Jieba
+     * silently fall back to the empty system segmenter in release builds.
+     */
+    private fun copyAsset(assetBase: String, dest: File) {
+        val gz = runCatching { appContext.assets.open("$assetBase.gz") }.getOrNull()
+        if (gz != null) {
+            gz.use { input ->
+                java.util.zip.GZIPInputStream(input).use { gzIn ->
+                    dest.outputStream().use { output ->
+                        gzIn.copyTo(output, bufferSize = 64 * 1024)
+                    }
+                }
+            }
+        } else {
+            appContext.assets.open(assetBase).use { input ->
                 dest.outputStream().use { output ->
-                    gz.copyTo(output, bufferSize = 64 * 1024)
+                    input.copyTo(output, bufferSize = 64 * 1024)
                 }
             }
         }

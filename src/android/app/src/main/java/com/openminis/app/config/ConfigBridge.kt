@@ -262,35 +262,9 @@ object ConfigBridge {
     // -- write (single or batch) --
 
     /**
-     * Write one or more fields. Each item is a JSON object
-     * `{ "path": ..., "value_json": ... }`. Returns the standard
-     * envelope including `applied[]`, `audit_ids[]`, `audit_url`,
-     * and `user_message`.
-     */
-    fun writeFields(
-        items: JSONArray,
-        caption: String?,
-        actorRaw: String,
-        sessionId: String?,
-    ): JSONObject {
-        if (!MinisConfigPermissionStore.isEnabled) return disabledErrorEnvelope()
-        // Bridge runs on the offload worker thread; the gate itself
-        // does its own context switch to Main for the dialog.
-        return runBlocking {
-            performWriteBatch(
-                items = items,
-                caption = caption,
-                actorRaw = actorRaw,
-                sessionId = sessionId,
-                skipConfirmation = false,
-            )
-        }
-    }
-
-    /**
-     * Internal write path — used by both [writeFields] and the audit-
-     * revert flow. `skipConfirmation` is for user-initiated reverts
-     * from the in-app Logs UI: the user already confirmed via a local
+     * Internal write path — used by both the offload handler ([writeFieldsSuspending])
+     * and the audit-revert flow. `skipConfirmation` is for user-initiated
+     * reverts from the in-app Logs UI: the user already confirmed via a local
      * dialog, so the gate would be redundant.
      */
     suspend fun performWriteBatch(
@@ -859,7 +833,8 @@ object ConfigBridge {
      * and stacking a second dialog over the Logs sheet would queue
      * silently behind it.
      */
-    fun auditRevert(
+    /** Suspending variant for the offload handler — see [writeFieldsSuspending]. */
+    suspend fun auditRevertSuspending(
         id: String,
         actorRaw: String,
         sessionId: String?,
@@ -937,15 +912,13 @@ object ConfigBridge {
                 put("value_json", entry.oldValueJSON)
             })
         }
-        val res = runBlocking {
-            performWriteBatch(
-                items = items,
-                caption = "minis-config audit revert ${entry.id.take(8)}",
-                actorRaw = actorRaw,
-                sessionId = sessionId,
-                skipConfirmation = skipConfirmation,
-            )
-        }
+        val res = performWriteBatch(
+            items = items,
+            caption = "minis-config audit revert ${entry.id.take(8)}",
+            actorRaw = actorRaw,
+            sessionId = sessionId,
+            skipConfirmation = skipConfirmation,
+        )
         if (res.optBoolean("ok", false)) {
             ConfigAuditLog.get().markReverted(entry.id)
         }

@@ -61,12 +61,32 @@ class MCPOAuthController(private val context: Context) {
         if (!oauth.isConfigured) {
             return Result.Failed("OAuth is not fully configured (client id + endpoints required).")
         }
-        val redirect = redirectUri(oauth)
+        // MCPOAUTH-1: the fixed 54546 collides with a previous/parallel
+        // listener and the login then waits out the 5-minute timeout. When the
+        // user has not pinned a redirect URI, pick a free loopback port and
+        // build the redirect from it (RFC 8252 allows any loopback port for
+        // native clients). A user-configured redirect URI is honored verbatim
+        // because the IdP may have it registered.
+        val configuredRedirect = oauth.redirectUri?.trim()?.takeIf { it.isNotEmpty() }
+        val redirect: String
+        val port: Int
+        if (configuredRedirect != null) {
+            redirect = configuredRedirect
+            val configuredPort = runCatching { URI(redirect).port }.getOrDefault(-1)
+            if (configuredPort <= 0) {
+                return Result.Failed(
+                    "Redirect URI must include an explicit loopback port, e.g. $DEFAULT_REDIRECT_URI.",
+                )
+            }
+            port = configuredPort
+        } else {
+            port = findFreeLoopbackPort(LOOPBACK_PORT)
+            redirect = "http://localhost:$port/callback"
+        }
         val redirectHost = runCatching { URI(redirect).host?.lowercase() }.getOrNull()
         if (redirectHost != "localhost" && redirectHost != "127.0.0.1") {
             return Result.Failed("Redirect URI must be a loopback address, e.g. $DEFAULT_REDIRECT_URI.")
         }
-        val port = runCatching { URI(redirect).port.takeIf { it > 0 } }.getOrNull() ?: LOOPBACK_PORT
         val resource = McpPkce.canonicalResourceUri(serverUrl)
         val pkce = McpPkce.newPkce()
         val authUrl = McpPkce.buildAuthorizationUrl(
@@ -220,11 +240,26 @@ class MCPOAuthController(private val context: Context) {
         }
     }
 
-    private fun redirectUri(oauth: MCPOAuthConfig): String =
-        oauth.redirectUri?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_REDIRECT_URI
-
     companion object {
         private const val TAG = "MCPOAuthController"
+
+        /**
+         * First bindable loopback port at/after [preferred]. Binding and
+         * releasing is inherently racy; [OAuthCallbackServer] still handles a
+         * late BindException, but this avoids the common "previous listener
+         * still holds 54546" failure.
+         */
+        internal fun findFreeLoopbackPort(preferred: Int = LOOPBACK_PORT, span: Int = 20): Int {
+            val loopback = java.net.InetAddress.getByName("127.0.0.1")
+            for (p in preferred until preferred + span) {
+                try {
+                    java.net.ServerSocket(p, 1, loopback).use { return p }
+                } catch (_: java.io.IOException) {
+                    // busy — try the next one
+                }
+            }
+            return java.net.ServerSocket(0, 1, loopback).use { it.localPort }
+        }
 
         /**
          * Assemble the form-urlencoded token-exchange body for the

@@ -40,9 +40,13 @@ import java.util.UUID
 class VoiceCorrectionDb private constructor(private val dbFile: File) {
 
     private var db: SQLiteDatabase? = null
+    private var writesSincePrune = 0
 
     init {
         db = openOrRebuild(dbFile)
+        // Retention before first use: a long-lived install's event log is
+        // regenerable learning signal, not an archive.
+        pruneEvents()
     }
 
     // ---- Confusion dictionary ----
@@ -370,7 +374,39 @@ class VoiceCorrectionDb private constructor(private val dbFile: File) {
                 else putNull("source_summary")
             }
             d.insert("correction_events", null, values)
+            if (++writesSincePrune >= PRUNE_EVERY) {
+                writesSincePrune = 0
+                pruneEvents()
+            }
         }.onFailure { Log.e(TAG, "recordCorrectionEvent failed", it) }
+    }
+
+    /**
+     * Bounded retention for [correction_events]. The vocabulary/dictionary
+     * tables are bounded by their own learning rules and stay untouched.
+     *
+     * @return rows deleted, for tests and metrics.
+     */
+    internal fun pruneEvents(
+        maxEvents: Int = MAX_EVENTS,
+        maxAgeDays: Int = MAX_AGE_DAYS,
+        nowSec: Double = System.currentTimeMillis() / 1000.0,
+    ): Int {
+        val d = db ?: return 0
+        return runCatching {
+            val cutoff = nowSec - maxAgeDays * 86_400.0
+            var deleted = d.delete(
+                "correction_events",
+                "created_at < ?",
+                arrayOf(cutoff.toString()),
+            )
+            deleted += d.delete(
+                "correction_events",
+                "rowid NOT IN (SELECT rowid FROM correction_events ORDER BY created_at DESC LIMIT ?)",
+                arrayOf(maxEvents.toString()),
+            )
+            deleted
+        }.onFailure { Log.e(TAG, "pruneEvents failed", it) }.getOrDefault(0)
     }
 
     /** Row counts per table, for the settings screen and debug metrics. */
@@ -582,6 +618,11 @@ class VoiceCorrectionDb private constructor(private val dbFile: File) {
     companion object {
         private const val TAG = "VoiceCorrectionDB"
 
+        /** Retention for the diagnostic event log (regenerable signal). */
+        private const val MAX_EVENTS = 2_000
+        private const val MAX_AGE_DAYS = 90
+        private const val PRUNE_EVERY = 64
+
         /**
          * Bumped ONLY for versioned structural migrations. Additive columns go
          * through [ensureIdempotentColumns] and do NOT require a bump.
@@ -615,6 +656,10 @@ class VoiceCorrectionDb private constructor(private val dbFile: File) {
                 }.getOrNull()?.also { instance = it }
             }
         }
+
+        /** Fresh store on an explicit file — tests must not share the singleton. */
+        internal fun openForTest(file: File): VoiceCorrectionDb? =
+            VoiceCorrectionDb(file).takeIf { it.db != null }
 
         /**
          * `frequency / (frequency + negative * 2)` — a rejection costs double a

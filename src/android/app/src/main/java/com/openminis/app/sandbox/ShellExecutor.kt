@@ -159,7 +159,8 @@ object ShellExecutor {
     ): ShellResult = withContext(Dispatchers.IO) {
         val prootCommand = PRootKernel.buildProotCommand(command)
 
-        Log.d(TAG, "Executing: $command")
+        // S-14: never log the command line itself (tokens/passwords/URLs).
+        Log.d(TAG, "Executing ${com.openminis.app.util.LogRedaction.command(command)}")
 
         val startTime = System.currentTimeMillis()
 
@@ -289,7 +290,7 @@ object ShellExecutor {
                     }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
-            Log.w(TAG, "Command timed out after ${timeout}ms: $command")
+            Log.w(TAG, "Command timed out after ${timeout}ms: ${com.openminis.app.util.LogRedaction.command(command)}")
             SandboxWorkload.release(started, kill = true, reason = "oneshot-timeout")
             output.appendLine("\n[Command timed out after ${timeout / 1000}s; guest process group killed]")
             exitCode = 124 // Standard timeout exit code
@@ -301,7 +302,7 @@ object ShellExecutor {
             }
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Command failed: $command", e)
+            Log.e(TAG, "Command failed: ${com.openminis.app.util.LogRedaction.command(command)}", e)
             SandboxWorkload.release(started, kill = true, reason = "oneshot-error")
             output.appendLine("\n[Error: ${e.message}]")
             exitCode = -1

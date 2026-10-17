@@ -39,7 +39,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,6 +72,7 @@ fun MemoryManagementScreen(
     var files by remember { mutableStateOf<List<MemoryRepository.MemoryFileInfo>>(emptyList()) }
     var deleteFileName by remember { mutableStateOf<String?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     // [T-memory-global-toggle-settings-ui-android] Global default for
     // newly-created sessions. Stored separately from per-session
     // memoryEnabled (which lives in the sessions DB row) so toggling
@@ -79,7 +84,9 @@ fun MemoryManagementScreen(
     }
 
     LaunchedEffect(Unit) {
-        files = memoryRepository.listAllFiles()
+        // listAllFiles() reads every daily log for its preview; never do that
+        // on the main thread, even from a LaunchedEffect.
+        files = withContext(Dispatchers.IO) { memoryRepository.listAllFiles() }
     }
 
     SettingsScaffold(title = stringResource(R.string.memory_title), onBack = null) {
@@ -160,11 +167,17 @@ fun MemoryManagementScreen(
             text = { Text(stringResource(R.string.memory_delete_confirm_text)) },
             confirmButton = {
                 MinisTextButton(onClick = {
-                    deleteFileName?.let {
-                        memoryRepository.deleteFile(it)
-                        files = memoryRepository.listAllFiles()
-                    }
+                    val target = deleteFileName
                     deleteFileName = null
+                    if (target != null) {
+                        scope.launch {
+                            // deleteFile() + the refresh both touch disk.
+                            files = withContext(Dispatchers.IO) {
+                                memoryRepository.deleteFile(target)
+                                memoryRepository.listAllFiles()
+                            }
+                        }
+                    }
                 }) {
                     Text(stringResource(R.string.common_delete), color = MaterialTheme.colorScheme.error)
                 }

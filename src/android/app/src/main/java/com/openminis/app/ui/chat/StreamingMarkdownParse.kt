@@ -4,7 +4,7 @@ import com.openminis.app.text.BoundedText
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.ensureActive
 
-internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
+internal suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<MdBlock> {
     // Do not substring the whole document: LargeContentGuard expand and
     // file preview (up to 512 KB) must keep block structure. ICU stays
     // bounded by the per-line [BoundedText.MAX_ICU_INPUT_CHARS] skip below.
@@ -115,14 +115,23 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 val lang = trimmed.removePrefix("```").trim()
                 val codeLines = mutableListOf<String>()
                 val rawLines = mutableListOf(line)
+                var closed = false
                 i++
                 while (i < lines.size) {
                     rawLines.add(lines[i])
-                    if (lines[i].trimStart().startsWith("```")) { i++; break }
+                    if (lines[i].trimStart().startsWith("```")) { closed = true; i++; break }
                     codeLines.add(lines[i])
                     i++
                 }
-                blocks.addCodeChunks(rawLines.joinToString("\n"), lang, codeLines.joinToString("\n"))
+                // A stream that ends mid-fence must not hide the tail as if it
+                // were a complete snippet: carry the flag so the renderer can
+                // mark it and refuse to execute a truncated block.
+                blocks.addCodeChunks(
+                    rawLines.joinToString("\n"),
+                    lang,
+                    codeLines.joinToString("\n"),
+                    closed,
+                )
             }
 
             // Heading
@@ -177,7 +186,15 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                     innerLines.add(lines[i].trimStart().removePrefix(">").removePrefix(" "))
                     i++
                 }
-                val innerBlocks = parseMarkdownBlocks(innerLines.joinToString("\n"))
+                // Recurse one level per quote depth, but never without a
+                // bound: a hostile/streamed `>` sled used to reach
+                // StackOverflowError. At the cap, render the innermost content
+                // as plain paragraphs inside one final quote.
+                val innerBlocks = if (depth >= MAX_BLOCKQUOTE_DEPTH) {
+                    innerLines.filter { it.isNotBlank() }.map { MdBlock.Paragraph(it) }
+                } else {
+                    parseMarkdownBlocks(innerLines.joinToString("\n"), depth + 1)
+                }
                 blocks.add(MdBlock.BlockQuote(rawLines.joinToString("\n"), innerBlocks))
             }
 
@@ -279,12 +296,21 @@ internal suspend fun parseMarkdownBlocks(content: String): List<MdBlock> {
                 while (i < lines.size) {
                     val l = lines[i]
                     val t = l.trimStart()
-                    if (t.isEmpty() || t.startsWith("#") || t.startsWith("```") ||
-                        isBlockquoteLine(t) || t.matches(thematicBreakRegex) ||
-                        t.matches(bulletListItemRegex) || t.matches(numberedListItemRegex) ||
-                        t.matches(standaloneImageLineRegex) ||
-                        (t.contains('|') && i + 1 < lines.size &&
-                            lines[i + 1].trim().matches(tableSeparatorRegex))
+                    // Cheap first-char dispatch before the block-start
+                    // regexes: ordinary prose lines are the overwhelming
+                    // majority in a paragraph, and each `matches` call hands
+                    // the line to ICU. The table probe stays separate because
+                    // a pipe can appear anywhere in the line.
+                    //
+                    // `paraLines.isNotEmpty()` guarantees progress: a line
+                    // that looks like a block start but matched no earlier
+                    // branch (e.g. `#not-a-heading`) must be consumed here,
+                    // otherwise the outer loop never advances and the parser
+                    // spins forever.
+                    if (paraLines.isNotEmpty() &&
+                        (t.isEmpty() || isParagraphTerminator(t) ||
+                            (t.contains('|') && i + 1 < lines.size &&
+                                lines[i + 1].trim().matches(tableSeparatorRegex)))
                     ) break
                     paraLines.add(l)
                     i++
@@ -357,5 +383,29 @@ internal suspend fun appendContinuation(item: ListItem, contLines: List<String>)
         text = (listOf(item.text) + leading).joinToString("\n"),
         children = parsed.drop(idx),
     )
+}
+
+private const val MAX_BLOCKQUOTE_DEPTH = 16
+
+/**
+ * Superset of the per-line block-start checks the paragraph loop used to run
+ * on every line. Dispatch on the first character first so ordinary prose
+ * lines never reach an ICU-backed `Regex.matches`; the regex branches are the
+ * same ones the old unconditional chain used, so parse output is unchanged.
+ *
+ * Keep in lockstep with the top-level `when` in [parseMarkdownBlocks]: every
+ * branch that can terminate a paragraph must return true here.
+ */
+private fun isParagraphTerminator(t: String): Boolean {
+    if (t.isEmpty()) return true
+    return when (t[0]) {
+        '#' -> true
+        '`' -> t.startsWith("```")
+        '>' -> isBlockquoteLine(t)
+        '-', '*', '_', '+' -> t.matches(thematicBreakRegex) || t.matches(bulletListItemRegex)
+        '!' -> t.matches(standaloneImageLineRegex)
+        in '0'..'9' -> t.matches(numberedListItemRegex)
+        else -> false
+    }
 }
 

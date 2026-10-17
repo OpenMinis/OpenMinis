@@ -1,6 +1,7 @@
 package com.openminis.app.config.confirm
 
 import com.openminis.app.logging.AppLogger
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,11 +11,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
 /**
  * Funnels every minis-config write through user confirmation. Mirrors
@@ -76,7 +76,7 @@ object ConfigConfirmationGate {
     private val queue: ArrayDeque<QueuedRequest> = ArrayDeque()
 
     /** Continuation lookup keyed by request id, so timeout can resolve the right awaiter. */
-    private val awaiters = HashMap<String, Continuation<ConfirmOutcome>>()
+    private val awaiters = HashMap<String, CancellableContinuation<ConfirmOutcome>>()
     private val timeouts = HashMap<String, Job>()
 
     private val mutex = Mutex()
@@ -84,7 +84,7 @@ object ConfigConfirmationGate {
 
     private data class QueuedRequest(
         val change: PendingConfigChange,
-        val cont: Continuation<ConfirmOutcome>,
+        val cont: CancellableContinuation<ConfirmOutcome>,
     )
 
     /**
@@ -92,9 +92,16 @@ object ConfigConfirmationGate {
      * per-row reject) or the timeout fires.
      */
     suspend fun requestConfirmation(change: PendingConfigChange): ConfirmOutcome =
-        suspendCoroutine { cont ->
+        suspendCancellableCoroutine { cont ->
+            // CFG-1: the offload watchdog cancels the enclosing coroutine at
+            // 20 s. Remove the awaiter and dismiss/advance the dialog instead
+            // of leaving a dead request in the queue for 120 s.
+            cont.invokeOnCancellation {
+                scope.launch { cancel(change.id) }
+            }
             scope.launch {
                 mutex.withLock {
+                    if (!cont.isActive) return@withLock
                     awaiters[change.id] = cont
                     timeouts[change.id] = scope.launch {
                         delay(TIMEOUT_MS)
@@ -132,8 +139,30 @@ object ConfigConfirmationGate {
         resolve(id, ConfirmOutcome.TimedOut)
     }
 
+    /** Caller went away (offload watchdog / user cancel): drop the request. */
+    private suspend fun cancel(id: String) {
+        var advance = false
+        var advancedTo: PendingConfigChange? = null
+        mutex.withLock {
+            val hadAwaiter = awaiters.remove(id) != null
+            timeouts.remove(id)?.cancel()
+            notifiedIds.remove(id)
+            queue.removeAll { it.change.id == id }
+            if (_pending.value?.id == id) {
+                advance = true
+                val next = queue.removeFirstOrNull()
+                _pending.value = next?.change
+                advancedTo = next?.change
+            } else if (!hadAwaiter) {
+                return
+            }
+        }
+        cancelNotification?.invoke(id)
+        if (advance) advancedTo?.let { notifyIfBackgrounded(it) }
+    }
+
     private suspend fun resolve(id: String, outcome: ConfirmOutcome) {
-        val cont: Continuation<ConfirmOutcome>?
+        val cont: CancellableContinuation<ConfirmOutcome>?
         val advance: Boolean
         var advancedTo: PendingConfigChange? = null
         mutex.withLock {
@@ -152,7 +181,7 @@ object ConfigConfirmationGate {
         // [T-android-config-confirm-timeout] The newly-surfaced change also
         // needs a background nudge if the user is away.
         advancedTo?.let { notifyIfBackgrounded(it) }
-        cont?.resume(outcome)
+        if (cont?.isActive == true) cont.resume(outcome)
     }
 
     /**

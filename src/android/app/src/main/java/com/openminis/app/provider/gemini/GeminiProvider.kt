@@ -22,6 +22,7 @@ import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.SamplingIdentity
 import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.safeOptString
+import com.openminis.app.provider.ssePayloads
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
@@ -131,7 +132,10 @@ class GeminiProvider(
             .applyUserAgentOverride(null)
             .build()
 
-        val response = client.newCall(request).execute()
+        val call = client.newCall(request)
+        val cancelOnExit = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+            ?.invokeOnCompletion { call.cancel() }
+        val response = com.openminis.app.provider.StreamTtfb.execute(call, "Gemini")
         if (!response.isSuccessful) {
             val errorBody = response.body?.string() ?: ""
             response.close()
@@ -142,20 +146,9 @@ class GeminiProvider(
         try {
             var started = false
             var lastFinishReason: String? = null
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // [T-sse-data-prefix-tolerance] Tolerate `data:` with or without
-                // the optional space, exactly as OpenAIRawStream does — the SSE
-                // spec makes only ONE leading space ignorable, and Gemini-
-                // compatible relays behind a custom base emit `data:{...}`.
-                // Strict `data: ` matching dropped every chunk and the turn then
-                // surfaced as an empty-response failure.
-                if (!l.startsWith("data:")) continue
-                val payload = l.removePrefix("data:").let {
-                    if (it.startsWith(" ")) it.removePrefix(" ") else it
-                }
-
+            // Shared SSE assembler: joins multi-line `data:` and tolerates
+            // `data:{...}` with no space (Gemini-compatible relays).
+            for (payload in ssePayloads(reader)) {
                 val json = try { JSONObject(payload) } catch (_: Exception) { continue }
 
                 if (!started) {
@@ -199,7 +192,11 @@ class GeminiProvider(
             response.close()
         }
         channel.close()
-        awaitClose()
+        awaitClose {
+            cancelOnExit?.dispose()
+            call.cancel()
+            runCatching { response.close() }
+        }
     }
 
     private fun buildRequestBody(

@@ -64,7 +64,9 @@ import com.openminis.app.sandbox.TerminalSession
 import com.openminis.app.terminal.MinisOpenUrlBroker
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 // iOS-matched palette
 private val TerminalBg = Color(0xFF000000)
@@ -101,16 +103,23 @@ fun TerminalScreen(
     // ── Lifecycle ──────────────────────────────────────────────────────────
     LaunchedEffect(Unit) {
         if (!terminalSession.isRunning) terminalSession.start(sessionId = sessionId)
-        if (!initCommand.isNullOrBlank()) {
-            kotlinx.coroutines.delay(500)
-            // Strip control characters that would execute commands (CR, LF, ESC, etc.)
-            // before sending to the PTY — defense-in-depth alongside DeepLinkHandler's
-            // sanitization. The initCommand is meant to pre-fill visible text, not
-            // auto-execute.
-            val safe = initCommand.filter { it != '\u0000' && (it >= ' ' || it == '\t') && it != '\u007f' }
-            if (safe.isNotBlank()) {
-                terminalSession.sendText(safe)
+        if (initCommand.isNullOrBlank()) return@LaunchedEffect
+        // TERM-1: wait for the PTY state event, not a fixed 500 ms. A cold
+        // PRoot boot on a slow device routinely exceeded the old delay and
+        // dropped the pre-filled command into a shell that was not reading yet.
+        val ready = withTimeoutOrNull(5_000L) {
+            terminalSession.state.first {
+                it == TerminalSession.State.RUNNING || it == TerminalSession.State.STOPPED
             }
+        }
+        if (ready != TerminalSession.State.RUNNING) return@LaunchedEffect
+        // Strip control characters that would execute commands (CR, LF, ESC, etc.)
+        // before sending to the PTY — defense-in-depth alongside DeepLinkHandler's
+        // sanitization. The initCommand is meant to pre-fill visible text, not
+        // auto-execute.
+        val safe = initCommand.filter { it != '\u0000' && (it >= ' ' || it == '\t') && it != '\u007f' }
+        if (safe.isNotBlank()) {
+            terminalSession.sendText(safe)
         }
     }
 

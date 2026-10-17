@@ -531,10 +531,10 @@ class AgentForegroundService : Service() {
         } catch (_: Throwable) {}
         overlayController = null
         overlayScope.cancel()
+        islandProbeExecutor.shutdownNow() // symmetric with onCreate; no thread leak on restart
         super.onDestroy()
         Log.d(TAG, "Service destroyed")
     }
-
     /**
      * T-bg-overlay phase 2: collect the (foreground, toolName, toolStatus,
      * isToolRunning, toggle) tuple and reflect it into the overlay. We

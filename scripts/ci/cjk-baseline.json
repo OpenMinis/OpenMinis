@@ -1,0 +1,29 @@
+{
+  "files": {
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatComposerWidgets.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatScreen.kt": 6,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatSubAgentBar.kt": 35,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatToolDetailUI.kt": 2,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModel.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelAgentLoopExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelCodeRunExt.kt": 5,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelExecuteToolExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelGroupChatExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelPromptExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelRerunTailExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelResumeExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelResumeQueueExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelRetryExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelSendExt.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelSubAgentExt.kt": 11,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ChatViewModelVideoExt.kt": 4,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/CodeBlockRunRouter.kt": 4,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/HistoryDigest.kt": 2,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/ProcessCardFormat.kt": 7,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/StreamingMarkdownRenderBlock.kt": 4,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/TitlePromptLocale.kt": 5,
+    "src/android/app/src/main/java/com/openminis/app/ui/markdown/MarkdownText.kt": 1,
+    "src/android/app/src/main/java/com/openminis/app/ui/settings/AppearanceScreen.kt": 2,
+    "src/android/app/src/main/java/com/openminis/app/ui/settings/MultiAgentSettingsScreen.kt": 1
+  }
+}

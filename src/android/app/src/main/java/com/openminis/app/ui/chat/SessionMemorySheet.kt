@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,27 +39,20 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import com.openminis.app.R
 import com.openminis.app.data.repository.MemoryRepository
 import com.openminis.app.ui.settings.SettingsSection
 import com.openminis.app.ui.settings.SettingsValueRow
-import kotlinx.coroutines.delay
 import com.openminis.app.util.IsoTime
 import com.openminis.app.ui.components.MinisTextButton
 
 /**
- * Bottom sheet showing memory state for the current session.
- *
- * Three modes share the [StandardChatSheet] shell:
- *   - List: the default — Section 1 auto-injected + Section 2 op-log
- *   - Detail.AutoFile: read-only / editable view of GLOBAL.md or a daily log
- *   - Detail.Write: per-entry view of a memory_write op-log row, with
- *                   Edit / Save / Revoke
- *   - Detail.Get:   per-entry view of a memory_get op-log row
- *
- * The sheet header swaps its leading slot to a back-arrow when in any detail
- * mode; the trailing close X always dismisses the entire sheet, mirroring iOS
- * `NavigationStack` push behavior inside `SessionMemoryView`.
+ * Session memory sheet: auto-injected files + op-log, with AutoFile/Write/Get
+ * detail modes under [StandardChatSheet]. The back-arrow leaves a detail mode;
+ * the trailing X dismisses the whole sheet (mirrors iOS SessionMemoryView).
  */
 @Composable
 fun SessionMemorySheet(
@@ -71,8 +65,12 @@ fun SessionMemorySheet(
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<MemorySheetMode>(MemorySheetMode.List) }
-    val autoItems = remember(memoryRepository, context, sources) {
-        buildAutoInjectedItems(context, memoryRepository, sources)
+    val autoItems by produceState(emptyList<AutoItem>(), memoryRepository, context, sources) {
+        // File IO must not run inside remember{} on the main thread.
+        value = withContext(Dispatchers.IO) {
+            runCatching { buildAutoInjectedItems(context, memoryRepository, sources) }
+                .getOrElse { emptyList() }
+        }
     }
 
     // Editing state for the active detail screen. Lives at the sheet level so

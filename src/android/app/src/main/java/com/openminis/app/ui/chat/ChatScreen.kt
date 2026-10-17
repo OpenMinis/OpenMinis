@@ -318,13 +318,18 @@ internal val SparkleColor2 = Color(0xFF99998C) // rgb(0.6, 0.6, 0.55)
 private const val ATTACHMENT_PICK_LIMIT = 50
 
 /**
- * [T-android-send-no-autoscroll-behind-preview] Follow-grace window after a
- * user message append: within it the reserve-change pin bypasses the
- * isNearBottom gate (send intent is unambiguous; the freshly-inserted rows
- * make the live anchor transiently read "not at bottom").
+ * One gesture window for every "the user just took the viewport" decision.
+ *
+ * The interrupt check and the send-follow grace used to differ (1 s vs 2 s),
+ * which left a band where a small drag was still yanked back. Generation
+ * cancellation in [ChatScrollController] now drops commands queued before the
+ * gesture, so a single 1 s window covers a fling settle. [SEND_FOLLOW_GRACE_MS]
+ * is the same value: within it the reserve-change pin bypasses isNearBottom
+ * because a just-sent message makes the live anchor transiently read
+ * "not at bottom".
  */
-private const val SEND_FOLLOW_GRACE_MS = 2_000L
-
+private const val USER_SCROLL_INTERRUPT_MS = 1_000L
+private const val SEND_FOLLOW_GRACE_MS = USER_SCROLL_INTERRUPT_MS
 
 /**
  * [T-slash-picker-fixed-height port from iOS 73f1b94a] Locked popup
@@ -666,7 +671,7 @@ fun ChatScreen(
         // so every text item was appended to the same stale base and only the
         // last one survived — a two-text share landed as just the second one
         // even after the store-level merge delivered both.
-        var draft = inputText
+        var draft = viewModel.inputText.value
         for (item in pending.items) {
             when (item.kind) {
                 com.openminis.app.share.PendingShare.Item.Kind.INLINE_TEXT -> {
@@ -759,7 +764,7 @@ fun ChatScreen(
         // injecting (mirrors iOS injectPendingTransferIfNeeded).
         viewModel.clearAttachments()
         if (transfer.inputText.isNotEmpty()) {
-            val sep = if (inputText.isNotEmpty()) "\n" else ""
+            val sep = if (viewModel.inputText.value.isNotEmpty()) "\n" else ""
             viewModel.setInputText(inputText + sep + transfer.inputText)
         }
         for (a in transfer.attachments) viewModel.addAttachment(a)
@@ -808,24 +813,22 @@ fun ChatScreen(
     // separate from lastSendTimeMs above — that one also drives the 300ms
     // IME-residue suppression in the composer and must stay UI-send-only.
     var lastUserAppendMs by remember { mutableStateOf(0L) }
-    androidx.compose.runtime.LaunchedEffect(inputText) {
-        if (inputFieldValue.text != inputText) {
-            // [T-android-slash-menu-align-ios-prepend] Honor a one-shot caret
-            // override from the slash flow (prepend "/ " → caret 1; insert
-            // "/<skill> " → caret after the prefix). Read-and-clear so it
-            // applies exactly once; otherwise default the caret to the end
-            // (existing behavior). Coerce into bounds defensively.
-            val caret = viewModel.consumePendingCaret()?.coerceIn(0, inputText.length)
-                ?: inputText.length
-            inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
-                text = inputText,
-                selection = androidx.compose.ui.text.TextRange(caret),
-                // T217: explicitly drop any pending IME composing buffer so voice
-                // recognition / Pinyin candidates don't get re-committed back into
-                // the field after send (mirrors iOS unmarkText in AIChatView.swift
-                // updateUIView L5638).
-                composition = null,
-            )
+    androidx.compose.runtime.LaunchedEffect(viewModel) {
+        // Collect instead of keying on the value: the key would re-launch per keystroke.
+        viewModel.inputText.collect { text ->
+            if (inputFieldValue.text != text) {
+                // [T-android-slash-menu-align-ios-prepend] One-shot caret override
+                // from the slash flow; read-and-clear, default to the end.
+                val caret = viewModel.consumePendingCaret()?.coerceIn(0, text.length)
+                    ?: text.length
+                inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
+                    text = text,
+                    selection = androidx.compose.ui.text.TextRange(caret),
+                    // T217: drop any pending IME composing buffer so voice/pinyin
+                    // candidates are not re-committed after send (iOS unmarkText).
+                    composition = null,
+                )
+            }
         }
     }
     val inputFocusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
@@ -1369,6 +1372,9 @@ fun ChatScreen(
     LaunchedEffect(sessionId, sessionLoaded) {
         if (!sessionLoaded || entryPinRequested) return@LaunchedEffect
         entryPinRequested = true
+        // Any command queued for the previous session must not land in this
+        // one's list (same LazyListState can outlive the ViewModel).
+        scrollController.invalidate("session-switch")
         scrollPolicy.pin()
         viewModel.ensureSessionTailLoaded()
         // The initial tail load and any queued tail attach are asynchronous.
@@ -1487,27 +1493,12 @@ fun ChatScreen(
             tracedScrollToItem("SEND-PATH/settle", 0, 0)
         }
     }
-    // T196: timestamp of the last drag-stop. The streaming auto-follow LE
-    // below has three stages (initial scroll → re-pin after frame → settle
-    // after 220 ms) any of which can fire on the *next* token after a drag
-    // ends. When the user drags down while already near the bottom,
-    // userScrolledAway never flips true, so without this grace window the
-    // three stages all run on the next chunk and the user sees the chat
-    // "jump back" three times. 1 s covers a typical fling settle (~500-
-    // 800 ms) plus a small buffer; the user can re-engage follow at any
-    // time by scrolling all the way to the bottom (LE(isNearBottom) above
-    // resets userScrolledAway).
+    // Last drag-stop. Content-driven follow is suppressed briefly after a
+    // gesture even when the viewport is still "near bottom"; the controller's
+    // generation guard drops commands that were already queued.
     var lastInterruptMs by remember { mutableStateOf(0L) }
-    // [T-android-composer-input-blocked-while-streaming] True only while the
-    // user's FINGER is actively dragging the message list. Programmatic scrolls
-    // (the streaming auto-follow glide, settle, pin-to-bottom) go through
-    // `listState.scroll { }` / `scrollToItem`, which set
-    // `listState.isScrollInProgress = true` but emit NO DragInteraction. So a
-    // gesture-only signal lets us distinguish "user scrolled the transcript"
-    // (should dismiss the keyboard) from "streaming auto-followed" (must NOT
-    // touch focus). Without this the keyboard closed itself mid-stream and
-    // dropped the in-flight keystroke (the reported "can't type while
-    // streaming" bug).
+    // Finger-down only: programmatic scrolls also set isScrollInProgress but
+    // emit no DragInteraction, and focus handling must not confuse the two.
     var isUserDragging by remember { mutableStateOf(false) }
     LaunchedEffect(listState) {
         listState.interactionSource.interactions.collect { interaction ->
@@ -1516,6 +1507,7 @@ fun ChatScreen(
             // logs here added measurable load. Gate behind a constant.
             when (interaction) {
                 is androidx.compose.foundation.interaction.DragInteraction.Start -> {
+                    scrollController.beginUserGesture()
                     isUserDragging = true
                     // [T-android-scrollbtn-turn-walk] A manual drag breaks the
                     // up-button's turn-walk chain: the next tap should re-anchor
@@ -1523,6 +1515,7 @@ fun ChatScreen(
                     lastJumpedUserId = null
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Stop -> {
+                    scrollController.endUserGesture()
                     isUserDragging = false
                     lastInterruptMs = System.currentTimeMillis()
                     // [T-android-scroll-policy] Finger lift decides ownership:
@@ -1531,8 +1524,10 @@ fun ChatScreen(
                     val anchor = visibleTopAnchor()
                     scrollPolicy.onDragStop(isNearBottom.value, anchor?.first, anchor?.second ?: 0)
                 }
-                is androidx.compose.foundation.interaction.DragInteraction.Cancel ->
+                is androidx.compose.foundation.interaction.DragInteraction.Cancel -> {
+                    scrollController.endUserGesture()
                     isUserDragging = false
+                }
                 else -> Unit
             }
         }
@@ -1678,7 +1673,7 @@ fun ChatScreen(
                 if (!scrollPolicy.isPinned) return@collect
                 if (listState.isScrollInProgress) return@collect
                 val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
-                if (sinceInterrupt < 1000L) return@collect
+                if (sinceInterrupt < USER_SCROLL_INTERRUPT_MS) return@collect
                 // Keep the stream follower one-way and atomic. The previous
                 // frame-driven loop estimated item heights while the streaming
                 // row was being remeasured; stale estimates could alternate
@@ -2901,6 +2896,7 @@ fun ChatScreen(
             }
 
             // Messages + scroll-to-bottom button
+            ChatMessagesScope {
             Box(modifier = Modifier.weight(1f)) {
                 var toolBarHeightPx by remember { mutableStateOf(0) }
                 // T166 / T170 / T173: bottomReserve must clear the visible
@@ -3726,7 +3722,7 @@ fun ChatScreen(
                     if (!scrollPolicy.isPinned) return@LaunchedEffect
                     if (listState.isScrollInProgress) return@LaunchedEffect
                     val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
-                    if (sinceInterrupt < 1000L) return@LaunchedEffect
+                    if (sinceInterrupt < USER_SCROLL_INTERRUPT_MS) return@LaunchedEffect
                     // Pin fires when EITHER (a) we're inside the send-grace
                     // window (the original "freshly sent, snap the typing
                     // row up" case), OR (b) the agent loop is actively
@@ -4908,6 +4904,7 @@ fun ChatScreen(
                 // T-chat-title-pill: sticky session title overlay. Sits
                 // above the LazyColumn (top-center), animates in once the
             }
+            } // ChatMessagesScope
 
             // T-chat-title-pill-edit: reuse SessionEditSheet from the session
             // list (same composable, exposed `internal`) so title + category
@@ -4924,6 +4921,7 @@ fun ChatScreen(
                 )
             }
 
+            ChatComposerScope {
             // [T-android-slash-popup-width] The composer's laid-out width, read
             // back by the slash / mention popups below so they line up with it.
             var composerWidthPx by remember { mutableStateOf(0) }
@@ -7124,6 +7122,7 @@ fun ChatScreen(
                     isEnqueue = isStreaming,
                 )
             } // end swipe-to-send Box wrapping the composer Column
+            } // ChatComposerScope
 
             if (showMoveSheet) {
                 MoveToSessionSheet(
@@ -7572,36 +7571,7 @@ private fun HistoryPageEdge(text: String, onClick: () -> Unit) {
     )
 }
 
-// [T-android-split-chat] UserMessageBubble / UserAttachmentList /
-// FileAttachmentTile / fileIconFor / ImageGalleryDialog moved verbatim to
-// ChatUserMessageUI.kt.
-// [T-android-split-chat] FlatChatItem / mergeStreamingOverlay / buildFlatChatItems
-// moved verbatim to ChatFlatItems.kt (now internal).
-
-// [T-android-split-chat] AssistantHeader / AssistantMessageView /
-// BoundsTrackedBlock / InlineErrorBanner / ToolStopButton /
-// formatToolDetailsForClipboard / ToolCallPill / ThinkingBlock moved verbatim
-// to ChatAssistantMessageUI.kt.
-
-// ─── Tool Detail Bottom Sheet (iOS: ToolLiveSheet — nav bar + content + bottom bar) ──
-
-// [T-android-split-chat] ToolDetailSheet + helpers (extractShellCommand,
-// extractPartialJsonString, chunkToolOutput, initialRevealChunks,
-// LazyRevealToolText, EditorCard) moved verbatim to ChatToolDetailUI.kt.
-// [T-android-split-chat] AttachmentChip / InputCircleButton / MicButton /
-// ToolPreviewThumbnail / FloatingToolStatusBar / ThinkingLevelPicker moved
-// verbatim to ChatComposerWidgets.kt.
-
-// [T-android-split-chat] createCameraOutputUri / getFileName /
-// PendingNonTextSelection moved verbatim to ChatScreenHelpers.kt (now internal).
-
-
-// [T-android-split-chat] fuzzyMatch / ModelPickerSheet / providerDotColor moved
-// verbatim to ChatModelPickerSheet.kt (ModelPickerSheet now internal).
-
-// [T-android-split-chat] BorderedMarkdownTable / FallbackInfoBlock /
-// CompactSummarySheet / parseInlineMarkdown / rememberBrowserLiveSnapshot /
-// ResumeBanner / SwipeToSendHint moved verbatim to ChatMiscViews.kt.
-// Sun May 24 11:01:25 CST 2026
-
+// [T-android-split-chat] Message rows, assistant blocks, tool detail, composer
+// widgets, model picker and misc views live in their own Chat*UI / ChatMiscViews
+// files; see the KDoc at each extracted declaration.
 

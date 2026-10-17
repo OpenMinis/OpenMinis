@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.mozilla.javascript.BaseFunction
+import org.mozilla.javascript.ClassShutter
 import org.mozilla.javascript.Context
 import org.mozilla.javascript.ContextFactory
 import org.mozilla.javascript.Scriptable
@@ -95,6 +96,13 @@ object ExecuteCodeTool {
             }
             val cx = factory.enterContext()
             try {
+                // SEC-5: Rhino's default interop exposes `java.lang.Runtime`,
+                // file system and process APIs. `execute_code` is documented
+                // as a JS sandbox, so no Java class may be visible to scripts;
+                // the only host bridges are print/console/__minis_call.
+                cx.setClassShutter(object : ClassShutter {
+                    override fun visibleToScripts(fullClassName: String): Boolean = false
+                })
                 val scope = cx.initStandardObjects()
                 val printFn = object : BaseFunction() {
                     override fun call(

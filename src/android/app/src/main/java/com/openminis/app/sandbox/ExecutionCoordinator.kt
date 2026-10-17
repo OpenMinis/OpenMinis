@@ -8,6 +8,7 @@ import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.notification.SandboxNotifyActions
 import com.openminis.app.sandbox.SandboxResourceGate
 import com.openminis.app.sandbox.kernel.BudgetClassifier
+import com.openminis.app.util.LogRedaction
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -202,8 +203,9 @@ object ExecutionCoordinator {
             }
 
             // [diag] trace the sessionId that shell_execute is dispatched with —
-            // suspected source of the Chinese-emoji filename vanishing bug
-            Log.w(TAG, "[diag] execute sessionId=$sessionId cmd=${command.take(120).replace('\n', ' ')}")
+            // suspected source of the Chinese-emoji filename vanishing bug.
+            // S-14: only a redacted summary (program/len/hash), never the line.
+            Log.w(TAG, "[diag] execute sessionId=$sessionId ${LogRedaction.command(command)}")
 
             // Get or create shell — protected by globalLock to avoid duplicate creation
             val shell = getOrCreateShell(sessionId)

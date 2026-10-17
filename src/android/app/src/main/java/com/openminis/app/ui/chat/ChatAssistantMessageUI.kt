@@ -4,7 +4,6 @@ package com.openminis.app.ui.chat
 // extracted verbatim from ChatScreen.kt: AssistantHeader, AssistantMessageView,
 // BoundsTrackedBlock, InlineErrorBanner, ToolStopButton,
 // formatToolDetailsForClipboard, ToolCallPill, ThinkingBlock.
-// Imports trimmed after ChatScreen.kt split; externally-called ones internal.
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
@@ -65,6 +64,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -281,7 +281,6 @@ internal fun BoundsTrackedBlock(
         onDispose { registry?.remove(messageId, slotKey) }
     }
 }
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun InlineErrorBanner(error: String, onRetry: (() -> Unit)? = null) {
@@ -322,6 +321,7 @@ internal fun InlineErrorBanner(error: String, onRetry: (() -> Unit)? = null) {
             Spacer(modifier = Modifier.width(8.dp))
             Row(
                 modifier = Modifier
+                    .minimumInteractiveComponentSize()
                     .clip(RoundedCornerShape(50))
                     .background(Color(0xFFFF3B30).copy(alpha = 0.15f))
                     .clickable(onClick = onRetry)

@@ -1,5 +1,6 @@
 package com.openminis.app.service
 
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -19,24 +20,30 @@ object OverlayComposeBus {
     )
     val pending: SharedFlow<Request> = _pending.asSharedFlow()
 
-    @Volatile
-    private var sticky: Request? = null
+    /**
+     * Read-and-clear must be one atomic step. Two collectors racing a plain
+     * `get()` + `set(null)` could both observe the same request and deliver
+     * the prompt twice; a CAS loop gives exactly one winner.
+     */
+    private val sticky = AtomicReference<Request?>(null)
 
     fun submit(sessionId: String, text: String) {
         val sid = sessionId.trim()
         val body = text.trim()
         if (sid.isEmpty() || body.isEmpty()) return
         val req = Request(sid, body)
-        sticky = req
+        sticky.set(req)
         _pending.tryEmit(req)
     }
 
     fun consumeSticky(sessionId: String): String? {
-        val s = sticky ?: return null
-        if (s.sessionId != sessionId) return null
-        sticky = null
-        return s.text
+        while (true) {
+            val current = sticky.get() ?: return null
+            if (current.sessionId != sessionId) return null
+            if (sticky.compareAndSet(current, null)) return current.text
+            // Lost the race to another consumer or a newer submit; re-read.
+        }
     }
 
-    fun peekStickySessionId(): String? = sticky?.sessionId
+    fun peekStickySessionId(): String? = sticky.get()?.sessionId
 }

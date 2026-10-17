@@ -1301,7 +1301,7 @@ private fun escapeHtml(s: String): String =
         .replace(">", "&gt;")
 
 // saveImageToGallery moved to FileSaveActions.kt (architecture-policy
-// ceiling on this file); see FileSaveActions for the FileSaveGuard contract.
+// ceiling on this file); the save contract lives in io/VerifiedCopy + io/FileSaveGuard.
 
 /**
  * Build the swipe-able gallery's (items, startIndex) for a tapped image
