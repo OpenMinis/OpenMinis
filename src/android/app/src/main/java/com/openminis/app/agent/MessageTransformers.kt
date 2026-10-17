@@ -20,6 +20,15 @@ import java.io.File
 interface MessageTransformer {
     val id: String
     fun transform(text: String): String
+
+    /**
+     * [T-display-strip-unterminated] Display/hydration variant of [transform].
+     * Default = same behavior; a transformer whose send-path semantics are
+     * too aggressive for painting (deleting content rather than cleaning
+     * spelling) overrides this with a conservative mode. Wired via
+     * [MessageTransformerChain.applyForDisplay].
+     */
+    fun transformForDisplay(text: String): String = transform(text)
 }
 
 /** Optional per-message context enrichment hook (RikkaHub TimeReminder / WorkspaceReminder family). */
@@ -48,28 +57,42 @@ object MessageTransformerChain {
     )
 
     /** Clean an assistant reply before it is replayed to the model. */
-    fun apply(text: String): String = transformers.fold(text) { t, tr ->
-        // A transformer that throws on a pathological assistant turn (the
-        // reported StringIndexOutOfBoundsException — begin 0, end N, length
-        // N-1 — surfaces here, inside ReasoningTagStripper's code-fence /
-        // inline-code masking) must not kill the whole agent loop, and must
-        // not leave the exception's own message persisted as the turn's
-        // content (which is what made the crash recur on every replay of that
-        // message). Fall back to the text as it stood BEFORE this transformer
-        // and log the offending shape so the real boundary bug can be found:
-        // the transform is a cosmetic cleanup, the untransformed text is
-        // always safe to send.
-        try {
-            tr.transform(t)
-        } catch (e: Exception) {
-            com.openminis.app.logging.AppLogger.warning(
-                "MsgTransform",
-                "transformer ${tr.id} threw ${e.javaClass.simpleName}: ${e.message} " +
-                    "on text.length=${t.length} head=\"${t.take(120)}\" — using untransformed text",
-            )
-            t
+    fun apply(text: String): String = foldTransformers(text) { tr, t -> tr.transform(t) }
+
+    /**
+     * [T-display-strip-unterminated] Clean a restored assistant text for
+     * PAINTING (ChatViewModel hydration). Same chain, same crash fallback,
+     * but each transformer runs its display variant. The send path may
+     * delete aggressively (an unterminated reasoning prefix must never be
+     * replayed); the display path must never delete prose — a reply that
+     * bare-mentions a tag spelling lost its whole tail to the send-path
+     * rule and rendered as thinking-card-only.
+     */
+    fun applyForDisplay(text: String): String = foldTransformers(text) { tr, t -> tr.transformForDisplay(t) }
+
+    private inline fun foldTransformers(text: String, run: (MessageTransformer, String) -> String): String =
+        transformers.fold(text) { t, tr ->
+            // A transformer that throws on a pathological assistant turn (the
+            // reported StringIndexOutOfBoundsException — begin 0, end N, length
+            // N-1 — surfaces here, inside the fence/inline-code masking) must
+            // not kill the whole agent loop, and must not leave the exception's
+            // own message persisted as the turn's content (which is what made
+            // the crash recur on every replay of that message). Fall back to
+            // the text as it stood BEFORE this transformer and log the
+            // offending shape so the real boundary bug can be found: the
+            // transform is a cosmetic cleanup, the untransformed text is
+            // always safe to send.
+            try {
+                run(tr, t)
+            } catch (e: Exception) {
+                com.openminis.app.logging.AppLogger.warning(
+                    "MsgTransform",
+                    "transformer ${tr.id} threw ${e.javaClass.simpleName}: ${e.message} " +
+                        "on text.length=${t.length} head=\"${t.take(120)}\" — using untransformed text",
+                )
+                t
+            }
         }
-    }
 
     /**
      * Enrich a user message before send. Returns the original text when no
@@ -124,6 +147,10 @@ object MessageTransformerChain {
         // MessageTransformerChainTest / ReasoningTagStripperCoverageTest /
         // FenceAwareTagStripperTest / ReasoningTagStripTest.
         override fun transform(text: String): String = ReasoningTagStrip.strip(text)
+
+        // [T-display-strip-unterminated] Unterminated opens keep their tail
+        // in display mode — see ReasoningTagStrip.stripForDisplay.
+        override fun transformForDisplay(text: String): String = ReasoningTagStrip.stripForDisplay(text)
     }
 
     /**

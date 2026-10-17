@@ -4770,7 +4770,6 @@ class ChatViewModel(
         }
     }
 
-
     /**
      * [T-anchor-lookup-fail-closed] Resolve a truncation anchor's `sort_order`
      * from its candidate row ids, reporting a DAO failure as a failure instead
@@ -4863,7 +4862,6 @@ class ChatViewModel(
         val anchorSortOrder = resolved.getOrNull() ?: return -1
         return if (target.role == "user") anchorSortOrder else anchorSortOrder + 1
     }
-
 
 
     /**
@@ -5890,8 +5888,10 @@ class ChatViewModel(
                                 // vendor spelling the stream parser pre-dated) must
                                 // never render in the bubble. DB + agentHistory keep
                                 // the raw text; this only cleans the painted copy.
+                                // [T-display-strip-unterminated] display mode: a
+                                // bare tag mention must not lose its tail.
                                 if (entity.role == "assistant") {
-                                    com.openminis.app.agent.MessageTransformerChain.apply(it)
+                                    com.openminis.app.agent.MessageTransformerChain.applyForDisplay(it)
                                 } else it
                             }.let {
                                 if (it != raw) it.trim() else it

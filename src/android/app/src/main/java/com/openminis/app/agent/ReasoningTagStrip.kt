@@ -87,38 +87,62 @@ object ReasoningTagStrip {
      * strip reasoning tags from the masked prose, restore the masks.
      * Untouched content round-trips byte-identical.
      */
-    fun strip(text: String): String {
+    fun strip(text: String): String = stripImpl(text, displayMode = false)
+
+    /**
+     * [T-display-strip-unterminated] UI-hydration variant. The send path
+     * treats an unterminated open tag as a leaked reasoning prefix and
+     * strips to end-of-text — correct for replay (the model must never see
+     * an open tag it could imitate), catastrophic for display: an assistant
+     * reply that merely *mentions* a bare tag spelling while discussing the
+     * stripper itself ("把 4 个正则(<思考>…)替换") had everything after the
+     * mention deleted from the restored bubble, leaving only the thinking
+     * card. In display mode an unterminated open tag removes only the tag
+     * literal; paired blocks are still removed whole (a paired block is a
+     * real reasoning span, and the prose after its close survives either
+     * way). Fence and inline-code protection are identical to the send
+     * path.
+     */
+    fun stripForDisplay(text: String): String = stripImpl(text, displayMode = true)
+
+    private fun stripImpl(text: String, displayMode: Boolean): String {
         val sb = StringBuilder(text.length)
         var from = 0
         for ((range, isCode) in fenceSegments(text)) {
             if (from < range.first) sb.append(text, from, range.first)
             val chunk = text.substring(range)
-            sb.append(if (isCode) chunk else stripMasked(chunk))
+            sb.append(if (isCode) chunk else stripMasked(chunk, displayMode))
             from = range.last + 1
         }
         if (from < text.length) sb.append(text, from, text.length)
         return sb.toString()
     }
 
-    private fun stripMasked(chunk: String): String {
-        if (!chunk.contains('`')) return stripTags(chunk)
+    private fun stripMasked(chunk: String, displayMode: Boolean): String {
+        if (!chunk.contains('`')) return stripTags(chunk, displayMode)
         val masked = maskInlineCode(chunk)
-        val stripped = stripTags(masked.text)
+        val stripped = stripTags(masked.text, displayMode)
         return restoreMasked(stripped, masked.spans)
     }
 
     /**
      * The tag stripper proper: linear scan, per-form monotonic close
      * cursors, leftmost-unpaired-open → end-of-text. Public for tests.
+     * [displayMode]: see [stripForDisplay].
      */
-    fun stripTags(text: String): String {
+    fun stripTags(text: String): String = stripTags(text, displayMode = false)
+
+    fun stripTags(text: String, displayMode: Boolean): String {
         val hits = scanTags(text)
         if (hits.isEmpty()) return text
         val closes = HashMap<Int, MutableList<Int>>()
+        val opens = HashMap<Int, MutableList<Int>>()
         hits.forEachIndexed { k, h ->
             if (h.close) closes.getOrPut(h.form) { mutableListOf() }.add(k)
+            else opens.getOrPut(h.form) { mutableListOf() }.add(k)
         }
         val cursor = HashMap<Int, Int>()
+        val openCursor = HashMap<Int, Int>()
         val remove = ArrayList<Pair<Int, Int>>() // (start, endExclusive)
         var i = 0
         while (i < hits.size) {
@@ -126,23 +150,58 @@ object ReasoningTagStrip {
             if (!h.close) {
                 val list = closes[h.form]
                 var claimed = -1
+                var cur = -1
                 if (list != null) {
-                    var cur = cursor.getOrDefault(h.form, 0)
+                    cur = cursor.getOrDefault(h.form, 0)
                     while (cur < list.size && list[cur] <= i) cur++
-                    cursor[h.form] = cur
-                    if (cur < list.size) {
-                        claimed = list[cur]
-                        cursor[h.form] = cur + 1
+                    if (cur < list.size) claimed = list[cur]
+                }
+                // [T-display-strip-unterminated] In display mode an open only
+                // pairs with a close when NO same-form open sits between them
+                // (adjacent pairing). Lazy pairing let a bare MENTION of the
+                // tag claim the close of a real block further down, deleting
+                // the prose in between; with adjacent pairing the mention
+                // degrades to a literal removal and the real block still
+                // collapses whole.
+                var adjacent = true
+                if (displayMode && claimed >= 0) {
+                    val openList = opens[h.form]
+                    if (openList != null) {
+                        var oc = openCursor.getOrDefault(h.form, 0)
+                        while (oc < openList.size && openList[oc] <= i) oc++
+                        openCursor[h.form] = oc
+                        if (oc < openList.size && openList[oc] < claimed) adjacent = false
                     }
                 }
-                if (claimed >= 0) {
+                if (claimed >= 0 && adjacent) {
+                    cursor[h.form] = cur + 1
                     remove += h.start to hits[claimed].end
                     i = claimed + 1
+                } else if (claimed >= 0) {
+                    // Display mode, non-adjacent close: this open is a bare
+                    // mention — remove the literal, leave the close for the
+                    // inner open that actually pairs with it.
+                    cursor[h.form] = cur
+                    remove += h.start to h.end
+                    i++
                 } else {
-                    // Leftmost open with no same-name close after it: strip
-                    // to end-of-text (old `unterminatedOpen` leftmost match).
-                    remove += h.start to text.length
-                    break
+                    // Leftmost open with no same-name close after it.
+                    // Send path: strip to end-of-text (old `unterminatedOpen`
+                    // leftmost match) — a leaked reasoning prefix must not
+                    // reach the model. Display path: an unterminated open in
+                    // restored prose is far more likely a bare *mention* of
+                    // the tag (a reply discussing the stripper itself) than a
+                    // leak — the live stream parser already split genuine
+                    // prefixes before persist — so remove only the tag
+                    // literal and keep scanning; deleting the whole tail
+                    // here is what emptied the bubble.
+                    if (displayMode) {
+                        remove += h.start to h.end
+                        i++
+                    } else {
+                        remove += h.start to text.length
+                        break
+                    }
                 }
             } else {
                 i++
