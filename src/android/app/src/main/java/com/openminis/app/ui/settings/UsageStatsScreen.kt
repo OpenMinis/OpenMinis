@@ -37,6 +37,8 @@ import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ProviderType
 import org.json.JSONObject
 import com.openminis.app.util.IsoTime
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * [T-token-attribution-snapshot] How trustworthy a row's model attribution is.
@@ -264,10 +266,34 @@ fun UsageStatsScreen(
     var grandTotal by remember { mutableStateOf(GrandTotal()) }
     var providerGroups by remember { mutableStateOf<List<ProviderGroup>>(emptyList()) }
     var isLoaded by remember { mutableStateOf(false) }
+    // [T-usage-time-range] Records + selected window. Aggregation runs on
+    // Dispatchers.Default: thousands of rows x per-row JSONObject parsing is
+    // a CPU burst, and the project discipline since PR62 keeps CPU bursts
+    // off the main thread. The chart series is window-independent (fixed
+    // 14-day lookback) so it is derived once per records load, not per
+    // filter tap.
+    var records by remember { mutableStateOf<List<UsageRecord>>(emptyList()) }
+    var timeRange by remember { mutableStateOf(UsageTimeRange.LAST_7) }
+    var daily by remember { mutableStateOf<List<DailyUsage>>(emptyList()) }
 
     LaunchedEffect(Unit) {
-        val records = chatDao.allUsageRecords()
+        val loaded = chatDao.allUsageRecords()
+        val now = System.currentTimeMillis()
+        val series = withContext(Dispatchers.Default) { buildDailySeries(loaded, CHART_DAYS, now) }
+        records = loaded
+        daily = series
+        isLoaded = true
+        // Initial aggregation happens in the (timeRange, records) effect below
+        // — assigning `records` restarts it with isLoaded already true.
+    }
 
+    // Re-derive on filter taps without re-querying the DB. The lookup maps
+    // are rebuilt identically to the load effect (including the
+    // modelEntries fallback) — a partial lookup would misclassify live
+    // custom models as MEASURED_REMOVED and silently change attribution.
+    LaunchedEffect(timeRange, records) {
+        if (!isLoaded) return@LaunchedEffect
+        val now = System.currentTimeMillis()
         val modelLookup = mutableMapOf<String, Pair<String, String>>()
         for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
         val instanceLabels = mutableMapOf<String, String>()
@@ -281,15 +307,21 @@ fun UsageStatsScreen(
                 }
             }
         }
-
-        val summary = aggregateUsageRecords(records, modelLookup, instanceLabels)
+        val summary = withContext(Dispatchers.Default) {
+            aggregateUsageRecords(filterUsageByRange(records, timeRange, now), modelLookup, instanceLabels)
+        }
         grandTotal = summary.grandTotal
         providerGroups = summary.groups
-        isLoaded = true
     }
 
     SettingsScaffold(title = stringResource(R.string.usage_title), onBack = null) {
         if (!isLoaded) return@SettingsScaffold
+
+        UsageTimeFilterRow(selected = timeRange, onSelect = { timeRange = it })
+
+        SettingsSection(header = stringResource(R.string.usage_chart_title)) {
+            UsageTrendChart(daily = daily)
+        }
 
         SettingsSection(header = stringResource(R.string.usage_section_total)) {
             val stats = listOfNotNull(
@@ -314,6 +346,8 @@ fun UsageStatsScreen(
                 group.models.forEachIndexed { idx, model ->
                     ExpandableModelRow(
                         model = model,
+                        shareOfTotal = if (grandTotal.totalInput > 0)
+                            model.totalInput.toFloat() / grandTotal.totalInput else 0f,
                         showDivider = idx < group.models.size - 1,
                     )
                 }
@@ -325,7 +359,7 @@ fun UsageStatsScreen(
 }
 
 @Composable
-private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
+private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivider: Boolean) {
     var expanded by remember { mutableStateOf(false) }
     val summary = "${formatCount(model.totalInput)} / ${formatCount(model.outputTokens)}"
 
@@ -380,6 +414,26 @@ private fun ExpandableModelRow(model: ModelStats, showDivider: Boolean) {
             }
         }
 
+        // [T-usage-share-bar] This model's input as a share of the selected
+        // window's total input — the same number the row shows, made
+        // comparable at a glance. Hidden when the window has no input.
+        if (shareOfTotal > 0f) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, top = 2.dp)
+                    .height(3.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(shareOfTotal.coerceIn(0f, 1f))
+                        .height(3.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
+                )
+            }
+        }
+
         AnimatedVisibility(visible = expanded) {
             Column(modifier = Modifier.padding(start = 32.dp, end = 16.dp, bottom = 8.dp)) {
                 DetailRow(stringResource(R.string.usage_detail_input), formatCount(model.inputTokens))
@@ -430,7 +484,7 @@ private fun DetailRow(label: String, value: String) {
     }
 }
 
-private fun formatCount(n: Long): String = when {
+internal fun formatCount(n: Long): String = when {
     n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
     n >= 1_000 -> {
         val k = n / 1000.0

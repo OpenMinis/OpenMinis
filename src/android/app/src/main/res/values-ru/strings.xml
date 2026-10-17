@@ -882,6 +882,12 @@
     <string name="storage_clear_confirm_button">Очистить %1$s</string>
     <string name="usage_title">Использование</string>
     <string name="usage_section_total">Всего использовано</string>
+    <string name="usage_range_today">Сегодня</string>
+    <string name="usage_range_7d">За 7 дней</string>
+    <string name="usage_range_30d">За 30 дней</string>
+    <string name="usage_range_all">Всё</string>
+    <string name="usage_chart_title">Использование по дням (14 дней)</string>
+    <string name="usage_chart_no_data">Нет данных за этот период</string>
     <string name="usage_label_total_input">Всего входных (вкл. кэш)</string>
     <string name="usage_label_output">Выходные токены</string>
     <string name="usage_label_cache_read">Чтение из кэша</string>

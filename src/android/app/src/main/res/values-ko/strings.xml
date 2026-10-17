@@ -880,6 +880,12 @@
     <string name="storage_clear_confirm_button">%1$s 지우기</string>
     <string name="usage_title">사용량</string>
     <string name="usage_section_total">총 사용량</string>
+    <string name="usage_range_today">오늘</string>
+    <string name="usage_range_7d">최근 7일</string>
+    <string name="usage_range_30d">최근 30일</string>
+    <string name="usage_range_all">전체</string>
+    <string name="usage_chart_title">일일 사용량 (14일)</string>
+    <string name="usage_chart_no_data">이 기간 사용량 없음</string>
     <string name="usage_label_total_input">총 입력 (캐시 포함)</string>
     <string name="usage_label_output">출력 토큰</string>
     <string name="usage_label_cache_read">캐시 읽기</string>

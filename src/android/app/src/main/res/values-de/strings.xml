@@ -880,6 +880,12 @@
     <string name="storage_clear_confirm_button">%1$s leeren</string>
     <string name="usage_title">Verbrauch</string>
     <string name="usage_section_total">Gesamtverbrauch</string>
+    <string name="usage_range_today">Heute</string>
+    <string name="usage_range_7d">Letzte 7 Tage</string>
+    <string name="usage_range_30d">Letzte 30 Tage</string>
+    <string name="usage_range_all">Alle</string>
+    <string name="usage_chart_title">Tägliche Nutzung (14 Tage)</string>
+    <string name="usage_chart_no_data">Keine Nutzung in diesem Zeitraum</string>
     <string name="usage_label_total_input">Gesamteingabe (inkl. Cache)</string>
     <string name="usage_label_output">Ausgabe-Token</string>
     <string name="usage_label_cache_read">Cache-Lesen</string>

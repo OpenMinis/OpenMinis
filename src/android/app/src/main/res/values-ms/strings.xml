@@ -880,6 +880,12 @@
     <string name="storage_clear_confirm_button">Kosongkan %1$s</string>
     <string name="usage_title">Penggunaan</string>
     <string name="usage_section_total">Jumlah Penggunaan</string>
+    <string name="usage_range_today">Hari ini</string>
+    <string name="usage_range_7d">7 hari lepas</string>
+    <string name="usage_range_30d">30 hari lepas</string>
+    <string name="usage_range_all">Semua</string>
+    <string name="usage_chart_title">Penggunaan Harian (14 hari)</string>
+    <string name="usage_chart_no_data">Tiada penggunaan dalam tempoh ini</string>
     <string name="usage_label_total_input">Jumlah Input (termasuk Cache)</string>
     <string name="usage_label_output">Token Output</string>
     <string name="usage_label_cache_read">Bacaan Cache</string>

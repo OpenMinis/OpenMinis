@@ -881,6 +881,12 @@
     <string name="storage_clear_confirm_button">Golește: %1$s</string>
     <string name="usage_title">Consum</string>
     <string name="usage_section_total">Consum total</string>
+    <string name="usage_range_today">Astăzi</string>
+    <string name="usage_range_7d">Ultimele 7 zile</string>
+    <string name="usage_range_30d">Ultimele 30 de zile</string>
+    <string name="usage_range_all">Tot</string>
+    <string name="usage_chart_title">Utilizare zilnică (14 zile)</string>
+    <string name="usage_chart_no_data">Fără utilizare în această perioadă</string>
     <string name="usage_label_total_input">Intrare totală (inclusiv cache)</string>
     <string name="usage_label_output">Tokenuri de ieșire</string>
     <string name="usage_label_cache_read">Citiri din cache</string>

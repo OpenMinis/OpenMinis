@@ -880,6 +880,12 @@
     <string name="storage_clear_confirm_button">Temizle: %1$s</string>
     <string name="usage_title">Kullanım</string>
     <string name="usage_section_total">Toplam Kullanım</string>
+    <string name="usage_range_today">Bugün</string>
+    <string name="usage_range_7d">Son 7 gün</string>
+    <string name="usage_range_30d">Son 30 gün</string>
+    <string name="usage_range_all">Tümü</string>
+    <string name="usage_chart_title">Günlük Kullanım (14 gün)</string>
+    <string name="usage_chart_no_data">Bu dönemde kullanım yok</string>
     <string name="usage_label_total_input">Toplam Giriş (Önbellek dahil)</string>
     <string name="usage_label_output">Çıkış Token\'ları</string>
     <string name="usage_label_cache_read">Önbellek Okuma</string>

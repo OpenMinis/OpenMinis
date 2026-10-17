@@ -880,6 +880,12 @@
     <string name="storage_clear_confirm_button">I-clear ang %1$s</string>
     <string name="usage_title">Paggamit</string>
     <string name="usage_section_total">Kabuuang Paggamit</string>
+    <string name="usage_range_today">Ngayon</string>
+    <string name="usage_range_7d">Nakaraang 7 araw</string>
+    <string name="usage_range_30d">Nakaraang 30 araw</string>
+    <string name="usage_range_all">Lahat</string>
+    <string name="usage_chart_title">Pang-araw-araw na Paggamit (14 araw)</string>
+    <string name="usage_chart_no_data">Walang paggamit sa panahong ito</string>
     <string name="usage_label_total_input">Kabuuang Input (kasama ang Cache)</string>
     <string name="usage_label_output">Mga Output Token</string>
     <string name="usage_label_cache_read">Cache Read</string>
