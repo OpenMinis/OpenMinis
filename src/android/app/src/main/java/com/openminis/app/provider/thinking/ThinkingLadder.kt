@@ -10,7 +10,8 @@ import com.openminis.app.data.model.ThinkingLevel
  * Four providers drive thinking with a NUMERIC token budget rather than an
  * effort string: Gemini 2.5 (`thinkingBudget`), Qwen/DashScope
  * (`thinking_budget`), Anthropic legacy (`budget_tokens`) and the Zen free lane
- * (`max_completion_tokens`). Each grew its own hardcoded ladder, and each one
+ * (`max_completion_tokens`) that shipped until 2026-10-17. Each grew its own
+ * hardcoded ladder, and each one
  * collapsed in the same way — the top rungs were pinned to the model's own
  * ceiling:
  *

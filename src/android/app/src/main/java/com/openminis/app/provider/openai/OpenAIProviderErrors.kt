@@ -10,7 +10,7 @@ internal fun OpenAIProvider.mapHttpError(statusCode: Int, body: String, retryAft
     // [T-zen-structured-error] OpenCode Zen answers with a structured body
     // ({"type":"error","error":{"type":"FreeTierError",…}}) whose type carries
     // semantics the generic HTTP mapping cannot see. FreeTierError means the
-    // request's OpenCode session identity was rejected; ModelError means the
+    // request was refused as a non-official client; ModelError means the
     // catalogue lists the id but the server refuses to serve it; RegionError
     // means the model is geo-fenced. All three are provider refusals where
     // "Invalid API key" is simply false, and each has a hint worth showing.
@@ -24,19 +24,7 @@ internal fun OpenAIProvider.mapHttpError(statusCode: Int, body: String, retryAft
     // a service it knows nothing about. Only the Zen endpoint speaks this
     // dialect, so only the Zen endpoint gets this mapping; every other host
     // keeps the generic path it had before.
-    if (com.openminis.app.provider.ZenDisguise.isZenHost(basePath)) {
-        // [T-zen-free-lane-follow] Retirement evidence, recorded BEFORE the
-        // structured mapping so both dialect shapes reach it: the structured
-        // {"type":"error","error":{"type":"ModelError"…}} refusal AND the
-        // bare {"error":{"type":"server_error","message":"…Endpoint is
-        // unavailable"}} body that answers 503 (measured on exo-free). Only
-        // the free lane is recorded — a paid Zen instance keeps its full
-        // catalogue and its own error surface. FreeTierError is deliberately
-        // NOT retirement evidence: it answers EVERY model when the session
-        // identity is malformed, and recording it would nuke the whole lane.
-        if (isZenFree && zenRetirementEvidence(body)) {
-            com.openminis.app.provider.ZenFreeLaneHealth.recordDead(model.id)
-        }
+    if (com.openminis.app.provider.ZenEndpoint.isZenHost(basePath)) {
         zenStructuredProviderRefusal(body)?.let { return it }
     }
     if (statusCode == 401 || statusCode == 403) {
@@ -122,45 +110,12 @@ internal fun OpenAIProvider.mapError(error: Throwable): LLMError = mapThrowableT
 
 /**
  * [T-zen-structured-error] Parses an OpenCode Zen structured refusal body —
- * `{"type":"error","error":{"type":"FreeTierError"|"ModelError","message":…}}` —
- * into a precise [LLMError]; null when the body is not one, so generic OpenAI
- * bodies flow to the historical mapping untouched. The upstream message is
- * user-visible verbatim, so it goes through [maskSecrets] like every other
- * server-provided string in this file.
+ * `{"type":"error","error":{"type":"FreeTierError"|"ModelError"|"RegionError",
+ * "message":…}}` — into a precise [LLMError]; null when the body is not one, so
+ * generic OpenAI bodies flow to the historical mapping untouched. The upstream
+ * message is user-visible verbatim, so it goes through [maskSecrets] like every
+ * other server-provided string in this file.
  */
-/**
- * [T-zen-free-lane-follow] Whether an error body is per-model retirement
- * evidence on the Zen host — the trigger for [com.openminis.app.provider.
- * ZenFreeLaneHealth.recordDead].
- *
- * Three dialects, all measured on the live lane:
- *  - `error.type == "ModelError"` — 401 "Model X is not supported"
- *    (mimo-v2.5-free, deepseek-v4-flash-free, hy3-free);
- *  - `error.type == "RegionError"` — geo-fenced upstream (the muse pair,
- *    2026-10-05);
- *  - `error.message` containing "is unavailable" — "Endpoint is
- *    unavailable" on 400 (ling-3.0-flash-fin-free) and on 503 wrapped in a
- *    bare server_error body without the outer `{"type":"error"}` envelope
- *    (exo-free), plus the older "Model X is unavailable" 400 shape.
- *
- * Deliberately NOT evidence: FreeTierError (session identity, answers every
- * model), FreeUsageLimitError (429 — the model works, the quota doesn't),
- * and bare 500s (upstream broken, may heal). Those keep their rows; the
- * user hides them if they don't want them.
- */
-internal fun zenRetirementEvidence(body: String): Boolean {
-    val json = try {
-        JSONObject(body)
-    } catch (_: Exception) {
-        return false
-    }
-    val error = json.optJSONObject("error") ?: return false
-    val type = error.optString("type", "")
-    if (type == "ModelError" || type == "RegionError") return true
-    val message = error.safeOptString("message", "").orEmpty()
-    return message.contains("is unavailable", ignoreCase = true)
-}
-
 internal fun zenStructuredProviderRefusal(body: String): LLMError? {
     val json = try {
         JSONObject(body)
@@ -172,29 +127,28 @@ internal fun zenStructuredProviderRefusal(body: String): LLMError? {
     val type = error.optString("type", "")
     val message = error.safeOptString("message", "").orEmpty()
     return when (type) {
-        // [T-zen-canonical-session] This refusal is NOT a service boundary, and
-        // the upstream's own wording says so misleadingly. Measured 2026-10-05:
-        // a session id that is not exactly `ses_` + 12 lowercase hex + 14
-        // Base62 produces a byte-identical 403 to a request with no disguise at
-        // all — on EVERY model, including the nine that stream 200 with a
-        // canonical id. So the useful thing to tell the user is that the request
-        // carried a bad session identity, not that no client can pass.
+        // [T-zen-free-lane-retired] Measured 2026-10-17: this refusal is not a
+        // header problem and not a key problem — the official 2.0.32 CLI answers
+        // 200 on the same models from the same machine, while the CLI's own
+        // header set, replayed from curl / Node / Python / Chromium, answers 403
+        // on every model over both HTTP/1.1 and HTTP/2. The keyless lane this
+        // app used to ship is therefore retired, and the honest instruction is
+        // "bring your own Zen key".
         "FreeTierError" -> LLMError.ProviderError(
             "FreeTierError: ${maskSecrets(message.ifBlank { "free tier refused" })} — " +
-                "the upstream rejected this request's OpenCode session identity, not your " +
-                "key, plan or configuration. If it persists across models, the built-in " +
-                "OpenCode Zen (Free) provider is the one to use; another free model from " +
-                "the list is worth a try.",
+                "upstream only accepts requests from the official OpenCode client, so the " +
+                "keyless free lane is no longer usable here. Add your own OpenCode Zen API " +
+                "key in this provider's settings, or switch provider.",
         )
         "RegionError" -> LLMError.ProviderError(
             "RegionError: ${maskSecrets(message.ifBlank { "not available in your country" })} — " +
-                "this free model is geo-fenced upstream and cannot be reached from your " +
-                "current location. The other bundled free models have no such restriction.",
+                "this model is geo-fenced upstream and cannot be reached from your " +
+                "current location. Try another model or another provider.",
         )
         "ModelError" -> LLMError.ProviderError(
             "ModelError: ${maskSecrets(message.ifBlank { "model refused by server" })} — " +
                 "the server's catalogue lists this id but refuses to serve it. " +
-                "Refresh the model list, or pick another of the bundled free models.",
+                "Refresh the model list, or pick another model.",
         )
         else -> null
     }

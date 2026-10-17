@@ -11,7 +11,6 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.SamplingIdentity
 import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.applyUserAgentOverride
-import com.openminis.app.provider.thinking.ThinkingLadder
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import okhttp3.MediaType.Companion.toMediaType
@@ -42,9 +41,6 @@ internal class OpenAIRequestBodies(
         val isXAI: Boolean
         val usesUnifiedReasoningEffort: Boolean
         val thinkingRuleInstanceId: String?
-        /** True when this instance points at the Zen host with no API key —
-         *  the bundled free lane, not a user's paid Zen provider. */
-        val isZenFree: Boolean
         fun resolvedServiceTier(): String?
         fun endpointURL(defaultPath: String): String
         fun azureUrl(path: String): String?
@@ -94,18 +90,7 @@ internal class OpenAIRequestBodies(
         } else {
             body.put("max_completion_tokens", maxTokens)
         }
-        // [T-zen-stream-only-lane] The Zen free lane REFUSES stream=false with
-        // 403 FreeTierError — live-measured 2026-10-05 on-device via adb:
-        // stream=true answers 200 on the same session id, model and body, while
-        // the identical request with stream=false answers
-        // {"type":"error","error":{"type":"FreeTierError",…}} — byte-identical
-        // to a request carrying no disguise at all, which is why this read as a
-        // session-identity wall. The non-streaming caller
-        // [OpenAIProvider.sendMessageClamped] already concatenates SSE deltas
-        // into a single response, so forcing stream=true here changes nothing
-        // for the caller while passing the lane's only accepted shape.
-        val streamForced = if (host.isZenFree) true else stream
-        body.put("stream", streamForced)
+        body.put("stream", stream)
 
         // [T-android-xai-priority] xAI Priority Processing, driven by the same
         // app-level Fast Mode toggle as Codex (FastModePrefs), read here at
@@ -119,7 +104,7 @@ internal class OpenAIRequestBodies(
             SamplingIdentity.of(host.provider), host.model.id, temperature, thinkingLevel.isEnabled,
         )?.let { body.put("temperature", it) }
 
-        if (streamForced && !host.isOpenRouter) {
+        if (stream && !host.isOpenRouter) {
             body.put("stream_options", JSONObject().put("include_usage", true))
         }
 
@@ -136,19 +121,7 @@ internal class OpenAIRequestBodies(
         // OpenMinis#87) — the request-parameter half of that fix was never
         // ported, so an enabled thinking level still put `reasoning_effort` on
         // the wire to api.mistral.ai.
-        //
-        // [T-zen-free-thinking-budget] The Zen free lane is the exception
-        // that replaces the field entirely: it ignores reasoning_effort
-        // (live-measured: `low` produced MORE reasoning than `xhigh`, and
-        // unknown fields occasionally surfaced as a 503). The only control
-        // it enforces is max_completion_tokens, so the thinking level maps
-        // to a real generation budget that REPLACES the caller's maxTokens
-        // instead of a field the gateway drops. Only the bundled keyless
-        // instance qualifies; a user's own paid Zen provider keeps the
-        // normal reasoning_effort path untouched.
-        if (host.isZenFree) {
-            zenBudgetTokens(thinkingLevel, maxTokens)?.let { body.put("max_completion_tokens", it) }
-        } else if (!host.isMistral) {
+        if (!host.isMistral) {
             injectThinkingParams(body, thinkingLevel, maxTokens)
         }
 
@@ -166,26 +139,14 @@ internal class OpenAIRequestBodies(
             body.put("cache_control", JSONObject().put("type", "ephemeral"))
         }
 
-        // OpenCode Zen's anonymous lane validates a small tool gate even when
-        // the caller has no tools. Keep this scoped to the Zen host; ordinary
-        // OpenAI-compatible providers must retain their existing body shape.
-        val effectiveTools = if (com.openminis.app.provider.ZenDisguise.isZenHost(host.basePath)) {
-            val names = tools.map { it.name }.toSet()
-            val gateTools = listOf(
-                AgentToolDefinition("bash", "Reserved for the host runtime; do not call it.", emptyMap()),
-                AgentToolDefinition("read", "Reserved for the host runtime; do not call it.", emptyMap()),
-            )
-            tools + gateTools.filter { it.name !in names }
-        } else tools
-
         // Tools
-        if (effectiveTools.isNotEmpty()) {
+        if (tools.isNotEmpty()) {
             val toolsArray = JSONArray()
-            for (tool in effectiveTools) {
+            for (tool in tools) {
                 toolsArray.put(tool.toOpenAIJson())
             }
             body.put("tools", toolsArray)
-            body.put("tool_choice", if (com.openminis.app.provider.ZenDisguise.isZenHost(host.basePath) && tools.isEmpty()) "none" else "auto")
+            body.put("tool_choice", "auto")
         }
 
         val messagesArray = JSONArray()
@@ -683,82 +644,6 @@ internal class OpenAIRequestBodies(
     }
 
     /**
-     * [T-zen-free-thinking-budget] The generation ceiling one thinking level
-     * carries on the Zen free lane. The gateway ignores every effort field it
-     * is given and enforces ONLY max_completion_tokens, so a level here is a
-     * real, enforced budget rather than a hint — a menu that did nothing
-     * would be worse than no menu at all (design principle carried over from
-     * the desktop reference implementation).
-     *
-     * The ceiling is shared by thinking and the visible answer: a lower level
-     * shortens both. A model whose thinking cannot be switched off pays for
-     * its reasoning out of the same ceiling before the answer starts, so its
-     * rungs are scaled UP — measured on mimo-v2.6-flash-free over one day, 82%
-     * of output tokens were reasoning, and the unscaled ceiling ended long
-     * turns in `length` about every third request.
-     *
-     * Returns null when this model exposes no effort menu (supportsReasoning
-     * is not true), so the caller's own maxTokens stays on the wire untouched.
-     *
-     * [T-thinking-ladder-shared] The ladder itself is NOT here any more — it
-     * lives in [ThinkingLadder], shared with the Gemini / Qwen / Anthropic
-     * numeric-budget sites. The old table lived here as seven ABSOLUTE
-     * constants, which is precisely what cannot work on a lane whose models
-     * have wildly different ceilings: on big-pickle / mimo-v2.5 / mimo-v2.6
-     * (capacity 32000) and ling-3.1 (32768) — four REAL models in the device's
-     * own Zen free catalogue — the top rungs all clipped to the same number,
-     * so dragging the slider changed nothing on the wire.
-     *
-     * WHY PROPORTIONAL. Each rung is now a FRACTION of the model's OWN output
-     * capacity (1/32, 2/32, 4/32, 8/32, 14/32, 22/32, 30/32) instead of a
-     * constant. That is what makes the ladder strictly increasing for EVERY
-     * capacity: a constant that sits below one model's ceiling is above
-     * another's, but a fraction of that same ceiling is always below it.
-     *
-     * WHY THE FRACTIONS ARE UNEVEN. A linear ramp (1/7..6/7) would spend the
-     * user's tokens almost evenly. Reasoning cost grows SUPERLINEARLY with
-     * depth, so the ladder doubles early and tapers late — the same shape as
-     * the measured must-think behaviour (82% of output tokens were reasoning).
-     * ULTRA stops at 30/32 so it approaches the ceiling without ever being
-     * pinned to it. OFF is the smallest rung and deliberately not a duplicate
-     * of LOW: it exists to leave room for the ANSWER only, while LOW must buy
-     * real reasoning room above it.
-     *
-     * MUST-THINK IS A RESCALE, NOT A MULTIPLICATION. `multiplier = 2` divides
-     * the FRACTIONS, shifting the whole ladder down by one step's worth of
-     * headroom instead of doubling the resulting numbers. Doubling the numbers
-     * (`budget * 2`) would push XHIGH/MAX/ULTRA straight past the ceiling,
-     * where `minOf(..., capacity)` clamps them all back to the same value —
-     * reintroducing byte-for-byte the collapse this change removes, on exactly
-     * the mimo models that motivated it.
-     *
-     * [UNMEASURED] The fractions are reasoned, not swept. The claim that THESE
-     * steps raise reasoning quality on this lane is NOT measured — this
-     * gateway may just truncate differently at a bigger ceiling. Strictly
-     * increasing and strictly below capacity is the part that is provably
-     * right; the exact steps need an on-device sweep (reasoning tokens and
-     * `length` finish rate per level) before being called tuned.
-     */
-    private fun zenBudgetTokens(level: ThinkingLevel, maxTokens: Int): Int? {
-        if (host.model.supportsReasoning != true) return null
-        // [T-thinking-ladder-shared] capacity MUST be the model's own max
-        // output tokens — scaling a ladder against the caller's arbitrary
-        // maxTokens would make the same level produce a different budget
-        // depending on who asked for it, and would destroy proportionality.
-        val capacity = host.model.maxOutputTokens ?: maxTokens
-        val lid = host.model.id.lowercase()
-        // [T-zen-mimo-must-think] The `mimo-v2.5` arm is NOT dead code even though
-        // commit 56b7437 dropped `mimo-v2.5-free` from the bundled SEED: this lane
-        // follows the LIVE catalogue (`isZenFreeLaneId` = any `-free` suffix, see
-        // ProviderRepository [T-zen-free-lane-follow]), so an upstream
-        // re-advertisement of a mimo-v2.5* id lands here and would silently lose
-        // its must-think rescale if the arm were removed. Pinned by
-        // ZenFreeThinkingBudgetTest's `mimo-v2p5 …` cases. Keep both arms.
-        val mustThink = lid.startsWith("mimo-v2.6") || lid.startsWith("mimo-v2.5")
-        return ThinkingLadder.budgetFor(level, capacity, if (mustThink) 2 else 1)
-    }
-
-    /**
      * Inject the provider-specific thinking parameters for one request.
      *
      * [T-thinking-rules-phase1] The body of this function used to be an if-return chain
@@ -1026,17 +911,9 @@ internal class OpenAIRequestBodies(
 
         // Tools — flat shape required by Responses API ({type, name, description,
         // parameters}), distinct from Chat Completions' wrapped {type, function:{...}}.
-        // The Zen Responses lane requires tool_choice=auto.
-        val effectiveResponseTools = if (com.openminis.app.provider.ZenDisguise.isZenHost(host.basePath)) {
-            val names = tools.map { it.name }.toSet()
-            tools + listOf(
-                AgentToolDefinition("bash", "Reserved for the host runtime; do not call it.", emptyMap()),
-                AgentToolDefinition("read", "Reserved for the host runtime; do not call it.", emptyMap()),
-            ).filter { it.name !in names }
-        } else tools
-        if (effectiveResponseTools.isNotEmpty()) {
+        if (tools.isNotEmpty()) {
             val toolsArray = JSONArray()
-            for (tool in effectiveResponseTools) {
+            for (tool in tools) {
                 toolsArray.put(tool.toResponsesAPIJson())
             }
             body.put("tools", toolsArray)

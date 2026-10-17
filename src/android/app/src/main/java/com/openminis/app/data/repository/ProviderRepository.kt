@@ -263,7 +263,7 @@ class ProviderRepository(private val context: Context) {
             // heal corrupted modality). Mirrors iOS ProviderConfigStore.init.
             try {
                 ensureVoiceTemplateModels()
-                ensureBuiltInZenProvider()
+                retireBuiltInZenProvider()
             } catch (e: Exception) {
                 android.util.Log.w("ProviderRepo", "[BuiltIn] provider reconciliation failed: ${e.message}")
             }
@@ -589,102 +589,33 @@ class ProviderRepository(private val context: Context) {
     }
 
     /**
-     * Adds the bundled OpenCode Zen instance only on a fresh install.
+     * Retires the OpenCode Zen free lane this app used to seed.
      *
-     * Upgrade safety: an existing user-created instance wins when its label or
-     * endpoint already identifies Zen; otherwise the built-in gets a unique
-     * deterministic label and ID, so no user-created provider is renamed or
-     * merged accidentally.
+     * The bundled instance authenticated with the literal `"public"`
+     * credential. Upstream no longer accepts it: measured 2026-10-17, every
+     * third-party client is refused with `403 FreeTierError` on every model,
+     * while the official 2.0.32 CLI passes on a credential it never stores
+     * anywhere on disk (see [com.openminis.app.provider.ZenEndpoint] for the
+     * full measurement). Seeding that instance would hand every fresh install
+     * a provider that cannot answer one request, so the seed is gone and an
+     * instance left over from an earlier install is removed here instead.
+     *
+     * Only the id this app created is touched. A user-created Zen instance —
+     * same host, real key — keeps its id, label, credentials and model rows.
      */
-    private fun ensureBuiltInZenProvider() = synchronized(configLock) {
+    private fun retireBuiltInZenProvider() = synchronized(configLock) {
         if (!_configLoaded.value) return@synchronized
-        val current = _config.value
-        val endpoint = ZEN_BUNDLED_ENDPOINT
-        // A user-created instance pointing at the same Zen endpoint already
-        // represents this service; do not duplicate or mutate it. A same-label
-        // instance with another endpoint is NOT a conflict: preserve it and use
-        // a deterministic suffix for the bundled provider.
-        //
-        // But an existing Zen instance that has never catalogued a model is
-        // exactly the "no free models anywhere" report: the hand-built
-        // instance won the skip check, its live refresh never landed, and the
-        // bundle was never seeded either. Reconciliation then fills the empty
-        // shell — the instance keeps its id/label/credentials, and a later
-        // live refresh still replaces the bundled list.
-        // [T-zen-free-lane-follow] The reconciliation pass targets the
-        // KEYLESS free-lane driver only: a user's own paid Zen instance
-        // (same endpoint, real key) must never have its rows swept or its
-        // catalogue filtered by free-lane logic. loadApiKey is reentrant
-        // here (same-thread intrinsic lock), so reading it inside the
-        // synchronized block is safe.
-        val existingZen = current.instances.firstOrNull {
-            isZenFreeInstance(it, loadApiKey(it.id))
-        }
-        if (existingZen != null) {
-            // One pass, both directions: drop every non-custom entry that
-            // can never work (paid-lane leftovers, proven-dead free ids),
-            // then top the instance up to the full bundle minus the dead.
-            //
-            // The top-up is the half that matters for an upgrading install.
-            // The build that shipped the white list carried ONE model
-            // (space-bunny-free) and its sweep only ever deleted, so an
-            // existing instance is left holding that single row — and a
-            // user who upgrades never sees the other free models the
-            // endpoint actually serves. Deleting dead rows and adding missing
-            // bundled ones in the same pass is what makes "every free model
-            // works, no key, no setup" true for an existing install rather
-            // than only for a fresh one.
-            val dead = zenDeadIds()
-            val stale = zenStaleEntryIds(existingZen.id, current.modelEntries, dead)
-            val present = current.modelEntries
-                .filter { it.providerInstanceId == existingZen.id }
-                .map { it.baseModel.id }
-                .toSet()
-            val missing = bundledZenModels().map { it.id }
-                .filterNot { it in present || it in dead }
-            if (stale.isNotEmpty() || missing.isNotEmpty()) {
-                val config = workingCopy()
-                config.modelEntries.removeAll { it.id in stale }
-                val alreadyPresent = config.modelEntries
-                    .filter { it.providerInstanceId == existingZen.id }
-                    .map { it.baseModel.id }
-                    .toSet()
-                val added = bundledZenModels()
-                    .filterNot { it.id in alreadyPresent || it.id in dead }
-                    .map { ModelEntry(providerInstanceId = existingZen.id, baseModel = it) }
-                config.modelEntries.addAll(added)
-                saveConfig(config)
-                android.util.Log.i(
-                    "ProviderRepo",
-                    "[BuiltIn] reconciled Zen instance ${existingZen.id} '${existingZen.label}': " +
-                        "swept ${stale.size} unusable entries, added ${added.size} bundled free models",
-                )
-            }
-            return@synchronized
-        }
-
+        val legacy = _config.value.instances.filter { it.id == LEGACY_ZEN_BUILTIN_ID }
+        if (legacy.isEmpty()) return@synchronized
         val config = workingCopy()
-        val baseLabel = "OpenCode Zen (Free)"
-        val label = if (config.instances.none { it.label == baseLabel }) {
-            baseLabel
-        } else {
-            "$baseLabel · Built-in"
-        }
-        val instance = ProviderInstance(
-            id = "builtin-opencode-zen",
-            label = label,
-            providerType = ProviderType.openAI,
-            credentialType = ProviderCredential.apiKey,
-            customBaseURL = endpoint,
-            appendV1Suffix = false,
-            isEnabled = true,
-        )
-        config.instances.add(instance)
-        saveApiKey(instance.id, "public")
-        val models = bundledZenModels()
-        config.modelEntries.addAll(models.map { ModelEntry(providerInstanceId = instance.id, baseModel = it) })
+        config.instances.removeAll { it.id == LEGACY_ZEN_BUILTIN_ID }
+        config.modelEntries.removeAll { it.providerInstanceId == LEGACY_ZEN_BUILTIN_ID }
         saveConfig(config)
-        android.util.Log.i("ProviderRepo", "[BuiltIn] seeded Zen instance ${instance.id} as '${instance.label}'")
+        legacy.forEach { deleteApiKey(it.id) }
+        android.util.Log.i(
+            "ProviderRepo",
+            "[BuiltIn] retired the Zen free lane: removed ${legacy.size} built-in instance(s)",
+        )
     }
 
     /**
@@ -694,24 +625,6 @@ class ProviderRepository(private val context: Context) {
      * fallback / seed — those are GPT-only IDs that don't exist upstream.
      * Mirrors iOS `ProviderConfigStore.isThirdPartyOpenAICompat`.
      */
-    private fun isZenInstance(instance: ProviderInstance): Boolean =
-        instance.customBaseURL?.trimEnd('/') == ZEN_BUNDLED_ENDPOINT
-
-    /**
-     * [T-zen-free-lane-follow] Whether [instance] drives the KEYLESS free
-     * lane: the Zen host, authenticated with the literal anonymous
-     * credential ("public") the free lane accepts. Only these instances get
-     * free-lane filtering and reconciliation — a user's own paid Zen
-     * instance (same endpoint, real key) sees the full catalogue and is
-     * never swept. Mirrors [com.openminis.app.provider.openai.OpenAIProvider.isZenFree].
-     */
-    private fun isZenFreeInstance(instance: ProviderInstance, apiKey: String?): Boolean =
-        isZenInstance(instance) && apiKey == "public"
-
-    /** Live retirement marks for the Zen free lane (see ZenFreeLaneHealth). */
-    private fun zenDeadIds(): Set<String> =
-        com.openminis.app.provider.ZenFreeLaneHealth.deadIds()
-
     private fun isThirdPartyOpenAICompat(instance: ProviderInstance): Boolean {
         if (instance.providerType != ProviderType.openAI) return false
         val custom = instance.customBaseURL?.lowercase() ?: return false
@@ -2534,11 +2447,7 @@ class ProviderRepository(private val context: Context) {
                     // models from the same /v1/models endpoint — only the
                     // completion endpoint differs.
                     ProviderType.openAI, ProviderType.openAIResponses ->
-                        OpenAIModelsApi.fetchModels(apiKey, baseURL, context = context, forceRefresh = liveForce, customUserAgent = if (isZenInstance(instance)) com.openminis.app.provider.ZenDisguise.userAgent() else instance.customUserAgent, cacheScope = instance.id)
-                            // [T-zen-free-lane-follow] The free-lane filter is
-                            // KEYLESS-only: a user's paid Zen instance (same
-                            // host, real key) sees the full catalogue.
-                            .let { models -> if (isZenFreeInstance(instance, apiKey)) zenVisibleModels(models, zenDeadIds()) else models }
+                        OpenAIModelsApi.fetchModels(apiKey, baseURL, context = context, forceRefresh = liveForce, customUserAgent = instance.customUserAgent, cacheScope = instance.id)
                     ProviderType.openRouter -> OpenRouterModelsApi.fetchModels(apiKey, context = context, forceRefresh = liveForce, cacheScope = instance.id)
                     // [T-provider-dynamic-catalog-reconcile] xAI: fetch the live
                     // catalog, fall back to the built-in list.
@@ -2627,22 +2536,7 @@ class ProviderRepository(private val context: Context) {
         // empty so the existing list (vLLM/Ollama on a private host) is preserved.
         val fallbackBaseURL = modelsDevBaseURL(instance)
         val fallbackModels = ModelsDevApi.fetchModels(fallbackBaseURL)
-        // [T-zen-usable-free-lane-fallback] The models.dev fallback is a
-        // HOSTNAME-keyed catalogue, not this instance's own /v1/models — for
-        // the Zen host it answers with all rows: every paid lane (which a
-        // keyless "public" instance can never drive) plus the free ids the
-        // upstream advertises but may no longer serve. Writing it back
-        // unfiltered replaces the curated free list with rows that fail on
-        // the first call, which is the "pick a model, get an error" report.
-        // The curated list follows the catalogue's free lane minus the
-        // proven-dead record — and falls back to the bundle if the catalogue
-        // is silent, so a metrics blip can never leave the instance with
-        // nothing to pick.
-        val curatedFallback = if (isZenFreeInstance(instance, apiKey)) {
-            zenVisibleModels(fallbackModels, zenDeadIds()).ifEmpty { bundledZenModels() }
-        } else {
-            fallbackModels
-        }
+        val curatedFallback = fallbackModels
         if (curatedFallback.isNotEmpty()) {
             android.util.Log.i("ProviderRepo", "models.dev fallback returned ${curatedFallback.size} models for ${instance.label}")
             replaceEntries(instance.id, curatedFallback)
@@ -2865,174 +2759,10 @@ enum class ModelRefreshResult {
     FAILURE,
 }
 
-/** Bundled OpenCode Zen endpoint — single source for seed/patch/matching. */
-internal const val ZEN_BUNDLED_ENDPOINT = "https://opencode.ai/zen/v1"
-
 /**
- * Free-lane models bundled with the app for the Zen endpoint. Every id here
- * was measured to answer a real chat completion as a third-party client, with
- * no key and no configuration.
+ * Id of the OpenCode Zen provider this app used to seed.
  *
- * Re-measured 2026-10-05 against live `POST /zen/v1/chat/completions` with the
- * disguised client (CLI user agent, `x-opencode-client`, a canonical `ses_`
- * session id, the bash/read gate tools, `Authorization: Bearer public`). Each
- * id below was then re-probed three times on independent session ids.
- * Re-measured again 2026-10-08 (same shape) plus a third-party cross-check
- * against the `dsh-opencode-free-models` plugin's shape (official CLI UA,
- * `Bearer public`, NO session headers) — see the note below the table.
- *
- * | id | 2026-10-05 | 2026-10-08 |
- * | --- | --- | --- |
- * | big-pickle | **200 ×3** (plus 13/14 on a 14-id sweep) | **200** |
- * | space-bunny-free | **200 ×3** | (not re-probed; quota budget) |
- * | mimo-v2.6-flash-free | **200 ×3** | (not re-probed; quota budget) |
- * | mimo-v2.5-free | **200 ×3** | **401 ModelError "not supported"** — retired upstream AND de-advertised from the live catalogue; removed from the bundle |
- * | nemotron-3-ultra-free | **200 ×3** | **200** (mid-stream upstream overload once) |
- * | nemotron-3.5-lightning-free | **200 ×3** | (not re-probed; quota budget) |
- * | longcat-2.5-preview-free | **200 ×3** | (not re-probed; quota budget) |
- * | fledge-alpha-free | **200 ×3** | **200** after a cooldown |
- * | ling-3.1-flash-free | 200, then 429 ×2 — rate-limited | **200** (quota recovered) |
- * | ling-3.0-flash-fin-free | 400 "Endpoint is unavailable" | 400, same message (retired) |
- * | deepseek-v4-flash-free | 400 "Model is unavailable" | 401 ModelError "not supported" (retired) |
- * | jev-1.13-free | 500 (upstream broken) | 500, same (broken) |
- * | muse-spark-1.2-contributor-free | 403 RegionError (geo-fenced) | 429 FreeUsageLimitError all day — geo gate no longer reproduces; passes identity, never a 200 |
- * | muse-spark-1.3-contributor-free | 403 RegionError (geo-fenced) | 500 internal (broken) |
- * | hy3-free | — (not advertised then) | 401 ModelError "not supported" — advertised by the third-party plugin's static list, refused upstream |
- *
- * The upstream failures are genuine retirements — their messages name the
- * endpoint or model, not the client. The muse pair is kept out on the
- * 200-or-nothing rule: 1.2 clears every gate today but never answered a
- * completion (rate-limited all day), and a row that only ever 429s cannot be
- * shipped as usable.
- *
- * 2026-10-08 cross-check against `dsh-opencode-free-models` (a DeepSeek
- * Harness plugin driving the same lane): its exact wire shape — official CLI
- * user agent `opencode/1.18.18 ai-sdk/...`, `Bearer public`, and NO session
- * headers — answers **403 FreeTierError** on every model today, so the
- * plugin's users are currently refused upstream. The same request with our
- * canonical `ses_` session headers returns 200. That is live third-party
- * evidence for the session-id gate documented in
- * [com.openminis.app.provider.ZenDisguise]: the UA is not the key; the
- * canonical session id is.
- *
- * What made this list look like one row for a day was a MALFORMED session id in
- * [com.openminis.app.provider.ZenDisguise], not an upstream policy: a 23- or
- * 25-character id earns a 403 FreeTierError byte-identical to a request with no
- * disguise at all, on every model. Any future re-measurement MUST send a
- * canonical id — [com.openminis.app.provider.ZenDisguise.sessionIdForSeed] —
- * or it will "confirm" that the whole lane is closed.
- *
- * The live refresh replaces this with the full catalogue filtered by
- * [zenVisibleModels].
+ * Only this exact id is retired on launch (see [retireBuiltInZenProvider]).
+ * A user-created Zen instance — its own id, its own key — is never touched.
  */
-internal fun bundledZenModels(): List<LLMModel> = listOf(
-    LLMModel("big-pickle", "Big Pickle (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("space-bunny-free", "Space Bunny (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("mimo-v2.6-flash-free", "MiMo v2.6 Flash (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("nemotron-3-ultra-free", "Nemotron 3 Ultra (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("ling-3.1-flash-free", "Ling 3.1 Flash (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("longcat-2.5-preview-free", "LongCat 2.5 Preview (Free)", "OpenCode Zen", 128000, 8192, true),
-    LLMModel("fledge-alpha-free", "Fledge Alpha (Free)", "OpenCode Zen", 128000, 8192, true),
-)
-
-/**
- * [T-zen-usable-free-lane] The bundled SEED ids — what a fresh install (or an
- * empty shell) gets before the first live refresh, and what the launch
- * top-up heals to. NOT the gate anymore: since [T-zen-free-lane-follow] the
- * picker follows the live catalogue's free lane
- * ([isZenFreeLaneId]) minus the proven-dead record
- * ([com.openminis.app.provider.ZenFreeLaneHealth]), so upstream drift no
- * longer needs an app release to show up (or to disappear).
- */
-internal fun zenUsableFreeIds(): Set<String> = bundledZenModels().map { it.id }.toSet()
-
-/**
- * [T-zen-free-lane-follow] The free-lane id predicate: how the picker
- * recognises a free row in the live catalogue WITHOUT any hard-coded list.
- * Measured against every free id the catalogue has advertised since
- * 2026-10-05 (14 distinct ids): every one is either `big-pickle` (the one
- * free id with no suffix) or ends in `-free`. The catalogue itself carries
- * no free/paid marker — all 87 rows are the same four-field object — so
- * this shape is the only upstream signal, and it is the SAME shape the
- * pre-bundle builds used. What changed is not the predicate but what
- * backs it: dead rows are now evicted by evidence
- * ([com.openminis.app.provider.ZenFreeLaneHealth]) instead of by a
- * shipped table, so upstream drift no longer needs an app release.
- */
-internal fun isZenFreeLaneId(id: String): Boolean =
-    id == "big-pickle" || id.endsWith("-free")
-
-/**
- * Filter for a Zen instance's live /models refresh: every advertised
- * free-lane id ([isZenFreeLaneId]) minus the proven-dead record
- * ([deadIds]). This is what makes the picker FOLLOW the catalogue — a new
- * free id upstream appears on the next refresh with no app update, and a
- * de-advertised id disappears with it (replaceEntries prunes non-custom
- * rows the catalogue no longer returns).
- *
- * The dead record is the guard that replaced the old hard-coded measured
- * table: a row only leaves the picker on retirement EVIDENCE (401
- * ModelError "not supported", RegionError, "Endpoint is unavailable"),
- * recorded from a real failed call and expiring after 7 days so a wrong
- * mark self-heals. Advertised-but-flaky rows (429 quota, 500 upstream)
- * deliberately stay visible — the upstream advertises them, the user can
- * hide them, and a transient blip must not silently delete a working row.
- *
- * Applied to the KEYLESS free-lane instance only; a paid Zen instance
- * keeps the full catalogue (see isZenFreeInstance at the call sites).
- */
-internal fun zenVisibleModels(
-    models: List<LLMModel>,
-    deadIds: Set<String> = emptySet(),
-): List<LLMModel> =
-    models.filter { isZenFreeLaneId(it.id) && it.id !in deadIds }
-
-/**
- * Entry rows of the Zen instance [instanceId] that can never work: paid-lane
- * rows a keyless instance can never drive ([isZenFreeLaneId] miss), and
- * free-lane rows with live retirement evidence ([deadIds]). The instance
- * scoping is INSIDE the function so the reconciliation sweep can never leak
- * across instances; entries belonging to any other provider are never
- * touched.
- *
- * [T-zen-free-lane-follow] CUSTOM rows are untouchable by design: a row the
- * user added (AddCustomModelScreen, `isCustom = true`) is the user's call —
- * they may want a paid-lane id on their own key, or a dead free id they
- * believe in. The old sweep deleted them at every launch, which made
- * "add a model to the Zen provider" a lie: the row vanished on the next
- * start. Refresh keeps them too (replaceEntries preserves custom rows the
- * catalogue doesn't return), so user intent survives BOTH paths now.
- *
- * Re-seeding matters for the caller: the sweep can empty an instance that
- * held only dead rows, and an instance with zero models is the "no free
- * models anywhere" report, so the caller re-adds [bundledZenModels] when
- * the sweep would leave nothing behind.
- */
-internal fun zenStaleEntryIds(
-    instanceId: String,
-    entries: List<ModelEntry>,
-    deadIds: Set<String> = emptySet(),
-): Set<String> =
-    entries
-        .filter { it.providerInstanceId == instanceId }
-        .filterNot { it.isCustom }
-        .filter { entry ->
-            val id = entry.baseModel.id
-            !isZenFreeLaneId(id) || id in deadIds
-        }
-        .map { it.id }
-        .toSet()
-
-/**
- * Whether [instance] still shows the user "no free models anywhere": it
- * points at the bundled Zen endpoint but has never catalogued a single
- * model entry (hand-built before the bundle shipped, or its live refresh
- * failed). Only then may reconciliation seed the bundled models into it.
- */
-internal fun zenInstanceNeedsBundledModels(
-    instance: com.openminis.app.data.model.ProviderInstance,
-    entries: List<ModelEntry>,
-): Boolean =
-    instance.customBaseURL?.trimEnd('/') == ZEN_BUNDLED_ENDPOINT &&
-        entries.none { it.providerInstanceId == instance.id }
+private const val LEGACY_ZEN_BUILTIN_ID = "builtin-opencode-zen"

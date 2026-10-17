@@ -280,12 +280,6 @@ class MinisApp : Application(), ImageLoaderFactory {
         // the exact launch where the user is trying to read the crash files.
         AppLogger.primeContext(this)
 
-        // [T-zen-free-lane-follow] Persistence for the Zen free-lane
-        // retirement record. Primed right after AppLogger for the same
-        // reason: cheap, no I/O until first use, and safe-mode launches
-        // keep the in-memory record working even when repositories never
-        // come up.
-        com.openminis.app.provider.ZenFreeLaneHealth.initialize(this)
         com.openminis.app.platform.OptionalPackages.probe(this)
         com.openminis.app.session.ChatRuntime.binder =
             com.openminis.app.ui.chat.ChatViewModelBinder(this)

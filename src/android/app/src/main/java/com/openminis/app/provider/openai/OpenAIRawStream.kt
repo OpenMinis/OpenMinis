@@ -25,7 +25,6 @@ import com.openminis.app.provider.VendorMedia
 import com.openminis.app.provider.VendorMediaKind
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
-import com.openminis.app.provider.ZenDisguise
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
@@ -222,16 +221,7 @@ internal fun OpenAIProvider.rawStreamMessage(
                 memBefore, serStartNs, failure = null,
             )
         }
-        var request = buildRequest(bodyStr)
-        if (com.openminis.app.provider.ZenDisguise.isZenHost(basePath)) {
-            // [T-zen-disguise-single-serialize] applyToBody re-parsed the ENTIRE
-            // serialised body just to recover the first user message for the
-            // session id — a multi-MB JSONObject parse on every Zen turn, which is
-            // exactly the memory pressure T302 removed above (and it sat on top of
-            // the deliberate single `body.toString()`). `messages` is already in
-            // hand and is what the body was built from, so derive the id from it.
-            request = ZenDisguise.apply(request.newBuilder(), messages).build()
-        }
+        val request = buildRequest(bodyStr)
         val headerMap = mutableMapOf<String, String>()
         for (name in request.headers.names()) {
             headerMap[name] = request.headers[name] ?: ""

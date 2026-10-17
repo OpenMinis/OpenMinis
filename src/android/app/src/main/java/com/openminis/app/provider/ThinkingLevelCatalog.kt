@@ -84,9 +84,9 @@ object ThinkingLevelCatalog {
      * also folds into "max") depends on which provider path emits it — none of
      * which is visible from an [LLMModel]. Keying an id rule here would silently
      * cap the ~2090 relay-hosted Claude entries that declare their own effort
-     * tiers, which are a different wire path entirely. Likewise the Zen FREE
-     * lane, whose only control surface is `zenBudgetTokens` on a provider with
-     * `isZenFree` — a provider property (baseUrl + apiKey), not a model one.
+     * tiers, which are a different wire path entirely. Likewise the retired Zen
+     * free lane, which carried its own numeric budget on a provider property
+     * (baseUrl + apiKey) rather than on an [LLMModel].
      */
     sealed interface WireLadder {
         /** Every generic rung that the model declares is a distinct wire value. */

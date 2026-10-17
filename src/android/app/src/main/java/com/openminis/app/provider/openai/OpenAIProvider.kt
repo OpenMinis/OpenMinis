@@ -21,7 +21,6 @@ import com.openminis.app.provider.SamplingIdentity
 import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.VendorMedia
 import com.openminis.app.provider.VendorMediaKind
-import com.openminis.app.provider.ZenDisguise
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
@@ -106,16 +105,6 @@ class OpenAIProvider private constructor(
 ) : LLMProvider {
     override val name = "OpenAI"
 
-    /**
-     * [T-zen-free-thinking-budget] Whether this instance drives the bundled
-     * Zen FREE lane — the Zen host, authenticated with the literal anonymous
-     * credential ("public") the free lane accepts. The bundled instance's key
-     * is seeded with that literal, while a user's own paid Zen provider
-     * carries a real key — so this predicate can never capture a paid
-     * instance, and the free-lane budget path below stays off the paid wire.
-     */
-    internal val isZenFree: Boolean
-        get() = apiKey == "public" && ZenDisguise.isZenHost(basePath)
     override val callGateKey: String
         get() = ProviderKeyGate.key(
             basePath,
@@ -1658,7 +1647,6 @@ class OpenAIProvider private constructor(
         override val isXAI get() = this@OpenAIProvider.isXAI
         override val usesUnifiedReasoningEffort get() = this@OpenAIProvider.usesUnifiedReasoningEffort
         override val thinkingRuleInstanceId get() = this@OpenAIProvider.thinkingRuleInstanceId
-        override val isZenFree get() = this@OpenAIProvider.isZenFree
         override fun resolvedServiceTier() = this@OpenAIProvider.resolvedServiceTier()
         override fun endpointURL(defaultPath: String) = this@OpenAIProvider.endpointURL(defaultPath)
         override fun azureUrl(path: String) = this@OpenAIProvider.azureUrl(path)
