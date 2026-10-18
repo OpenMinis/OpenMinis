@@ -81,10 +81,16 @@ class OpenAIProviderTest {
         server.enqueue(MockResponse().setBody(responseBody))
         val response = provider.sendMessage(listOf(LLMMessage(LLMMessage.Role.USER, "Hi")), null, 1024)
 
-        assertEquals(100, response.usage?.inputTokens)
+        // [T-usage-cache-hit-rate] prompt_tokens 含缓存，inputTokens 必须是
+        // fresh-only（100 - 50 = 50），缓存只住在 cacheReadInputTokens 里。
+        // 旧断言期望 100（全量）把重复计数钉成了契约，使用量页
+        // totalInput = input + cacheRead 把缓存算两遍、命中率被稀释。
+        assertEquals(50, response.usage?.inputTokens)
         assertEquals(10, response.usage?.outputTokens)
         assertEquals(50, response.usage?.cacheReadInputTokens)
         assertNull(response.usage?.cacheCreationInputTokens)
+        // 上下文大小仍是全量 prompt —— 这是另一个字段的职责。
+        assertEquals(100, response.usage?.latestContextTokens)
     }
 
     @Test

@@ -21,7 +21,7 @@ internal fun OpenAIProvider.parseChatCompletionsUsage(usage: JSONObject): LLMUsa
     // latestContextTokens stays the full prompt (that IS the context size).
     val freshInput = cacheRead?.let { (promptTokens - it).takeIf { d -> d >= 0 } } ?: promptTokens
     return LLMUsage(
-        inputTokens = promptTokens,
+        inputTokens = freshInput,
         outputTokens = usage.optInt("completion_tokens", 0),
         cacheReadInputTokens = cacheRead,
         latestContextTokens = promptTokens,
