@@ -2263,25 +2263,26 @@ fun ChatScreen(
                                         )
                                         }
                                     }
-                                // Line 2: "provider · model" + thinking badge as two
-                                // SEPARATE tappable siblings (iOS AIChatView row-2 HStack).
-                                // [T-android-thinking-badge-navbar] Gesture
-                                // separation: the whole subtitle Column above owns
-                                // `clickable { showModelPicker = true }`, so a tap
-                                // on the model text still opens the model picker.
-                                // The badge declares its OWN `clickable` (see
-                                // ThinkingLevelBadge), and in Compose the innermost
-                                // clickable consumes the down/up events — so a tap
-                                // that lands on the badge opens the thinking sheet
-                                // and never bubbles up to the Column's model-picker
-                                // handler. Two hit targets, zero gesture conflict,
-                                // no pointerInput plumbing needed.
-                                //
-                                // Sizing: the model text takes `weight(1f, fill =
-                                // false)` so it truncates first (Ellipsis) when the
-                                // navbar is narrow; the badge has no weight, so it
-                                // keeps its intrinsic width and always renders in
-                                // full — the level label never gets clipped.
+                                // Layer 3: logo + model + thinking badge, two separate
+                                // tappable siblings. [T-android-thinking-badge-navbar]
+                                // The badge owns its own clickable, so a tap on it opens
+                                // the thinking sheet and never bubbles to the column's
+                                // model-picker handler. model text is weight(1f, fill=false)
+                                // so it truncates before the badge gets clipped.
+                                // [T-topbar-three-tier] Layer 2: provider on its own
+                                // line — glued as "天翼云 · glm-5.3" a long provider ate
+                                // the width and truncated the model name.
+                                if (providerName.isNotEmpty()) {
+                                    Text(
+                                        text = providerName,
+                                        fontSize = 11.sp,
+                                        lineHeight = 13.sp,
+                                        color = ChatColors.tertiaryText,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = noFontPad,
+                                    )
+                                }
                                 if (providerName.isNotEmpty() || modelName.isNotEmpty()) {
                                     val thinkingLevelBadgeState by viewModel.thinkingLevel.collectAsState()
                                     Row(
@@ -2311,15 +2312,9 @@ fun ChatScreen(
                                                 )
                                             }
                                         }
-                                // [T-usage-topbar-brand-icon] Vendor logo (lobe-icons,
-                                // res/raw) by model-name keyword scoring.
+                                // [T-usage-topbar-brand-icon] Vendor logo by model-name
+                                // keyword scoring (relay labels carry no brand).
                                 val brandSlug = remember(modelName) { ModelBrandResolver.resolve(null, modelName, null) }
-                                        if (providerName.isNotEmpty() && modelName.isNotEmpty()) {
-                                            Text(
-                                                "$providerName · ", fontSize = 11.sp, lineHeight = 13.sp,
-                                                color = ChatColors.tertiaryText, maxLines = 1, style = noFontPad,
-                                            )
-                                        }
                                         ModelBrandIcon(slug = brandSlug, sizeDp = 13.dp)
                                         Text(
                                             text = modelName.ifEmpty { providerName },

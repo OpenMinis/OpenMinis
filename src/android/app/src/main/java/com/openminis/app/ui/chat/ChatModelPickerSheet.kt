@@ -1,7 +1,7 @@
 package com.openminis.app.ui.chat
 
 // [T-android-split-chat] ModelPickerSheet (+ its private helpers fuzzyMatch /
-// providerDotColor) extracted from ChatScreen.kt. ModelPickerSheet is internal so ChatScreen can call it.
+// ModelPickerSheet is internal so ChatScreen can call it.
 
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -637,10 +637,20 @@ internal fun ModelPickerSheet(
                                                     modifier = Modifier.size(17.dp),
                                                 )
                                                 Spacer(Modifier.width(10.dp))
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(6.dp)
-                                                        .background(providerDotColor(instance?.providerType), CircleShape),
+                                                // [T-brand-icon-in-picker] Vendor LOGO,
+                                                // not a provider-color dot: the dot only
+                                                // encoded the relay's ProviderType, so
+                                                // every OpenAI-typed relay looked the same
+                                                // green and told the user nothing about
+                                                // the model. Slug resolves from the model
+                                                // id/name (relays carry no brand).
+                                                ModelBrandIcon(
+                                                    slug = ModelBrandResolver.resolve(
+                                                        instance?.providerType,
+                                                        entry.model.id,
+                                                        entry.model.displayName,
+                                                    ),
+                                                    sizeDp = 16.dp,
                                                 )
                                                 Spacer(Modifier.width(8.dp))
                                                 Column(modifier = Modifier.weight(1f)) {
@@ -799,7 +809,6 @@ internal fun ModelPickerSheet(
                                     val selectedEntry = entries.firstOrNull { it.id == activeEntryId && selectedGroupId == null }
                                     val displayEntry = selectedEntry ?: entries.firstOrNull()
                                     if (displayEntry != null) {
-                                        val dotColor = providerDotColor(instance.providerType)
                                         Row(
                                             // T236: collapsed summary row —
                                             // vertical 14→8 + heightIn(min=48dp)
@@ -820,10 +829,13 @@ internal fun ModelPickerSheet(
                                                 modifier = Modifier.size(20.dp),
                                             )
                                             Spacer(Modifier.width(10.dp))
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .background(dotColor, CircleShape),
+                                            ModelBrandIcon(
+                                                slug = ModelBrandResolver.resolve(
+                                                    instance.providerType,
+                                                    displayEntry.model.id,
+                                                    displayEntry.model.displayName,
+                                                ),
+                                                sizeDp = 16.dp,
                                             )
                                             Spacer(Modifier.width(10.dp))
                                             // [T-android-provider-voice] Modality chips
@@ -919,7 +931,6 @@ internal fun ModelPickerSheet(
                                 } else {
                                     entries.forEachIndexed { index, entry ->
                                         val isSelected = activeEntryId == entry.id && selectedGroupId == null
-                                        val dotColor = providerDotColor(instance.providerType)
                                         // Last row clips its own bottom so the
                                         // ripple respects the card corners.
                                         val rowShape = if (index == entries.size - 1) {
@@ -947,10 +958,13 @@ internal fun ModelPickerSheet(
                                                 modifier = Modifier.size(20.dp),
                                             )
                                             Spacer(Modifier.width(10.dp))
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(6.dp)
-                                                    .background(dotColor, CircleShape),
+                                            ModelBrandIcon(
+                                                slug = ModelBrandResolver.resolve(
+                                                    instance.providerType,
+                                                    entry.model.id,
+                                                    entry.model.displayName,
+                                                ),
+                                                sizeDp = 16.dp,
                                             )
                                             Spacer(Modifier.width(10.dp))
                                             Column(modifier = Modifier.weight(1f)) {
@@ -1094,19 +1108,3 @@ private fun QuickTestButton(onClick: () -> Unit) {
     }
 }
 
-// iOS: provider color dot helper
-private fun providerDotColor(providerType: ProviderType?): Color = when (providerType) {
-    ProviderType.anthropic -> Color(0xFFAB47BC) // purple
-    ProviderType.gemini -> Color(0xFF42A5F5)    // blue
-    ProviderType.openAI -> Color(0xFF4CAF50)    // green
-    ProviderType.openRouter -> Color(0xFF00BCD4) // cyan
-    ProviderType.xAI -> Color(0xFFFF7043)        // orange — Grok brand
-    ProviderType.kimiCode -> Color(0xFF5C6BC0)   // indigo — Kimi accent
-    // [T-android-provider-type-parity] Responses API instances are
-    // OpenAI under the hood — same green dot. Undrivable types share
-    // the neutral gray used for "no provider".
-    ProviderType.openAIResponses -> Color(0xFF4CAF50)
-    ProviderType.antigravity,
-    ProviderType.unsupported -> Color(0xFF8E8E93)
-    null -> Color(0xFF8E8E93)                    // gray
-}

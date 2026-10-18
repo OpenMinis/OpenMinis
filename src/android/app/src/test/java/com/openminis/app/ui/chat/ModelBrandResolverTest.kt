@@ -4,6 +4,7 @@ import com.openminis.app.data.model.ProviderType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -12,6 +13,9 @@ import org.junit.Test
  * logo reads as a routing fact, so every edge below is a contract.
  */
 class ModelBrandResolverTest {
+
+    /** Unrecognized non-empty references fall back to the OpenAI mark. */
+    private val FALLBACK = ModelBrandResolver.FALLBACK_BRAND
 
     private fun resolve(modelId: String? = null, displayName: String? = null, type: ProviderType? = null) =
         ModelBrandResolver.resolve(type, modelId, displayName)
@@ -68,6 +72,33 @@ class ModelBrandResolverTest {
         assertEquals("coze", resolve(modelId = "coze-loop"))
         assertEquals("nanobanana", resolve(modelId = "nano-banana-pro"))
         assertEquals("xuanyuan", resolve(modelId = "xuanyuan-70b"))
+    }
+
+    @Test
+    fun shortEnablementNamesHitTheirLongSlug() {
+        // [T-brand-short-name] Products ship enablement names shorter than the
+        // icon slug: a model called "agnes-2.0-flash" must still find
+        // agnesai's logo, and hy3/hy4 are Hunyuan's compact naming.
+        assertEquals("agnesai", resolve(modelId = "agnes-2.0-flash"))
+        assertEquals("hunyuan", resolve(modelId = "hy3"))
+        assertEquals("hunyuan", resolve(modelId = "hy4"))
+        assertEquals("hunyuan", resolve(modelId = "hy3-preview"))
+        assertEquals("vertexai", resolve(modelId = "vertex-llama-3.3-70b"))
+        assertEquals("leptonai", resolve(modelId = "lepton-llama-3"))
+    }
+
+    @Test
+    fun genericWordsNeverScoreAsBrands() {
+        // [T-brand-generic-word-guard] Bare generic English words (magic,
+        // sync, nova, flux, spark...) were in the keyword table straight
+        // from the icon catalog and swallowed unrelated model ids. Every one
+        // of them is now excluded; a brand that NEEDS such a word must use a
+        // longer, unambiguous keyword (flux-1/flux-pro → bfl, nova-pro → nova).
+        assertEquals(FALLBACK, resolve(modelId = "myth-7b"))
+        assertEquals(FALLBACK, resolve(modelId = "hyphen-magic"))
+        assertEquals(FALLBACK, resolve(modelId = "flux-dev"))
+        assertEquals("bfl", resolve(modelId = "flux-pro"))
+        assertEquals("nova", resolve(modelId = "nova-micro"))
     }
 
     @Test
@@ -153,5 +184,25 @@ class ModelBrandResolverTest {
     @Test
     fun unknownSlugHasNoIcon() {
         assertNull(ModelBrandResolver.iconResId("not-a-brand"))
+    }
+
+    /**
+     * [T-brand-icon-in-picker] The model picker used to draw a flat
+     * provider-color dot, which encoded the relay's ProviderType only — every
+     * OpenAI-typed relay showed the same green dot and told the user nothing
+     * about the model. Guard both picker surfaces against regressing to a dot.
+     */
+    @Test
+    fun modelPickerUsesBrandIconsNotColorDots() {
+        val source = com.openminis.app.ProductionSources.read("ui/chat/ChatModelPickerSheet.kt")
+        assertEquals(
+            "ChatModelPickerSheet must render a brand icon per model row",
+            3,
+            Regex("ModelBrandIcon\\(").findAll(source).count(),
+        )
+        assertTrue(
+            "ChatModelPickerSheet must NOT reintroduce the provider color dot",
+            !source.contains("providerDotColor"),
+        )
     }
 }
