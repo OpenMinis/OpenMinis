@@ -1902,4 +1902,8 @@
     <string name="settings_scheduled_badge_footer">Ana ekrandaki saat simgesinde kaç zamanlanmış görevin etkin olduğunu gösterir.</string>
     <string name="backup_dest_edit_title">Hedefi düzenle</string>
     <string name="backup_dest_folder">Klasör</string>
+    <string name="provider_detail_hidden_models">Gizli modeller (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Genişletmek için dokunun · silmek için satıra uzun basın</string>
+    <string name="provider_detail_hidden_models_expand">Gizli modelleri göster</string>
+    <string name="provider_detail_hidden_models_collapse">Gizli modelleri daralt</string>
 </resources>

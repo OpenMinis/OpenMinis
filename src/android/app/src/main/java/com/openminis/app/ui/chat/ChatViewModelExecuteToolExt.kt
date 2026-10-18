@@ -55,9 +55,19 @@ internal suspend fun ChatViewModel.executeTool(
         return findAndEnableTools(query, limit)
     }
 
+    // [T-android-tool-pool-cap] File tools block on disk (a grep over a big
+    // tree, a 40 MB read) and used to run inline on whatever context the agent
+    // loop was on — the shared Dispatchers.IO pool, whose 64 slots the rest of
+    // the app also needs. `files` funnels every file-tool branch through the
+    // bounded file dispatcher in ToolConcurrency.
+    suspend fun files(block: () -> ToolExecutionResult): ToolExecutionResult =
+        com.openminis.app.tools.ToolConcurrency.onFileOp(block)
+
     val result = when (canonical) {
         FileReadTool.NAME -> {
-            val result = FileReadTool.execute(argsJson, activeSessionId, context)
+            val result = files {
+                FileReadTool.execute(argsJson, activeSessionId, context)
+            }
             // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
             if (result.success) {
                 runCatching {
@@ -71,14 +81,14 @@ internal suspend fun ChatViewModel.executeTool(
             }
             result
         }
-        FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-        FileEditTool.NAME -> FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-        FileCheckpointTool.NAME -> FileCheckpointTool.execute(argsJson, activeSessionId, context)
-        com.openminis.app.tools.MultiEditTool.NAME -> com.openminis.app.tools.MultiEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
-        com.openminis.app.tools.ListDirTool.NAME -> com.openminis.app.tools.ListDirTool.execute(argsJson, activeSessionId, context)
+        FileWriteTool.NAME -> files { FileWriteTool.execute(argsJson, activeSessionId, context) }.also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        FileEditTool.NAME -> files { FileEditTool.execute(argsJson, activeSessionId, context) }.also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        FileCheckpointTool.NAME -> files { FileCheckpointTool.execute(argsJson, activeSessionId, context) }
+        com.openminis.app.tools.MultiEditTool.NAME -> files { com.openminis.app.tools.MultiEditTool.execute(argsJson, activeSessionId, context) }.also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        com.openminis.app.tools.ListDirTool.NAME -> files { com.openminis.app.tools.ListDirTool.execute(argsJson, activeSessionId, context) }
         com.openminis.app.tools.GrepTool.NAME, com.openminis.app.tools.GrepSourceTool.NAME ->
-            com.openminis.app.tools.GrepTool.execute(argsJson, activeSessionId, context)
-        com.openminis.app.tools.GlobTool.NAME -> com.openminis.app.tools.GlobTool.execute(argsJson, activeSessionId, context)
+            files { com.openminis.app.tools.GrepTool.execute(argsJson, activeSessionId, context) }
+        com.openminis.app.tools.GlobTool.NAME -> files { com.openminis.app.tools.GlobTool.execute(argsJson, activeSessionId, context) }
         com.openminis.app.tools.WebFetchTool.NAME -> com.openminis.app.tools.WebFetchTool.execute(argsJson)
         // [T-ui-read] GUI Agent 的眼睛：a11y 读屏快照，配合 shell_execute 里
         // 的 android-a11y-cli 点击/输入形成"看屏→决策→执行→再看"闭环。

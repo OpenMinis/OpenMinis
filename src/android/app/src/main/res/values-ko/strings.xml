@@ -1901,4 +1901,8 @@
     <string name="settings_scheduled_badge_footer">홈 시계 아이콘에 활성 예약 작업 수를 표시합니다.</string>
     <string name="backup_dest_edit_title">대상 편집</string>
     <string name="backup_dest_folder">폴더</string>
+    <string name="provider_detail_hidden_models">숨긴 모델 (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">탭하여 펼치기 · 길게 눌러 삭제</string>
+    <string name="provider_detail_hidden_models_expand">숨긴 모델 표시</string>
+    <string name="provider_detail_hidden_models_collapse">숨긴 모델 접기</string>
 </resources>

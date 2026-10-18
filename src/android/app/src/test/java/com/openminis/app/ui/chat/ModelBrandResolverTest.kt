@@ -289,7 +289,11 @@ class ModelBrandResolverTest {
         val files = listOf(
             "ui/chat/ChatScreen.kt",
             "ui/chat/ChatModelPickerSheet.kt",
-            "ui/settings/ProviderDetailScreen.kt",
+            // The provider screen's model rows live in ProviderModelRows.kt since
+            // F1 extracted them (the screen itself is at its architecture-policy
+            // ceiling). Listing the row file keeps this guard honest: the call
+            // site moved, it did not disappear.
+            "ui/settings/ProviderModelRows.kt",
         )
         for (f in files) {
             val source = com.openminis.app.ProductionSources.read(f)

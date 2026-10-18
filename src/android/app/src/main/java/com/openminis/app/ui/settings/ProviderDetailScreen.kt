@@ -585,150 +585,41 @@ fun ProviderDetailScreen(
                 showDivider = entries.isNotEmpty() || true,
             )
 
-            entries.forEachIndexed { idx, entry ->
-                // Drive both tap and long-press from a Box wrapper so we
-                // don't have to expand SettingsRow's signature.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        // [T-android-hidden-model-visual-state] Dim hidden
-                        // entries so the list visually distinguishes them from
-                        // active models — the " • Hidden" subtitle suffix alone
-                        // wasn't enough for users to tell them apart. alpha is
-                        // visual-only, so the row stays tappable to re-show the
-                        // model from its detail screen.
-                        .then(if (entry.isHidden) Modifier.alpha(0.45f) else Modifier)
-                        .combinedClickable(
-                            onClick = { onModelEntryClick(entry.id) },
-                            // [T-android-model-row-hide-action] Long-press opens a
-                            // menu (hide/delete) instead of straight delete:
-                            // hiding was reachable only via the detail screen
-                            // (five steps vs iOS's one tap on an eye button).
-                            // A menu, not a trailing icon — the trailing slot
-                            // is a fixed 72dp badge area keeping the chevron
-                            // column aligned; a button there would rag it.
-                            // Built-ins can't be deleted (repo re-creates
-                            // them) but hiding works.
-                            onLongClick = { menuEntryId = entry.id },
-                        ),
-                ) {
-                    // [T-android-model-capability-output-tags] (XIN msg 38847)
-                    // The list previously read INPUT modalities only, so a
-                    // generator like gpt-image-2 (image_output) or an
-                    // audio_output model showed no capability badge at all.
-                    // Surface both directions — input badges are muted, output
-                    // badges use a tinted "generate"-style glyph so they read
-                    // distinctly. Mirrors iOS #669.
-                    val inputModalities = entry.model.inputModalities.orEmpty()
-                    val outputModalities = entry.model.outputModalities.orEmpty()
-                    val hasBadge = inputModalities.any { it in modalityIconKeys } ||
-                        outputModalities.any { it in modalityOutputIconKeys }
-                    // [T-usage-topbar-brand-icon] Vendor logo ahead of the model
-                    // name, resolved by keyword scoring over id + displayName
-                    // (the instance type is a relay, not a brand).
-                    val brandSlug = remember(entry.model.id, entry.model.displayName) {
-                        ModelBrandResolver.resolve(entry.model.id, entry.model.displayName)
-                    }
-                    SettingsRow(
-                        title = entry.model.displayName,
-                        subtitle = buildString {
-                            append(entry.model.id)
-                            if (entry.isHidden) append(" • Hidden")
-                        },
-                        leading = if (brandSlug != null) {
-                            {
-                                ModelBrandIcon(slug = brandSlug, sizeDp = 24.dp)
-                            }
-                        } else null,
-                        // onClick = null so SettingsRow doesn't add a second
-                        // clickable that would swallow the long-press. The
-                        // wrapping Box owns both gestures.
-                        onClick = null,
-                        showChevron = true,
-                        showDivider = idx != entries.lastIndex,
-                        // [T-android-settings-ui-md3] #8 two-line row (name + id)
-                        // uses the MD3 double-line height (72dp).
-                        minHeight = 72.dp,
-                        // #9 The capability-icon area has a FIXED width so the
-                        // trailing chevron lands at the same x on every row,
-                        // regardless of how many badges (0–4) a model has —
-                        // previously the chevron slid left/right per row and the
-                        // column looked ragged. Icons right-align within the slot.
-                        trailing = {
-                            Box(
-                                modifier = Modifier.width(72.dp),
-                                contentAlignment = Alignment.CenterEnd,
-                            ) {
-                                if (hasBadge) {
-                                    ModalityIconsRow(inputModalities, outputModalities)
-                                }
-                            }
-                        },
-                    )
-
-                    // [T-android-model-row-hide-action] Row context menu. Anchored
-                    // inside the row's Box so it opens over the entry the user
-                    // pressed. Delete stays custom-only, matching the previous
-                    // long-press behaviour and the repo's constraint.
-                    DropdownMenu(
-                        expanded = menuEntryId == entry.id,
-                        onDismissRequest = { menuEntryId = null },
-                    ) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    stringResource(
-                                        if (entry.isHidden) R.string.provider_detail_show_model
-                                        else R.string.provider_detail_hide_model,
-                                    ),
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    if (entry.isHidden) Icons.Filled.Visibility
-                                    else Icons.Filled.VisibilityOff,
-                                    contentDescription = null,
-                                )
-                            },
-                            onClick = {
-                                menuEntryId = null
-                                // Write straight through — no Save step. This is
-                                // the whole point of the affordance, and it
-                                // mirrors iOS, whose eye button calls
-                                // store.updateEntry immediately.
-                                providerRepository.updateEntry(entry.copy(isHidden = !entry.isHidden))
-                                AppLogger.info(
-                                    TAG,
-                                    "Model entry ${entry.id} (${entry.model.displayName}) " +
-                                        "isHidden ${entry.isHidden} -> ${!entry.isHidden}",
-                                )
-                            },
+            // [T-android-hidden-models-group] Only visible models stay inline;
+            // hidden ones move to their own collapsible section below. Rows are
+            // rendered by ProviderModelRows.kt (extracted — this file is at its
+            // architecture-policy ceiling).
+            val visibleEntries = entries.filter { !it.isHidden }
+            visibleEntries.forEachIndexed { idx, entry ->
+                ProviderModelEntryRow(
+                    entry = entry,
+                    showDivider = idx != visibleEntries.lastIndex,
+                    onOpen = { onModelEntryClick(entry.id) },
+                    // Write straight through — no Save step. This is the whole
+                    // point of the affordance, and it mirrors iOS, whose eye
+                    // button calls store.updateEntry immediately.
+                    onToggleHidden = {
+                        providerRepository.updateEntry(entry.copy(isHidden = !entry.isHidden))
+                        AppLogger.info(
+                            TAG,
+                            "Model entry ${entry.id} (${entry.model.displayName}) " +
+                                "isHidden ${entry.isHidden} -> ${!entry.isHidden}",
                         )
-                        if (entry.isCustom) {
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        stringResource(R.string.common_delete),
-                                        color = MaterialTheme.colorScheme.error,
-                                    )
-                                },
-                                leadingIcon = {
-                                    Icon(
-                                        Icons.Filled.Delete,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.error,
-                                    )
-                                },
-                                onClick = {
-                                    menuEntryId = null
-                                    entryToDelete = entry
-                                },
-                            )
-                        }
-                    }
-                }
+                    },
+                    onDelete = { entryToDelete = entry },
+                )
             }
         }
+
+        ProviderHiddenModelsSection(
+            hidden = entries.filter { it.isHidden },
+            onOpen = { onModelEntryClick(it.id) },
+            onToggleHidden = { e ->
+                providerRepository.updateEntry(e.copy(isHidden = !e.isHidden))
+                AppLogger.info(TAG, "Model entry ${e.id} (${e.model.displayName}) isHidden ${e.isHidden} -> ${!e.isHidden}")
+            },
+            onDelete = { entryToDelete = it },
+        )
 
         // Pure-action rows render as standalone buttons — no Section/Card wrap.
         // Match iOS visual: button sits on the page background with horizontal
@@ -1193,42 +1084,5 @@ private fun ManualBearerTokenSection(
         }) {
             Text(stringResource(R.string.provider_detail_set_manual_bearer_token))
         }
-    }
-}
-
-/** Input modalities that get a (muted) capability badge in the model list. */
-private val modalityIconKeys = setOf("image", "pdf", "audio", "video")
-
-/** Output modalities that get a (tinted, generate-style) badge in the model list. */
-private val modalityOutputIconKeys = setOf("image", "audio", "video")
-
-/**
- * [T-android-model-capability-output-tags] Capability badges for one model row.
- * Input modalities render in the muted onSurfaceVariant tint; output modalities
- * render in the primary tint with "generate"-style glyphs so a generator (e.g.
- * gpt-image-2 image_output) is visibly distinct from a model that merely accepts
- * that modality as input. Mirrors iOS ProviderInstanceDetailView.modalityIcons.
- */
-@Composable
-private fun ModalityIconsRow(
-    inputModalities: List<String>,
-    outputModalities: List<String>,
-) {
-    val inputTint = MaterialTheme.colorScheme.onSurfaceVariant
-    val outputTint = MaterialTheme.colorScheme.primary
-    val size = Modifier.size(14.dp)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        // Input badges (muted).
-        if ("image" in inputModalities) Icon(Icons.Default.Image, contentDescription = stringResource(R.string.modeldetail_image_input), tint = inputTint, modifier = size)
-        if ("pdf" in inputModalities) Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = stringResource(R.string.modeldetail_pdf_input), tint = inputTint, modifier = size)
-        if ("audio" in inputModalities) Icon(Icons.Default.Mic, contentDescription = stringResource(R.string.modeldetail_audio_input), tint = inputTint, modifier = size)
-        if ("video" in inputModalities) Icon(Icons.Default.Videocam, contentDescription = stringResource(R.string.modeldetail_video_input), tint = inputTint, modifier = size)
-        // Output badges (tinted, generate-style glyphs).
-        if ("image" in outputModalities) Icon(Icons.Default.AddPhotoAlternate, contentDescription = stringResource(R.string.modeldetail_image_output), tint = outputTint, modifier = size)
-        if ("audio" in outputModalities) Icon(Icons.Default.VolumeUp, contentDescription = stringResource(R.string.modeldetail_audio_output), tint = outputTint, modifier = size)
-        if ("video" in outputModalities) Icon(Icons.Default.MovieCreation, contentDescription = stringResource(R.string.modeldetail_video_output), tint = outputTint, modifier = size)
     }
 }

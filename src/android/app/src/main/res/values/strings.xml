@@ -2733,4 +2733,8 @@
     <string name="settings_scheduled_badge_footer">Show how many scheduled tasks are active on the home clock icon.</string>
     <string name="backup_dest_edit_title">Edit Destination</string>
     <string name="backup_dest_folder">Folder</string>
+    <string name="provider_detail_hidden_models">Hidden models (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Tap to expand · long-press a row to delete</string>
+    <string name="provider_detail_hidden_models_expand">Show hidden models</string>
+    <string name="provider_detail_hidden_models_collapse">Hide hidden models</string>
 </resources>

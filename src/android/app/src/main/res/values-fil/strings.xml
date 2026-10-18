@@ -1902,4 +1902,8 @@
     <string name="settings_scheduled_badge_footer">Ipakita sa icon ng orasan sa home kung ilang naka-iskedyul na gawain ang aktibo.</string>
     <string name="backup_dest_edit_title">I-edit ang destination</string>
     <string name="backup_dest_folder">Folder</string>
+    <string name="provider_detail_hidden_models">Mga nakatagong modelo (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">I-tap para palawakin · long-press ang row para burahin</string>
+    <string name="provider_detail_hidden_models_expand">Ipakita ang mga nakatagong modelo</string>
+    <string name="provider_detail_hidden_models_collapse">Itago ang mga nakatagong modelo</string>
 </resources>

@@ -1904,4 +1904,8 @@
     <string name="settings_scheduled_badge_footer">Affiche sur l\'icône d\'horloge de l\'accueil le nombre de tâches planifiées actives.</string>
     <string name="backup_dest_edit_title">Modifier la destination</string>
     <string name="backup_dest_folder">Dossier</string>
+    <string name="provider_detail_hidden_models">Modèles masqués (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Touchez pour développer · appui long sur une ligne pour supprimer</string>
+    <string name="provider_detail_hidden_models_expand">Afficher les modèles masqués</string>
+    <string name="provider_detail_hidden_models_collapse">Masquer les modèles masqués</string>
 </resources>

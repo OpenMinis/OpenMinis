@@ -2547,4 +2547,8 @@
     <string name="settings_scheduled_badge_footer">在首页时钟图标上显示启用中的定时任务数量。</string>
     <string name="backup_dest_edit_title">编辑目标</string>
     <string name="backup_dest_folder">文件夹</string>
+    <string name="provider_detail_hidden_models">已隐藏模型 (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">点按展开 · 长按行可删除</string>
+    <string name="provider_detail_hidden_models_expand">展开已隐藏模型</string>
+    <string name="provider_detail_hidden_models_collapse">收起已隐藏模型</string>
 </resources>

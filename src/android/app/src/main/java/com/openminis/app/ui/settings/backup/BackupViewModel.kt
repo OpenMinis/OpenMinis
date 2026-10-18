@@ -285,7 +285,7 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
         _historyRecords.value = history.records()
 
         fun note(line: String, problem: Boolean = false) {
-            log.add(BackupHistory.LogEntry(System.currentTimeMillis(), line, problem))
+            BackupHistory.appendLog(log, line, problem)  // [T-android-backup-log-cap] capped append
         }
         exportJob = viewModelScope.launch {
             try {

@@ -1217,28 +1217,23 @@ internal class OpenAIRequestBodies(
 
     /**
      * [T-android-tool-call-id-too-long] Chat-Completions `tool_calls[].id` /
-     * `tool_call_id` must be ≤64 chars — OpenAI-compatible endpoints reject longer
-     * ids with a 400 ("string too long. Expected a string with maximum length 64").
-     * Two ways an id gets over 64 here:
+     * `tool_call_id` must be ≤64 chars — OpenAI-compatible endpoints reject
+     * longer ids with a 400 ("string too long. Expected a string with maximum
+     * length 64"). Two ways an id gets over 64 here:
      *   - a Responses-origin history turn stores the combined "call_…|fc_…" id
      *     (splitResponsesAPIIds' form) which is replayed verbatim on a Chat
      *     Completions request;
      *   - memory-tool / synthetic ids that are long by construction.
-     * We keep only the call_-id half (before any '|') and, if still >64, replace
-     * it with a deterministic SHA-256-derived id. Determinism matters: the SAME
-     * raw id must map to the SAME capped id so the assistant tool_call and its
-     * matching tool result still pair up (a mismatch is its own 400). The
-     * downstream dedupe pass then guarantees uniqueness within the request.
+     * [com.openminis.app.data.model.ToolIdCompat] is the single mapping since
+     * 1.15-beta.5 parity: keep the call_-id half (before any '|'), rewrite
+     * characters a strict relay refuses, and cap with a deterministic SHA-256
+     * suffix. Determinism matters: the SAME raw id must map to the SAME wire id
+     * so the assistant tool_call and its matching tool result still pair up (a
+     * mismatch is its own 400). The downstream dedupe pass then guarantees
+     * uniqueness within the request.
      */
-    private fun capChatToolCallId(id: String): String {
-        val callHalf = id.substringBefore('|')
-        if (callHalf.length <= 64) return callHalf
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(callHalf.toByteArray(Charsets.UTF_8))
-        val hex = digest.joinToString("") { "%02x".format(it) }
-        // "call_" + 56 hex chars = 61 chars, safely under 64 and clearly a call id.
-        return "call_${hex.take(56)}"
-    }
+    private fun capChatToolCallId(id: String): String =
+        com.openminis.app.data.model.ToolIdCompat.normalize(id)
 
     /**
      * Derives a stable per-conversation `prompt_cache_key` for the Responses

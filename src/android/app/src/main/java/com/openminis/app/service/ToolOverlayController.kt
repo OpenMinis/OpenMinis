@@ -255,23 +255,15 @@ class ToolOverlayController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            val metrics = context.resources.displayMetrics
-            val maxX = (metrics.widthPixels - width).coerceAtLeast(0)
-            val maxY = (metrics.heightPixels - height).coerceAtLeast(0)
-            val savedX = backgroundRepo?.getOverlayX() ?: -1
-            val savedY = backgroundRepo?.getOverlayY() ?: -1
-            if (savedX >= 0 && savedY >= 0) {
-                x = savedX.coerceIn(0, maxX)
-                y = savedY.coerceIn(0, maxY)
-            } else {
-                // First-paint default: bottom-left, 10 dp from the left
-                // edge and 10 dp above an approximate nav-bar region.
-                val padding = dpToPx(EDGE_PADDING_DP)
-                val approxNavBar = dpToPx(48)
-                x = padding.coerceIn(0, maxX)
-                y = (metrics.heightPixels - height - approxNavBar - padding)
-                    .coerceIn(0, maxY)
-            }
+            // [T-android-overlay-orientation-position] Restore THIS orientation's
+            // remembered spot, clamped into the safe area. See OverlayPlacement.
+            val landscape = OverlayPlacement.isLandscape(context)
+            val area = OverlayPlacement.safeArea(context, width, height, dpToPx(EDGE_PADDING_DP))
+            val sx = backgroundRepo?.getOverlayX(landscape) ?: -1
+            val sy = backgroundRepo?.getOverlayY(landscape) ?: -1
+            val spot = if (sx >= 0 && sy >= 0) area.clamp(sx, sy) else OverlayPlacement.defaultBottomLeft(area)
+            x = spot.first
+            y = spot.second
         }
         layoutParams = params
         // Software-compose the capsule. A hardware-accelerated overlay
@@ -730,14 +722,18 @@ class ToolOverlayController(
                     if (!dragging && (abs(dx) > slopPx || abs(dy) > slopPx)) dragging = true
                     if (dragging) {
                         val windowView = view ?: return@setOnTouchListener true
-                        val dm = context.resources.displayMetrics
-                        val maxX = (dm.widthPixels - params.width).coerceAtLeast(0)
-                        val maxY = (dm.heightPixels - params.height.coerceAtLeast(1)).coerceAtLeast(0)
-                        params.x = (startParamX + dx).coerceIn(0, maxX)
-                        params.y = (startParamY + dy).coerceIn(0, maxY)
+                        // [T-android-overlay-orientation-position] Drag inside the
+                        // safe area, not the raw display, so the capsule can never
+                        // be dragged half off-screen or under the gesture strip.
+                        val area = OverlayPlacement.safeArea(
+                            context, params.width, params.height.coerceAtLeast(1),
+                            dpToPx(EDGE_PADDING_DP),
+                        )
+                        val (nx, ny) = area.clamp(startParamX + dx, startParamY + dy)
+                        params.x = nx
+                        params.y = ny
                         try {
-                            // Must update the WindowManager root, not the
-                            // inner capsule row the touch listener is on.
+                            // Update the WindowManager root, not the inner row.
                             windowManager.updateViewLayout(windowView, params)
                         } catch (e: Throwable) {
                             Log.w(TAG, "updateViewLayout failed: ${e.message}")
@@ -747,7 +743,11 @@ class ToolOverlayController(
                 }
                 MotionEvent.ACTION_UP -> {
                     if (dragging) {
-                        backgroundRepo?.setOverlayPosition(params.x, params.y)
+                        // Save into the CURRENT orientation's slot only
+                        // (T-android-overlay-orientation-position).
+                        backgroundRepo?.setOverlayPosition(
+                            params.x, params.y, OverlayPlacement.isLandscape(context),
+                        )
                     } else {
                         onTap()
                     }
@@ -826,14 +826,15 @@ class ToolOverlayController(
     }
 
     /**
-     * [T-android-overlay-landscape-width-rotation-drift] Re-clamp the
-     * attached capsule into the current screen bounds after a
-     * configuration change (orientation flip, multi-window resize). The
-     * overlay is a WindowManager view — it is NOT recreated on rotation —
-     * so a position saved while in landscape can land off-screen (or fully
-     * out of view) once the device returns to portrait. Recompute the
-     * width for the new metrics, clamp x/y so the capsule stays fully
-     * on-screen, push the new layout, and persist the corrected position.
+     * [T-android-overlay-landscape-width-rotation-drift] Re-place the attached
+     * capsule after a configuration change (orientation flip, multi-window
+     * resize). The overlay is a WindowManager view — it is NOT recreated on
+     * rotation — so its old x/y now belongs to the OTHER orientation's shape.
+     *
+     * [T-android-overlay-orientation-position] The new orientation's own saved
+     * slot wins (clamped into the safe area); only when that slot is empty does
+     * the current spot get clamped. The result is written back and the width is
+     * recomputed for the new metrics.
      *
      * No-op when nothing is attached. Owned by [AgentForegroundService],
      * which forwards its own onConfigurationChanged here.
@@ -842,20 +843,19 @@ class ToolOverlayController(
         mainHandler.post {
             val v = view ?: return@post
             val params = layoutParams ?: return@post
-            val dm = context.resources.displayMetrics
             val width = fixedCapsuleWidthPx()
-            val height = dpToPx(CAPSULE_HEIGHT_DP)
-            val maxX = (dm.widthPixels - width).coerceAtLeast(0)
-            val maxY = (dm.heightPixels - height).coerceAtLeast(0)
-            val clampedX = params.x.coerceIn(0, maxX)
-            val clampedY = params.y.coerceIn(0, maxY)
+            val landscape = OverlayPlacement.isLandscape(context)
+            val area = OverlayPlacement.safeArea(context, width, dpToPx(CAPSULE_HEIGHT_DP), dpToPx(EDGE_PADDING_DP))
+            val sx = backgroundRepo?.getOverlayX(landscape) ?: -1
+            val sy = backgroundRepo?.getOverlayY(landscape) ?: -1
+            val (clampedX, clampedY) = if (sx >= 0 && sy >= 0) area.clamp(sx, sy) else area.clamp(params.x, params.y)
             if (params.width == width && params.x == clampedX && params.y == clampedY) return@post
             params.width = width
             params.x = clampedX
             params.y = clampedY
             try {
                 windowManager.updateViewLayout(v, params)
-                backgroundRepo?.setOverlayPosition(clampedX, clampedY)
+                backgroundRepo?.setOverlayPosition(clampedX, clampedY, landscape)
             } catch (e: Throwable) {
                 Log.w(TAG, "onConfigurationChanged relayout failed: ${e.message}")
             }

@@ -5,6 +5,7 @@ import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import com.openminis.app.scheduled.ScheduledModelResolver
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTargetMode
 import com.openminis.app.scheduled.ScheduledTask
@@ -45,7 +46,7 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val args = OffloadArgs(
             request.argv.drop(1),
-            booleanFlags = setOf("disabled", "h", "help"),
+            booleanFlags = setOf("disabled", "h", "help", "allow-unknown-model"),
         )
         // [T-offload-defaults-batch-android] Help only on explicit
         // --help/-h; no subcommand defaults to `list`.
@@ -98,7 +99,7 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
             customDays = customDays,
             prompt = prompt,
             targetMode = target,
-            modelId = args.get("model", "m"),
+            modelId = resolveModelArg(args),
             enabled = !args.hasFlag("disabled"),
             startDateMs = args.get("start")?.let { parseDate(it) },
             endDateMs = args.get("end")?.let { parseDate(it) },
@@ -147,6 +148,40 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
     }
 
     // ── parsing helpers ──
+
+    /**
+     * [T-android-scheduled-model-resolve] Resolve `--model` against the
+     * configured models NOW.
+     *
+     * Deferring this to fire time meant a typo saved cleanly and then failed
+     * every unattended run — the exact opposite of what a scheduler is for.
+     * Accepts a wire model id, an entry uuid or an unambiguous display name and
+     * stores the canonical wire id.
+     *
+     * Returns null when `--model` was not given (the task keeps the runtime
+     * default), and throws [IllegalArgumentException] — surfaced as exit code 2
+     * by [handle] — for an unknown value, unless `--allow-unknown-model` was
+     * passed for a model that will exist after a later provider refresh.
+     */
+    private fun resolveModelArg(args: OffloadArgs): String? {
+        val raw = args.get("model", "m")
+        val entries = (context.applicationContext as? com.openminis.app.MinisApp)
+            ?.providerRepositoryOrNull?.config?.value?.modelEntries.orEmpty()
+        return when (val resolved = ScheduledModelResolver.resolve(raw, entries)) {
+            ScheduledModelResolver.Result.Unspecified -> null
+            is ScheduledModelResolver.Result.Resolved -> resolved.modelId
+            is ScheduledModelResolver.Result.Unknown ->
+                if (args.hasFlag("allow-unknown-model")) {
+                    raw
+                } else {
+                    val known = resolved.known.ifEmpty { listOf("(none configured)") }.joinToString(", ")
+                    throw IllegalArgumentException(
+                        "--model '${resolved.raw}' is not a configured model. Known ids: $known. " +
+                            "Pass --allow-unknown-model to store it verbatim.",
+                    )
+                }
+        }
+    }
 
     private fun parseTime(s: String): Pair<Int, Int> {
         val parts = s.split(":")
@@ -242,6 +277,12 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
             Target modes: new = run prompt in a fresh chat; follow-up = append prompt
             to an existing chat (--session); rerun = re-run a chat (--session) from a
             chosen user message (--message, prompt ignored).
+
+            --model is resolved when the task is CREATED: a wire model id, an entry
+            uuid or an unambiguous display name all work, and the stored value is the
+            canonical id. An unknown value fails now instead of at every fire; pass
+            --allow-unknown-model to store it verbatim anyway (e.g. a model that
+            arrives with a later provider refresh).
         """.trimIndent()
     }
 }

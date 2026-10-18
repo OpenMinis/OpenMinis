@@ -1902,4 +1902,8 @@
     <string name="settings_scheduled_badge_footer">แสดงจำนวนงานที่ตั้งเวลาไว้ซึ่งเปิดใช้งานบนไอคอนนาฬิกาหน้าจอหลัก</string>
     <string name="backup_dest_edit_title">แก้ไขปลายทาง</string>
     <string name="backup_dest_folder">โฟลเดอร์</string>
+    <string name="provider_detail_hidden_models">โมเดลที่ซ่อนไว้ (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">แตะเพื่อขยาย · กดค้างที่แถวเพื่อลบ</string>
+    <string name="provider_detail_hidden_models_expand">แสดงโมเดลที่ซ่อนไว้</string>
+    <string name="provider_detail_hidden_models_collapse">ย่อโมเดลที่ซ่อนไว้</string>
 </resources>

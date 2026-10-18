@@ -16,9 +16,7 @@ import com.openminis.app.data.db.toProviderConfig
 import com.openminis.app.data.db.toSnapshot
 import com.openminis.app.data.model.ImageEndpointMode
 import com.openminis.app.data.model.LLMModel
-import com.openminis.app.data.model.applyUnrecognizedModelDefaults
 import com.openminis.app.data.model.ModelEntry
-import com.openminis.app.data.model.ModelOverrides
 import com.openminis.app.data.model.ModelGroup
 import com.openminis.app.data.model.ProviderConfig
 import com.openminis.app.data.model.ProviderCredential
@@ -32,9 +30,6 @@ import com.openminis.app.data.model.hasAudioOutput
 import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.data.model.hasVoiceModality
 import com.openminis.app.data.model.isVoiceTemplateSeedShape
-import com.openminis.app.data.model.withInferredVoiceModality
-import com.openminis.app.data.model.withInferredVideoModality
-import com.openminis.app.data.model.withInferredImageModality
 import com.openminis.app.provider.ModelReleaseIndex
 import com.openminis.app.provider.ModelsDevApi
 import com.openminis.app.provider.anthropic.AnthropicModelsApi
@@ -1011,73 +1006,26 @@ class ProviderRepository(private val context: Context) {
         val existing = config.modelEntries.filter { it.providerInstanceId == instanceId }
         val existingEntryIds = existing.map { it.id }.toSet()
 
-        // Build lookup: baseModel.id → existing entry (prefer non-custom if duplicates exist)
-        val existingByModelId = mutableMapOf<String, ModelEntry>()
-        for (entry in existing) {
-            val key = entry.baseModel.id
-            val current = existingByModelId[key]
-            if (current == null || current.isCustom) {
-                existingByModelId[key] = entry
-            }
-        }
-
-        // Build new entries, carrying forward uuid / overrides / isHidden from prior entries
-        val refreshedModelIds = models.map { it.id }.toSet()
         // [T-android-provider-voice] Template-sourced voice models carry an
         // authoritative modality that API-inferred modality (typically no audio
         // bits) must never overwrite. Mirrors iOS replaceEntries
         // templateModalityById guard (d55cd821).
         val instanceBaseURL = config.instances.firstOrNull { it.id == instanceId }?.customBaseURL
-        val voiceTemplate = VoiceProviderTemplate.template(instanceBaseURL)
-        val templateVoiceModelById = voiceTemplate?.mockModels
-            ?.filter { it.hasVoiceModality }
-            ?.associateBy { it.id }
-            ?: emptyMap()
-        val newEntries = models.map { model ->
-            val prior = existingByModelId[model.id]
-            // Dedicated ASR/TTS id/name patterns fill the exact voice shape when
-            // the API returned no modality info; the template's shape wins last.
-            var resolved = model.withInferredVoiceModality()
-                .withInferredVideoModality()
-                .withInferredImageModality()
-            templateVoiceModelById[model.id]?.let { tplModel ->
-                resolved = resolved.copy(
-                    inputModalities = tplModel.inputModalities,
-                    outputModalities = tplModel.outputModalities,
-                )
-            }
-            ModelEntry(
-                providerInstanceId = instanceId,
-                baseModel = applyUnrecognizedModelDefaults(resolved),
-                overrides = prior?.overrides ?: ModelOverrides(),
-                isCustom = false,
-                isHidden = prior?.isHidden ?: false,
-                uuid = prior?.id ?: java.util.UUID.randomUUID().toString(),
-                userModifiedAt = prior?.userModifiedAt,
-            )
-        }
-
-        // Keep custom entries that weren't in the refreshed list
-        val remainingCustom = existing.filter { it.isCustom && it.baseModel.id !in refreshedModelIds }
-
-        // [T-android-provider-voice] Preserve voice-template SEED entries the
-        // /models list didn't return. Vendors like MiMo never expose their
-        // ASR/TTS voices via /v1/models, so without this every refresh wipes
-        // the seeds (iOS regression cffbec0e: MiMo launch model count 15→11).
-        // Only genuine template members are protected — never stray audio
-        // entries. Mirrors iOS replaceEntries preservedVoice.
-        val preservedVoice = existing.filter { e ->
-            !e.isCustom &&
-                e.baseModel.id !in refreshedModelIds &&
-                e.baseModel.id in templateVoiceModelById
-        }
+        // [T-android-delete-api-model] Deleted-then-refreshed models stay deleted;
+        // see DeletedModelTombstones.
+        val plan = ModelRefreshPlanner.plan(
+            instanceId = instanceId,
+            models = models.filterNot { DeletedModelTombstones.isDeleted(context, instanceId, it.id) },
+            existing = existing,
+            instanceBaseURL = instanceBaseURL,
+        )
 
         config.modelEntries.removeAll { it.providerInstanceId == instanceId }
-        config.modelEntries.addAll(newEntries)
-        config.modelEntries.addAll(remainingCustom)
-        if (preservedVoice.isNotEmpty()) {
-            config.modelEntries.addAll(preservedVoice)
-            android.util.Log.i("ProviderRepo", "[ModelList] replaceEntries preserved ${preservedVoice.size} voice-template seed entries: ${preservedVoice.map { it.baseModel.id }.take(10)}")
+        config.modelEntries.addAll(plan.refreshed)
+        config.modelEntries.addAll(plan.remainingCustom)
+        if (plan.preservedVoice.isNotEmpty()) {
+            config.modelEntries.addAll(plan.preservedVoice)
+            android.util.Log.i("ProviderRepo", "[ModelList] replaceEntries preserved ${plan.preservedVoice.size} voice-template seed entries: ${plan.preservedVoice.map { it.baseModel.id }.take(10)}")
         }
 
         // Prune stale group member references
@@ -1243,6 +1191,8 @@ class ProviderRepository(private val context: Context) {
             // Fixed at the mapping level, where the row id is minted (colliding
             // entries get their uuid appended); see ProviderConfigMappingRoundTripTest.
         }
+        // [T-android-delete-api-model] Re-adding a model by hand clears its tombstone.
+        DeletedModelTombstones.forget(context, entry.providerInstanceId, entry.baseModel.id)
         config.modelEntries.add(entry)
         saveConfig(config)
     }
@@ -1257,18 +1207,24 @@ class ProviderRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Remove an entry; API-reported removals are remembered so the next refresh
+     * cannot rebuild them ([DeletedModelTombstones], [T-android-delete-api-model]).
+     * Custom entries need none — they exist only locally. Mirrors iOS
+     * ProviderConfigStore.removeEntry (Providers/ProviderConfigStore.swift L268).
+     */
     fun removeEntry(entryId: String): Unit = synchronized(configLock) {
         ensureConfigLoaded()
         val config = workingCopy()
+        val removed = config.modelEntries.firstOrNull { it.id == entryId }
         config.modelEntries.removeAll { it.id == entryId }
         config.modelGroups.forEach { group ->
             group.memberEntryIds.removeAll { it == entryId }
         }
-        // T171: cascade-clean the agent-loop direct-entry pin so the
-        // AgentLoopModelsScreen never surfaces a checkmark on a model that
-        // no longer exists. Mirrors iOS ProviderConfigStore.removeEntry
-        // (Providers/ProviderConfigStore.swift L268).
         config.agentLoopModelEntryIds.removeAll { it == entryId }
+        if (removed != null && !removed.isCustom) {
+            DeletedModelTombstones.add(context, removed.providerInstanceId, removed.baseModel.id)
+        }
         saveConfig(config)
     }
 

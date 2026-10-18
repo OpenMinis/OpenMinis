@@ -110,7 +110,7 @@ class BackupHistory private constructor(private val context: Context) {
 
     private val storeFile: File
         get() = File(context.filesDir, "backup-history").apply { mkdirs() }
-            .let { File(it, "records.json") }
+            .let { File(it, RECORD_FILE) }
 
     @Volatile
     private var cache: List<Record>? = null
@@ -125,16 +125,47 @@ class BackupHistory private constructor(private val context: Context) {
         }.getOrNull() ?: emptyList()
         val cutoff = System.currentTimeMillis() - RETENTION_MS
         val kept = loaded.filter { it.startedAt >= cutoff }.sortedByDescending { it.startedAt }
-        if (kept.size != loaded.size) persist(kept)
-        cache = kept
-        return kept
+        // [T-android-backup-log-cap] Trim oversized logs written by earlier
+        // versions (or by a run that produced thousands of progress lines)
+        // while we already have the decoded records in hand. Comparing by
+        // identity is exact here: cappedLog returns the SAME list when nothing
+        // was dropped.
+        var rewritten = kept.size != loaded.size
+        val trimmed = kept.map { record ->
+            val capped = cappedLog(record.log)
+            if (capped !== record.log) {
+                rewritten = true
+                record.copy(log = capped)
+            } else {
+                record
+            }
+        }
+        if (rewritten) persist(trimmed)
+        cache = trimmed
+        return trimmed
     }
 
     @Synchronized
     private fun persist(list: List<Record>) {
         cache = list
-        runCatching { storeFile.writeText(JSON.encodeToString(RECORD_LIST, list)) }
-            .onFailure { AppLogger.error(TAG, "[Backup] history write failed: ${it.message}") }
+        runCatching {
+            val encoded = JSON.encodeToString(RECORD_LIST, list)
+            // [T-android-backup-atomic-write] Write-then-rename: a run killed
+            // mid-`writeText` used to leave a truncated JSON file, and the
+            // decode above swallows the error (`runCatching ?: emptyList`), so
+            // the ENTIRE history silently disappeared. A rename over the old
+            // file is atomic on the same POSIX filesystem, so a reader either
+            // sees the previous complete file or the new complete one.
+            val tmp = File(storeFile.parentFile, RECORD_FILE + ".tmp")
+            tmp.writeText(encoded)
+            if (!tmp.renameTo(storeFile)) {
+                // Defensive: rename cannot cross filesystems and both paths are
+                // in filesDir, so this is unreachable in practice — but a
+                // history that stops updating is worse than a non-atomic write.
+                storeFile.writeText(encoded)
+                tmp.delete()
+            }
+        }.onFailure { AppLogger.error(TAG, "[Backup] history write failed: ${it.message}") }
     }
 
     // MARK: - Mutation
@@ -143,8 +174,12 @@ class BackupHistory private constructor(private val context: Context) {
     @Synchronized
     fun upsert(record: Record) {
         val cur = records().toMutableList()
-        val i = cur.indexOfFirst { it.id == record.id }
-        if (i >= 0) cur[i] = record else cur.add(0, record)
+        // [T-android-backup-log-cap] Cap on the way in as well, so a live run
+        // never has more than MAX_LOG_ENTRIES lines on disk even before the
+        // next load-time trim.
+        val capped = record.copy(log = cappedLog(record.log))
+        val i = cur.indexOfFirst { it.id == capped.id }
+        if (i >= 0) cur[i] = capped else cur.add(0, capped)
         persist(cur.sortedByDescending { it.startedAt })
     }
 
@@ -188,12 +223,77 @@ class BackupHistory private constructor(private val context: Context) {
         /** 30 days, matching iOS `BackupHistory.retention`. */
         const val RETENTION_MS: Long = 30L * 24 * 60 * 60 * 1000
 
+        private const val RECORD_FILE = "records.json"
+
+        /**
+         * [T-android-backup-log-cap] Hard ceiling on progress lines kept per
+         * record.
+         *
+         * A local-folder / SMB destination reports one line per file, so a
+         * 4 000-file workspace wrote 4 000 progress entries — each carrying its
+         * own text, serialised into a single JSON file that is re-encoded on
+         * EVERY `note()` (twice: upsert + publishRunning). That is both a
+         * storage and a jank problem: the file reached megabytes, and the
+         * re-encode ran on the UI-visible path while the backup was running.
+         *
+         * 200 lines is far more than the history row or the detail screen ever
+         * shows (the row renders `log.last`, the detail sheet a scrollback) and
+         * keeps the file in the tens of KB.
+         */
+        const val MAX_LOG_ENTRIES: Int = 200
+
+        /**
+         * How many of the opening lines survive the cap. The first lines of a
+         * run say what was being backed up and where to; the tail says how it
+         * ended. Dropping only the middle keeps both answers readable.
+         */
+        private const val LOG_HEAD_ENTRIES = 20
+
         /**
          * Recorded as the error for a run that never reported a terminal state.
          * Not localized on purpose: it is a stored marker, and the UI maps it to
          * a translated string at render time.
          */
         const val INTERRUPTED_MARKER = "interrupted"
+
+        /**
+         * Cap [log] to [MAX_LOG_ENTRIES], keeping the opening [LOG_HEAD_ENTRIES]
+         * lines, the newest remainder, and one explicit marker saying how many
+         * lines went missing (a silently shortened log reads as a complete run).
+         *
+         * Returns [log] ITSELF when nothing had to be dropped, so callers can
+         * detect "no change" by identity.
+         */
+        fun cappedLog(log: List<LogEntry>): List<LogEntry> {
+            if (log.size <= MAX_LOG_ENTRIES) return log
+            val head = log.take(LOG_HEAD_ENTRIES)
+            val tail = log.takeLast(MAX_LOG_ENTRIES - LOG_HEAD_ENTRIES - 1)
+            val dropped = log.size - head.size - tail.size
+            val marker = LogEntry(
+                at = tail.firstOrNull()?.at ?: head.lastOrNull()?.at ?: System.currentTimeMillis(),
+                message = "… $dropped earlier progress line(s) dropped",
+                isProblem = false,
+            )
+            return head + marker + tail
+        }
+
+        /**
+         * [T-android-backup-log-cap] Append one progress line, keeping the list
+         * capped in memory too.
+         *
+         * Used by [com.openminis.app.ui.settings.backup.BackupViewModel]; the
+         * in-memory list is what `publishRunning` copies into the record on
+         * every line, so letting it grow uncaught would keep re-encoding the
+         * whole thing.
+         */
+        fun appendLog(target: MutableList<LogEntry>, message: String, isProblem: Boolean = false) {
+            target.add(LogEntry(System.currentTimeMillis(), message, isProblem))
+            if (target.size > MAX_LOG_ENTRIES) {
+                val capped = cappedLog(target)
+                target.clear()
+                target.addAll(capped)
+            }
+        }
 
         private val JSON = Json { ignoreUnknownKeys = true; encodeDefaults = true }
         private val RECORD_LIST = ListSerializer(Record.serializer())

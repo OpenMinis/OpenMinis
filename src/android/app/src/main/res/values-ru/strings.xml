@@ -1912,4 +1912,8 @@
     <string name="settings_scheduled_badge_footer">Показывает на значке часов на главном экране число активных запланированных задач.</string>
     <string name="backup_dest_edit_title">Изменить назначение</string>
     <string name="backup_dest_folder">Папка</string>
+    <string name="provider_detail_hidden_models">Скрытые модели (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Нажмите, чтобы развернуть · долгое нажатие для удаления</string>
+    <string name="provider_detail_hidden_models_expand">Показать скрытые модели</string>
+    <string name="provider_detail_hidden_models_collapse">Свернуть скрытые модели</string>
 </resources>

@@ -1227,64 +1227,28 @@ fun ChatScreen(
     // really left the bottom. 32 dp is roughly half the floating
     // tool-bar height, aligning "at bottom" with what the user sees.
     val nearBottomThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
-    // T138 phase 2 v3: ground-truth bottom test via layoutInfo. If
-    // LazyList currently renders the visual-bottom item (data-index 0
-    // under reverseLayout) and its bottom edge sits within `threshold`
-    // px of the viewport bottom, the user is visually at the bottom.
-    // `firstVisibleItemIndex` is unreliable here: one message emission
-    // can expand into N flat items and firstVisible drifts by N in a
-    // single frame. Anchor on the rendered set instead.
+    // T138 phase 2 v3 / T173: ground-truth bottom test via the LazyListState
+    // ANCHOR, not a geometric gap.
+    //
+    // [T-android-scroll-isnearbottom-bug] `listState.firstVisibleItem(Index|
+    // ScrollOffset)` is the authority. A gap test on `visibleItemsInfo` fails
+    // both ways: when the bottom row is taller than the viewport (one big
+    // assistant message with code blocks) reverseLayout pins index 0's bottom
+    // to the viewport bottom while its geometric bottom sits below it, so the
+    // gap stays hugely negative even as the user scrolls up by thousands of
+    // px; and during a fresh measure pass `visibleItemsInfo` can transiently be
+    // empty while the user IS at the bottom, which read as "not at bottom" and
+    // cost the reserve-change recovery, the FAB visibility and the
+    // trailing-row pin. See /tmp/fix_scroll_diagnosis.md.
+    //
+    // The per-frame AppLogger.debug that used to live here (and its five
+    // locals: bottomItem / itemBottom / viewportEnd / gap / firstIdx) was
+    // already dead — gated behind `if (false)` after T-android-jank-profile
+    // measured the string building inside this ~60×/s derivedStateOf body.
     val isNearBottom = remember(listState, nearBottomThresholdPx) {
         derivedStateOf {
-            val info = listState.layoutInfo
-            val bottomItem = info.visibleItemsInfo.firstOrNull { it.index == 0 }
-            val viewportEnd = info.viewportEndOffset
-            val itemBottom = bottomItem?.let { it.offset + it.size } ?: Int.MIN_VALUE
-            val gap = viewportEnd - itemBottom
-            // T173: when the bottom row is taller than the viewport (e.g. one
-            // big assistant message with code blocks), `gap` is permanently
-            // hugely negative even when the user is anchored at the bottom —
-            // because reverseLayout pins index 0's *bottom* to the viewport
-            // bottom, but the item's geometric bottom is below the viewport
-            // (it extends downward off-screen in layoutInfo terms). The
-            // earlier `gap < threshold` test happened to be true in that
-            // case, but it ALSO stayed true as the user scrolled up by
-            // thousands of px — settle-after-interaction then snapped them
-            // right back. Use the LazyListState anchor instead: under
-            // reverseLayout, "at bottom" ⇔ index 0 is the first item AND
-            // its scroll offset is within `threshold` px. Any drag upward
-            // grows firstVisibleItemScrollOffset past threshold instantly,
-            // so the user's intent flips into userScrolledAway.
-            val firstIdx = listState.firstVisibleItemIndex
-            val firstOff = listState.firstVisibleItemScrollOffset
-            // [T-android-scroll-isnearbottom-bug] Anchor authority lives on
-            // listState.firstVisibleItem(Index|ScrollOffset). Previous form
-            // required `bottomItem != null` too, but during a fresh measure
-            // pass visibleItemsInfo can transiently be empty even when the
-            // user IS at the bottom (firstIdx=0 / firstOff=0). The empty
-            // window read as "not at bottom" and propagated to:
-            //   - reserve-change SKIP at the bottom (recovery yank lost)
-            //   - scroll-to-bottom FAB shown on a session that's actually
-            //     bottom-anchored
-            //   - trailing-row pin gated on isNearBottom failing
-            // See /tmp/fix_scroll_diagnosis.md. Anchor on firstIdx/firstOff
-            // alone — they survive the measure window.
-            val result = firstIdx == 0 && firstOff <= nearBottomThresholdPx.toInt()
-            // T-android-jank-profile: was logging on every scroll frame (this
-            // is a derivedStateOf body — it re-runs when any of
-            // listState.layoutInfo / firstVisibleItemIndex /
-            // firstVisibleItemScrollOffset / canScrollForward / etc. change,
-            // i.e. ~60 times/second during a scroll fling). String-building
-            // + file write per frame measurably contributed to scroll jank.
-            // Gate behind a debug toggle so the log path stays available for
-            // future scroll-debugging sessions but doesn't ship by default.
-            if (false) {
-                AppLogger.debug(
-                    tagScroll,
-                    "isNearBottom: bottomVisible=${bottomItem != null} itemBottom=$itemBottom viewportEnd=$viewportEnd gap=$gap threshold=${nearBottomThresholdPx.toInt()} firstVisible=$firstIdx firstOffset=$firstOff canScrollForward=${listState.canScrollForward} canScrollBackward=${listState.canScrollBackward} totalItems=${info.totalItemsCount} visibleItems=${info.visibleItemsInfo.size} isScrollInProgress=${listState.isScrollInProgress} → $result",
-                )
-            }
-            result
+            listState.firstVisibleItemIndex == 0 &&
+                listState.firstVisibleItemScrollOffset <= nearBottomThresholdPx.toInt()
         }
     }
     // T170: derived "does content actually overflow the viewport?". Mirrors
@@ -1299,15 +1263,10 @@ fun ChatScreen(
             val moreItemsThanVisible = info.totalItemsCount > info.visibleItemsInfo.size
             val visibleSum = info.visibleItemsInfo.sumOf { it.size }
             val sumExceedsViewport = visibleSum > viewportSize
-            val result = canScroll || moreItemsThanVisible || sumExceedsViewport
-            // T-android-jank-profile: gate per-frame derivedStateOf logs.
-            if (false) {
-                AppLogger.debug(
-                    tagScroll,
-                    "contentOverflows: canScroll=$canScroll moreItems=$moreItemsThanVisible sumExceeds=$sumExceedsViewport visibleSum=$visibleSum viewport=$viewportSize total=${info.totalItemsCount} visible=${info.visibleItemsInfo.size} → $result",
-                )
-            }
-            result
+            // The per-frame AppLogger.debug that used to sit here was gated
+            // behind `if (false)` (T-android-jank-profile); it is deleted, not
+            // merely disabled.
+            canScroll || moreItemsThanVisible || sumExceedsViewport
         }
     }
 
@@ -1606,6 +1565,22 @@ fun ChatScreen(
     // token — async self-sizing / image height settling needs the safety
     // net but not at 50ms cadence.
     LaunchedEffect(listState, scrollMode) {
+        // [T-android-stream-follow-deadband] Bookkeeping for the anti-jitter
+        // deadband (X12). `lastFollowDist` is the distance-from-bottom at the
+        // last sample the loop ACTED on; `lastGrowthAtMs` is when that distance
+        // last increased. See StreamFollowDeadband for the measured defect this
+        // suppresses: inline markdown re-measure (an inline-code chip closing)
+        // moves the viewport a few px UP mid-stream, and the follow loop used to
+        // "correct" that reversal — the jitter users report as the list jumping
+        // when a new round starts.
+        //
+        // The distance is `firstVisibleItemIndex * viewportHeightPx +
+        // firstVisibleItemScrollOffset`. The index term is a coarse stand-in for
+        // item height on purpose: the deadband only ever compares SMALL deltas,
+        // and crossing a whole item changes the index, which produces a delta
+        // larger than the band and is therefore always followed.
+        var lastFollowDist = 0f
+        var lastGrowthAtMs = 0L
         // T-streaming-side-channel: combine the canonical messages flow
         // with streamingById so growth signals (content length, toolBlocks
         // count, awaiting flag) reflect the live stream — otherwise the
@@ -1668,6 +1643,20 @@ fun ChatScreen(
                 if (listState.isScrollInProgress) return@collect
                 val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
                 if (sinceInterrupt < USER_SCROLL_INTERRUPT_MS) return@collect
+                // [T-android-stream-follow-deadband] Distance-from-bottom in px.
+                // Under reverseLayout index 0 is the newest row, so the index
+                // term grows as the viewport falls behind.
+                val followDist = (
+                    listState.firstVisibleItemIndex *
+                        listState.layoutInfo.viewportEndOffset.coerceAtLeast(1) +
+                        listState.firstVisibleItemScrollOffset
+                    ).toFloat()
+                val now = System.currentTimeMillis()
+                if (StreamFollowDeadband.shouldSuppress(followDist, lastFollowDist, now - lastGrowthAtMs)) {
+                    return@collect
+                }
+                if (followDist > lastFollowDist) lastGrowthAtMs = now
+                lastFollowDist = followDist
                 // Keep the stream follower one-way and atomic. The previous
                 // frame-driven loop estimated item heights while the streaming
                 // row was being remeasured; stale estimates could alternate

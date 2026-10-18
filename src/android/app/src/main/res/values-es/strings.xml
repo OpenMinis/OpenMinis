@@ -1904,4 +1904,8 @@
     <string name="settings_scheduled_badge_footer">Muestra en el icono de reloj de la pantalla de inicio cuántas tareas programadas están activas.</string>
     <string name="backup_dest_edit_title">Editar destino</string>
     <string name="backup_dest_folder">Carpeta</string>
+    <string name="provider_detail_hidden_models">Modelos ocultos (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Toca para expandir · mantén pulsada una fila para borrar</string>
+    <string name="provider_detail_hidden_models_expand">Mostrar modelos ocultos</string>
+    <string name="provider_detail_hidden_models_collapse">Ocultar modelos ocultos</string>
 </resources>

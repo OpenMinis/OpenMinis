@@ -1907,4 +1907,8 @@
     <string name="settings_scheduled_badge_footer">Tampilkan di ikon jam beranda berapa banyak tugas terjadwal yang aktif.</string>
     <string name="backup_dest_edit_title">Edit tujuan</string>
     <string name="backup_dest_folder">Folder</string>
+    <string name="provider_detail_hidden_models">Model tersembunyi (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Ketuk untuk membuka · tekan lama baris untuk menghapus</string>
+    <string name="provider_detail_hidden_models_expand">Tampilkan model tersembunyi</string>
+    <string name="provider_detail_hidden_models_collapse">Sembunyikan model tersembunyi</string>
 </resources>

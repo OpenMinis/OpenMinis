@@ -1906,4 +1906,8 @@
     <string name="settings_scheduled_badge_footer">Arată pe pictograma ceas din ecranul principal câte activități programate sunt active.</string>
     <string name="backup_dest_edit_title">Editează destinația</string>
     <string name="backup_dest_folder">Folder</string>
+    <string name="provider_detail_hidden_models">Modele ascunse (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Atinge pentru extindere · ține apăsat pe rând pentru ștergere</string>
+    <string name="provider_detail_hidden_models_expand">Arată modelele ascunse</string>
+    <string name="provider_detail_hidden_models_collapse">Ascunde modelele ascunse</string>
 </resources>

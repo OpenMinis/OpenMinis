@@ -1902,4 +1902,8 @@
     <string name="settings_scheduled_badge_footer">Mostra no ícone de relógio da tela inicial quantas tarefas agendadas estão ativas.</string>
     <string name="backup_dest_edit_title">Editar destino</string>
     <string name="backup_dest_folder">Pasta</string>
+    <string name="provider_detail_hidden_models">Modelos ocultos (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Toque para expandir · mantenha pressionado para excluir</string>
+    <string name="provider_detail_hidden_models_expand">Mostrar modelos ocultos</string>
+    <string name="provider_detail_hidden_models_collapse">Ocultar modelos ocultos</string>
 </resources>

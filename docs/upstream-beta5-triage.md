@@ -201,6 +201,29 @@ beta.5 共 **32 项**（8 新功能 + 21 修复 + 3 视觉打磨），beta.4 遗
 
 ---
 
+## 7. 批次 2 交付（7/10）
+
+本轮按点名只做 `X1 X5 X16 X11 X20 X12 F1` 七项；`F2`（堆叠趋势图）、`X7`（语音纠正回退链）、
+`P1`（大会话打开占位）仍欠，留待下一轮。
+
+| # | 落地位置 | 行为 |
+| --- | --- | --- |
+| F1 | `ui/settings/ProviderModelRows.kt`（新）、`data/repository/DeletedModelTombstones.kt`（新） | 隐藏模型收进「已隐藏模型 (N)」折叠组（默认收起，不再 45% 变暗内联）；长按菜单对**任意**模型都可删除；删除写入墓碑，模型刷新不再复活（`ProviderRepository.replaceEntries` 过滤） |
+| X1 | `backup/BackupHistory.kt` | 单条记录进度行上限 200（首 20 行 + 最新 179 行 + 1 条「已丢弃 N 行」标记）；写盘改 temp + rename 原子替换（原来 writeText 中途被杀会留下截断 JSON，而读取端 `runCatching ?: emptyList()` 会把整段历史静默吞掉）；载入时顺带裁剪旧超长记录并回写 |
+| X5 | `core/model/.../ToolIdCompat.kt`（新） | 工具 id 归一化：截断 `call_x\|fc_y` 合成前缀、`[A-Za-z0-9_-]` 之外映射为 `-`、超 64 字符时 `前 55 + "-" + 8 位 SHA-256 摘要`；`AgentTypes.sanitizeToolId` 与 `OpenAIRequestBodies.capChatToolCallId` 统一走它（原来两处各写一份） |
+| X11 | `scheduled/ScheduledModelResolver.kt`（新） | `minis-scheduled create --model` 在**创建时**解析：wire id / entry uuid / 唯一显示名均可，存回规范 wire id；未知值立即失败并列出候选 id，`--allow-unknown-model` 显式放行（原来推迟到触发时才失败，且是无人值守的触发） |
+| X12 | `ui/chat/StreamFollowDeadband.kt`（新） | 跟随死区：距离回退 < 24px 且距上次增长 < 250ms 时抑制滚动，只压制 markdown 重排造成的抖动；索引跨越（delta ≥ 视口高）永不被抑制 |
+| X16 | `service/OverlayPlacement.kt`（新）、`BackgroundSettingsRepository`、`ToolOverlayController` | 安全区按系统栏实测裁剪（竖屏扣导航栏、横屏两侧对称扣手势条），悬浮胶囊任何方向都完整可见；位置按横/竖屏各自记忆，旋转后优先本方向自己的槽位 |
+| X20 | `tools/ToolConcurrency.kt`（新） | 文件工具并发上限 8、offload handler 并发上限 4（排队 30s 未获槽位返回 `host_busy` JSON）；权限弹窗 120s 维持 §4 既定口径不变 |
+
+架构棘轮（`scripts/ci/architecture-policy.json`）：`ProviderRepository` 抽出 `ModelRefreshPlanner.kt`（2768→2726）、
+`ProviderDetailScreen` 抽出模型行到 `ProviderModelRows.kt`（1234→1088）、`ChatScreen` 删除两处 `if (false)` 死调试块与
+`tagScroll`（7539→7528）、`OpenAIRequestBodies` 1309→1304、`ToolOverlayController` 1022→1008（等于上限）；
+baseline 已同步收紧（只降不升）。新增/改动单测 5 个类 48 例（`ToolIdCompatTest` 12、`StreamFollowDeadbandTest` 10、
+`ScheduledModelResolverTest` 10、`ModelRefreshPlannerTest` 6、`BackupHistoryLogCapTest` 10）。
+
+---
+
 ## 附：本次分析用到的只读证据
 
 - `git fetch --depth=1 upstream refs/tags/0-beta-build34` → `8c1592c6`(tag) → `b4c0661d`(commit)

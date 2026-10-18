@@ -73,9 +73,11 @@ data class AgentMessage(
  * Normalize a tool-use id to the regex Anthropic accepts (`^[a-zA-Z0-9_-]+$`).
  * OpenAI Responses can emit ids like `call_abc|fc_def` which Anthropic rejects
  * on the follow-up turn, so every provider echoes ids through this filter.
+ *
+ * Delegates to [ToolIdCompat] since 1.15-beta.5 parity: the old body fixed the
+ * alphabet but left over-long ids alone, which the OpenAI-compatible relays
+ * reject ("maximum length 64") — and the reverse direction truncated ids to 64
+ * chars without fixing their alphabet. One deterministic mapping now covers
+ * both, and a call plus its result still map to the same wire id.
  */
-fun sanitizeToolId(id: String): String = buildString(id.length) {
-    for (ch in id) {
-        append(if (ch.isLetterOrDigit() || ch == '_' || ch == '-') ch else '-')
-    }
-}
+fun sanitizeToolId(id: String): String = ToolIdCompat.normalize(id)

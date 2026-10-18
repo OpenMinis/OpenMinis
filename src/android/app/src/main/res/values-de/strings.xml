@@ -1904,4 +1904,8 @@
     <string name="settings_scheduled_badge_footer">Zeigt auf dem Uhr-Symbol der Startseite, wie viele geplante Aufgaben aktiv sind.</string>
     <string name="backup_dest_edit_title">Ziel bearbeiten</string>
     <string name="backup_dest_folder">Ordner</string>
+    <string name="provider_detail_hidden_models">Ausgeblendete Modelle (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Zum Aufklappen tippen · Zeile lange drücken zum Löschen</string>
+    <string name="provider_detail_hidden_models_expand">Ausgeblendete Modelle anzeigen</string>
+    <string name="provider_detail_hidden_models_collapse">Ausgeblendete Modelle ausblenden</string>
 </resources>

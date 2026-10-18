@@ -1910,4 +1910,8 @@
     <string name="settings_scheduled_badge_footer">Pokazuje na ikonie zegara na ekranie głównym liczbę aktywnych zaplanowanych zadań.</string>
     <string name="backup_dest_edit_title">Edytuj miejsce docelowe</string>
     <string name="backup_dest_folder">Folder</string>
+    <string name="provider_detail_hidden_models">Ukryte modele (%1$d)</string>
+    <string name="provider_detail_hidden_models_hint">Dotknij, aby rozwinąć · przytrzymaj wiersz, aby usunąć</string>
+    <string name="provider_detail_hidden_models_expand">Pokaż ukryte modele</string>
+    <string name="provider_detail_hidden_models_collapse">Ukryj ukryte modele</string>
 </resources>

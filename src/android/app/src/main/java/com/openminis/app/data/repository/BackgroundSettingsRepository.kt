@@ -77,12 +77,45 @@ class BackgroundSettingsRepository(context: Context) {
      * previous drag. -1 means "no remembered position — let the overlay
      * controller pick a default near the bottom-left, 10 dp from each
      * edge" ([T-bg-overlay-polish]).
+     *
+     * [T-android-overlay-orientation-position] The position is remembered
+     * PER ORIENTATION: the capsule is a `TYPE_APPLICATION_OVERLAY` window, so
+     * it survives rotation and used to be clamped from one shared pair of
+     * keys. A spot that reads well in portrait (bottom-left, above the nav bar)
+     * lands inside the landscape gesture strip or under the side nav; the user
+     * dragged it again there and thereby destroyed the portrait placement. Two
+     * slots keep both.
+     *
+     * These no-argument accessors stay for callers that predate the split: they
+     * read and write the pre-split keys, which also act as the fallback so an
+     * upgrade keeps the position the user last chose.
      */
     fun getOverlayX(): Int = prefs.getInt(KEY_BG_OVERLAY_X, -1)
     fun getOverlayY(): Int = prefs.getInt(KEY_BG_OVERLAY_Y, -1)
     fun setOverlayPosition(x: Int, y: Int) {
         prefs.edit().putInt(KEY_BG_OVERLAY_X, x).putInt(KEY_BG_OVERLAY_Y, y).apply()
     }
+
+    /** Orientation-aware read: that orientation's slot, else the pre-split key. */
+    fun getOverlayX(landscape: Boolean): Int = prefs.getInt(overlayKeyX(landscape), getOverlayX())
+    fun getOverlayY(landscape: Boolean): Int = prefs.getInt(overlayKeyY(landscape), getOverlayY())
+
+    /**
+     * Orientation-aware write. Only the current orientation's slot is touched,
+     * so rotating never clobbers the other one.
+     */
+    fun setOverlayPosition(x: Int, y: Int, landscape: Boolean) {
+        prefs.edit()
+            .putInt(overlayKeyX(landscape), x)
+            .putInt(overlayKeyY(landscape), y)
+            .apply()
+    }
+
+    private fun overlayKeyX(landscape: Boolean) =
+        if (landscape) KEY_BG_OVERLAY_X_LANDSCAPE else KEY_BG_OVERLAY_X_PORTRAIT
+
+    private fun overlayKeyY(landscape: Boolean) =
+        if (landscape) KEY_BG_OVERLAY_Y_LANDSCAPE else KEY_BG_OVERLAY_Y_PORTRAIT
 
     companion object {
         private const val PREFS_NAME = "background_settings"
@@ -91,6 +124,10 @@ class BackgroundSettingsRepository(context: Context) {
         private const val KEY_BG_OVERLAY_ENABLED = "backgroundOverlayEnabled"
         private const val KEY_BG_OVERLAY_X = "backgroundOverlayX"
         private const val KEY_BG_OVERLAY_Y = "backgroundOverlayY"
+        private const val KEY_BG_OVERLAY_X_PORTRAIT = "backgroundOverlayXPortrait"
+        private const val KEY_BG_OVERLAY_Y_PORTRAIT = "backgroundOverlayYPortrait"
+        private const val KEY_BG_OVERLAY_X_LANDSCAPE = "backgroundOverlayXLandscape"
+        private const val KEY_BG_OVERLAY_Y_LANDSCAPE = "backgroundOverlayYLandscape"
         private const val KEY_DYNAMIC_ISLAND_ENABLED = "dynamicIslandEnabled"
     }
 }

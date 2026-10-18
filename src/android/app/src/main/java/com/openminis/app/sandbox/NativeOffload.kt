@@ -4,6 +4,7 @@ import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Process
 import android.util.Log
+import com.openminis.app.tools.ToolConcurrency
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -425,6 +426,43 @@ object NativeOffloadServer {
     }
 
     /**
+     * [T-android-tool-pool-cap] Admit at most
+     * [ToolConcurrency.MAX_CONCURRENT_OFFLOAD_HANDLERS] concurrent handlers.
+     *
+     * This server starts a fresh daemon thread per connection AND another per
+     * handler deadline, with no ceiling: a guest script that fans out `minis-*`
+     * calls (`for f in …; do minis-photos … & done`), or an agent turn that
+     * emits several parallel `shell_execute` calls, put arbitrarily many
+     * long-lived threads on the phone — each able to sit for up to 18 minutes
+     * (`minis-model-use`). That is how a "stuck" turn becomes a device-wide
+     * stall instead of one slow tool.
+     *
+     * The slot is released when the CALLER stops waiting, not when the handler
+     * thread dies: a handler that ignores cancellation has already had its
+     * connection answered by [handlerTimeoutResult], and holding a slot forever
+     * for a wedged recognizer would permanently shrink the pool to three. The
+     * admission cap therefore bounds concurrent handler EXECUTION, which is the
+     * resource that matters; an abandoned thread only touches its result queue.
+     *
+     * Over the ceiling the guest gets a structured `host_busy` reply instead of
+     * another thread, so its CLI exits cleanly and the model can retry.
+     */
+    private fun runHandlerWithWatchdog(
+        name: String,
+        handler: NativeOffloadHandler,
+        request: NativeOffloadRequest,
+    ): NativeOffloadResult {
+        if (!ToolConcurrency.tryAcquireOffloadSlot()) {
+            return offloadBusyResult(name, request)
+        }
+        try {
+            return runHandlerWithWatchdogLocked(name, handler, request)
+        } finally {
+            ToolConcurrency.releaseOffloadSlot()
+        }
+    }
+
+    /**
      * [T-android-offload-watchdog] Run [handler] with a hard deadline.
      *
      * The handler runs on its own daemon thread and hands its result back
@@ -434,8 +472,10 @@ object NativeOffloadServer {
      * `read()` forever. The abandoned thread keeps running (Java cannot
      * safely kill it) but it no longer owns the connection: it only ever
      * touches the queue, so its late result is dropped harmlessly.
+     *
+     * [runHandlerWithWatchdog] gates entry to this method.
      */
-    private fun runHandlerWithWatchdog(
+    private fun runHandlerWithWatchdogLocked(
         name: String,
         handler: NativeOffloadHandler,
         request: NativeOffloadRequest,
@@ -470,6 +510,26 @@ object NativeOffloadServer {
         // cancellation (blocking IO) still must not hold the connection.
         return slot.poll(timeoutMs + 2_000L, TimeUnit.MILLISECONDS)
             ?: handlerTimeoutResult(name, timeoutMs, request)
+    }
+
+    /** Structured reply for a request that could not get a handler slot. */
+    private fun offloadBusyResult(name: String, request: NativeOffloadRequest): NativeOffloadResult {
+        val max = ToolConcurrency.MAX_CONCURRENT_OFFLOAD_HANDLERS
+        Log.w(TAG, "handler '$name' refused: $max handlers already in flight (session=${request.sessionId})")
+        return NativeOffloadResult(
+            exitCode = 1,
+            output = buildString {
+                append("{\n")
+                append("  \"error\": \"host_busy\",\n")
+                append("  \"tool\": \"").append(name.replace("\\", "\\\\").replace("\"", "\\\"")).append("\",\n")
+                append("  \"max_concurrent\": ").append(max).append(",\n")
+                append("  \"message\": \"The device is already running ").append(max)
+                append(" long host handlers; this call waited ")
+                append(ToolConcurrency.OFFLOAD_QUEUE_WAIT_MS / 1000)
+                append("s for a free slot and gave up. Retry in a moment, or run fewer host tools at once.\"\n")
+                append("}\n")
+            },
+        )
     }
 
     private fun handlerTimeoutResult(
