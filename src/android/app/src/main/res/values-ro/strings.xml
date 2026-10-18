@@ -1915,4 +1915,10 @@
     <string name="provider_detail_hidden_models_hint">Atinge pentru extindere · ține apăsat pe rând pentru ștergere</string>
     <string name="provider_detail_hidden_models_expand">Arată modelele ascunse</string>
     <string name="provider_detail_hidden_models_collapse">Ascunde modelele ascunse</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Jurnale și cache</string>
+    <string name="storage_clear_logs_caches_confirm_title">Curățați jurnalele și cache-ul?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Șterge jurnalele de execuție și fișierele cache (%1$s). Conversațiile, sesiunile și copiile de siguranță nu sunt afectate.</string>
+    <string name="storage_clear_logs_caches_button">Curăță</string>
+    <string name="storage_clear_logs_caches_done">%1$s eliberați</string>
 </resources>

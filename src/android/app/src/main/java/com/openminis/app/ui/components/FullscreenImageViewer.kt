@@ -32,6 +32,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,7 +55,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
-import com.openminis.app.ui.sandbox.saveBitmapToGallery
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -180,6 +180,12 @@ fun FullscreenImageViewer(
         var offsetX by remember { mutableFloatStateOf(0f) }
         var offsetY by remember { mutableFloatStateOf(0f) }
         var showChrome by remember { mutableStateOf(true) }
+        // [T-android-image-save-original] Full-resolution decode once the user
+        // asks for the original: AsyncImage renders a Coil request sized to the
+        // composable, so zooming past 1x on a large photo shows interpolation
+        // rather than detail. Non-null here means "displaying the original".
+        var originalBitmap by remember(model) { mutableStateOf<android.graphics.Bitmap?>(null) }
+        var loadingOriginal by remember(model) { mutableStateOf(false) }
 
         Box(
             modifier = Modifier
@@ -188,7 +194,7 @@ fun FullscreenImageViewer(
         ) {
             // ── Image ──────────────────────────────────────────────────────────
             AsyncImage(
-                model = model,
+                model = originalBitmap ?: model,
                 contentDescription = null,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
@@ -314,16 +320,44 @@ fun FullscreenImageViewer(
                         label = stringResource(R.string.image_action_save),
                         onClick = {
                             scope.launch {
-                                val bmp = loadBitmap(context, model)
-                                // A decode failure used to be a silent no-op:
-                                // the user tapped Save and got no feedback at
-                                // all. Treat it as a failed save.
-                                val saved = bmp != null && saveBitmapToGallery(context, bmp)
+                                // [T-android-image-save-original] Save the ORIGINAL
+                                // bytes when they are readable: the format and its
+                                // metadata survive, and a JPEG no longer leaves the
+                                // gallery as a much larger re-encoded PNG.
+                                val saved = saveImageToGallery(context, model)
                                 Toast.makeText(
                                     context,
                                     if (saved) savedToAlbumMsg else saveFailedMsg,
                                     Toast.LENGTH_SHORT,
                                 ).show()
+                            }
+                        },
+                    )
+                    // Original — swap in a full-resolution decode for inspection.
+                    ImageActionButton(
+                        icon = Icons.Outlined.Image,
+                        label = stringResource(R.string.image_action_original),
+                        onClick = onClick@{
+                            if (originalBitmap != null || loadingOriginal) return@onClick
+                            loadingOriginal = true
+                            scope.launch {
+                                try {
+                                    originalBitmap = loadOriginalImage(context, model)
+                                        ?.let { original ->
+                                            android.graphics.BitmapFactory.decodeByteArray(
+                                                original.bytes, 0, original.bytes.size,
+                                            )
+                                        }
+                                    if (originalBitmap == null) {
+                                        Toast.makeText(
+                                            context,
+                                            saveFailedMsg,
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
+                                } finally {
+                                    loadingOriginal = false
+                                }
                             }
                         },
                     )

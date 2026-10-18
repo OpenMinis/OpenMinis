@@ -1919,4 +1919,10 @@
     <string name="provider_detail_hidden_models_hint">Dotknij, aby rozwinąć · przytrzymaj wiersz, aby usunąć</string>
     <string name="provider_detail_hidden_models_expand">Pokaż ukryte modele</string>
     <string name="provider_detail_hidden_models_collapse">Ukryj ukryte modele</string>
+    <string name="image_action_original">Oryginał</string>
+    <string name="storage_overview_logs_caches">Dzienniki i pamięć podręczna</string>
+    <string name="storage_clear_logs_caches_confirm_title">Wyczyścić dzienniki i pamięć podręczną?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Usuwa dzienniki uruchomień i pliki pamięci podręcznej (%1$s). Czaty, sesje i kopie zapasowe pozostają nietknięte.</string>
+    <string name="storage_clear_logs_caches_button">Wyczyść</string>
+    <string name="storage_clear_logs_caches_done">Zwolniono %1$s</string>
 </resources>

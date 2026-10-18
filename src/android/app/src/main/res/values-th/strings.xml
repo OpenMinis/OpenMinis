@@ -1911,4 +1911,10 @@
     <string name="provider_detail_hidden_models_hint">แตะเพื่อขยาย · กดค้างที่แถวเพื่อลบ</string>
     <string name="provider_detail_hidden_models_expand">แสดงโมเดลที่ซ่อนไว้</string>
     <string name="provider_detail_hidden_models_collapse">ย่อโมเดลที่ซ่อนไว้</string>
+    <string name="image_action_original">ต้นฉบับ</string>
+    <string name="storage_overview_logs_caches">บันทึกและแคช</string>
+    <string name="storage_clear_logs_caches_confirm_title">ล้างบันทึกและแคชหรือไม่?</string>
+    <string name="storage_clear_logs_caches_confirm_message">ลบไฟล์บันทึกการทำงานและไฟล์แคช (%1$s) แชท เซสชัน และข้อมูลสำรองไม่ได้รับผลกระทบ</string>
+    <string name="storage_clear_logs_caches_button">ล้าง</string>
+    <string name="storage_clear_logs_caches_done">คืนพื้นที่ %1$s</string>
 </resources>

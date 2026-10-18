@@ -2002,4 +2002,10 @@
     <string name="provider_detail_hidden_models_hint">點按展開 · 長按列可刪除</string>
     <string name="provider_detail_hidden_models_expand">展開已隱藏模型</string>
     <string name="provider_detail_hidden_models_collapse">收起已隱藏模型</string>
+    <string name="image_action_original">原圖</string>
+    <string name="storage_overview_logs_caches">日誌與快取</string>
+    <string name="storage_clear_logs_caches_confirm_title">清理日誌與快取？</string>
+    <string name="storage_clear_logs_caches_confirm_message">將刪除執行日誌與快取檔案（%1$s）。聊天、工作階段與備份不受影響。</string>
+    <string name="storage_clear_logs_caches_button">清理</string>
+    <string name="storage_clear_logs_caches_done">已釋放 %1$s</string>
 </resources>

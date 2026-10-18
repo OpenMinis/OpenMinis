@@ -1913,4 +1913,10 @@
     <string name="provider_detail_hidden_models_hint">Toca para expandir · mantén pulsada una fila para borrar</string>
     <string name="provider_detail_hidden_models_expand">Mostrar modelos ocultos</string>
     <string name="provider_detail_hidden_models_collapse">Ocultar modelos ocultos</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Registros y caché</string>
+    <string name="storage_clear_logs_caches_confirm_title">¿Limpiar registros y caché?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Elimina registros de ejecución y archivos en caché (%1$s). Los chats, las sesiones y las copias de seguridad no se ven afectados.</string>
+    <string name="storage_clear_logs_caches_button">Limpiar</string>
+    <string name="storage_clear_logs_caches_done">%1$s liberados</string>
 </resources>

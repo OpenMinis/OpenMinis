@@ -1921,4 +1921,10 @@
     <string name="provider_detail_hidden_models_hint">Нажмите, чтобы развернуть · долгое нажатие для удаления</string>
     <string name="provider_detail_hidden_models_expand">Показать скрытые модели</string>
     <string name="provider_detail_hidden_models_collapse">Свернуть скрытые модели</string>
+    <string name="image_action_original">Оригинал</string>
+    <string name="storage_overview_logs_caches">Журналы и кэш</string>
+    <string name="storage_clear_logs_caches_confirm_title">Очистить журналы и кэш?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Удаляет журналы выполнения и кэшированные файлы (%1$s). Чаты, сеансы и резервные копии не затрагиваются.</string>
+    <string name="storage_clear_logs_caches_button">Очистить</string>
+    <string name="storage_clear_logs_caches_done">Освобождено %1$s</string>
 </resources>

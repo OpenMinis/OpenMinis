@@ -1911,4 +1911,10 @@
     <string name="provider_detail_hidden_models_hint">Toque para expandir · mantenha pressionado para excluir</string>
     <string name="provider_detail_hidden_models_expand">Mostrar modelos ocultos</string>
     <string name="provider_detail_hidden_models_collapse">Ocultar modelos ocultos</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Logs e caches</string>
+    <string name="storage_clear_logs_caches_confirm_title">Limpar logs e caches?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Exclui registros de execução e arquivos em cache (%1$s). Chats, sessões e backups não são afetados.</string>
+    <string name="storage_clear_logs_caches_button">Limpar</string>
+    <string name="storage_clear_logs_caches_done">%1$s liberados</string>
 </resources>

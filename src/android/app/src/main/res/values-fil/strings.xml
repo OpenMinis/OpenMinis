@@ -1911,4 +1911,10 @@
     <string name="provider_detail_hidden_models_hint">I-tap para palawakin · long-press ang row para burahin</string>
     <string name="provider_detail_hidden_models_expand">Ipakita ang mga nakatagong modelo</string>
     <string name="provider_detail_hidden_models_collapse">Itago ang mga nakatagong modelo</string>
+    <string name="image_action_original">Orihinal</string>
+    <string name="storage_overview_logs_caches">Mga log at cache</string>
+    <string name="storage_clear_logs_caches_confirm_title">Linisin ang mga log at cache?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Tatanggalin ang mga run log at naka-cache na file (%1$s). Hindi apektado ang mga chat, session at backup.</string>
+    <string name="storage_clear_logs_caches_button">Linisin</string>
+    <string name="storage_clear_logs_caches_done">%1$s ang naipalabas</string>
 </resources>

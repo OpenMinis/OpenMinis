@@ -1911,4 +1911,10 @@
     <string name="provider_detail_hidden_models_hint">Genişletmek için dokunun · silmek için satıra uzun basın</string>
     <string name="provider_detail_hidden_models_expand">Gizli modelleri göster</string>
     <string name="provider_detail_hidden_models_collapse">Gizli modelleri daralt</string>
+    <string name="image_action_original">Orijinal</string>
+    <string name="storage_overview_logs_caches">Günlükler ve önbellek</string>
+    <string name="storage_clear_logs_caches_confirm_title">Günlükler ve önbellek temizlensin mi?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Çalıştırma günlüklerini ve önbellek dosyalarını (%1$s) siler. Sohbetler, oturumlar ve yedekler etkilenmez.</string>
+    <string name="storage_clear_logs_caches_button">Temizle</string>
+    <string name="storage_clear_logs_caches_done">%1$s boşaltıldı</string>
 </resources>

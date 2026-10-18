@@ -1911,4 +1911,10 @@
     <string name="provider_detail_hidden_models_hint">Ketik untuk kembang · tekan lama baris untuk padam</string>
     <string name="provider_detail_hidden_models_expand">Tunjukkan model tersembunyi</string>
     <string name="provider_detail_hidden_models_collapse">Sembunyikan model tersembunyi</string>
+    <string name="image_action_original">Asal</string>
+    <string name="storage_overview_logs_caches">Log &amp; Cache</string>
+    <string name="storage_clear_logs_caches_confirm_title">Bersihkan log &amp; cache?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Memadam log pelaksanaan dan fail cache (%1$s). Sembang, sesi dan sandaran tidak terjejas.</string>
+    <string name="storage_clear_logs_caches_button">Bersihkan</string>
+    <string name="storage_clear_logs_caches_done">%1$s dibebaskan</string>
 </resources>

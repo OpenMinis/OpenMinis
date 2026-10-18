@@ -1913,4 +1913,10 @@
     <string name="provider_detail_hidden_models_hint">Touchez pour développer · appui long sur une ligne pour supprimer</string>
     <string name="provider_detail_hidden_models_expand">Afficher les modèles masqués</string>
     <string name="provider_detail_hidden_models_collapse">Masquer les modèles masqués</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Journaux et caches</string>
+    <string name="storage_clear_logs_caches_confirm_title">Nettoyer les journaux et caches ?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Supprime les journaux d’exécution et les fichiers en cache (%1$s). Les discussions, sessions et sauvegardes ne sont pas affectées.</string>
+    <string name="storage_clear_logs_caches_button">Nettoyer</string>
+    <string name="storage_clear_logs_caches_done">%1$s libérés</string>
 </resources>

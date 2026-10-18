@@ -1913,4 +1913,10 @@
     <string name="provider_detail_hidden_models_hint">Zum Aufklappen tippen · Zeile lange drücken zum Löschen</string>
     <string name="provider_detail_hidden_models_expand">Ausgeblendete Modelle anzeigen</string>
     <string name="provider_detail_hidden_models_collapse">Ausgeblendete Modelle ausblenden</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Protokolle &amp; Caches</string>
+    <string name="storage_clear_logs_caches_confirm_title">Protokolle &amp; Caches bereinigen?</string>
+    <string name="storage_clear_logs_caches_confirm_message">Löscht Ausführungsprotokolle und Cache-Dateien (%1$s). Chats, Sitzungen und Backups bleiben unberührt.</string>
+    <string name="storage_clear_logs_caches_button">Bereinigen</string>
+    <string name="storage_clear_logs_caches_done">%1$s freigegeben</string>
 </resources>

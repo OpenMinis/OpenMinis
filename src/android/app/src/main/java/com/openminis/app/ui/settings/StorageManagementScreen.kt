@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.data.StorageScanner
 import com.openminis.app.data.db.ChatDao
@@ -76,6 +77,13 @@ fun StorageManagementScreen(
     var shellSize by remember { mutableLongStateOf(0L) }
     var dbSize by remember { mutableLongStateOf(0L) }
     var sessions by remember { mutableStateOf<List<SessionStorageInfo>>(emptyList()) }
+    // [T-android-storage-clean-logs-caches] Logs & cache space: measured on entry
+    // and after each cleanup so the row always shows what the action would free.
+    var logsCachesSize by remember { mutableLongStateOf(0L) }
+    var showCleanLogsDialog by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        logsCachesSize = withContext(Dispatchers.IO) { StorageCleaner.measure(context) }
+    }
 
     fun reload() {
         scope.launch {
@@ -149,6 +157,15 @@ fun StorageManagementScreen(
                 color = Color(0xFF5856D6),
                 label = stringResource(R.string.storage_overview_sessions),
                 value = Formatter.formatFileSize(context, totalSessionSize),
+                showDivider = true,
+            )
+            // [T-android-storage-clean-logs-caches] Disposable space, with the
+            // only action that can reclaim it without touching chat history.
+            StorageOverviewRow(
+                color = Color(0xFF34C759),
+                label = stringResource(R.string.storage_overview_logs_caches),
+                value = Formatter.formatFileSize(context, logsCachesSize),
+                onClick = { showCleanLogsDialog = true },
                 showDivider = false,
             )
         }
@@ -181,6 +198,47 @@ fun StorageManagementScreen(
         }
 
         Spacer(Modifier.height(24.dp))
+    }
+
+    // [T-android-storage-clean-logs-caches] Confirm before deleting disposable
+    // space: the dialog states what is removed and, just as importantly, what is
+    // not (chats, sessions, backups).
+    if (showCleanLogsDialog) {
+        val cleanedToast = stringResource(R.string.storage_clear_logs_caches_done)
+        AlertDialog(
+            onDismissRequest = { showCleanLogsDialog = false },
+            title = { Text(stringResource(R.string.storage_clear_logs_caches_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.storage_clear_logs_caches_confirm_message,
+                        Formatter.formatFileSize(context, logsCachesSize),
+                    ),
+                )
+            },
+            confirmButton = {
+                MinisTextButton(onClick = {
+                    showCleanLogsDialog = false
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) { StorageCleaner.clean(context) }
+                        logsCachesSize = withContext(Dispatchers.IO) { StorageCleaner.measure(context) }
+                        Toast.makeText(
+                            context,
+                            cleanedToast.format(Formatter.formatFileSize(context, result.freedBytes)),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }) {
+                    Text(
+                        stringResource(R.string.storage_clear_logs_caches_button),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                MinisTextButton(onClick = { showCleanLogsDialog = false }) { Text(stringResource(R.string.common_cancel)) }
+            },
+        )
     }
 }
 
@@ -331,6 +389,7 @@ fun SessionStorageDetailScreen(
             },
         )
     }
+
 }
 
 @Composable

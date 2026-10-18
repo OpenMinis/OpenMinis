@@ -2556,4 +2556,10 @@
     <string name="provider_detail_hidden_models_hint">点按展开 · 长按行可删除</string>
     <string name="provider_detail_hidden_models_expand">展开已隐藏模型</string>
     <string name="provider_detail_hidden_models_collapse">收起已隐藏模型</string>
+    <string name="image_action_original">原图</string>
+    <string name="storage_overview_logs_caches">日志与缓存</string>
+    <string name="storage_clear_logs_caches_confirm_title">清理日志与缓存？</string>
+    <string name="storage_clear_logs_caches_confirm_message">将删除运行日志与缓存文件（%1$s）。聊天、会话与备份不受影响。</string>
+    <string name="storage_clear_logs_caches_button">清理</string>
+    <string name="storage_clear_logs_caches_done">已释放 %1$s</string>
 </resources>

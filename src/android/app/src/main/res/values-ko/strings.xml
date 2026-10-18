@@ -1910,4 +1910,10 @@
     <string name="provider_detail_hidden_models_hint">탭하여 펼치기 · 길게 눌러 삭제</string>
     <string name="provider_detail_hidden_models_expand">숨긴 모델 표시</string>
     <string name="provider_detail_hidden_models_collapse">숨긴 모델 접기</string>
+    <string name="image_action_original">원본</string>
+    <string name="storage_overview_logs_caches">로그 및 캐시</string>
+    <string name="storage_clear_logs_caches_confirm_title">로그 및 캐시를 정리할까요?</string>
+    <string name="storage_clear_logs_caches_confirm_message">실행 로그와 캐시 파일(%1$s)을 삭제합니다. 채팅, 세션, 백업은 영향을 받지 않습니다.</string>
+    <string name="storage_clear_logs_caches_button">정리</string>
+    <string name="storage_clear_logs_caches_done">%1$s 확보</string>
 </resources>

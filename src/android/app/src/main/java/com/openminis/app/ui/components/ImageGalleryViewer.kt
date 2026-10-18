@@ -47,7 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import com.openminis.app.R
-import com.openminis.app.ui.sandbox.saveBitmapToGallery
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -310,8 +309,10 @@ fun ImageGalleryViewer(
                                 label = stringResource(R.string.image_action_save),
                                 onClick = {
                                     scope.launch {
-                                        val bmp = loadBitmap(context, currentItem.model)
-                                        val saved = bmp != null && saveBitmapToGallery(context, bmp)
+                                        // [T-android-image-save-original] Same rule as
+                                        // the single-image viewer: keep the source
+                                        // bytes (format + metadata) when readable.
+                                        val saved = saveImageToGallery(context, currentItem.model)
                                         Toast.makeText(
                                             context,
                                             if (saved) savedToAlbumMsg else saveFailedMsg,

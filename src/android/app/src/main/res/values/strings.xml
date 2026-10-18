@@ -2742,4 +2742,10 @@
     <string name="provider_detail_hidden_models_hint">Tap to expand · long-press a row to delete</string>
     <string name="provider_detail_hidden_models_expand">Show hidden models</string>
     <string name="provider_detail_hidden_models_collapse">Hide hidden models</string>
+    <string name="image_action_original">Original</string>
+    <string name="storage_overview_logs_caches">Logs &amp; Caches</string>
+    <string name="storage_clear_logs_caches_confirm_title">Clean logs &amp; caches?</string>
+    <string name="storage_clear_logs_caches_confirm_message">This deletes run logs and cached files (%1$s). Chats, sessions and backups are not affected.</string>
+    <string name="storage_clear_logs_caches_button">Clean</string>
+    <string name="storage_clear_logs_caches_done">Freed %1$s</string>
 </resources>
