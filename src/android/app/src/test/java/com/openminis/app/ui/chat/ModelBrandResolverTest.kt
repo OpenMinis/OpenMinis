@@ -1,6 +1,5 @@
 package com.openminis.app.ui.chat
 
-import com.openminis.app.data.model.ProviderType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -17,26 +16,31 @@ class ModelBrandResolverTest {
     /** Unrecognized non-empty references fall back to the OpenAI mark. */
     private val FALLBACK = ModelBrandResolver.FALLBACK_BRAND
 
-    private fun resolve(modelId: String? = null, displayName: String? = null, type: ProviderType? = null) =
-        ModelBrandResolver.resolve(type, modelId, displayName)
+    private fun resolve(modelId: String? = null, displayName: String? = null) =
+        ModelBrandResolver.resolve(modelId, displayName)
 
-    // ── ProviderType authoritative mapping ────────────────────────────
+    // ── Type independence (the relay bug) ─────────────────────────────
 
+    /**
+     * [T-brand-model-name-first] Regression for "picker shows only fallbacks":
+     * the resolver used to take the provider type and short-circuit
+     * `openAI -> openai` BEFORE scoring the model name, so a relay configured
+     * as OpenAI painted its whole 22-model catalog with one logo. The type is
+     * no longer an input at all — resolution depends on the model reference
+     * alone, which is also why every call site now behaves identically.
+     */
     @Test
-    fun providerTypeMappingWinsOverNameScoring() {
-        assertEquals("claude", resolve(modelId = "gpt-5", type = ProviderType.anthropic))
-        assertEquals("gemini", resolve(modelId = "gpt-5", type = ProviderType.gemini))
-        assertEquals("openai", resolve(modelId = "claude-3", type = ProviderType.openAI))
-        assertEquals("openai", resolve(modelId = "claude-3", type = ProviderType.openAIResponses))
-        assertEquals("xai", resolve(modelId = "m2", type = ProviderType.xAI))
-        assertEquals("kimi", resolve(modelId = "m2", type = ProviderType.kimiCode))
-    }
-
-    @Test
-    fun compatTypesFallThroughToScoring() {
-        // Relay/compat types carry no brand; the model name decides.
-        assertEquals("zhipu", resolve(modelId = "glm-5.3", type = ProviderType.antigravity))
-        assertEquals("zhipu", resolve(modelId = "glm-5.3", type = ProviderType.unsupported))
+    fun relayCatalogResolvesEachVendorIndependently() {
+        // The exact ids from the reported relay catalog.
+        assertEquals("zhipu", resolve("glm-5.3"))
+        assertEquals("zhipu", resolve("GLM-5.3-Flash", "GLM-5.3-Flash"))
+        assertEquals("kimi", resolve("Kimi-K2.6"))
+        assertEquals("kimi", resolve("Kimi-K3"))
+        assertEquals("minimax", resolve("minimax-m3"))
+        assertEquals("deepseek", resolve("deepseek-v4.1-flash"))
+        assertEquals("gemini", resolve("gemini-4-argon"))
+        assertEquals("grok", resolve("grok-4.7"))
+        assertEquals("openai", resolve("gpt-6-luna"))
     }
 
     // ── Keyword scoring ───────────────────────────────────────────────
@@ -218,5 +222,35 @@ class ModelBrandResolverTest {
             "ChatModelPickerSheet must NOT reintroduce the provider color dot",
             !source.contains("providerDotColor"),
         )
+    }
+
+    /**
+     * [T-brand-single-entry] Every surface must call the ONE resolver entry with
+     * the same shape. This bug shipped because three call sites assembled their
+     * own arguments: the top bar passed null and worked, the picker passed the
+     * provider type and produced nothing but fallbacks. A new call site that
+     * reintroduces a per-site variant fails here.
+     */
+    @Test
+    fun everyCallSiteUsesTheSingleEntryPoint() {
+        val files = listOf(
+            "ui/chat/ChatScreen.kt",
+            "ui/chat/ChatModelPickerSheet.kt",
+            "ui/settings/ProviderDetailScreen.kt",
+        )
+        for (f in files) {
+            val source = com.openminis.app.ProductionSources.read(f)
+            val calls = Regex("ModelBrandResolver\\.resolve\\(([^)]*)\\)", RegexOption.DOT_MATCHES_ALL)
+                .findAll(source).map { it.groupValues[1] }.toList()
+            assertTrue("$f should resolve brand icons", calls.isNotEmpty())
+            for (args in calls) {
+                // resolve(modelId) or resolve(modelId, displayName) — never a
+                // provider type in first position.
+                assertTrue(
+                    "$f passes an unexpected argument list: resolve(${args.trim()})",
+                    !args.contains("providerType"),
+                )
+            }
+        }
     }
 }

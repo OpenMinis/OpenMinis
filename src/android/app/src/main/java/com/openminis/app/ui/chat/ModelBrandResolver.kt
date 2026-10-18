@@ -1,32 +1,26 @@
 package com.openminis.app.ui.chat
 
-import com.openminis.app.data.model.ProviderType
-
 /**
- * Resolves the lobe-icons brand slug for a model reference in the top bar.
+ * Resolves the lobe-icons brand slug for a MODEL reference (top bar, model
+ * picker, provider detail).
  *
- * Resolution chain (first hit wins):
- *  1. **ProviderType mapping** — the configured provider type is the
- *     authoritative signal when it is a KNOWN brand type. Relay/compat
- *     types carry no brand information — a relay can serve any vendor's
- *     model — so they fall through to 2.
- *  2. **Model-name keyword scoring** — the fallback for relays and custom
- *     instances. The normalized model id/display name is scanned for brand
- *     keywords; the LONGEST matching keyword wins (a longer hit is a
- *     stronger signal: "deepseek-chat" must outrank any 3-char fragment).
- *     Ties keep table order.
- *  3. OpenAI fallback — an unrecognized but non-empty reference shows the
- *     OpenAI mark (product decision: a stable icon slot beats an empty
- *     one; the model text next to it carries the exact identity). null is
- *     returned ONLY when there is no model reference at all.
+ * Resolution is a single rule: **scan the model id / display name for brand
+ * keywords, longest match wins**, then fall back to the OpenAI mark.
+ *
+ * The provider type is deliberately NOT an input. A relay configured as
+ * `openAI` serves any vendor's model (GLM, Kimi, DeepSeek, Gemini all run over
+ * the OpenAI protocol), so a type→brand shortcut painted an entire relay
+ * catalog with one vendor's logo. It also made call sites disagree: the top bar
+ * passed `null` and worked, the picker passed the type and showed nothing but
+ * fallbacks. One entry point, one behaviour — see [resolve].
  *
  * Icons are lobe-icons v1.95.1 (MIT) SVGs packed verbatim under res/raw
- * (color variants) and res/raw-night (mono brands follow the theme via
- * the night qualifier — currentColor semantics, no color conversion).
- * The catalog covers ALL 358 static-svg brands (verified byte-identical
- * against the v6.0.0 tag — the static-svg subpackage did not rev with
- * the v6.0.0 release); keywords are slug-as-keyword with longest-match
- * priority, slugs of length <= 2 are excluded (uncontrollable false hits).
+ * (color variants) and res/raw-night (mono brands follow the theme via the
+ * night qualifier — currentColor semantics, no color conversion). The catalog
+ * covers all 358 static-svg brands; keywords are slug-as-keyword with
+ * longest-match priority, slugs of length <= 2 are excluded (uncontrollable
+ * false hits), and bare generic English words (meta/liquid/reka/...) are
+ * excluded too — they swallowed unrelated ids like `metadata-pro`.
  */
 internal object ModelBrandResolver {
 
@@ -411,30 +405,23 @@ internal object ModelBrandResolver {
     )
 
     /**
-     * ProviderType → lobe-icons slug. Only types that assert a brand.
-     * Compat/relay/unsupported types return null on purpose — see KDoc.
+     * [T-brand-single-entry] THE entry point. Callers pass what they have from a
+     * model row and nothing else — there is deliberately no `providerType`
+     * parameter any more:
+     *
+     * A relay configured as `openAI` serves ANY vendor's model, so passing the
+     * instance type let a type→"openai" short-circuit paint every row of a
+     * 22-model relay catalog with the OpenAI mark. Worse, each call site decided
+     * its own arguments: the top bar passed `null` (worked), the picker passed
+     * the type (all fallbacks), provider detail passed `null` (worked). Three
+     * sites, three behaviours, one bug.
+     *
+     * The model id/display name is the ONE signal that describes the actual
+     * vendor; brand-exclusive provider types add nothing a model name does not
+     * already say far more precisely.
      */
-    private fun slugForType(type: ProviderType): String? = when (type) {
-        ProviderType.anthropic -> "claude"
-        ProviderType.gemini -> "gemini"
-        ProviderType.openAI, ProviderType.openAIResponses -> "openai"
-        ProviderType.xAI -> "xai"
-        ProviderType.kimiCode -> "kimi"
-        else -> null
-    }
-
-    /**
-     * @param providerType the instance's configured type, when known.
-     * @param modelId raw model id (e.g. "glm-5.3", "claude-sonnet-4-5").
-     * @param displayName display name as a second signal — relay catalogs
-     *   often use friendlier ids than the wire id.
-     * @return lobe-icons slug, or null when nothing matches well enough.
-     */
-    fun resolve(providerType: ProviderType?, modelId: String?, displayName: String?): String? {
-        providerType?.let { type -> slugForType(type)?.let { return it } }
-
-        val haystack = "${modelId ?: ""} ${displayName ?: ""}".lowercase()
-        // No model reference at all → no icon (the row itself is empty).
+    fun resolve(modelId: String?, displayName: String? = null): String? {
+        val haystack = "${modelId ?: ""} ${displayName ?: ""}".trim().lowercase()
         if (haystack.isBlank()) return null
 
         var best: String? = null
@@ -446,10 +433,9 @@ internal object ModelBrandResolver {
                 bestScore = keyword.length
             }
         }
-        // [T-usage-topbar-brand-icon] Product decision: an UNRECOGNIZED but
-        // non-empty model reference falls back to the OpenAI mark rather
-        // than rendering no icon — the icon slot is always filled so the
-        // top bar keeps a stable visual rhythm across model switches.
+        // Product decision: an unrecognized non-empty reference shows the OpenAI
+        // mark so the icon slot keeps a stable rhythm. null means "no reference
+        // at all" (empty row) — never a fallback.
         return best ?: FALLBACK_BRAND
     }
 

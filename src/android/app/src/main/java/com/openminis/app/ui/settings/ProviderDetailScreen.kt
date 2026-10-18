@@ -627,7 +627,7 @@ fun ProviderDetailScreen(
                     // name, resolved by keyword scoring over id + displayName
                     // (the instance type is a relay, not a brand).
                     val brandSlug = remember(entry.model.id, entry.model.displayName) {
-                        ModelBrandResolver.resolve(null, entry.model.id, entry.model.displayName)
+                        ModelBrandResolver.resolve(entry.model.id, entry.model.displayName)
                     }
                     SettingsRow(
                         title = entry.model.displayName,

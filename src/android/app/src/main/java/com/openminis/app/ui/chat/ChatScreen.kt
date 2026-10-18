@@ -2314,7 +2314,7 @@ fun ChatScreen(
                                         }
                                 // [T-usage-topbar-brand-icon] Vendor logo by model-name
                                 // keyword scoring (relay labels carry no brand).
-                                val brandSlug = remember(modelName) { ModelBrandResolver.resolve(null, modelName, null) }
+                                val brandSlug = remember(modelName) { ModelBrandResolver.resolve(modelName) }
                                         ModelBrandIcon(slug = brandSlug, sizeDp = 13.dp)
                                         Text(
                                             text = modelName.ifEmpty { providerName },

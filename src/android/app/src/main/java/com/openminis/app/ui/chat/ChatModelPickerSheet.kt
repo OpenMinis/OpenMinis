@@ -637,16 +637,14 @@ internal fun ModelPickerSheet(
                                                     modifier = Modifier.size(17.dp),
                                                 )
                                                 Spacer(Modifier.width(10.dp))
-                                                // [T-brand-icon-in-picker] Vendor LOGO,
-                                                // not a provider-color dot: the dot only
-                                                // encoded the relay's ProviderType, so
-                                                // every OpenAI-typed relay looked the same
-                                                // green and told the user nothing about
-                                                // the model. Slug resolves from the model
-                                                // id/name (relays carry no brand).
+                                                // [T-brand-icon-in-picker] Vendor LOGO, not a
+                                                // provider-color dot: the dot only encoded
+                                                // the relay's ProviderType, so every
+                                                // OpenAI-typed relay looked identical.
+                                                // Resolve(modelId, displayName) — the type is
+                                                // NOT passed: a relay serves any vendor.
                                                 ModelBrandIcon(
                                                     slug = ModelBrandResolver.resolve(
-                                                        instance?.providerType,
                                                         entry.model.id,
                                                         entry.model.displayName,
                                                     ),
@@ -831,7 +829,6 @@ internal fun ModelPickerSheet(
                                             Spacer(Modifier.width(10.dp))
                                             ModelBrandIcon(
                                                 slug = ModelBrandResolver.resolve(
-                                                    instance.providerType,
                                                     displayEntry.model.id,
                                                     displayEntry.model.displayName,
                                                 ),
@@ -960,7 +957,6 @@ internal fun ModelPickerSheet(
                                             Spacer(Modifier.width(10.dp))
                                             ModelBrandIcon(
                                                 slug = ModelBrandResolver.resolve(
-                                                    instance.providerType,
                                                     entry.model.id,
                                                     entry.model.displayName,
                                                 ),
