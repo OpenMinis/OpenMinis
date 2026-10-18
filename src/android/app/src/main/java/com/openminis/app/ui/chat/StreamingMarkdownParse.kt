@@ -169,8 +169,15 @@ internal suspend fun parseMarkdownBlocks(content: String, depth: Int = 0): List<
                     tableLines.add(lines[i])
                     i++
                 }
-                val (headers, rows) = parseTable(tableLines)
-                blocks.add(MdBlock.Table(tableLines.joinToString("\n"), headers, rows))
+                val parsed = parseTable(tableLines)
+                blocks.add(
+                    MdBlock.Table(
+                        tableLines.joinToString("\n"),
+                        parsed.headers,
+                        parsed.rows,
+                        parsed.alignments,
+                    ),
+                )
             }
 
             // Blockquote — strict CommonMark match: `>` followed by space or end

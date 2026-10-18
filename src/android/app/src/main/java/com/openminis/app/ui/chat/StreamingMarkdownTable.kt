@@ -28,9 +28,31 @@ import androidx.compose.ui.unit.sp
 import com.openminis.app.R
 import kotlinx.coroutines.launch
 
+/**
+ * [T-android-table-width-by-content] Widest single word of [text], in px.
+ *
+ * A column cannot usefully narrow below its longest unbreakable run, so
+ * [TableColumnPlanner] uses this as the hard minimum. Whitespace-separated
+ * tokens are the right unit here: CJK text has no spaces and is measured as one
+ * token, which is exactly why the planner then keeps such a column at its
+ * natural width instead of wrapping it mid-word.
+ */
+private fun longestWordWidthPx(
+    text: String,
+    measurer: androidx.compose.ui.text.TextMeasurer,
+    style: androidx.compose.ui.text.TextStyle,
+): Float {
+    var widest = 0f
+    for (word in text.split(' ', '\t', '\n')) {
+        if (word.isBlank()) continue
+        val w = measurer.measure(word, style, maxLines = 1).size.width.toFloat()
+        if (w > widest) widest = w
+    }
+    return widest
+}
+
 @Composable
-internal fun RenderTable(block: MdBlock.Table) {
-    val colors = currentMdColors()
+internal fun RenderTable(block: MdBlock.Table) {    val colors = currentMdColors()
     val colCount = maxOf(block.headers.size, block.rows.maxOfOrNull { it.size } ?: 0)
     if (colCount == 0) return
 
@@ -155,6 +177,26 @@ internal fun RenderTable(block: MdBlock.Table) {
         val lineColor = colors.tableBorder
         val lineStrokePx = with(androidx.compose.ui.platform.LocalDensity.current) { 1.dp.toPx() }
         val totalRowCount = allRows.size
+        // Cell horizontal padding (10.dp each side) is part of every column width
+        // the planner sees, so the numbers below and the drawn cells agree.
+        val cellHPaddingPx = with(androidx.compose.ui.platform.LocalDensity.current) { 20.dp.toPx() }
+        // [T-android-table-width-by-content] Longest unbreakable word per column —
+        // the width a column can never usefully drop below. Measured once per
+        // table content: a layout-phase measurement would redo it every frame.
+        val cellMeasurer = androidx.compose.ui.text.rememberTextMeasurer()
+        val cellTextStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = colors.text)
+        val unbreakablePx = androidx.compose.runtime.remember(block.raw, cellTextStyle) {
+            val per = FloatArray(colCount)
+            for (row in allRows) {
+                for (c in 0 until colCount) {
+                    per[c] = maxOf(
+                        per[c],
+                        longestWordWidthPx(row.getOrElse(c) { "" }, cellMeasurer, cellTextStyle),
+                    )
+                }
+            }
+            per
+        }
         androidx.compose.ui.layout.Layout(
             content = {
                 for ((rowIndex, cells) in allRows.withIndex()) {
@@ -162,6 +204,9 @@ internal fun RenderTable(block: MdBlock.Table) {
                     val isLastRow = rowIndex == totalRowCount - 1
                     for (colIndex in 0 until colCount) {
                         val isLastCol = colIndex == colCount - 1
+                        // [T-android-table-align] Honour the separator row: `:---:`
+                        // centres, `---:` right-aligns, everything else starts.
+                        val cellAlign = block.alignments.getOrNull(colIndex) ?: MdTableAlign.START
                         Box(
                             modifier = Modifier
                                 .then(if (isHeader) Modifier.background(colors.tableHeaderBg) else Modifier)
@@ -186,7 +231,11 @@ internal fun RenderTable(block: MdBlock.Table) {
                                     }
                                 }
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
-                            contentAlignment = Alignment.CenterStart,
+                            contentAlignment = when (cellAlign) {
+                                MdTableAlign.CENTER -> Alignment.Center
+                                MdTableAlign.END -> Alignment.CenterEnd
+                                MdTableAlign.START -> Alignment.CenterStart
+                            },
                         ) {
                             val cellText = cells.getOrElse(colIndex) { "" }
                             MdText(
@@ -222,26 +271,36 @@ internal fun RenderTable(block: MdBlock.Table) {
             // pathological intrinsics from unbroken strings.
             val maxCellWidth = (viewportWidthPx * 5).coerceAtLeast(1)
 
-            // Pass 1: use intrinsic widths (no measure() call) to compute per-column max width.
-            // Compose forbids calling measure() twice on the same Measurable in one layout pass.
-            // Pass height=0 (standard "no height constraint" sentinel for intrinsic queries).
-            val colWidths = IntArray(colCount)
+            // Pass 1: intrinsic widths (no measure() call) give each column its
+            // natural width — the widest cell on one line.
+            val natural = FloatArray(colCount)
             for (rowIdx in 0 until rowCount) {
                 for (colIdx in 0 until colCount) {
                     val idx = rowIdx * colCount + colIdx
                     if (idx < measurables.size) {
                         val intrinsic = measurables[idx].maxIntrinsicWidth(0)
                             .coerceIn(0, maxCellWidth)
-                        colWidths[colIdx] = maxOf(colWidths[colIdx], intrinsic)
+                        natural[colIdx] = maxOf(natural[colIdx], intrinsic.toFloat())
                     }
                 }
             }
 
-            // Expand-to-fill: if natural content width is narrower than the viewport,
-            // grow the last column to fill the remaining space (matches iOS behavior).
-            val naturalWidth = colWidths.sum()
-            if (naturalWidth < viewportWidthPx && colCount > 0) {
-                colWidths[colCount - 1] += viewportWidthPx - naturalWidth
+            // [T-android-table-width-by-content] Widths follow the CONTENT ratio
+            // (port of upstream TableColumnPlanner): a column holding three times
+            // the text is no longer squeezed to its neighbour's width, and the
+            // table fills the viewport only when every column fits at a
+            // comfortable width. All widths include the cell's horizontal padding.
+            val plan = TableColumnPlanner.plan(
+                columns = (0 until colCount).map { c ->
+                    TableColumnPlanner.Column(
+                        natural = natural[c] + cellHPaddingPx,
+                        minUnbreakable = unbreakablePx.getOrElse(c) { 0f } + cellHPaddingPx,
+                    )
+                },
+                availableWidth = viewportWidthPx.toFloat(),
+            )
+            val colWidths = IntArray(colCount) { c ->
+                plan.widths.getOrElse(c) { 0f }.toInt().coerceIn(1, maxCellWidth)
             }
 
             // Pass 2: measure each cell exactly once, with its column's fixed width.

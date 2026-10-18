@@ -57,7 +57,7 @@
     "src/android/app/src/main/java/com/openminis/app/ui/chat/MinisTextKitGesture.kt": 1672,
     "src/android/app/src/main/java/com/openminis/app/ui/chat/MinisTextKitSelection.kt": 1245,
     "src/android/app/src/main/java/com/openminis/app/ui/chat/SessionMemorySheet.kt": 838,
-    "src/android/app/src/main/java/com/openminis/app/ui/chat/StreamingMarkdownText.kt": 1483,
+    "src/android/app/src/main/java/com/openminis/app/ui/chat/StreamingMarkdownText.kt": 1472,
     "src/android/app/src/main/java/com/openminis/app/ui/chat/voice/InlineVoiceInputPanel.kt": 941,
     "src/android/app/src/main/java/com/openminis/app/ui/components/UnifiedModelPickerSheet.kt": 847,
     "src/android/app/src/main/java/com/openminis/app/ui/markdown/MarkdownParser.kt": 888,

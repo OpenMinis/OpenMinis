@@ -632,7 +632,13 @@ internal sealed class MdBlock(val raw: String) {
     class OrderedList(raw: String, val items: List<ListItem>, val startNum: Int = 1) : MdBlock(raw)
     class TaskList(raw: String, val items: List<TaskItem>) : MdBlock(raw)
     class HorizontalRule(raw: String) : MdBlock(raw)
-    class Table(raw: String, val headers: List<String>, val rows: List<List<String>>) : MdBlock(raw)
+    class Table(
+        raw: String,
+        val headers: List<String>,
+        val rows: List<List<String>>,
+        /** Per-column alignment from the separator row; empty = all START. */
+        val alignments: List<MdTableAlign> = emptyList(),
+    ) : MdBlock(raw)
     class Image(raw: String, val alt: String, val url: String) : MdBlock(raw)
     class Video(raw: String, val alt: String, val url: String) : MdBlock(raw)
     class Audio(raw: String, val alt: String, val url: String) : MdBlock(raw)
@@ -673,7 +679,6 @@ private val inlineMediaRegex = Regex("""!\[([^\]\n]*)]\(([^)\s]+)\)""")
 internal val thematicBreakRegex = Regex("^[-*_]{3,}\\s*$")
 internal val standaloneImageLineRegex = Regex("^!\\[.*]\\(.*\\)\\s*$")
 internal val imageMatchRegex = Regex("^!\\[(.*)\\]\\((.*)\\)")
-internal val tableSeparatorRegex = Regex("^\\|?[\\s\\-:|]+\\|?$")
 internal val taskListItemRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+.*")
 internal val taskListPrefixRegex = Regex("^[-*+]\\s+\\[[ xX]\\]\\s+")
 internal val bulletListItemRegex = Regex("^[-*+]\\s+.*")
@@ -907,22 +912,6 @@ internal fun MutableList<MdBlock>.addCodeChunks(raw: String, lang: String, code:
     }
 }
 
-internal fun parseTable(lines: List<String>): Pair<List<String>, List<List<String>>> {
-    val headers = mutableListOf<String>()
-    val rows = mutableListOf<List<String>>()
-    for (line in lines) {
-        val trimmed = line.trim()
-        if (trimmed.matches(tableSeparatorRegex)) continue
-        // T308: Strip the leading/trailing pipe (if present) before splitting.
-        // The previous `.filter { isNotEmpty() }` swallowed legitimate empty
-        // cells like the first column of `| | Manus | TikTok |`, leaving the
-        // header with fewer columns than body rows and breaking alignment.
-        val core = trimmed.removePrefix("|").removeSuffix("|")
-        val cells = core.split("|").map { it.trim() }
-        if (headers.isEmpty()) headers.addAll(cells) else rows.add(cells)
-    }
-    return headers to rows
-}
 
 // ─── Math (KaTeX) ───────────────────────────────────────────────────────────
 
