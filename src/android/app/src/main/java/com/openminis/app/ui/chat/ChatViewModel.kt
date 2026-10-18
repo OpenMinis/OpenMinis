@@ -4245,7 +4245,7 @@ class ChatViewModel(
                             "skipping the paint so its rows survive (${result.restoredCount} restored)",
                     )
                 } else {
-                    _messages.value = tail.toChatMessages()
+                    _messages.value = tail.toChatMessages().demoteOrphanedToolSpinners(_isStreaming.value)
                     timeline.reset()
                     timeline.noteBounds(tail)
                     refreshHistoryEdges(scheduleTail = false)
