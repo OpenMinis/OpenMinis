@@ -154,6 +154,53 @@ beta.5 共 **32 项**（8 新功能 + 21 修复 + 3 视觉打磨），beta.4 遗
 
 ---
 
+## 6. 欠账核对（2026-10-18 晚，main = `42d516e9`）
+
+**已清偿 — 批次 1 的 11 项**（PR #73，squash = `42d516e9`）：
+`F4` 备份目标可编辑、`F6` 角标开关、`F8` `--engine` 贯通、`X4` 附件菜单兜底、
+`X6` 端点自报上下文长度（保留 128K 回退）、`X10` 草稿 15 分钟恢复、`X14` 预览长行保护、
+`X17` Markdown 预览链接、`X18` `browser_use` 的 "null" 错误、`X21` 读屏标签、`P3` 朗读音量 0–200%。
+
+**#72（用量页重做）并入后 `F2` 的缺口收窄**：汇总、按服务商分组、按模型下钻、品牌图标、
+品牌色占比条、按所选窗口的占比（`UsageStatsScreen.kt:124,131,280` 的 `shareOfWindow`）都已落地；
+仍缺「堆叠趋势图」——`UsageTrendChart.kt` 仍是单序列日柱。
+
+**仍欠 19 项**（在 `42d516e9` 上逐项重新 grep/读码核对）：
+
+批次 2（10 项，碰状态机）：
+| # | 条目 | 复核证据（42d516e9） |
+| --- | --- | --- |
+| F1 | 隐藏模型可折叠分组 + 长按删除 API 模型 | 仍只有 per-entry `isHidden`（`ModelEntryDetailScreen.kt:353`）；无可折叠分组 |
+| F2 | 堆叠趋势图 | `UsageTrendChart.kt` 无 stack 实现；仅 `shareOfWindow` 占比条 |
+| X1 | 备份记录进度行无上限 + 历史非原子写 | `backup/BackupHistory.kt:48,101` 的 `log: List<LogEntry>` 无 cap；`:118` 只做过期清理 |
+| X5 | 跨 API 工具 ID 兼容层 | 全仓库无 `apiType`/`wireApi`/`foreignTool` |
+| X7 | AI 语音纠正多模型回退链 | `speech/correction/VoiceCorrectionEngine.kt:79` 单次 `strategy.correct(...)` |
+| X11 | `minis-scheduled --model` 创建时解析 | `ScheduledTaskOffloadHandler.kt:101` 存原始字符串，解析推迟到运行时 |
+| X12 | 列表跟随死区 | 无 `StreamFollowDeadband` 等价物 |
+| X16 | 悬浮胶囊按横竖屏记忆位置 | 无 `perOrientation` / 位置持久化 |
+| X20 | offload / 文件工具线程池上限 | 仅 `McpHttpServer.kt:83` pool(4) 与若干单线程 executor；权限弹窗 120s 按既定口径保留 |
+| P1 | 大会话打开占位淡入 | 只有 `isLoadingHistory`（分页用，`ChatScreen.kt:545`） |
+
+批次 3（9 项，大件 / 需要产品口径）：
+| # | 条目 | 复核证据 |
+| --- | --- | --- |
+| F3 | 停止语义（仅停止当前工具 / 全部停止 + 长按停止前确认 + 设置项） | 无 `Stop All` / `stop_confirm` 匹配 |
+| F5 | 五个新语言 | `values-it/nl/hu/cs/fa` 缺；`values-hr` 也缺（1.14 缺口） |
+| F7 | minis-config 覆盖子代理名单 + 19 项设置 | `config/collections/` 仍只有 5 个，无子代理字段 |
+| P2 | 模型回退橙色卡片 / 停止 iOS 操作菜单 | 压缩进度分隔行已有；橙色卡片与操作菜单缺 |
+| B4-F2 | 等待回答时常驻通知倒计时 | 现在只有运行中工具的 chronometer（`AgentForegroundService.kt:1265`）；提问通知无倒计时 |
+| B4-F3 | 工具状态栏提问缩略预览 | 无缩略预览实现 |
+| B4-X1 | 提问卡片滚边回弹 | 无 `SheetScrollGuard` |
+| B4-X2 | 问题类型推断 | 无 `QuestionType` |
+| B4-X6 | 列表项下嵌套表格 | 无 `TableColumnPlanner` / `MathLineBreaker` |
+
+不适用 / 需实机（3 项，与首轮判定一致）：
+- `X15` 琥珀光晕：本仓库无该动效
+- `B4-P1` 人设编辑器语言按钮：已移除（`SoulSettingsScreen.kt:98`）
+- `B4-X3` Android 8–10 首次启动 shell：`minSdk = 26` 覆盖区间，需实机
+
+---
+
 ## 附：本次分析用到的只读证据
 
 - `git fetch --depth=1 upstream refs/tags/0-beta-build34` → `8c1592c6`(tag) → `b4c0661d`(commit)
