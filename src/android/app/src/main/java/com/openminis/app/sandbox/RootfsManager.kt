@@ -301,18 +301,17 @@ class RootfsManager private constructor(private val context: Context) {
     }
 
     /**
-     * Read system DNS servers and search domains from ConnectivityManager,
-     * then write resolv.conf into the guest rootfs.
-     * Mirrors iOS ISHKernel.configureDns / refreshDns.
-     *
-     * Public fallback nameservers are always appended after the system ones
-     * (see [composeResolvConf]); that is what keeps the guest resolving when a
-     * reported server stops being reachable.
+     * Write resolv.conf into the guest rootfs: [ContainerDns.Plan.Custom] lists
+     * exactly the configured servers, [ContainerDns.Plan.System] follows the
+     * active network plus the public fallbacks (see [composeResolvConf]).
      */
     fun refreshDns() {
         if (!rootfsDir.exists()) return
-        val (domains, servers) = readSystemDns()
-        val content = composeResolvConf(domains, servers)
+        val content = when (val plan = ContainerDns.plan(context)) {
+            is ContainerDns.Plan.Custom -> ContainerDns.customResolvConf(plan.servers)
+            ContainerDns.Plan.System ->
+                readSystemDns().let { (domains, servers) -> composeResolvConf(domains, servers) }
+        }
         try {
             val file = File(rootfsDir, "etc/resolv.conf")
             file.parentFile?.mkdirs()

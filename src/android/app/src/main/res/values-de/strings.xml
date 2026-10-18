@@ -1919,4 +1919,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Löscht Ausführungsprotokolle und Cache-Dateien (%1$s). Chats, Sitzungen und Backups bleiben unberührt.</string>
     <string name="storage_clear_logs_caches_button">Bereinigen</string>
     <string name="storage_clear_logs_caches_done">%1$s freigegeben</string>
+    <string name="rootfs_dns_section">Container-Netzwerk</string>
+    <string name="rootfs_dns_auto">System folgen</string>
+    <string name="rootfs_dns_auto_desc">Der Sandbox kopiert die DNS-Server des aktiven Netzwerks und aktualisiert sie bei jeder Netzwerkänderung. Unter einem Proxy mit Fake-IP/TUN-Modus so lassen.</string>
+    <string name="rootfs_dns_custom">Benutzerdefiniert</string>
+    <string name="rootfs_dns_custom_desc">Die Sandbox nutzt genau die untenstehenden Server; Netzwerkänderungen überschreiben sie nicht mehr.</string>
+    <string name="rootfs_dns_servers">DNS-Server</string>
+    <string name="rootfs_dns_servers_hint">Eine Adresse pro Zeile oder durch Kommas getrennt. IPv4 und IPv6 werden unterstützt.</string>
+    <string name="rootfs_dns_invalid">Ungültige Adresse: %1$s</string>
+    <string name="rootfs_dns_save">Speichern und anwenden</string>
+    <string name="rootfs_dns_saved">Gespeichert und angewendet</string>
 </resources>

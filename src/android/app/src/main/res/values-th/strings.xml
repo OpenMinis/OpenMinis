@@ -1917,4 +1917,14 @@
     <string name="storage_clear_logs_caches_confirm_message">ลบไฟล์บันทึกการทำงานและไฟล์แคช (%1$s) แชท เซสชัน และข้อมูลสำรองไม่ได้รับผลกระทบ</string>
     <string name="storage_clear_logs_caches_button">ล้าง</string>
     <string name="storage_clear_logs_caches_done">คืนพื้นที่ %1$s</string>
+    <string name="rootfs_dns_section">เครือข่ายคอนเทนเนอร์</string>
+    <string name="rootfs_dns_auto">ตามระบบ</string>
+    <string name="rootfs_dns_auto_desc">แซนด์บ็อกซ์คัดลอกเซิร์ฟเวอร์ DNS ของเครือข่ายที่ใช้งานและอัปเดตทุกครั้งที่เครือข่ายเปลี่ยน ควรคงไว้เมื่อใช้พร็อกซีแบบ Fake-IP/TUN</string>
+    <string name="rootfs_dns_custom">กำหนดเอง</string>
+    <string name="rootfs_dns_custom_desc">แซนด์บ็อกซ์ใช้เฉพาะเซิร์ฟเวอร์ด้านล่าง และการเปลี่ยนเครือข่ายจะไม่เขียนทับอีก</string>
+    <string name="rootfs_dns_servers">เซิร์ฟเวอร์ DNS</string>
+    <string name="rootfs_dns_servers_hint">หนึ่งที่อยู่ต่อบรรทัด หรือคั่นด้วยจุลภาค รองรับทั้ง IPv4 และ IPv6</string>
+    <string name="rootfs_dns_invalid">ที่อยู่ไม่ถูกต้อง: %1$s</string>
+    <string name="rootfs_dns_save">บันทึกและใช้งาน</string>
+    <string name="rootfs_dns_saved">บันทึกและใช้งานแล้ว</string>
 </resources>

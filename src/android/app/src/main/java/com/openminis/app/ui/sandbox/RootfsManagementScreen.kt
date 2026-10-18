@@ -2,6 +2,9 @@ package com.openminis.app.ui.sandbox
 
 import com.openminis.app.R
 import com.openminis.app.ui.components.MinisTextButton
+import android.widget.Toast
+import com.openminis.app.sandbox.ContainerDns
+import com.openminis.app.sandbox.RootfsManager
 
 import android.text.format.Formatter
 import androidx.compose.foundation.background
@@ -176,6 +179,13 @@ fun RootfsManagementScreen(
                 SettingsSection(title = stringResource(R.string.rootfs_mirrors_section)) {
                     MirrorsSectionView(onNavigate = onMirrorCategoryClick)
                 }
+
+                // --- Container network (DNS) ---
+                // [T-container-network-dns] Custom mode lists exactly the entered
+                // servers in /etc/resolv.conf and network changes stop rewriting
+                // it; AUTO keeps following the system (the only correct choice
+                // under a proxy's Fake-IP/TUN mode, which is why it stays default).
+                ContainerNetworkSection()
             }
 
             // --- Actions section ---
@@ -362,6 +372,81 @@ fun RootfsManagementScreen(
 @Composable
 private fun transparentListItemColors() =
     ListItemDefaults.colors(containerColor = Color.Transparent)
+
+/**
+ * [T-container-network-dns] Sandbox DNS mode: follow the system (default) or
+ * list exactly the servers the user enters.
+ *
+ * Saving applies immediately ([RootfsManager.refreshDns]) so the change is
+ * visible in the guest without a restart, and an invalid address is rejected
+ * before it can reach resolv.conf.
+ */
+@Composable
+private fun ContainerNetworkSection() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var mode by remember { mutableStateOf(ContainerDns.mode(context)) }
+    var serversText by remember { mutableStateOf(ContainerDns.rawServers(context)) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val savedMessage = stringResource(R.string.rootfs_dns_saved)
+
+    SettingsSection(title = stringResource(R.string.rootfs_dns_section)) {
+        listOf(
+            ContainerDns.DnsMode.AUTO to Pair(R.string.rootfs_dns_auto, R.string.rootfs_dns_auto_desc),
+            ContainerDns.DnsMode.CUSTOM to Pair(R.string.rootfs_dns_custom, R.string.rootfs_dns_custom_desc),
+        ).forEach { (candidate, labels) ->
+            ListItem(
+                headlineContent = { Text(stringResource(labels.first)) },
+                supportingContent = { Text(stringResource(labels.second)) },
+                trailingContent = {
+                    androidx.compose.material3.RadioButton(
+                        selected = mode == candidate,
+                        onClick = {
+                            mode = candidate
+                            error = null
+                        },
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickableListItem(onClick = {
+                        mode = candidate
+                        error = null
+                    }),
+                colors = transparentListItemColors(),
+            )
+        }
+        if (mode == ContainerDns.DnsMode.CUSTOM) {
+            androidx.compose.material3.OutlinedTextField(
+                value = serversText,
+                onValueChange = {
+                    serversText = it
+                    error = null
+                },
+                label = { Text(stringResource(R.string.rootfs_dns_servers)) },
+                placeholder = { Text("223.5.5.5, 1.1.1.1") },
+                isError = error != null,
+                supportingText = { Text(error ?: stringResource(R.string.rootfs_dns_servers_hint)) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
+        }
+        MinisTextButton(onClick = {
+            val parsed = ContainerDns.parse(serversText)
+            if (mode == ContainerDns.DnsMode.CUSTOM && !parsed.isValid) {
+                // Name the offending entries: "invalid" alone leaves the user
+                // hunting through a pasted list for the one bad address.
+                error = context.getString(R.string.rootfs_dns_invalid, parsed.invalid.joinToString(", "))
+            } else {
+                ContainerDns.save(context, mode, serversText)
+                RootfsManager.getInstance(context).refreshDns()
+                Toast.makeText(context, savedMessage, Toast.LENGTH_SHORT).show()
+            }
+        }) {
+            Text(stringResource(R.string.rootfs_dns_save))
+        }
+    }
+}
 
 private fun Modifier.clickableListItem(
     enabled: Boolean = true,

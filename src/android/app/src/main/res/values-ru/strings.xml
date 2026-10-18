@@ -1927,4 +1927,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Удаляет журналы выполнения и кэшированные файлы (%1$s). Чаты, сеансы и резервные копии не затрагиваются.</string>
     <string name="storage_clear_logs_caches_button">Очистить</string>
     <string name="storage_clear_logs_caches_done">Освобождено %1$s</string>
+    <string name="rootfs_dns_section">Сеть контейнера</string>
+    <string name="rootfs_dns_auto">Как в системе</string>
+    <string name="rootfs_dns_auto_desc">Песочница копирует DNS-серверы активной сети и обновляет их при каждом изменении сети. Оставьте так при прокси в режиме Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Свои серверы</string>
+    <string name="rootfs_dns_custom_desc">Песочница использует только серверы ниже, и изменения сети их больше не перезаписывают.</string>
+    <string name="rootfs_dns_servers">DNS-серверы</string>
+    <string name="rootfs_dns_servers_hint">Один адрес в строке или через запятую. Поддерживаются IPv4 и IPv6.</string>
+    <string name="rootfs_dns_invalid">Неверный адрес: %1$s</string>
+    <string name="rootfs_dns_save">Сохранить и применить</string>
+    <string name="rootfs_dns_saved">Сохранено и применено</string>
 </resources>

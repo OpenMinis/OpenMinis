@@ -1922,4 +1922,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Menghapus log eksekusi dan berkas cache (%1$s). Chat, sesi, dan cadangan tidak terpengaruh.</string>
     <string name="storage_clear_logs_caches_button">Bersihkan</string>
     <string name="storage_clear_logs_caches_done">%1$s dibebaskan</string>
+    <string name="rootfs_dns_section">Jaringan kontainer</string>
+    <string name="rootfs_dns_auto">Ikuti sistem</string>
+    <string name="rootfs_dns_auto_desc">Sandbox menyalin server DNS jaringan aktif dan memperbaruinya setiap perubahan jaringan. Pertahankan ini bila memakai proksi mode Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Kustom</string>
+    <string name="rootfs_dns_custom_desc">Sandbox memakai persis server di bawah, dan perubahan jaringan tidak lagi menimpanya.</string>
+    <string name="rootfs_dns_servers">Server DNS</string>
+    <string name="rootfs_dns_servers_hint">Satu alamat per baris, atau dipisah koma. IPv4 dan IPv6 didukung.</string>
+    <string name="rootfs_dns_invalid">Alamat tidak valid: %1$s</string>
+    <string name="rootfs_dns_save">Simpan dan terapkan</string>
+    <string name="rootfs_dns_saved">Disimpan dan diterapkan</string>
 </resources>

@@ -1916,4 +1916,14 @@
     <string name="storage_clear_logs_caches_confirm_message">実行ログとキャッシュファイル（%1$s）を削除します。チャット・セッション・バックアップには影響しません。</string>
     <string name="storage_clear_logs_caches_button">削除</string>
     <string name="storage_clear_logs_caches_done">%1$s を解放しました</string>
+    <string name="rootfs_dns_section">コンテナネットワーク</string>
+    <string name="rootfs_dns_auto">システムに従う</string>
+    <string name="rootfs_dns_auto_desc">サンドボックスは接続中のネットワークの DNS をコピーし、ネットワーク変更のたびに更新します。Fake-IP/TUN モードのプロキシ利用時はこのままにしてください。</string>
+    <string name="rootfs_dns_custom">カスタム</string>
+    <string name="rootfs_dns_custom_desc">サンドボックスは下記のサーバーのみを使用し、ネットワーク変更でも書き換えません。</string>
+    <string name="rootfs_dns_servers">DNS サーバー</string>
+    <string name="rootfs_dns_servers_hint">1 行に 1 アドレス、またはカンマ区切り。IPv4 と IPv6 の両方に対応します。</string>
+    <string name="rootfs_dns_invalid">無効なアドレス: %1$s</string>
+    <string name="rootfs_dns_save">保存して適用</string>
+    <string name="rootfs_dns_saved">保存して適用しました</string>
 </resources>

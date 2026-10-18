@@ -1917,4 +1917,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Tatanggalin ang mga run log at naka-cache na file (%1$s). Hindi apektado ang mga chat, session at backup.</string>
     <string name="storage_clear_logs_caches_button">Linisin</string>
     <string name="storage_clear_logs_caches_done">%1$s ang naipalabas</string>
+    <string name="rootfs_dns_section">Network ng container</string>
+    <string name="rootfs_dns_auto">Sundin ang system</string>
+    <string name="rootfs_dns_auto_desc">Kinokopya ng sandbox ang DNS server ng aktibong network at ina-update tuwing magbabago ito. Panatilihin ito kapag gumagamit ng proxy na Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Custom</string>
+    <string name="rootfs_dns_custom_desc">Gagamitin ng sandbox ang mga server sa ibaba, at hindi na ito mababago ng pagbabago ng network.</string>
+    <string name="rootfs_dns_servers">Mga DNS server</string>
+    <string name="rootfs_dns_servers_hint">Isang address kada linya, o pinaghihiwalay ng kuwit. Gumagana ang IPv4 at IPv6.</string>
+    <string name="rootfs_dns_invalid">Di-wastong address: %1$s</string>
+    <string name="rootfs_dns_save">I-save at ilapat</string>
+    <string name="rootfs_dns_saved">Na-save at nailapat</string>
 </resources>

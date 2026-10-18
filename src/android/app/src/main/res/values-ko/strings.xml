@@ -1916,4 +1916,14 @@
     <string name="storage_clear_logs_caches_confirm_message">실행 로그와 캐시 파일(%1$s)을 삭제합니다. 채팅, 세션, 백업은 영향을 받지 않습니다.</string>
     <string name="storage_clear_logs_caches_button">정리</string>
     <string name="storage_clear_logs_caches_done">%1$s 확보</string>
+    <string name="rootfs_dns_section">컨테이너 네트워크</string>
+    <string name="rootfs_dns_auto">시스템 따르기</string>
+    <string name="rootfs_dns_auto_desc">샌드박스가 활성 네트워크의 DNS 서버를 복사하고 네트워크가 바뀔 때마다 갱신합니다. Fake-IP/TUN 프록시를 쓸 때는 이 설정을 유지하세요.</string>
+    <string name="rootfs_dns_custom">사용자 지정</string>
+    <string name="rootfs_dns_custom_desc">샌드박스가 아래 서버만 사용하며, 네트워크가 바뀌어도 다시 쓰지 않습니다.</string>
+    <string name="rootfs_dns_servers">DNS 서버</string>
+    <string name="rootfs_dns_servers_hint">한 줄에 하나씩 또는 쉼표로 구분하세요. IPv4와 IPv6 모두 지원합니다.</string>
+    <string name="rootfs_dns_invalid">잘못된 주소: %1$s</string>
+    <string name="rootfs_dns_save">저장 및 적용</string>
+    <string name="rootfs_dns_saved">저장 및 적용됨</string>
 </resources>

@@ -1917,4 +1917,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Memadam log pelaksanaan dan fail cache (%1$s). Sembang, sesi dan sandaran tidak terjejas.</string>
     <string name="storage_clear_logs_caches_button">Bersihkan</string>
     <string name="storage_clear_logs_caches_done">%1$s dibebaskan</string>
+    <string name="rootfs_dns_section">Rangkaian kontena</string>
+    <string name="rootfs_dns_auto">Ikut sistem</string>
+    <string name="rootfs_dns_auto_desc">Sandbox menyalin pelayan DNS rangkaian aktif dan mengemas kininya setiap perubahan. Kekalkan ini jika menggunakan proksi mod Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Tersuai</string>
+    <string name="rootfs_dns_custom_desc">Sandbox menggunakan pelayan di bawah sahaja, dan perubahan rangkaian tidak lagi menulis semula.</string>
+    <string name="rootfs_dns_servers">Pelayan DNS</string>
+    <string name="rootfs_dns_servers_hint">Satu alamat setiap baris, atau dipisahkan koma. IPv4 dan IPv6 disokong.</string>
+    <string name="rootfs_dns_invalid">Alamat tidak sah: %1$s</string>
+    <string name="rootfs_dns_save">Simpan dan gunakan</string>
+    <string name="rootfs_dns_saved">Disimpan dan digunakan</string>
 </resources>

@@ -2748,4 +2748,14 @@
     <string name="storage_clear_logs_caches_confirm_message">This deletes run logs and cached files (%1$s). Chats, sessions and backups are not affected.</string>
     <string name="storage_clear_logs_caches_button">Clean</string>
     <string name="storage_clear_logs_caches_done">Freed %1$s</string>
+    <string name="rootfs_dns_section">Container Network</string>
+    <string name="rootfs_dns_auto">Follow system</string>
+    <string name="rootfs_dns_auto_desc">The sandbox copies the active network\'s DNS servers and updates them on every network change. Keep this under a proxy that uses Fake-IP / TUN mode.</string>
+    <string name="rootfs_dns_custom">Custom</string>
+    <string name="rootfs_dns_custom_desc">The sandbox uses exactly the servers below, and network changes no longer rewrite them.</string>
+    <string name="rootfs_dns_servers">DNS servers</string>
+    <string name="rootfs_dns_servers_hint">One address per line, or separated by commas. IPv4 and IPv6 both work.</string>
+    <string name="rootfs_dns_invalid">Invalid address: %1$s</string>
+    <string name="rootfs_dns_save">Save and apply</string>
+    <string name="rootfs_dns_saved">Saved and applied</string>
 </resources>

@@ -6,6 +6,9 @@ import com.openminis.app.service.DynamicIslandSupport
 import com.openminis.app.config.collections.GroupsCollection
 import com.openminis.app.config.collections.ModelsCollection
 import com.openminis.app.config.collections.ProvidersCollection
+import com.openminis.app.config.fields.ContainerDnsFields
+import com.openminis.app.sandbox.ContainerDns
+import com.openminis.app.sandbox.RootfsManager
 import com.openminis.app.config.fields.ClosureField
 import com.openminis.app.config.fields.PrefsBoolField
 import com.openminis.app.config.fields.PrefsDoubleField
@@ -50,37 +53,24 @@ internal object ConfigBuiltins {
         registerProviderCollections(r, providerRepo, envVarRepo)
         registerDefaults(r, providerRepo)
         registerSoul(r, context)
-        registerMemory(r, context)
+        com.openminis.app.config.fields.registerMemoryFields(r, context)
+        registerNetwork(r, context)
     }
 
-    // -- Memory — global default toggle for the persistent memory feature --
-    //
-    // [T-android-memory-enabled-minisconfig] `memory.enabled` mirrors the
-    // Settings → Memory switch (MemoryManagementScreen, backed by
-    // MemoryGlobalPrefs: SharedPreferences `minis_memory_prefs`, key
-    // `memory.global.enabled`, default true). It is the global DEFAULT
-    // applied to newly-created sessions: a new chat seeds its per-session
-    // memoryEnabled from this value. It does NOT retroactively flip
-    // already-open sessions — those carry their own per-session toggle,
-    // changed via the SessionMemorySheet / `/memory`. Registering the same
-    // prefs+key as MemoryGlobalPrefs keeps the CLI/agent and the Settings
-    // switch reading/writing one source of truth. Topic auto-surfaces in
-    // list-topics since topics derive from field-path prefixes.
-
-    private fun registerMemory(r: ConfigRegistry, context: Context) {
-        val prefs = context.getSharedPreferences("minis_memory_prefs", Context.MODE_PRIVATE)
-        r.register(
-            PrefsBoolField(
-                path = "memory.enabled",
-                displayName = "Memory enabled (global default)",
-                description = "Default for whether NEW chat sessions start with memory on. When on, a new session auto-injects GLOBAL.md + recent daily logs into the system prompt and exposes the memory_get / memory_write tools. When off, new sessions get neither. Already-open sessions keep their own per-session setting (toggle in the session memory sheet) and are not changed by this.",
-                prefs = prefs,
-                key = "memory.global.enabled",
-                defaultValue = true,
-            )
-        )
+    /**
+     * [T-container-network-dns] `network.dnsMode` / `network.dnsCustomServers`:
+     * the same two prefs Settings > Rootfs > Container Network writes, so CLI and
+     * UI share one source of truth. A successful write re-applies resolv.conf
+     * immediately — a change the sandbox ignores until reboot would do nothing.
+     */
+    private fun registerNetwork(r: ConfigRegistry, context: Context) {
+        ContainerDnsFields.build(ContainerDns.PrefsStore(context)) {
+            RootfsManager.getInstance(context).refreshDns()
+        }.forEach { r.register(it) }
     }
 
+    // Memory fields live in config/fields/MemoryConfigFields.kt (extracted:
+    // this file is on the architecture-policy baseline and may only shrink).
     // -- Master switch surface (read-only via the registry; UI toggles it) --
 
     /**

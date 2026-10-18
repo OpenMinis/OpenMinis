@@ -1919,4 +1919,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Supprime les journaux d’exécution et les fichiers en cache (%1$s). Les discussions, sessions et sauvegardes ne sont pas affectées.</string>
     <string name="storage_clear_logs_caches_button">Nettoyer</string>
     <string name="storage_clear_logs_caches_done">%1$s libérés</string>
+    <string name="rootfs_dns_section">Réseau du conteneur</string>
+    <string name="rootfs_dns_auto">Suivre le système</string>
+    <string name="rootfs_dns_auto_desc">Le bac à sable copie les serveurs DNS du réseau actif et les met à jour à chaque changement. À conserver avec un proxy en mode Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Personnalisé</string>
+    <string name="rootfs_dns_custom_desc">Le bac à sable utilise exactement les serveurs ci-dessous ; les changements de réseau ne les écrasent plus.</string>
+    <string name="rootfs_dns_servers">Serveurs DNS</string>
+    <string name="rootfs_dns_servers_hint">Une adresse par ligne ou séparées par des virgules. IPv4 et IPv6 acceptés.</string>
+    <string name="rootfs_dns_invalid">Adresse invalide : %1$s</string>
+    <string name="rootfs_dns_save">Enregistrer et appliquer</string>
+    <string name="rootfs_dns_saved">Enregistré et appliqué</string>
 </resources>

@@ -2562,4 +2562,14 @@
     <string name="storage_clear_logs_caches_confirm_message">将删除运行日志与缓存文件（%1$s）。聊天、会话与备份不受影响。</string>
     <string name="storage_clear_logs_caches_button">清理</string>
     <string name="storage_clear_logs_caches_done">已释放 %1$s</string>
+    <string name="rootfs_dns_section">容器网络</string>
+    <string name="rootfs_dns_auto">跟随系统</string>
+    <string name="rootfs_dns_auto_desc">沙箱复制当前网络的 DNS 服务器，并在网络变化时更新。使用 Fake-IP/TUN 模式的代理时请保持此项。</string>
+    <string name="rootfs_dns_custom">自定义</string>
+    <string name="rootfs_dns_custom_desc">沙箱只使用下面的服务器，网络变化不会再覆盖它们。</string>
+    <string name="rootfs_dns_servers">DNS 服务器</string>
+    <string name="rootfs_dns_servers_hint">每行一个地址，或用逗号分隔。IPv4 与 IPv6 均支持。</string>
+    <string name="rootfs_dns_invalid">地址无效：%1$s</string>
+    <string name="rootfs_dns_save">保存并应用</string>
+    <string name="rootfs_dns_saved">已保存并应用</string>
 </resources>

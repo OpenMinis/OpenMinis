@@ -114,7 +114,13 @@ sealed class ConfigValue {
 
         /** Parse a JSON string into a ConfigValue. Returns null on malformed JSON. */
         fun decode(json: String): ConfigValue? = try {
-            fromJsonAny(JSONTokener(json).nextValue())
+            val tokener = JSONTokener(json)
+            val value = fromJsonAny(tokener.nextValue())
+            // [T-minis-config-strict-json] Trailing text is an error, not a
+            // silent truncation: `minis-config set x "223.5.5.5" typo` used to
+            // store "223.5.5.5" and drop the typo, so the caller believed a
+            // value the command never accepted.
+            if (tokener.nextClean() != '\u0000') null else value
         } catch (_: Throwable) {
             null
         }

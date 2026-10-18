@@ -1925,4 +1925,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Usuwa dzienniki uruchomień i pliki pamięci podręcznej (%1$s). Czaty, sesje i kopie zapasowe pozostają nietknięte.</string>
     <string name="storage_clear_logs_caches_button">Wyczyść</string>
     <string name="storage_clear_logs_caches_done">Zwolniono %1$s</string>
+    <string name="rootfs_dns_section">Sieć kontenera</string>
+    <string name="rootfs_dns_auto">Według systemu</string>
+    <string name="rootfs_dns_auto_desc">Sandbox kopiuje serwery DNS aktywnej sieci i aktualizuje je przy każdej zmianie sieci. Zachowaj to przy proxy w trybie Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Niestandardowe</string>
+    <string name="rootfs_dns_custom_desc">Sandbox używa dokładnie poniższych serwerów, a zmiany sieci ich nie nadpisują.</string>
+    <string name="rootfs_dns_servers">Serwery DNS</string>
+    <string name="rootfs_dns_servers_hint">Jeden adres w wierszu lub oddzielone przecinkami. Obsługiwane IPv4 i IPv6.</string>
+    <string name="rootfs_dns_invalid">Nieprawidłowy adres: %1$s</string>
+    <string name="rootfs_dns_save">Zapisz i zastosuj</string>
+    <string name="rootfs_dns_saved">Zapisano i zastosowano</string>
 </resources>

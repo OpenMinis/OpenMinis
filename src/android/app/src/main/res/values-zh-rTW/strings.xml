@@ -2008,4 +2008,14 @@
     <string name="storage_clear_logs_caches_confirm_message">將刪除執行日誌與快取檔案（%1$s）。聊天、工作階段與備份不受影響。</string>
     <string name="storage_clear_logs_caches_button">清理</string>
     <string name="storage_clear_logs_caches_done">已釋放 %1$s</string>
+    <string name="rootfs_dns_section">容器網路</string>
+    <string name="rootfs_dns_auto">跟隨系統</string>
+    <string name="rootfs_dns_auto_desc">沙箱複製目前網路的 DNS 伺服器，並在網路變更時更新。使用 Fake-IP/TUN 模式的代理時請保持此項。</string>
+    <string name="rootfs_dns_custom">自訂</string>
+    <string name="rootfs_dns_custom_desc">沙箱只使用下面的伺服器，網路變更不會再覆寫它們。</string>
+    <string name="rootfs_dns_servers">DNS 伺服器</string>
+    <string name="rootfs_dns_servers_hint">每行一個位址，或以逗號分隔。IPv4 與 IPv6 均支援。</string>
+    <string name="rootfs_dns_invalid">位址無效：%1$s</string>
+    <string name="rootfs_dns_save">儲存並套用</string>
+    <string name="rootfs_dns_saved">已儲存並套用</string>
 </resources>

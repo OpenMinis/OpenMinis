@@ -1917,4 +1917,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Çalıştırma günlüklerini ve önbellek dosyalarını (%1$s) siler. Sohbetler, oturumlar ve yedekler etkilenmez.</string>
     <string name="storage_clear_logs_caches_button">Temizle</string>
     <string name="storage_clear_logs_caches_done">%1$s boşaltıldı</string>
+    <string name="rootfs_dns_section">Konteyner ağı</string>
+    <string name="rootfs_dns_auto">Sistemi izle</string>
+    <string name="rootfs_dns_auto_desc">Sandbox etkin ağın DNS sunucularını kopyalar ve her ağ değişiminde günceller. Fake-IP/TUN modunda proxy kullanıyorsanız bunu koruyun.</string>
+    <string name="rootfs_dns_custom">Özel</string>
+    <string name="rootfs_dns_custom_desc">Sandbox yalnızca aşağıdaki sunucuları kullanır ve ağ değişimleri artık onları ezmez.</string>
+    <string name="rootfs_dns_servers">DNS sunucuları</string>
+    <string name="rootfs_dns_servers_hint">Her satıra bir adres veya virgülle ayırın. IPv4 ve IPv6 desteklenir.</string>
+    <string name="rootfs_dns_invalid">Geçersiz adres: %1$s</string>
+    <string name="rootfs_dns_save">Kaydet ve uygula</string>
+    <string name="rootfs_dns_saved">Kaydedildi ve uygulandı</string>
 </resources>

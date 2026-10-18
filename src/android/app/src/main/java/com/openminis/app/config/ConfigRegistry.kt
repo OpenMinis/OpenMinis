@@ -103,6 +103,15 @@ class ConfigRegistry private constructor() {
         fun get(): ConfigRegistry =
             INSTANCE ?: error("ConfigRegistry not initialized; call init() from Application.onCreate")
 
+        /**
+         * A fresh, isolated registry for tests that register their own fields.
+         *
+         * Such tests must not use [get]: the singleton is process-wide, so a
+         * test that registers into it leaks its fields into every later test in
+         * the same JVM.
+         */
+        internal fun isolated(): ConfigRegistry = ConfigRegistry()
+
         fun init(
             context: Context,
             providerRepository: ProviderRepository,

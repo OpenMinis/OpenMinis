@@ -1921,4 +1921,14 @@
     <string name="storage_clear_logs_caches_confirm_message">Șterge jurnalele de execuție și fișierele cache (%1$s). Conversațiile, sesiunile și copiile de siguranță nu sunt afectate.</string>
     <string name="storage_clear_logs_caches_button">Curăță</string>
     <string name="storage_clear_logs_caches_done">%1$s eliberați</string>
+    <string name="rootfs_dns_section">Rețeaua containerului</string>
+    <string name="rootfs_dns_auto">Urmează sistemul</string>
+    <string name="rootfs_dns_auto_desc">Sandbox-ul copiază serverele DNS ale rețelei active și le actualizează la fiecare schimbare. Păstrează cu proxy în mod Fake-IP/TUN.</string>
+    <string name="rootfs_dns_custom">Personalizat</string>
+    <string name="rootfs_dns_custom_desc">Sandbox-ul folosește exact serverele de mai jos, iar schimbările de rețea nu le mai suprascriu.</string>
+    <string name="rootfs_dns_servers">Servere DNS</string>
+    <string name="rootfs_dns_servers_hint">O adresă pe linie sau separate prin virgule. Suportă IPv4 și IPv6.</string>
+    <string name="rootfs_dns_invalid">Adresă nevalidă: %1$s</string>
+    <string name="rootfs_dns_save">Salvează și aplică</string>
+    <string name="rootfs_dns_saved">Salvat și aplicat</string>
 </resources>
