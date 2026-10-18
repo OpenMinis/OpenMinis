@@ -2,6 +2,7 @@ package com.openminis.app.ui.settings
 
 import com.openminis.app.data.db.UsageRecord
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +17,21 @@ import org.junit.Test
  * or shows stale percentages the moment they tap a chip.
  */
 class UsageFlatListTest {
+
+    /**
+     * [T-usage-unit-case] Units are UPPERCASE only. The k/M case was mixed
+     * on the same card ("303.3M" next to "473.5k") and reported as a
+     * detail-level eyesore; this pins the single rule.
+     */
+    @Test
+    fun formatCountUsesUppercaseUnitsOnly() {
+        assertEquals("473.5K", formatCount(473_500))
+        assertEquals("303.3M", formatCount(303_300_000))
+        assertEquals("2K", formatCount(2_000))
+        assertEquals("999", formatCount(999))
+        assertFalse(formatCount(473_500).contains("k"))
+        assertFalse(formatCount(303_300_000).contains("m"))
+    }
     private fun row(
         modelId: String,
         name: String = modelId,

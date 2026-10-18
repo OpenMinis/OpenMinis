@@ -566,7 +566,14 @@ private fun UsageEmptyRow() {
 @Composable
 private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivider: Boolean) {
     var expanded by remember { mutableStateOf(false) }
-    val summary = "${formatCount(model.totalInput)} / ${formatCount(model.outputTokens)}"
+    // [T-usage-row-io-format] "输入：200.5M｜输出：294.8K" — the slash form
+    // "200.5M / 294.8K" read as a ratio/quota to the user (reported), and
+    // carried no hint which number was which. Labelled form, no slash.
+    val summary = stringResource(
+        R.string.usage_row_io_format,
+        formatCount(model.totalInput),
+        formatCount(model.outputTokens),
+    )
     // [T-brand-accent-color] Brand logo + the brand's own accent for the share
     // bar. Resolves through the single brand entry point, so the row shows the
     // SAME logo the picker and top bar show — and a model with no recognisable
@@ -764,12 +771,17 @@ private fun DetailRow(label: String, value: String) {
     }
 }
 
+/**
+ * Compact token count with UPPERCASE units only. The k/M case used to be
+ * mixed ("303.3M" next to "473.5k") and read as inconsistent on the same
+ * card — reported as a detail-level eyesore. One rule: K and M, always caps.
+ */
 internal fun formatCount(n: Long): String = when {
     n >= 1_000_000 -> String.format("%.1fM", n / 1_000_000.0)
     n >= 1_000 -> {
         val k = n / 1000.0
-        if (k == k.toLong().toDouble()) "${k.toLong()}k"
-        else String.format("%.1fk", k)
+        if (k == k.toLong().toDouble()) "${k.toLong()}K"
+        else String.format("%.1fK", k)
     }
     else -> n.toString()
 }

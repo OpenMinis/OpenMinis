@@ -884,7 +884,8 @@
     <string name="usage_range_7d">直近7日</string>
     <string name="usage_range_30d">直近30日</string>
     <string name="usage_range_all">すべて</string>
-    <string name="usage_chart_title">日別使用量（直近14日）</string>
+    <string name="usage_chart_title">日別使用量</string>
+    <string name="usage_row_io_format">入力：%1$s｜出力：%2$s</string>
     <string name="usage_chart_no_data">この期間の使用はありません</string>
     <string name="usage_label_total_input">合計入力（キャッシュ含む）</string>
     <string name="usage_label_output">出力トークン</string>

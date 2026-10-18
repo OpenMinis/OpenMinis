@@ -884,7 +884,8 @@
     <string name="usage_range_7d">7 derniers jours</string>
     <string name="usage_range_30d">30 derniers jours</string>
     <string name="usage_range_all">Tout</string>
-    <string name="usage_chart_title">Utilisation quotidienne (14 jours)</string>
+    <string name="usage_chart_title">Utilisation quotidienne</string>
+    <string name="usage_row_io_format">Entrée : %1$s | Sortie : %2$s</string>
     <string name="usage_chart_no_data">Aucune utilisation sur cette période</string>
     <string name="usage_label_total_input">Entrée totale (cache inclus)</string>
     <string name="usage_label_output">Tokens de sortie</string>

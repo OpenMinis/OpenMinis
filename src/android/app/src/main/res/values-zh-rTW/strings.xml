@@ -948,7 +948,8 @@
     <string name="usage_range_7d">近7天</string>
     <string name="usage_range_30d">近30天</string>
     <string name="usage_range_all">全部</string>
-    <string name="usage_chart_title">每日用量（近14天）</string>
+    <string name="usage_chart_title">每日用量</string>
+    <string name="usage_row_io_format">輸入：%1$s｜輸出：%2$s</string>
     <string name="usage_chart_no_data">該時段暫無用量</string>
     <string name="usage_label_total_input">輸入總計（含快取）</string>
     <string name="usage_label_output">輸出 Token</string>

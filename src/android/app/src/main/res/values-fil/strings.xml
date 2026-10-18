@@ -884,7 +884,8 @@
     <string name="usage_range_7d">Nakaraang 7 araw</string>
     <string name="usage_range_30d">Nakaraang 30 araw</string>
     <string name="usage_range_all">Lahat</string>
-    <string name="usage_chart_title">Pang-araw-araw na Paggamit (14 araw)</string>
+    <string name="usage_chart_title">Pang-araw-araw na Paggamit</string>
+    <string name="usage_row_io_format">Input: %1$s | Output: %2$s</string>
     <string name="usage_chart_no_data">Walang paggamit sa panahong ito</string>
     <string name="usage_label_total_input">Kabuuang Input (kasama ang Cache)</string>
     <string name="usage_label_output">Mga Output Token</string>

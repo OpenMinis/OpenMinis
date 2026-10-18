@@ -884,7 +884,8 @@
     <string name="usage_range_7d">7 วันที่ผ่านมา</string>
     <string name="usage_range_30d">30 วันที่ผ่านมา</string>
     <string name="usage_range_all">ทั้งหมด</string>
-    <string name="usage_chart_title">การใช้งานรายวัน (14 วัน)</string>
+    <string name="usage_chart_title">การใช้งานรายวัน</string>
+    <string name="usage_row_io_format">อินพุต: %1$s | เอาต์พุต: %2$s</string>
     <string name="usage_chart_no_data">ไม่มีการใช้งานในช่วงนี้</string>
     <string name="usage_label_total_input">อินพุตทั้งหมด (รวมแคช)</string>
     <string name="usage_label_output">โทเค็นเอาต์พุต</string>

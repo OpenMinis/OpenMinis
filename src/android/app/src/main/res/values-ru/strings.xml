@@ -886,7 +886,8 @@
     <string name="usage_range_7d">За 7 дней</string>
     <string name="usage_range_30d">За 30 дней</string>
     <string name="usage_range_all">Всё</string>
-    <string name="usage_chart_title">Использование по дням (14 дней)</string>
+    <string name="usage_chart_title">Использование по дням</string>
+    <string name="usage_row_io_format">Вход: %1$s | Выход: %2$s</string>
     <string name="usage_chart_no_data">Нет данных за этот период</string>
     <string name="usage_label_total_input">Всего входных (вкл. кэш)</string>
     <string name="usage_label_output">Выходные токены</string>

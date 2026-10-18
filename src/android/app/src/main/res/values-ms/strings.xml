@@ -884,7 +884,8 @@
     <string name="usage_range_7d">7 hari lepas</string>
     <string name="usage_range_30d">30 hari lepas</string>
     <string name="usage_range_all">Semua</string>
-    <string name="usage_chart_title">Penggunaan Harian (14 hari)</string>
+    <string name="usage_chart_title">Penggunaan Harian</string>
+    <string name="usage_row_io_format">Input: %1$s | Output: %2$s</string>
     <string name="usage_chart_no_data">Tiada penggunaan dalam tempoh ini</string>
     <string name="usage_label_total_input">Jumlah Input (termasuk Cache)</string>
     <string name="usage_label_output">Token Output</string>

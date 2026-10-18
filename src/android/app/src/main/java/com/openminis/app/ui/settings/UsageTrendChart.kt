@@ -33,6 +33,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import kotlin.math.max
+import kotlin.math.sqrt
 import com.openminis.app.R
 
 /**
@@ -139,7 +141,7 @@ internal fun UsageTrendChart(
     val emptyColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
     // [T-usage-chart-card] Read BEFORE the Canvas lambda: DrawScope is not a
     // composable scope, so MaterialTheme.colorScheme cannot be read inside it.
-    val ruleColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
+    val ruleColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
     val hasAnyData = daily.any { it.inputTokens > 0 || it.outputTokens > 0 }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -182,14 +184,34 @@ internal fun UsageTrendChart(
             }
             daily.forEachIndexed { idx, day ->
                 val slotLeft = idx * slotWidth
-                val inputH = (day.inputTokens / maxVal) * chartHeight
-                val outputH = (day.outputTokens / maxVal) * chartHeight
+                // [T-usage-sqrt-scale] Square-root bar height. Input (with
+                // cache) routinely dwarfs output 100-1000x — on a linear scale
+                // the smaller bar is a sub-pixel sliver the user reported as
+                // "can only see one bar". sqrt preserves ORDER (a bigger day
+                // is still taller) while lifting a 0.15% bar to ~4% height,
+                // and a 3dp floor keeps any NON-ZERO day visible at all; the
+                // exact numbers stay in the tap-detail row.
+                val minBar = 3.dp.toPx()
+                val inputH = max(sqrt(day.inputTokens / maxVal) * chartHeight, minBar)
+                val outputH = max(sqrt(day.outputTokens / maxVal) * chartHeight, minBar)
                 val inputBar = day.inputTokens > 0
                 val outputBar = day.outputTokens > 0
+                // Selected slot backdrop FIRST — it used to be drawn after the
+                // bars, and a 28%-alpha primary veil ON TOP of the bars tinted
+                // both bars the same hue, which is why the input bar read as
+                // "background" and the chart seemed to show only output.
+                if (idx == sel) {
+                    drawRoundRect(
+                        color = selectedColor,
+                        topLeft = Offset(slotLeft + slotWidth * 0.08f, 0f),
+                        size = Size(slotWidth * 0.84f, size.height),
+                        cornerRadius = CornerRadius(4.dp.toPx()),
+                    )
+                }
                 // Input bar (left half of the slot)
                 if (inputBar) {
                     drawRoundRect(
-                        color = if (idx == sel) inputColor else inputColor.copy(alpha = 0.75f),
+                        color = inputColor,
                         topLeft = Offset(slotLeft + slotWidth / 2 - barWidth - gap, size.height - inputH),
                         size = Size(barWidth, inputH),
                         cornerRadius = CornerRadius(2.dp.toPx()),
@@ -198,7 +220,7 @@ internal fun UsageTrendChart(
                 // Output bar (right half)
                 if (outputBar) {
                     drawRoundRect(
-                        color = if (idx == sel) outputColor else outputColor.copy(alpha = 0.75f),
+                        color = outputColor,
                         topLeft = Offset(slotLeft + slotWidth / 2 + gap, size.height - outputH),
                         size = Size(barWidth, outputH),
                         cornerRadius = CornerRadius(2.dp.toPx()),
@@ -213,32 +235,30 @@ internal fun UsageTrendChart(
                         cornerRadius = CornerRadius(1.dp.toPx()),
                     )
                 }
-                // Selected slot backdrop
-                if (idx == sel) {
-                    drawRoundRect(
-                        color = selectedColor,
-                        topLeft = Offset(slotLeft + slotWidth * 0.08f, 0f),
-                        size = Size(slotWidth * 0.84f, size.height),
-                        cornerRadius = CornerRadius(4.dp.toPx()),
-                    )
-                }
             }
         }
 
-        // Axis labels: first / middle / last day, compact MM-dd
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            val mid = daily[daily.size / 2]
-            Text(shortDate(daily.first().dateKey), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(shortDate(mid.dateKey), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(shortDate(daily.last().dateKey), style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Axis labels: first / middle / last day, compact MM-dd — but only
+        // when there are at least three DISTINCT days. On a 1-2 day window the
+        // first/middle/last triple collapses to the same date printed 2-3x
+        // (reported as clutter), and the tap-detail row already carries the
+        // full date, so the axis row is dropped entirely.
+        val axisDays = when {
+            daily.size >= 3 -> listOf(daily.first(), daily[daily.size / 2], daily.last())
+            else -> emptyList()
+        }.distinct()
+        if (axisDays.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                axisDays.forEach { day ->
+                    Text(shortDate(day.dateKey), style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
 
         Spacer(Modifier.height(6.dp))

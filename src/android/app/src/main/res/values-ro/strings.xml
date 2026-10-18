@@ -885,7 +885,8 @@
     <string name="usage_range_7d">Ultimele 7 zile</string>
     <string name="usage_range_30d">Ultimele 30 de zile</string>
     <string name="usage_range_all">Tot</string>
-    <string name="usage_chart_title">Utilizare zilnică (14 zile)</string>
+    <string name="usage_chart_title">Utilizare zilnică</string>
+    <string name="usage_row_io_format">Intrare: %1$s | Ieșire: %2$s</string>
     <string name="usage_chart_no_data">Fără utilizare în această perioadă</string>
     <string name="usage_label_total_input">Intrare totală (inclusiv cache)</string>
     <string name="usage_label_output">Tokenuri de ieșire</string>
