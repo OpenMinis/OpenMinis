@@ -1937,4 +1937,8 @@
     <string name="rootfs_dns_invalid">Неверный адрес: %1$s</string>
     <string name="rootfs_dns_save">Сохранить и применить</string>
     <string name="rootfs_dns_saved">Сохранено и применено</string>
+    <string name="chat_context_usage_hint">Использование контекста</string>
+    <string name="send_return_mode_a11y_action">Поведение клавиши Enter</string>
+    <string name="send_return_mode_sends">Enter отправляет</string>
+    <string name="send_return_mode_newline">Enter добавляет строку</string>
 </resources>

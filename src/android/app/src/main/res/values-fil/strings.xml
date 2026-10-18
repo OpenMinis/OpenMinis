@@ -1927,4 +1927,8 @@
     <string name="rootfs_dns_invalid">Di-wastong address: %1$s</string>
     <string name="rootfs_dns_save">I-save at ilapat</string>
     <string name="rootfs_dns_saved">Na-save at nailapat</string>
+    <string name="chat_context_usage_hint">Paggamit ng konteksto</string>
+    <string name="send_return_mode_a11y_action">Gawi ng Enter key</string>
+    <string name="send_return_mode_sends">Nagpapadala ang Enter</string>
+    <string name="send_return_mode_newline">Nagdadagdag ng bagong linya ang Enter</string>
 </resources>

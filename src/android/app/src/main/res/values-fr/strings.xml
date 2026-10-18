@@ -1929,4 +1929,8 @@
     <string name="rootfs_dns_invalid">Adresse invalide : %1$s</string>
     <string name="rootfs_dns_save">Enregistrer et appliquer</string>
     <string name="rootfs_dns_saved">Enregistré et appliqué</string>
+    <string name="chat_context_usage_hint">Utilisation du contexte</string>
+    <string name="send_return_mode_a11y_action">Comportement de la touche Entrée</string>
+    <string name="send_return_mode_sends">Entrée envoie</string>
+    <string name="send_return_mode_newline">Entrée ajoute une ligne</string>
 </resources>

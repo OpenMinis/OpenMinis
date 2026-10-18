@@ -1927,4 +1927,8 @@
     <string name="rootfs_dns_invalid">ที่อยู่ไม่ถูกต้อง: %1$s</string>
     <string name="rootfs_dns_save">บันทึกและใช้งาน</string>
     <string name="rootfs_dns_saved">บันทึกและใช้งานแล้ว</string>
+    <string name="chat_context_usage_hint">การใช้บริบท</string>
+    <string name="send_return_mode_a11y_action">พฤติกรรมปุ่ม Enter</string>
+    <string name="send_return_mode_sends">Enter ส่ง</string>
+    <string name="send_return_mode_newline">Enter ขึ้นบรรทัดใหม่</string>
 </resources>

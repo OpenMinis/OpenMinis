@@ -2018,4 +2018,8 @@
     <string name="rootfs_dns_invalid">位址無效：%1$s</string>
     <string name="rootfs_dns_save">儲存並套用</string>
     <string name="rootfs_dns_saved">已儲存並套用</string>
+    <string name="chat_context_usage_hint">上下文用量</string>
+    <string name="send_return_mode_a11y_action">Enter 鍵行為</string>
+    <string name="send_return_mode_sends">Enter 傳送</string>
+    <string name="send_return_mode_newline">Enter 換行</string>
 </resources>

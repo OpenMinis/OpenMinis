@@ -1926,4 +1926,8 @@
     <string name="rootfs_dns_invalid">잘못된 주소: %1$s</string>
     <string name="rootfs_dns_save">저장 및 적용</string>
     <string name="rootfs_dns_saved">저장 및 적용됨</string>
+    <string name="chat_context_usage_hint">컨텍스트 사용량</string>
+    <string name="send_return_mode_a11y_action">Enter 키 동작</string>
+    <string name="send_return_mode_sends">Enter로 전송</string>
+    <string name="send_return_mode_newline">Enter로 줄바꿈</string>
 </resources>

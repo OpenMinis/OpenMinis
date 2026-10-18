@@ -1927,4 +1927,8 @@
     <string name="rootfs_dns_invalid">Geçersiz adres: %1$s</string>
     <string name="rootfs_dns_save">Kaydet ve uygula</string>
     <string name="rootfs_dns_saved">Kaydedildi ve uygulandı</string>
+    <string name="chat_context_usage_hint">Bağlam kullanımı</string>
+    <string name="send_return_mode_a11y_action">Enter tuşu davranışı</string>
+    <string name="send_return_mode_sends">Enter gönderir</string>
+    <string name="send_return_mode_newline">Enter yeni satır ekler</string>
 </resources>

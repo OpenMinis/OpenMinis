@@ -2572,4 +2572,8 @@
     <string name="rootfs_dns_invalid">地址无效：%1$s</string>
     <string name="rootfs_dns_save">保存并应用</string>
     <string name="rootfs_dns_saved">已保存并应用</string>
+    <string name="chat_context_usage_hint">上下文用量</string>
+    <string name="send_return_mode_a11y_action">回车键行为</string>
+    <string name="send_return_mode_sends">回车发送</string>
+    <string name="send_return_mode_newline">回车换行</string>
 </resources>

@@ -1931,4 +1931,8 @@
     <string name="rootfs_dns_invalid">Adresă nevalidă: %1$s</string>
     <string name="rootfs_dns_save">Salvează și aplică</string>
     <string name="rootfs_dns_saved">Salvat și aplicat</string>
+    <string name="chat_context_usage_hint">Utilizarea contextului</string>
+    <string name="send_return_mode_a11y_action">Comportamentul tastei Enter</string>
+    <string name="send_return_mode_sends">Enter trimite</string>
+    <string name="send_return_mode_newline">Enter adaugă un rând nou</string>
 </resources>

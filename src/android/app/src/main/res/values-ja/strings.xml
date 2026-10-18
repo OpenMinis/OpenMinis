@@ -1926,4 +1926,8 @@
     <string name="rootfs_dns_invalid">無効なアドレス: %1$s</string>
     <string name="rootfs_dns_save">保存して適用</string>
     <string name="rootfs_dns_saved">保存して適用しました</string>
+    <string name="chat_context_usage_hint">コンテキスト使用量</string>
+    <string name="send_return_mode_a11y_action">Enter キーの動作</string>
+    <string name="send_return_mode_sends">Enter で送信</string>
+    <string name="send_return_mode_newline">Enter で改行</string>
 </resources>

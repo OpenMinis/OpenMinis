@@ -1927,4 +1927,8 @@
     <string name="rootfs_dns_invalid">Alamat tidak sah: %1$s</string>
     <string name="rootfs_dns_save">Simpan dan gunakan</string>
     <string name="rootfs_dns_saved">Disimpan dan digunakan</string>
+    <string name="chat_context_usage_hint">Penggunaan konteks</string>
+    <string name="send_return_mode_a11y_action">Tingkah laku kekunci Enter</string>
+    <string name="send_return_mode_sends">Enter menghantar</string>
+    <string name="send_return_mode_newline">Enter menambah baris baharu</string>
 </resources>

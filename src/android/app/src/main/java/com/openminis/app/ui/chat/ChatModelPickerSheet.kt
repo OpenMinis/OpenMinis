@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import com.openminis.app.ui.components.rememberSheetScrollGuard
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -195,9 +197,8 @@ internal fun ModelPickerSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        // Match the slim drag handle used by StandardChatSheet (6dp top / 4dp
-        // bottom) so the title sits flush with the indicator instead of the
-        // Material default's ~44dp whitespace gap above it.
+        // Slim drag handle (6dp/4dp) so the title sits flush with the indicator
+        // instead of Material's ~44dp whitespace gap above it.
         dragHandle = {
             Box(
                 modifier = Modifier
@@ -328,14 +329,13 @@ internal fun ModelPickerSheet(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f, fill = false),
+                    .weight(1f, fill = false).nestedScroll(rememberSheetScrollGuard()),
             ) {
                 // ── Model Groups (grouped section card with embedded header) ──
                 if (filteredGroups.isNotEmpty()) {
-                    // Section card: header + rows live in the same surface so
-                    // the visual unit is unambiguous. Header uses the
-                    // titleSmall + onSurfaceVariant pair so it reads as a
-                    // section label rather than another row.
+                    // Header + rows share one surface so the unit is unambiguous;
+                    // the titleSmall + onSurfaceVariant pair reads as a section
+                    // label rather than another row.
                     item {
                         Column(
                             modifier = Modifier

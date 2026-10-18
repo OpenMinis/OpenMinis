@@ -1929,4 +1929,8 @@
     <string name="rootfs_dns_invalid">Ungültige Adresse: %1$s</string>
     <string name="rootfs_dns_save">Speichern und anwenden</string>
     <string name="rootfs_dns_saved">Gespeichert und angewendet</string>
+    <string name="chat_context_usage_hint">Kontextauslastung</string>
+    <string name="send_return_mode_a11y_action">Verhalten der Eingabetaste</string>
+    <string name="send_return_mode_sends">Eingabetaste sendet</string>
+    <string name="send_return_mode_newline">Eingabetaste fügt Zeilenumbruch ein</string>
 </resources>

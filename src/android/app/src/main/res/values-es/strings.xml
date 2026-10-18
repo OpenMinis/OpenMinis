@@ -1929,4 +1929,8 @@
     <string name="rootfs_dns_invalid">Dirección no válida: %1$s</string>
     <string name="rootfs_dns_save">Guardar y aplicar</string>
     <string name="rootfs_dns_saved">Guardado y aplicado</string>
+    <string name="chat_context_usage_hint">Uso del contexto</string>
+    <string name="send_return_mode_a11y_action">Comportamiento de Intro</string>
+    <string name="send_return_mode_sends">Intro envía</string>
+    <string name="send_return_mode_newline">Intro añade una línea</string>
 </resources>

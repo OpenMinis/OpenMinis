@@ -1927,4 +1927,8 @@
     <string name="rootfs_dns_invalid">Endereço inválido: %1$s</string>
     <string name="rootfs_dns_save">Salvar e aplicar</string>
     <string name="rootfs_dns_saved">Salvo e aplicado</string>
+    <string name="chat_context_usage_hint">Uso do contexto</string>
+    <string name="send_return_mode_a11y_action">Comportamento da tecla Enter</string>
+    <string name="send_return_mode_sends">Enter envia</string>
+    <string name="send_return_mode_newline">Enter adiciona uma linha</string>
 </resources>

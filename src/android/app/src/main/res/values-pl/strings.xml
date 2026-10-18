@@ -1935,4 +1935,8 @@
     <string name="rootfs_dns_invalid">Nieprawidłowy adres: %1$s</string>
     <string name="rootfs_dns_save">Zapisz i zastosuj</string>
     <string name="rootfs_dns_saved">Zapisano i zastosowano</string>
+    <string name="chat_context_usage_hint">Użycie kontekstu</string>
+    <string name="send_return_mode_a11y_action">Zachowanie klawisza Enter</string>
+    <string name="send_return_mode_sends">Enter wysyła</string>
+    <string name="send_return_mode_newline">Enter dodaje nową linię</string>
 </resources>

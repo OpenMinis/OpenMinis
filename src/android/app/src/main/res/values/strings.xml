@@ -2758,4 +2758,8 @@
     <string name="rootfs_dns_invalid">Invalid address: %1$s</string>
     <string name="rootfs_dns_save">Save and apply</string>
     <string name="rootfs_dns_saved">Saved and applied</string>
+    <string name="chat_context_usage_hint">Context usage</string>
+    <string name="send_return_mode_a11y_action">Enter key behaviour</string>
+    <string name="send_return_mode_sends">Enter sends</string>
+    <string name="send_return_mode_newline">Enter adds a new line</string>
 </resources>
