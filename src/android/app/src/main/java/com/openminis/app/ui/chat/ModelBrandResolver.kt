@@ -1,5 +1,7 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.tools.BrandKeywordSources
+
 /**
  * Resolves the lobe-icons brand slug for a MODEL reference (top bar, model
  * picker, provider detail).
@@ -31,7 +33,10 @@ internal object ModelBrandResolver {
      * Brand keywords → lobe-icons slug. Order matters for ties; longer
      * keywords outrank shorter ones by length, not position.
      */
-    private val KEYWORDS: List<Pair<String, String>> = listOf(
+    private val KEYWORDS: List<Pair<String, String>> =
+        // Chinese brand aliases live in tools/BrandKeywordSources — match data,
+        // not UI copy, so the CJK ratchet on ui/ stays meaningful.
+        BrandKeywordSources.CJK_ALIASES + listOf(
         // Long, unambiguous brand names first so they win length ties.
         "deepseek" to "deepseek",
         "moonshot" to "moonshot",
@@ -82,6 +87,7 @@ internal object ModelBrandResolver {
         "kimi" to "kimi",
         "copilot" to "copilot",
         "command" to "cohere",
+        "cohere" to "cohere",
         "together" to "together",
         "ollama" to "ollama",
         "davinci" to "openai",
@@ -421,22 +427,43 @@ internal object ModelBrandResolver {
      * already say far more precisely.
      */
     fun resolve(modelId: String?, displayName: String? = null): String? {
-        val haystack = "${modelId ?: ""} ${displayName ?: ""}".trim().lowercase()
-        if (haystack.isBlank()) return null
+        // No reference at all → no icon (the row itself is empty). This guard
+        // must live HERE, not in resolveExact: an empty reference is not
+        // "unrecognized", it is absent, and must not wear the fallback mark.
+        if ("${modelId ?: ""} ${displayName ?: ""}".isBlank()) return null
+        // Product decision: an unrecognized non-empty reference shows the OpenAI
+        // mark so the icon slot keeps a stable rhythm.
+        return resolveExact(modelId, displayName) ?: FALLBACK_BRAND
+    }
+
+    /**
+     * Same keyword scan as [resolve] but WITHOUT the OpenAI fallback: returns
+     * null when the reference matches no brand. Group-chat avatars use this —
+     // an unrecognized speaker must degrade to its initial-letter avatar, not
+     // silently wear another vendor's mark.
+     */
+    fun resolveExact(modelId: String?, displayName: String? = null): String? {
+        val raw = "${modelId ?: ""} ${displayName ?: ""}".trim().lowercase()
+        if (raw.isBlank()) return null
+        // Second channel with punctuation stripped: dirty relay ids like
+        // "deep-seek_chat" or "x.ai/grok-3" glue the brand name across
+        // separators, so a plain contains() on the raw text misses it.
+        // Keywords that themselves contain separators ("hy-") simply never
+        // hit this channel — the raw channel covers them.
+        val compact = raw.replace(Regex("[^a-z0-9\\u4e00-\\u9fff]+"), "")
 
         var best: String? = null
         var bestScore = 0
         for ((keyword, slug) in KEYWORDS) {
             if (keyword.length <= bestScore) continue
-            if (haystack.contains(keyword)) {
+            if (raw.contains(keyword) ||
+                (compact.length > keyword.length && compact.contains(keyword))
+            ) {
                 best = slug
                 bestScore = keyword.length
             }
         }
-        // Product decision: an unrecognized non-empty reference shows the OpenAI
-        // mark so the icon slot keeps a stable rhythm. null means "no reference
-        // at all" (empty row) — never a fallback.
-        return best ?: FALLBACK_BRAND
+        return best
     }
 
     /** Compiled resource id for a slug, or null when not packed. */

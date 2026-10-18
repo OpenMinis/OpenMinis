@@ -36,17 +36,40 @@ class GroupChatTest {
 
     @Test
     fun vendorMatchIgnoresDirtyModelFields() {
-        assertEquals("deepseek", GroupChat.vendorKey("models/DeepSeek-V3:latest", "DeepSeek（官方）", "openAI"))
+        assertEquals("deepseek", GroupChat.vendorKey("models/DeepSeek-V3:latest", "DeepSeek（官方）"))
         assertEquals("deepseek", GroupChat.vendorKey("deep-seek_chat", null))
         assertEquals("openai", GroupChat.vendorKey("gpt4o-mini", "【自定义】GPT-4o"))
         assertEquals("openai", GroupChat.vendorKey("o1preview", null))
         assertEquals("doubao", GroupChat.vendorKey("Doubao-pro-32k", "【豆包】"))
         assertEquals("gemini", GroupChat.vendorKey("gemini2.5pro", "models/gemini-2.5-flash"))
-        assertEquals("anthropic", GroupChat.vendorKey("claude-3.5-sonnet（官方）", null))
-        assertEquals("xai", GroupChat.vendorKey("x.ai/grok-3", null))
+        assertEquals("claude", GroupChat.vendorKey("claude-3.5-sonnet（官方）", null))
+        assertEquals("grok", GroupChat.vendorKey("x.ai/grok-3", null))
         assertEquals("qwen", GroupChat.vendorKey("qwen2.5-72b", "通义千问"))
-        assertEquals("anthropic", GroupChat.vendorKey("custom-model", null, "anthropic"))
+        // [T-brand-model-name-first] The provider TYPE is no longer an input
+        // (PR70): an unrecognized id must degrade to unknown — the avatar shows
+        // the initial letter, never a guessed vendor mark.
+        assertEquals("unknown", GroupChat.vendorKey("custom-model", null))
         assertEquals("unknown", GroupChat.vendorKey("metadata-exporter", null))
+    }
+
+    /**
+     * [T-brand-cjk-aliases] Chinese speaker names are the group chat's most
+     * common form ("智谱清言", "月之暗面"). These used to resolve only through
+     * the retired GroupChat alias table; they must keep resolving after the
+     * merge into ModelBrandResolver's keyword table.
+     */
+    @Test
+    fun vendorKeyResolvesChineseSpeakerNames() {
+        assertEquals("zhipu", GroupChat.vendorKey(null, "智谱清言"))
+        assertEquals("kimi", GroupChat.vendorKey(null, "月之暗面 Kimi"))
+        assertEquals("qwen", GroupChat.vendorKey(null, "通义千问"))
+        assertEquals("deepseek", GroupChat.vendorKey(null, "深度求索"))
+        assertEquals("doubao", GroupChat.vendorKey(null, "豆包大模型"))
+        assertEquals("hunyuan", GroupChat.vendorKey(null, "腾讯混元"))
+        assertEquals("wenxin", GroupChat.vendorKey(null, "文心一言"))
+        assertEquals("baichuan", GroupChat.vendorKey(null, "百川智能"))
+        assertEquals("hailuo", GroupChat.vendorKey(null, "海螺 AI"))
+        assertEquals("unknown", GroupChat.vendorKey(null, "小助手"))
     }
 
     @Test

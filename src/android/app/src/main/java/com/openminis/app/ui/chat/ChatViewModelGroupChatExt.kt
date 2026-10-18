@@ -61,7 +61,6 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     val hostVendor = GroupChat.vendorKey(
         mainEntry?.model?.id ?: currentModel?.id,
         mainEntry?.model?.displayName ?: currentModel?.displayName,
-        hostSnapshot?.providerTypeRaw,
     )
     val slotMembers = groupMembers(config.modelEntries, mainEntry?.id)
     val hostPlain = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "Host"
@@ -312,11 +311,7 @@ private fun ChatViewModel.groupMembers(
         GroupMember(
             name = entry.model.displayName,
             modelId = entry.model.id,
-            vendor = GroupChat.vendorKey(
-                entry.model.id,
-                entry.model.displayName,
-                snapshotFor(entry)?.providerTypeRaw,
-            ),
+            vendor = GroupChat.vendorKey(entry.model.id, entry.model.displayName),
             provider = provider,
             snapshot = snapshotFor(entry),
             maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(1024, 16384),
@@ -743,7 +738,7 @@ private suspend fun ChatViewModel.persistGroupUtterance(
     speaker: String,
     text: String,
     snapshot: ModelAttributionSnapshot?,
-    vendor: String = GroupChat.vendorKey(snapshot?.modelId, snapshot?.displayName, snapshot?.providerTypeRaw),
+    vendor: String = GroupChat.vendorKey(snapshot?.modelId, snapshot?.displayName),
 ): String? = withContext(Dispatchers.IO) {
     val parts = JSONArray()
         .put(

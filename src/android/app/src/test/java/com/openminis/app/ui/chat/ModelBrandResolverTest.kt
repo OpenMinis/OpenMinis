@@ -43,6 +43,59 @@ class ModelBrandResolverTest {
         assertEquals("openai", resolve("gpt-6-luna"))
     }
 
+    /**
+     * [T-brand-resolve-exact] Group-chat avatars need the scan WITHOUT the
+     * OpenAI fallback: an unrecognized speaker must return null (→ initial
+     * letter), while resolve() keeps filling the icon slot with the fallback
+     * mark. Two entry points, two documented semantics, one keyword table.
+     */
+    @Test
+    fun resolveExactReturnsNullForUnrecognizedButResolveFallsBack() {
+        assertNull(ModelBrandResolver.resolveExact("custom-alias-7", null))
+        assertEquals("openai", ModelBrandResolver.resolve("custom-alias-7", null))
+        assertEquals("zhipu", ModelBrandResolver.resolveExact("glm-5.3"))
+        assertNull(ModelBrandResolver.resolveExact(null, null))
+        // Chinese aliases merged from the retired GroupChat table.
+        assertEquals("zhipu", ModelBrandResolver.resolveExact(null, "智谱清言"))
+        assertEquals("kimi", ModelBrandResolver.resolveExact(null, "月之暗面"))
+    }
+
+    /**
+     * [T-brand-avatar-single-source] VendorMark must render the SAME
+     * ModelBrandIcon the picker uses — the retired hand-drawn geometric glyphs
+     * were a second truth source that drifted from the real logos. Guard
+     * against reintroducing a private drawing path.
+     */
+    @Test
+    fun vendorMarkRendersBrandIconsNotHandDrawnGlyphs() {
+        val source = com.openminis.app.ProductionSources.read("ui/chat/VendorMark.kt")
+        assertTrue(
+            "VendorMark must delegate to ModelBrandIcon",
+            source.contains("ModelBrandIcon("),
+        )
+        assertTrue(
+            "VendorMark must NOT reintroduce hand-drawn vendor glyphs",
+            !source.contains("vendorPaint") && !source.contains("VendorPaint"),
+        )
+    }
+
+    /**
+     * [T-brand-single-entry] GroupChat.vendorKey must delegate to
+     * ModelBrandResolver.resolveExact — no second keyword table.
+     */
+    @Test
+    fun groupChatVendorKeyDelegatesToTheResolver() {
+        val source = com.openminis.app.ProductionSources.read("tools/GroupChat.kt")
+        assertTrue(
+            "vendorKey must call ModelBrandResolver.resolveExact",
+            source.contains("ModelBrandResolver.resolveExact"),
+        )
+        assertTrue(
+            "GroupChat must not keep a private vendor alias table",
+            !source.contains("VENDOR_ALIASES"),
+        )
+    }
+
     // ── Keyword scoring ───────────────────────────────────────────────
 
     @Test
