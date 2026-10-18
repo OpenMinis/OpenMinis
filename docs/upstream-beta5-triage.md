@@ -222,6 +222,18 @@ beta.5 共 **32 项**（8 新功能 + 21 修复 + 3 视觉打磨），beta.4 遗
 baseline 已同步收紧（只降不升）。新增/改动单测 5 个类 48 例（`ToolIdCompatTest` 12、`StreamFollowDeadbandTest` 10、
 `ScheduledModelResolverTest` 10、`ModelRefreshPlannerTest` 6、`BackupHistoryLogCapTest` 10）。
 
+**实际交付记录（2026-10-19，main = `2e247c6f`）**
+
+| 批次 | PR | squash 提交 | 增量 | 内容 |
+| --- | --- | --- | --- | --- |
+| 1 Markdown 表格/列宽 | #82 | `064e7935` | 9 files +646/−34 | 移植 `TableColumnPlanner`（含 iOS 金样本），流式表格读取分隔行对齐并逐列渲染，列宽按内容比例 |
+| 2 看图/存储 | #83 | `1dfbce54` | 23 files +549/−10 | `ImageExport`（原始字节保存、按字节嗅探 MIME、MediaStore Q+/legacy），两个看图入口保留原格式与元数据并新增「原图」；`StorageCleaner` + 日志缓存清理入口 |
+| 3 容器 DNS | #85 | `4848c530` | 27 files +791/−39 | `ContainerDns`（解析/校验/plan）、`refreshDns` 按模式分支、`network.dnsMode`/`network.dnsCustomServers` 字段、Rootfs 设置页容器网络段；顺带把 `ConfigValue.decode` 改严格 |
+| 4 聊天页门控件 | #86 | `668569d5` | 26 files +781/−18 | 接线 3 件（`FallbackPulseGate`/`SheetScrollGuard`/`SendReturnModeMenu`）+ 15 件逐件判定（见下表） |
+| 4b(1/5) 无主 RUNNING 降级 | #87 | `2e247c6f` | 8 files +417/−20 | `OrphanedRunningToolGate` 纯策略 + `demoteOrphanedToolSpinners`，接在 `restoreArchivedMessages` 展示列表；16 例单测 |
+
+批次 4b 剩余 4 件（未实现）：`SelectionDocumentOrder`（需引入 `DocOrder`(行, 子序号) 替换按屏幕 y 排序）、`ContextUsageHint(+Ui)`（需 ChatScreen 展示位）、`EmptyTurnRecovery`、`BubbleRowLocator`。
+
 **批次 4（聊天页门控件）依赖判定（2026-10-19，分支 `feat/batch4-chat-gates`）**
 
 上游 15 件门控件逐件比对后，实际可落地面比路线图设想的窄，原因分三类：
