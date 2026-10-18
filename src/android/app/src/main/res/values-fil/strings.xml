@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">Cache Read</string>
     <string name="usage_label_cache_creation">Paggawa ng Cache</string>
     <string name="usage_label_cache_hit_rate">Cache Hit Rate</string>
+    <string name="usage_cache_health_title">Kalusugan ng cache</string>
+    <string name="usage_cache_health_rate">Rate ng cache hit</string>
+    <string name="usage_cache_health_unreported">Hindi iniuulat</string>
+    <string name="usage_cache_health_enhanced_title">Pinahusay na cache (TTL 1 oras)</string>
+    <string name="usage_cache_health_enhanced_body">Opisyal na Anthropic lang · nananatili sa cache sa mahabang pahinga</string>
     <string name="usage_detail_input">Input</string>
     <string name="newer_db_title">Galing sa mas bagong bersyon ang data mo</string>
     <string name="newer_db_body">Mas luma ang kopyang ito ng Minis Ultra kaysa sa bersyong gumawa ng data mo, kaya hindi ito ligtas na mabubuksan.\n\nWalang nabura — buo pa rin ang mga usapan mo sa device na ito. I-install muli ang mas bagong bersyon ng Minis Ultra at babalik ang lahat.</string>

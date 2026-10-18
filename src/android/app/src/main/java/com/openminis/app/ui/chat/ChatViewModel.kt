@@ -2293,13 +2293,13 @@ class ChatViewModel(
 
     /**
      * [T-android-enhanced-cache] Enhanced Cache (1-hour Anthropic cache TTL)
-     * toggle. Per-VM memory state, NOT persisted — mirrors iOS
-     * `AIChatViewModel.enhancedCacheEnabled`. When true, the active turn's
-     * AnthropicProvider is stamped with `enhancedCache = true` just before the
-     * request (see the streamMessage choke point).
+     * toggle. DURABLE app-level preference (EnhancedCachePrefs, primed in
+     * MinisApp.onCreate) shared by the chat menu and the usage screen. Used to
+     * be per-VM memory and silently reset to OFF on every restart, which made
+     * a money-saving preference unusable.
      */
-    internal val _enhancedCacheEnabled = MutableStateFlow(false)
-    val enhancedCacheEnabled: StateFlow<Boolean> = _enhancedCacheEnabled.asStateFlow()
+    val enhancedCacheEnabled: StateFlow<Boolean> =
+        com.openminis.app.data.EnhancedCachePrefs.enabled
 
     /**
      * [T-android-enhanced-cache] Whether the Enhanced Cache menu item is shown.
@@ -2337,7 +2337,7 @@ class ChatViewModel(
      */
     fun confirmAndEnableEnhancedCache() {
         com.openminis.app.data.EnhancedCachePrefs.setConfirmed(context)
-        _enhancedCacheEnabled.value = true
+        com.openminis.app.data.EnhancedCachePrefs.setEnabled(context, true)
     }
 
     /**
@@ -2346,7 +2346,7 @@ class ChatViewModel(
      * acknowledged). The confirmation-gated first enable is handled in the UI.
      */
     fun setEnhancedCacheEnabled(enabled: Boolean) {
-        _enhancedCacheEnabled.value = enabled
+        com.openminis.app.data.EnhancedCachePrefs.setEnabled(context, enabled)
     }
 
     /**

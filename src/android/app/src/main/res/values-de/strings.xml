@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">Cache-Lesen</string>
     <string name="usage_label_cache_creation">Cache-Erstellung</string>
     <string name="usage_label_cache_hit_rate">Cache-Trefferquote</string>
+    <string name="usage_cache_health_title">Cache-Zustand</string>
+    <string name="usage_cache_health_rate">Cache-Trefferrate</string>
+    <string name="usage_cache_health_unreported">Nicht gemeldet</string>
+    <string name="usage_cache_health_enhanced_title">Erweiterter Cache (TTL 1 Std.)</string>
+    <string name="usage_cache_health_enhanced_body">Nur offizielles Anthropic · bleibt auch bei langen Pausen im Cache</string>
     <string name="usage_detail_input">Eingabe</string>
     <string name="newer_db_title">Ihre Daten stammen aus einer neueren Version</string>
     <string name="newer_db_body">Diese Kopie von Minis Ultra ist älter als die Version, die Ihre Daten erstellt hat, und kann sie daher nicht sicher öffnen.\n\nEs wurde nichts gelöscht — Ihre Unterhaltungen sind auf diesem Gerät unversehrt. Installieren Sie die neuere Version von Minis Ultra erneut, dann ist alles wieder da.</string>

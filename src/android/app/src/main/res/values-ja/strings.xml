@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">キャッシュ読み取り</string>
     <string name="usage_label_cache_creation">キャッシュ作成</string>
     <string name="usage_label_cache_hit_rate">キャッシュヒット率</string>
+    <string name="usage_cache_health_title">キャッシュ状態</string>
+    <string name="usage_cache_health_rate">キャッシュヒット率</string>
+    <string name="usage_cache_health_unreported">未報告</string>
+    <string name="usage_cache_health_enhanced_title">拡張キャッシュ（1時間 TTL）</string>
+    <string name="usage_cache_health_enhanced_body">公式 Anthropic のみ・長い間隔でもキャッシュ維持</string>
     <string name="usage_detail_input">入力</string>
     <string name="newer_db_title">データが新しいバージョンで作成されています</string>
     <string name="newer_db_body">この Minis Ultra は、データを作成したバージョンより古いため、安全に開くことができません。\n\n何も削除されていません。会話はこの端末に無事残っています。新しいバージョンの Minis Ultra を再インストールすれば、すべて元どおりになります。</string>

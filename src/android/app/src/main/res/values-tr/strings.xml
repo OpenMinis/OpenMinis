@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">Önbellek Okuma</string>
     <string name="usage_label_cache_creation">Önbellek Oluşturma</string>
     <string name="usage_label_cache_hit_rate">Önbellek İsabet Oranı</string>
+    <string name="usage_cache_health_title">Önbellek durumu</string>
+    <string name="usage_cache_health_rate">Önbellek isabet oranı</string>
+    <string name="usage_cache_health_unreported">Bildirilmedi</string>
+    <string name="usage_cache_health_enhanced_title">Gelişmiş önbellek (1 saat TTL)</string>
+    <string name="usage_cache_health_enhanced_body">Yalnızca resmi Anthropic · uzun aralarda da önbellekte kalır</string>
     <string name="usage_detail_input">Giriş</string>
     <string name="newer_db_title">Verileriniz daha yeni bir sürümden geliyor</string>
     <string name="newer_db_body">Minis Ultra\'in bu kopyası, verilerinizi oluşturan sürümden daha eski olduğu için onları güvenle açamıyor.\n\nHiçbir şey silinmedi — sohbetleriniz bu cihazda olduğu gibi duruyor. Minis Ultra\'in daha yeni sürümünü yeniden kurun, her şey yerinde olacak.</string>

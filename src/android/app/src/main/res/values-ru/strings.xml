@@ -894,6 +894,11 @@
     <string name="usage_label_cache_read">Чтение из кэша</string>
     <string name="usage_label_cache_creation">Создание кэша</string>
     <string name="usage_label_cache_hit_rate">Частота попаданий в кэш</string>
+    <string name="usage_cache_health_title">Состояние кэша</string>
+    <string name="usage_cache_health_rate">Процент попаданий</string>
+    <string name="usage_cache_health_unreported">Не сообщается</string>
+    <string name="usage_cache_health_enhanced_title">Расширенный кэш (TTL 1 ч)</string>
+    <string name="usage_cache_health_enhanced_body">Только официальный Anthropic · кэш сохраняется при долгих паузах</string>
     <string name="usage_detail_input">Входные</string>
     <string name="newer_db_title">Ваши данные созданы более новой версией</string>
     <string name="newer_db_body">Эта копия Minis Ultra старше той, что создала ваши данные, поэтому не может безопасно их открыть.\n\nНичего не удалено — ваши переписки на устройстве целы. Переустановите более новую версию Minis Ultra, и всё вернётся на место.</string>

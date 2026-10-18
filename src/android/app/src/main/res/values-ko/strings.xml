@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">캐시 읽기</string>
     <string name="usage_label_cache_creation">캐시 생성</string>
     <string name="usage_label_cache_hit_rate">캐시 적중률</string>
+    <string name="usage_cache_health_title">캐시 상태</string>
+    <string name="usage_cache_health_rate">캐시 적중률</string>
+    <string name="usage_cache_health_unreported">보고되지 않음</string>
+    <string name="usage_cache_health_enhanced_title">확장 캐시(1시간 TTL)</string>
+    <string name="usage_cache_health_enhanced_body">공식 Anthropic 전용 · 긴 공백에도 캐시 유지</string>
     <string name="usage_detail_input">입력</string>
     <string name="newer_db_title">데이터가 더 새로운 버전에서 만들어졌습니다</string>
     <string name="newer_db_body">이 Minis Ultra는 데이터를 만든 버전보다 오래되어 안전하게 열 수 없습니다.\n\n삭제된 것은 없습니다. 대화는 이 기기에 그대로 남아 있습니다. 더 새로운 버전의 Minis Ultra를 다시 설치하면 모두 그대로 나타납니다.</string>

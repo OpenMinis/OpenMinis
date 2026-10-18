@@ -658,7 +658,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // currentProvider was (re)assigned by the fallback loop.
                 // Non-Anthropic providers ignore it (cast fails silently).
                 (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
-                    ?.enhancedCache = _enhancedCacheEnabled.value
+                    ?.enhancedCache = com.openminis.app.data.EnhancedCachePrefs.isEnabled()
                 try {
                 // Route through effectiveAgentHistory() so a populated
                 // [_compactSummary] is prepended as a `<context-summary>`

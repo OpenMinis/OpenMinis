@@ -894,6 +894,11 @@
     <string name="usage_label_cache_read">Odczyt pamięci podręcznej</string>
     <string name="usage_label_cache_creation">Tworzenie pamięci podręcznej</string>
     <string name="usage_label_cache_hit_rate">Skuteczność pamięci podręcznej</string>
+    <string name="usage_cache_health_title">Kondycja pamięci podręcznej</string>
+    <string name="usage_cache_health_rate">Współczynnik trafień</string>
+    <string name="usage_cache_health_unreported">Nie raportowano</string>
+    <string name="usage_cache_health_enhanced_title">Rozszerzony cache (TTL 1 godz.)</string>
+    <string name="usage_cache_health_enhanced_body">Tylko oficjalne Anthropic · pozostaje w cache po długich przerwach</string>
     <string name="usage_detail_input">Wejście</string>
     <string name="newer_db_title">Twoje dane pochodzą z nowszej wersji</string>
     <string name="newer_db_body">Ta kopia aplikacji Minis Ultra jest starsza niż wersja, która utworzyła Twoje dane, więc nie może ich bezpiecznie otworzyć.\n\nNic nie zostało usunięte — Twoje rozmowy są nienaruszone na tym urządzeniu. Zainstaluj ponownie nowszą wersję Minis Ultra, a wszystko wróci.</string>

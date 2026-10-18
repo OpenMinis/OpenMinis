@@ -2539,6 +2539,11 @@
     <string name="usage_section_models">模型用量</string>
     <string name="usage_summary_window">统计范围：%1$s</string>
     <string name="usage_summary_cache_hit">缓存命中</string>
+    <string name="usage_cache_health_title">缓存健康</string>
+    <string name="usage_cache_health_rate">缓存命中率</string>
+    <string name="usage_cache_health_unreported">未报告缓存</string>
+    <string name="usage_cache_health_enhanced_title">增强缓存（1 小时 TTL）</string>
+    <string name="usage_cache_health_enhanced_body">仅官方 Anthropic · 长间隔仍命中</string>
     <string name="usage_detail_window_share">本期占比</string>
     <string name="usage_label_input_short">输入</string>
     <string name="usage_label_output_short">输出</string>

@@ -285,11 +285,10 @@ class MinisApp : Application(), ImageLoaderFactory {
         com.openminis.app.session.ChatRuntime.binder =
             com.openminis.app.ui.chat.ChatViewModelBinder(this)
 
-        // [T-codex-fast-mode] Capture the app context + warm the Fast Mode
-        // flag cache so the provider layer (no Context) can read it at
-        // request-build time — including offload / title-gen calls that
-        // never pass through a ViewModel.
+        // [T-codex-fast-mode] Warm the context-free flags the provider layer reads.
         com.openminis.app.data.FastModePrefs.prime(this)
+        // [T-android-enhanced-cache] Same pattern (durable + observable).
+        com.openminis.app.data.EnhancedCachePrefs.prime(this)
 
         // Warm the auto-compact flag the same way: the pre-send context check
         // and the in-chat one-tap opt-in both read it from places that have no

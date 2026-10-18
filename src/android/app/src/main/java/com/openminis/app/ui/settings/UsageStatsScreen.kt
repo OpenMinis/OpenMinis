@@ -398,6 +398,19 @@ fun UsageStatsScreen(
             UsageSummaryCard(grandTotal = grandTotal, timeRange = timeRange)
         }
 
+        // ── Cache health (follows the selected window) ──────────────────────
+        // [T-usage-cache-health] The money card: "am I actually paying cache
+        // prices?" — see UsageCacheHealth.kt.
+        SettingsSection(header = stringResource(R.string.usage_cache_health_title)) {
+            CacheHealthCard(
+                grandTotal = grandTotal,
+                providerRows = aggregateCacheByProvider(rows),
+                hasAnthropicUsage = rows.any {
+                    it.stats.provider.contains("anthropic", ignoreCase = true)
+                },
+            )
+        }
+
         // ── Trend chart (follows the selected window) ───────────────────────
         SettingsSection(
             header = stringResource(R.string.usage_chart_title) + " · " + usageRangeLabel(timeRange),
@@ -525,7 +538,7 @@ private fun SplitTokenValue(value: Long, color: Color) {
 }
 
 @Composable
-private fun UsagePill(label: String, value: String) {
+internal fun UsagePill(label: String, value: String) {
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(50))

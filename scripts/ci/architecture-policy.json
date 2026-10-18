@@ -13,7 +13,7 @@
   ],
   "baseline": {
     "src/android/app/src/main/java/com/openminis/app/MainActivity.kt": 851,
-    "src/android/app/src/main/java/com/openminis/app/MinisApp.kt": 1152,
+    "src/android/app/src/main/java/com/openminis/app/MinisApp.kt": 1151,
     "src/android/app/src/main/java/com/openminis/app/agent/PersonaPromptLibrary.kt": 859,
     "src/android/app/src/main/java/com/openminis/app/backup/BackupExporter.kt": 877,
     "src/android/app/src/main/java/com/openminis/app/backup/BackupImporter.kt": 1167,

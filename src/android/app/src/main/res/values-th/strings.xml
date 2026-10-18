@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">อ่านแคช</string>
     <string name="usage_label_cache_creation">สร้างแคช</string>
     <string name="usage_label_cache_hit_rate">อัตราการใช้แคชสำเร็จ</string>
+    <string name="usage_cache_health_title">สุขภาพแคช</string>
+    <string name="usage_cache_health_rate">อัตราการใช้แคช</string>
+    <string name="usage_cache_health_unreported">ไม่รายงาน</string>
+    <string name="usage_cache_health_enhanced_title">แคชแบบขยาย (TTL 1 ชั่วโมง)</string>
+    <string name="usage_cache_health_enhanced_body">Anthropic ทางการเท่านั้น · แคชคงอยู่แม้หยุดนาน</string>
     <string name="usage_detail_input">อินพุต</string>
     <string name="newer_db_title">ข้อมูลของคุณมาจากเวอร์ชันที่ใหม่กว่า</string>
     <string name="newer_db_body">Minis Ultra สำเนานี้เก่ากว่าเวอร์ชันที่สร้างข้อมูลของคุณ จึงเปิดข้อมูลอย่างปลอดภัยไม่ได้\n\nไม่มีข้อมูลใดถูกลบ — บทสนทนาของคุณยังอยู่ครบในอุปกรณ์นี้ ติดตั้ง Minis Ultra เวอร์ชันที่ใหม่กว่าอีกครั้งแล้วทุกอย่างจะกลับมา</string>

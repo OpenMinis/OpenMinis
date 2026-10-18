@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">Lecture du cache</string>
     <string name="usage_label_cache_creation">Création du cache</string>
     <string name="usage_label_cache_hit_rate">Taux de succès du cache</string>
+    <string name="usage_cache_health_title">État du cache</string>
+    <string name="usage_cache_health_rate">Taux de réussite</string>
+    <string name="usage_cache_health_unreported">Non signalé</string>
+    <string name="usage_cache_health_enhanced_title">Cache amélioré (TTL 1 h)</string>
+    <string name="usage_cache_health_enhanced_body">Anthropic officiel uniquement · reste en cache après de longues pauses</string>
     <string name="usage_detail_input">Entrée</string>
     <string name="newer_db_title">Vos données proviennent d\'une version plus récente</string>
     <string name="newer_db_body">Cette copie de Minis Ultra est plus ancienne que celle qui a créé vos données, elle ne peut donc pas les ouvrir sans risque.\n\nRien n\'a été supprimé — vos conversations sont intactes sur cet appareil. Réinstallez la version plus récente de Minis Ultra et tout sera de nouveau là.</string>

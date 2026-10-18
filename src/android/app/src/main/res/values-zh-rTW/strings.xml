@@ -956,6 +956,11 @@
     <string name="usage_label_cache_read">快取讀取</string>
     <string name="usage_label_cache_creation">快取建立</string>
     <string name="usage_label_cache_hit_rate">快取命中率</string>
+    <string name="usage_cache_health_title">快取健康度</string>
+    <string name="usage_cache_health_rate">快取命中率</string>
+    <string name="usage_cache_health_unreported">未回報</string>
+    <string name="usage_cache_health_enhanced_title">增強快取（1 小時 TTL）</string>
+    <string name="usage_cache_health_enhanced_body">僅官方 Anthropic · 長間隔仍保有快取</string>
     <string name="usage_detail_input">輸入</string>
     <string name="newer_db_title">您的資料來自較新的版本</string>
     <string name="newer_db_body">這個 Minis Ultra 版本比建立您資料的版本還舊，因此無法安全地開啟它。\n\n沒有任何資料被刪除——您的對話在這台裝置上完好無缺。重新安裝較新版的 Minis Ultra，一切就會回來。</string>

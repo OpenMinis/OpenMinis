@@ -893,6 +893,11 @@
     <string name="usage_label_cache_read">Citiri din cache</string>
     <string name="usage_label_cache_creation">Creare de cache</string>
     <string name="usage_label_cache_hit_rate">Rata de succes a cache-ului</string>
+    <string name="usage_cache_health_title">Starea cache-ului</string>
+    <string name="usage_cache_health_rate">Rata de succes</string>
+    <string name="usage_cache_health_unreported">Neraportat</string>
+    <string name="usage_cache_health_enhanced_title">Cache avansat (TTL 1 oră)</string>
+    <string name="usage_cache_health_enhanced_body">Doar Anthropic oficial · rămâne în cache la pauze lungi</string>
     <string name="usage_detail_input">Intrare</string>
     <string name="newer_db_title">Datele tale provin dintr-o versiune mai nouă</string>
     <string name="newer_db_body">Această copie a aplicației Minis Ultra este mai veche decât versiunea care ți-a creat datele, așa că nu le poate deschide în siguranță.\n\nNu s-a șters nimic — conversațiile tale sunt intacte pe acest dispozitiv. Reinstalează versiunea mai nouă de Minis Ultra și totul va fi la locul lui.</string>

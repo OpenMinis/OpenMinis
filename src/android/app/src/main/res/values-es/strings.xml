@@ -892,6 +892,11 @@
     <string name="usage_label_cache_read">Lectura de caché</string>
     <string name="usage_label_cache_creation">Creación de caché</string>
     <string name="usage_label_cache_hit_rate">Tasa de aciertos de caché</string>
+    <string name="usage_cache_health_title">Salud de caché</string>
+    <string name="usage_cache_health_rate">Tasa de aciertos</string>
+    <string name="usage_cache_health_unreported">No informado</string>
+    <string name="usage_cache_health_enhanced_title">Caché mejorada (TTL 1 h)</string>
+    <string name="usage_cache_health_enhanced_body">Solo Anthropic oficial · sigue en caché tras pausas largas</string>
     <string name="usage_detail_input">Entrada</string>
     <string name="newer_db_title">Tus datos son de una versión más reciente</string>
     <string name="newer_db_body">Esta copia de Minis Ultra es más antigua que la que creó tus datos, así que no puede abrirlos de forma segura.\n\nNo se ha eliminado nada: tus conversaciones siguen intactas en este dispositivo. Vuelve a instalar la versión más reciente de Minis Ultra y todo estará ahí.</string>
