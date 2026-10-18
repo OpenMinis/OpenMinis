@@ -768,16 +768,16 @@ fun SessionListScreen(
         }
     }
 
-    // [T-android-scheduled-tasks-full] Live count of scheduled tasks for the
-    // toolbar clock-icon badge. Observes the SharedPreferences-backed store so
-    // the badge updates when tasks are added / removed without a manual refresh.
-    // [T-android-scheduled-badge-enabled-only] Count only enabled tasks so the
-    // badge reflects what's actually active — disabled tasks don't contribute,
-    // and with none enabled the count is 0 (badge hidden by the >0 gate below).
+    // [T-android-scheduled-tasks-full] Live count of ENABLED tasks for the badge.
     val scheduledTaskCount by remember {
         com.openminis.app.scheduled.ScheduledTaskStore(context).observe()
             .map { list -> list.count { it.enabled } }
     }.collectAsState(initial = 0)
+    // [T-android-scheduled-badge-toggle] Opt out of the badge without deleting
+    // the task that keeps it lit.
+    val showScheduledBadge by remember {
+        com.openminis.app.scheduled.ScheduledBadgePrefs.flow(context)
+    }.collectAsState()
 
     Scaffold(
         topBar = {
@@ -798,7 +798,7 @@ fun SessionListScreen(
                         IconButton(onClick = onScheduledTasksClick) {
                             androidx.compose.material3.BadgedBox(
                                 badge = {
-                                    if (scheduledTaskCount > 0) {
+                                    if (showScheduledBadge && scheduledTaskCount > 0) {
                                         Badge { Text("$scheduledTaskCount") }
                                     }
                                 },

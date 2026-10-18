@@ -67,6 +67,35 @@ class RcloneDestinationsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * [T-android-backup-destination-edit] Rename a saved destination. Errors go
+     * to [error] instead of throwing at the UI: an invalid or duplicate name is
+     * a user-visible message, not a crash.
+     */
+    fun rename(oldName: String, newName: String) {
+        try {
+            store.rename(oldName, newName)
+            store.syncToRclone()
+            refresh()
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not rename the destination."
+        }
+    }
+
+    /** [T-android-backup-destination-edit] Point a saved destination elsewhere. */
+    fun updatePath(name: String, path: String) {
+        try {
+            if (!store.updatePath(name, path)) {
+                _error.value = "That destination no longer exists."
+                return
+            }
+            store.syncToRclone()
+            refresh()
+        } catch (e: Exception) {
+            _error.value = e.message ?: "Could not change the destination folder."
+        }
+    }
+
+    /**
      * Register a candidate remote in rclone's in-memory config and list its
      * root, so the add-server form can browse for a destination folder BEFORE
      * the remote is permanently saved. Uses a temporary name; the real save

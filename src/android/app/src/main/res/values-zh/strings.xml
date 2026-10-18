@@ -2541,4 +2541,9 @@
     <string name="usage_detail_window_share">本期占比</string>
     <string name="usage_label_input_short">输入</string>
     <string name="usage_label_output_short">输出</string>
+    <string name="picker_unavailable_toast">此设备上没有可打开该选择器的应用。</string>
+    <string name="settings_scheduled_badge_title">定时任务角标</string>
+    <string name="settings_scheduled_badge_footer">在首页时钟图标上显示启用中的定时任务数量。</string>
+    <string name="backup_dest_edit_title">编辑目标</string>
+    <string name="backup_dest_folder">文件夹</string>
 </resources>

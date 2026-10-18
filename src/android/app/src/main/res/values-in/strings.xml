@@ -1901,4 +1901,9 @@
     <string name="usage_detail_window_share">Bagian periode ini</string>
     <string name="usage_label_input_short">Input</string>
     <string name="usage_label_output_short">Output</string>
+    <string name="picker_unavailable_toast">Tidak ada aplikasi di perangkat ini yang dapat membuka pemilih tersebut.</string>
+    <string name="settings_scheduled_badge_title">Lencana tugas terjadwal</string>
+    <string name="settings_scheduled_badge_footer">Tampilkan di ikon jam beranda berapa banyak tugas terjadwal yang aktif.</string>
+    <string name="backup_dest_edit_title">Edit tujuan</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

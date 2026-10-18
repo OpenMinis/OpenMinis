@@ -1906,4 +1906,9 @@
     <string name="usage_detail_window_share">Доля за период</string>
     <string name="usage_label_input_short">Ввод</string>
     <string name="usage_label_output_short">Вывод</string>
+    <string name="picker_unavailable_toast">На этом устройстве нет приложения, которое может открыть этот выбор.</string>
+    <string name="settings_scheduled_badge_title">Значок запланированных задач</string>
+    <string name="settings_scheduled_badge_footer">Показывает на значке часов на главном экране число активных запланированных задач.</string>
+    <string name="backup_dest_edit_title">Изменить назначение</string>
+    <string name="backup_dest_folder">Папка</string>
 </resources>

@@ -20,6 +20,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -137,6 +139,9 @@ fun SpeechPlayerCapsule(
     val enabled by VoiceOutputState.isEnabled.collectAsState()
     val muted by VoiceOutputState.isMuted.collectAsState()
     val speed by VoiceOutputState.speed.collectAsState()
+    // [T-android-tts-volume] 0–200%, owned by VoiceOutputState so the player and
+    // the system-TTS path read the same number this slider writes.
+    val volume by VoiceOutputState.volume.collectAsState()
     val speaking by VoiceOutputState.isSpeaking.collectAsState()
     val synthesizing by VoiceOutputState.isSynthesizing.collectAsState()
     val modelLabel by VoiceOutputState.activeModelLabel.collectAsState()
@@ -167,6 +172,9 @@ fun SpeechPlayerCapsule(
     var expanded by remember { mutableStateOf(false) }
     var idleToken by remember { mutableIntStateOf(0) }
     var showModelPicker by remember { mutableStateOf(false) }
+    // [T-android-tts-volume] The slider row only exists while the user is
+    // actually adjusting it — the capsule's resting size must not change.
+    var showVolume by remember { mutableStateOf(false) }
 
     // First real utterance → collapse to compact (iOS onChange(isReadingAloud)).
     LaunchedEffect(speaking) { if (speaking && expanded) expanded = false }
@@ -343,18 +351,34 @@ fun SpeechPlayerCapsule(
                 label = "capsule",
             ) { isExpanded ->
                 if (isExpanded) {
-                    ExpandedCapsule(
-                        muted = muted,
-                        synthesizing = synthesizing,
-                        speed = speed,
-                        modelLabel = modelLabel
-                            ?: systemVoiceLabel
-                            ?: stringResource(R.string.tts_capsule_system_engine),
-                        onMuteToggle = { VoiceOutputState.setMuted(!muted); bumpIdle() },
-                        onModelTap = { showModelPicker = true; bumpIdle() },
-                        onSpeedTap = { VoiceOutputState.nextSpeed(); bumpIdle() },
-                        onClose = { VoiceOutputState.setEnabled(false) },
-                    )
+                    // [T-android-tts-volume] The slider opens ABOVE the capsule
+                    // (a Column, so the capsule's own 40dp frame is unchanged
+                    // while the row is hidden) and closes on the chip again.
+                    Column(horizontalAlignment = Alignment.End) {
+                        if (showVolume) {
+                            VolumeControlRow(
+                                volume = volume,
+                                onVolumeChange = {
+                                    VoiceOutputState.setVolume(it)
+                                    bumpIdle()
+                                },
+                            )
+                        }
+                        ExpandedCapsule(
+                            muted = muted,
+                            synthesizing = synthesizing,
+                            speed = speed,
+                            volume = volume,
+                            modelLabel = modelLabel
+                                ?: systemVoiceLabel
+                                ?: stringResource(R.string.tts_capsule_system_engine),
+                            onMuteToggle = { VoiceOutputState.setMuted(!muted); bumpIdle() },
+                            onModelTap = { showModelPicker = true; bumpIdle() },
+                            onSpeedTap = { VoiceOutputState.nextSpeed(); bumpIdle() },
+                            onVolumeTap = { showVolume = !showVolume; bumpIdle() },
+                            onClose = { VoiceOutputState.setEnabled(false) },
+                        )
+                    }
                 } else {
                     CompactSpeaker(
                         muted = muted,
@@ -439,10 +463,12 @@ private fun ExpandedCapsule(
     muted: Boolean,
     synthesizing: Boolean,
     speed: Float,
+    volume: Float,
     modelLabel: String,
     onMuteToggle: () -> Unit,
     onModelTap: () -> Unit,
     onSpeedTap: () -> Unit,
+    onVolumeTap: () -> Unit,
     onClose: () -> Unit,
 ) {
     // [T-android-tts-capsule-height] Height is PINNED to the compact button's
@@ -533,6 +559,36 @@ private fun ExpandedCapsule(
             )
         }
         Spacer(Modifier.width(10.dp))
+        // [T-android-tts-volume] Volume chip — shows the current percentage and
+        // toggles the slider row above. Fixed size for the same reason the speed
+        // chip is: "5%" → "200%" must not jitter the capsule width.
+        Box(
+            Modifier
+                .size(width = 46.dp, height = 22.dp)
+                .background(
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.15f),
+                    RoundedCornerShape(50),
+                )
+                .clickable(onClick = onVolumeTap),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                VoiceOutputState.volumeLabel(volume),
+                maxLines = 1,
+                color = if (volume != 1.0f) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                style = androidx.compose.ui.text.TextStyle(
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 11.sp,
+                    platformStyle = androidx.compose.ui.text.PlatformTextStyle(
+                        includeFontPadding = false,
+                    ),
+                ),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
         // Close — read-replies fully off (capsule hides).
         Icon(
             Icons.Default.Close,
@@ -543,8 +599,52 @@ private fun ExpandedCapsule(
     }
 }
 
-/** Speaker icon with a rotating 75° arc while cloud TTS is synthesizing. */
+/**
+ * [T-android-tts-volume] The read-aloud volume slider, shown above the capsule.
+ *
+ * Range is 0–200% (upstream parity). Above 100% the extra gain is applied by
+ * [com.openminis.app.speech.ReadAloudPlayer] through a LoudnessEnhancer, because
+ * every Android volume parameter tops out at 1.0; the percentage here is the
+ * gain the user asked for, not a raw platform value.
+ */
 @Composable
+private fun VolumeControlRow(volume: Float, onVolumeChange: (Float) -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .width(240.dp)
+            .padding(bottom = 8.dp)
+            .background(
+                MaterialTheme.colorScheme.surface.copy(alpha = 0.95f),
+                RoundedCornerShape(50),
+            )
+            .border(0.5.dp, Color.Gray.copy(alpha = 0.25f), RoundedCornerShape(50))
+            .padding(start = 12.dp, end = 12.dp),
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.VolumeUp,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(14.dp),
+        )
+        Slider(
+            value = volume,
+            onValueChange = onVolumeChange,
+            valueRange = VoiceOutputState.VOLUME_MIN..VoiceOutputState.VOLUME_MAX,
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 6.dp),
+        )
+        Text(
+            VoiceOutputState.volumeLabel(volume),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Speaker icon with a rotating 75° arc while cloud TTS is synthesizing. */@Composable
 private fun SpeakerGlyph(muted: Boolean, synthesizing: Boolean, ring: androidx.compose.ui.unit.Dp) {
     Box(contentAlignment = Alignment.Center) {
         Icon(

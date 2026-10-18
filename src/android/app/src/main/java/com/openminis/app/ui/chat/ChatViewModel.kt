@@ -3673,6 +3673,7 @@ class ChatViewModel(
             }
         }
         loadSession()
+        restoreComposerDraftIfAny() // [T-android-composer-draft-restore]
         // [T-session-paused-badge-active-false-positive] Drive the session-list
         // PAUSED badge directly off canResume — the authoritative "this session
         // is interrupted (tap Resume)" flag. This is the single chokepoint over
@@ -5645,6 +5646,7 @@ class ChatViewModel(
     internal fun trimIdleBrowser() { _browserTabPoolRef?.trimIdleTabs() }
 
     override fun onCleared() {
+        saveComposerDraftIfAny() // [T-android-composer-draft-restore]
         unsubscribeSafeMode?.invoke()
         unsubscribeSafeMode = null
         _browserTabPoolRef?.dispose()
@@ -5662,9 +5664,6 @@ class ChatViewModel(
      * T-android-new-chat-empty-residue: when the user leaves the chat screen,
      * drop sessions that were materialised in the DB (e.g. via a thinking /
      * memory toggle in `ensureSession()`) but never received a real message.
-     * Without this hook, tapping "New chat" → toggling a session-scoped
-     * setting → exiting leaves an empty row at the top of the session list.
-     *
      * Called from ChatScreen's onDispose. Gates:
      *   - realSessionId must be non-empty (a row was actually inserted)
      *   - not currently streaming (background agent work would be lost)

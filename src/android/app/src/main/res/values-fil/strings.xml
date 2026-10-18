@@ -1896,4 +1896,9 @@
     <string name="usage_detail_window_share">Bahagi ng panahong ito</string>
     <string name="usage_label_input_short">Input</string>
     <string name="usage_label_output_short">Output</string>
+    <string name="picker_unavailable_toast">Walang app sa device na ito na makakabukas ng picker na iyon.</string>
+    <string name="settings_scheduled_badge_title">Badge ng naka-iskedyul na gawain</string>
+    <string name="settings_scheduled_badge_footer">Ipakita sa icon ng orasan sa home kung ilang naka-iskedyul na gawain ang aktibo.</string>
+    <string name="backup_dest_edit_title">I-edit ang destination</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

@@ -425,7 +425,7 @@ private fun MarkdownPreview(item: FileItem) {
             try {
                 val bytes = item.file.readBytes()
                 val cap = if (bytes.size > MAX_TEXT_PREVIEW_BYTES) MAX_TEXT_PREVIEW_BYTES else bytes.size
-                content = String(bytes, 0, cap, Charsets.UTF_8)
+                content = PreviewTextGuard.clamp(String(bytes, 0, cap, Charsets.UTF_8))
             } catch (e: Exception) {
                 error = e.message ?: "Failed to read file"
                 AppLogger.warning("FilePreview", "markdown read failed for ${item.name}: ${e.message}")
@@ -437,20 +437,19 @@ private fun MarkdownPreview(item: FileItem) {
         error != null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(error!!, color = MaterialTheme.colorScheme.error)
         }
-        content != null -> com.openminis.app.ui.chat.MarkdownDocument(
-            // T285-md: was StreamingMarkdownText inside verticalScroll{}, which
-            // composed the full document up-front and stalled the chat-tap →
-            // preview transition with main-thread parseInline scans across
-            // all blocks (~150-300ms for a multi-KB markdown). MarkdownDocument
-            // uses LazyColumn so only viewport-visible blocks compose on the
-            // first frame — transition completes before the off-screen blocks
-            // are touched.
-            content = content!!,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                horizontal = 16.dp, vertical = 12.dp,
-            ),
-        )
+        content != null -> com.openminis.app.ui.markdown.DefaultMarkdownLinks {
+            // T285-md: MarkdownDocument (LazyColumn) composes only the blocks in
+            // the viewport, so the tap → preview transition stays fast on big
+            // files. [T-android-md-doc-links] The wrapper supplies the URL
+            // handler, without which links rendered here were inert.
+            com.openminis.app.ui.chat.MarkdownDocument(
+                content = content!!,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 16.dp, vertical = 12.dp,
+                ),
+            )
+        }
         else -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text(stringResource(R.string.loading), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }

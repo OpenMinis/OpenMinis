@@ -1496,27 +1496,25 @@ class BrowserUseManager(
         deferred.await()
     }
 
-    private suspend fun evaluateAndReturn(js: String): BrowserActionResult {
-        return try {
-            val raw = evaluateJavascript(js)
-            val json = try { JSONObject(raw) } catch (_: Exception) { null }
-            if (json != null) {
-                if (json.has("error")) {
-                    BrowserActionResult.error(json.getString("error"))
-                } else {
-                    BrowserActionResult(text = formatJSONResult(json))
-                }
-            } else {
-                BrowserActionResult(text = raw)
-            }
-        } catch (e: Exception) {
-            BrowserActionResult.error("JavaScript error: ${e.message}")
-        }
-    }
+    /** Alias of [evaluateJSAndParse]; the bodies were identical copies and one
+     *  fix could miss the other ([T-browser-js-null-result] was that miss). */
+    private suspend fun evaluateAndReturn(js: String): BrowserActionResult =
+        evaluateJSAndParse(js)
 
     private suspend fun evaluateJSAndParse(js: String): BrowserActionResult {
         return try {
             val raw = evaluateJavascript(js)
+            // [T-browser-js-null-result] WebView reports "no value" as the
+            // literal "null": a missing document.body (blank / non-HTML page)
+            // and a throwing script both land here. Passing it through put the
+            // bare word "null" in the tool result — nothing actionable.
+            if (raw.isBlank() || raw == "null" || raw == "undefined") {
+                return BrowserActionResult.error(
+                    "The page returned no value. Its document.body is missing " +
+                        "(blank or non-HTML page) or the injected script threw. " +
+                        "Check the URL, wait for the page to finish loading, then retry.",
+                )
+            }
             val json = try { JSONObject(raw) } catch (_: Exception) { null }
             if (json != null) {
                 if (json.has("error")) {

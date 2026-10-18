@@ -407,7 +407,13 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
 
     private fun buildSpeechParams(): android.os.Bundle {
         return android.os.Bundle().apply {
-            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, speechVolume)
+            // [T-android-tts-volume] The capsule's 0–200% slider folds into this
+            // 0–1 parameter; the >100% half can't be expressed here and is
+            // applied as gain on the media path instead (ReadAloudPlayer).
+            putFloat(
+                TextToSpeech.Engine.KEY_PARAM_VOLUME,
+                (speechVolume * VoiceOutputState.volumeFraction()).coerceIn(0f, 1f),
+            )
         }
     }
 

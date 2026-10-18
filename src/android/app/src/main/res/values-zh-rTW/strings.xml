@@ -1987,4 +1987,9 @@
     <string name="usage_detail_window_share">本期佔比</string>
     <string name="usage_label_input_short">輸入</string>
     <string name="usage_label_output_short">輸出</string>
+    <string name="picker_unavailable_toast">此裝置上沒有可開啟該選擇器的應用程式。</string>
+    <string name="settings_scheduled_badge_title">排程任務標記</string>
+    <string name="settings_scheduled_badge_footer">在主畫面時鐘圖示上顯示啟用中的排程任務數量。</string>
+    <string name="backup_dest_edit_title">編輯目的地</string>
+    <string name="backup_dest_folder">資料夾</string>
 </resources>

@@ -1896,4 +1896,9 @@
     <string name="usage_detail_window_share">Participação neste período</string>
     <string name="usage_label_input_short">Entrada</string>
     <string name="usage_label_output_short">Saída</string>
+    <string name="picker_unavailable_toast">Nenhum aplicativo neste dispositivo pode abrir esse seletor.</string>
+    <string name="settings_scheduled_badge_title">Distintivo de tarefas agendadas</string>
+    <string name="settings_scheduled_badge_footer">Mostra no ícone de relógio da tela inicial quantas tarefas agendadas estão ativas.</string>
+    <string name="backup_dest_edit_title">Editar destino</string>
+    <string name="backup_dest_folder">Pasta</string>
 </resources>

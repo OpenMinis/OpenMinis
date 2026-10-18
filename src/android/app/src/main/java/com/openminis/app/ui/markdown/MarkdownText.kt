@@ -221,7 +221,6 @@ private fun CodeBlockView(
     block: MarkdownParser.Block.CodeBlock,
     onRunCode: ((lang: String, code: String) -> Unit)? = null,
 ) {
-    val context = LocalContext.current
     val codeColor = Color(0xFF4EC9B0) // Green code text
     val bgColor = MaterialTheme.colorScheme.surfaceContainerHighest
     // Button shows only when a handler exists AND the fence language is one
@@ -287,20 +286,8 @@ private fun CodeBlockView(
                     }
                 }
             }
-            IconButton(
-                onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("code", block.code))
-                },
-                modifier = Modifier.height(28.dp),
-            ) {
-                Icon(
-                    Icons.Default.ContentCopy,
-                    contentDescription = "Copy code",
-                    modifier = Modifier.height(16.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            // Extracted to CodeCopyButton: translated label + copy feedback.
+            CodeCopyButton(block.code)
         }
 
         // Scrollable code content

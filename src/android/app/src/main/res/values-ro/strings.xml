@@ -1900,4 +1900,9 @@
     <string name="usage_detail_window_share">Pondere în această perioadă</string>
     <string name="usage_label_input_short">Intrare</string>
     <string name="usage_label_output_short">Ieșire</string>
+    <string name="picker_unavailable_toast">Nicio aplicație de pe acest dispozitiv nu poate deschide acel selector.</string>
+    <string name="settings_scheduled_badge_title">Insigna activităților programate</string>
+    <string name="settings_scheduled_badge_footer">Arată pe pictograma ceas din ecranul principal câte activități programate sunt active.</string>
+    <string name="backup_dest_edit_title">Editează destinația</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

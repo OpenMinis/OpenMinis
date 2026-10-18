@@ -1896,4 +1896,9 @@
     <string name="usage_detail_window_share">Bahagian tempoh ini</string>
     <string name="usage_label_input_short">Input</string>
     <string name="usage_label_output_short">Output</string>
+    <string name="picker_unavailable_toast">Tiada apl pada peranti ini yang boleh membuka pemilih itu.</string>
+    <string name="settings_scheduled_badge_title">Lencana tugasan berjadual</string>
+    <string name="settings_scheduled_badge_footer">Tunjukkan pada ikon jam di laman utama berapa banyak tugasan berjadual yang aktif.</string>
+    <string name="backup_dest_edit_title">Edit destinasi</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

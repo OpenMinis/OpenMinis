@@ -471,6 +471,9 @@ class ReadAloudPlayer(context: Context) {
                     true
                 }
                 mp.prepare()
+                // [T-android-tts-volume] 0–200% applied once the session id is
+                // valid (after prepare), so the enhancer attaches to this player.
+                applyVolumeTo(mp, VoiceOutputState.volume.value)
                 // [T-android-tts-rom-compat] start() FIRST, speed second, each
                 // in its own guard. The previous order relied on
                 // setPlaybackParams-on-prepared implicitly starting playback —
@@ -612,12 +615,66 @@ class ReadAloudPlayer(context: Context) {
         (text.length * 90L + 400L).coerceIn(600L, 30_000L)
 
     private fun releasePlayer() {
+        releaseLoudnessEnhancer()
         player?.runCatching {
             if (isPlaying) stop()
             release()
         }
         player = null
         abandonAudioFocus()
+    }
+
+    // -- [T-android-tts-volume] read-aloud volume, 0–200% --
+
+    /**
+     * The >100% half of the capsule's volume slider.
+     *
+     * `MediaPlayer.setVolume` and `KEY_PARAM_VOLUME` both stop at 1.0, so the
+     * boost has to happen in the effect chain: a [LoudnessEnhancer] on the
+     * player's audio session adds gain in dB. Below 100% no enhancer is
+     * attached (and an existing one is released), so normal playback is
+     * untouched — the effect only exists while the user has asked for >100%.
+     */
+    private var loudnessEnhancer: android.media.audiofx.LoudnessEnhancer? = null
+
+    private fun applyVolumeTo(target: MediaPlayer, volume: Float) {
+        val fraction = VoiceOutputState.volumeFraction(volume)
+        runCatching { target.setVolume(fraction, fraction) }
+            .onFailure { AppLogger.warning(TAG, "setVolume($fraction) failed: $it") }
+
+        val gainMb = VoiceOutputState.volumeGainMillibels(volume)
+        if (gainMb <= 0) {
+            releaseLoudnessEnhancer()
+            return
+        }
+        val enhancer = loudnessEnhancer ?: runCatching {
+            android.media.audiofx.LoudnessEnhancer(target.audioSessionId)
+                .also { loudnessEnhancer = it }
+        }.onFailure {
+            AppLogger.warning(TAG, "LoudnessEnhancer unavailable, capping at 100%: $it")
+        }.getOrNull() ?: return
+        runCatching {
+            enhancer.setTargetGain(gainMb)
+            enhancer.enabled = true
+        }.onFailure { AppLogger.warning(TAG, "LoudnessEnhancer gain=${gainMb}mB rejected: $it") }
+    }
+
+    private fun releaseLoudnessEnhancer() {
+        loudnessEnhancer?.runCatching {
+            enabled = false
+            release()
+        }
+        loudnessEnhancer = null
+    }
+
+    /**
+     * Live volume change from the capsule: applied to whatever is playing now.
+     * A no-op when nothing is playing — the next [playBytes] reads the stored
+     * value itself.
+     */
+    fun applyVolume(volume: Float) {
+        val target = player ?: return
+        applyVolumeTo(target, volume)
     }
 
     /**

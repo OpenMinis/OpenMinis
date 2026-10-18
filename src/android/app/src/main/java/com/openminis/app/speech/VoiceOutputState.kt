@@ -29,6 +29,9 @@ object VoiceOutputState {
     private const val KEY_ENABLED = "readReplies"
     private const val KEY_MUTED = "readReplies.muted"
     private const val KEY_SPEED = "readReplies.speed"
+    // [T-android-tts-volume] 0.0–2.0; >1.0 needs post-processing because both
+    // TextToSpeech and MediaPlayer cap their own volume parameter at 1.0.
+    private const val KEY_VOLUME = "readReplies.volume"
     private const val KEY_SYSTEM_VOICE = "readReplies.systemVoice"
     private const val KEY_SYSTEM_VOICE_LABEL = "readReplies.systemVoiceLabel"
 
@@ -45,6 +48,19 @@ object VoiceOutputState {
     /** Speed cycle, matching iOS `VoiceOutputPreferences.speedSteps`. */
     val SPEED_STEPS = floatArrayOf(1.0f, 1.25f, 1.5f, 2.0f)
 
+    /**
+     * [T-android-tts-volume] Read-aloud volume, 0.0–2.0 (100% = normal).
+     *
+     * Upstream lets this go to 200%; on Android the platform caps its own
+     * volume knobs at 1.0, so the range above 100% is delivered by a
+     * [android.media.audiofx.LoudnessEnhancer] on the player's audio session
+     * (see ReadAloudPlayer) — the slider value is the gain we ask for, not a
+     * parameter we can pass straight through.
+     */
+    const val VOLUME_MIN = 0f
+    const val VOLUME_MAX = 2f
+    const val VOLUME_DEFAULT = 1f
+
     // @Volatile: init() runs from both ChatScreen's LaunchedEffect and
     // ReadAloudPlayer.init, and a player can be constructed off the main
     // thread — without it a caller could observe a half-published object.
@@ -59,6 +75,9 @@ object VoiceOutputState {
 
     private val _speed = MutableStateFlow(1.0f)
     val speed: StateFlow<Float> = _speed.asStateFlow()
+
+    private val _volume = MutableStateFlow(VOLUME_DEFAULT)
+    val volume: StateFlow<Float> = _volume.asStateFlow()
 
     /**
      * [T-android-tts-capsule-drag] Persisted drag offset in DP from the resting
@@ -175,6 +194,7 @@ object VoiceOutputState {
         _isEnabled.value = p.getBoolean(KEY_ENABLED, false)
         _isMuted.value = p.getBoolean(KEY_MUTED, false)
         _speed.value = p.getFloat(KEY_SPEED, 1.0f)
+        _volume.value = p.getFloat(KEY_VOLUME, VOLUME_DEFAULT).coerceIn(VOLUME_MIN, VOLUME_MAX)
         _systemVoiceName.value = p.getString(KEY_SYSTEM_VOICE, null)
         _systemVoiceLabel.value = p.getString(KEY_SYSTEM_VOICE_LABEL, null)
         // [T-android-tts-capsule-drag] Both keys must be present: a half-written
@@ -241,4 +261,37 @@ object VoiceOutputState {
 
     fun speedLabel(s: Float = _speed.value): String =
         if (s == s.toInt().toFloat()) "${s.toInt()}×" else "$s×"
+
+    /**
+     * [T-android-tts-volume] Persist the read-aloud volume. Clamped rather than
+     * validated: a Slider can hand back 1.9999999 at the end of its track.
+     */
+    fun setVolume(value: Float) {
+        val clamped = value.coerceIn(VOLUME_MIN, VOLUME_MAX)
+        if (_volume.value == clamped) return
+        _volume.value = clamped
+        prefs?.edit()?.putFloat(KEY_VOLUME, clamped)?.apply()
+        activePlayer?.applyVolume(clamped)
+    }
+
+    /** "0%" … "200%" — the label the capsule's volume chip shows. */
+    fun volumeLabel(v: Float = _volume.value): String =
+        "${Math.round(v * 100f)}%"
+
+    /**
+     * The platform-natives' 0–1 fraction, i.e. what [ReadAloudPlayer] passes to
+     * `MediaPlayer.setVolume` and [TextToSpeechManager] to
+     * `KEY_PARAM_VOLUME`. Anything above 1.0 is handled as extra gain instead.
+     */
+    fun volumeFraction(v: Float = _volume.value): Float = v.coerceIn(0f, 1f)
+
+    /**
+     * Linear-to-decibel gain for the LoudnessEnhancer, in millibels. 1.0 and
+     * below → 0 (no boost); 2.0 → +602 mB ≈ +6 dB ≈ double amplitude.
+     */
+    fun volumeGainMillibels(v: Float = _volume.value): Int {
+        if (v <= 1f) return 0
+        val db = 20.0 * kotlin.math.log10(v.toDouble())
+        return Math.round(db * 100.0).toInt()
+    }
 }

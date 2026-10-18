@@ -115,6 +115,35 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
             return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
         }
 
+        // [T-android-speech-engine-flag] `--engine` selects the recognition
+        // path. The provider (cloud ASR) engine only exists inside the in-app
+        // voice input: it streams through the bound voice-input model and needs
+        // the app's own audio session, so the CLI cannot drive it. Rather than
+        // accept the flag and silently do something else, `provider` gets an
+        // actionable answer and `auto` is defined as "system, labelled" — the
+        // caller always learns which engine actually ran.
+        val requestedEngine = (args.get("engine") ?: "system").trim().lowercase()
+        if (requestedEngine !in ENGINE_CHOICES) {
+            return NativeOffloadResult(
+                2,
+                "android-speech: --engine must be one of ${ENGINE_CHOICES.joinToString("|")}\n",
+            )
+        }
+        if (requestedEngine == "provider") {
+            val body = JSONObject()
+                .put("error", "engine_not_available_in_cli")
+                .put("requested_engine", requestedEngine)
+                .put(
+                    "message",
+                    "The provider (cloud ASR) engine only runs inside the app's voice " +
+                        "input, where it streams through the bound voice-input model. " +
+                        "The CLI transcribes with the system recognizer: re-run with " +
+                        "--engine system, or --engine auto to accept that fallback.",
+                )
+                .toString()
+            return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
+        }
+
         // --source: default mic, accept "mic" / "system-mic" / any /var/minis/... path.
         val source = args.get("source")
         if (source != null && !sourceIsMic(source)) {
@@ -154,7 +183,18 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
         val maxResults = args.getInt("max") ?: 3
         val durationSec = (args.getInt("duration") ?: args.getInt("timeout") ?: 30).coerceIn(1, 120)
         val text = recognize(lang, maxResults, durationSec.toLong())
-        return NativeOffloadResult(0, OffloadOutput.formatBody(text, args) + "\n")
+        // [T-android-speech-engine-flag] Stamp the engine fields onto whatever
+        // recognize() produced, including its error shapes — a caller that asked
+        // for `auto` still needs to know the system recognizer ran.
+        val labeled = try {
+            JSONObject(text)
+                .put("requested_engine", requestedEngine)
+                .put("engine_used", "system")
+                .toString()
+        } catch (_: Exception) {
+            text
+        }
+        return NativeOffloadResult(0, OffloadOutput.formatBody(labeled, args) + "\n")
     }
 
     /**
@@ -430,6 +470,7 @@ class SpeechOffloadHandler(private val context: Context) : NativeOffloadHandler 
 
     companion object {
         private const val TAG = "SpeechOffload"
+        private val ENGINE_CHOICES = listOf("system", "provider", "auto")
         private const val HELP = """android-speech — speech recognition (audio → text)
 
 Usage:
@@ -449,6 +490,11 @@ OPTIONS:
   --duration <sec>     Recording duration for mic source (default: 30)
   --language <locale>  Recognition locale (e.g. en-US, zh-CN)
   --max <N>            Maximum number of result candidates (default: 3)
+  --engine <e>         system (default) | provider | auto. `provider` needs the
+                       in-app voice input pipeline, so the CLI answers
+                       `error: engine_not_available_in_cli` and points at
+                       `system` / `auto`; the reply always carries
+                       requested_engine + engine_used.
 
 EXAMPLES:
   android-speech transcribe --duration 5

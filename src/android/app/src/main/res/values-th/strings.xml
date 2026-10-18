@@ -1896,4 +1896,9 @@
     <string name="usage_detail_window_share">สัดส่วนในช่วงนี้</string>
     <string name="usage_label_input_short">อินพุต</string>
     <string name="usage_label_output_short">เอาต์พุต</string>
+    <string name="picker_unavailable_toast">ไม่มีแอปในอุปกรณ์นี้ที่เปิดตัวเลือกนี้ได้</string>
+    <string name="settings_scheduled_badge_title">ป้ายงานที่ตั้งเวลาไว้</string>
+    <string name="settings_scheduled_badge_footer">แสดงจำนวนงานที่ตั้งเวลาไว้ซึ่งเปิดใช้งานบนไอคอนนาฬิกาหน้าจอหลัก</string>
+    <string name="backup_dest_edit_title">แก้ไขปลายทาง</string>
+    <string name="backup_dest_folder">โฟลเดอร์</string>
 </resources>

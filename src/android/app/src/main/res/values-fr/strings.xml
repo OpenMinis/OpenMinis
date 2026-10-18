@@ -1898,4 +1898,9 @@
     <string name="usage_detail_window_share">Part de cette période</string>
     <string name="usage_label_input_short">Entrée</string>
     <string name="usage_label_output_short">Sortie</string>
+    <string name="picker_unavailable_toast">Aucune application de cet appareil ne peut ouvrir ce sélecteur.</string>
+    <string name="settings_scheduled_badge_title">Badge des tâches planifiées</string>
+    <string name="settings_scheduled_badge_footer">Affiche sur l\'icône d\'horloge de l\'accueil le nombre de tâches planifiées actives.</string>
+    <string name="backup_dest_edit_title">Modifier la destination</string>
+    <string name="backup_dest_folder">Dossier</string>
 </resources>

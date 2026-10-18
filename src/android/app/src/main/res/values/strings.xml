@@ -2727,4 +2727,9 @@
     <string name="usage_detail_window_share">Share of this period</string>
     <string name="usage_label_input_short">Input</string>
     <string name="usage_label_output_short">Output</string>
+    <string name="picker_unavailable_toast">No app on this device can open that picker.</string>
+    <string name="settings_scheduled_badge_title">Scheduled task badge</string>
+    <string name="settings_scheduled_badge_footer">Show how many scheduled tasks are active on the home clock icon.</string>
+    <string name="backup_dest_edit_title">Edit Destination</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

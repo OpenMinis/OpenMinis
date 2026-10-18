@@ -105,6 +105,8 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
     }
 
     var adding by remember { mutableStateOf(false) }
+    // [T-android-backup-destination-edit] Destination being edited, if any.
+    var editing by remember { mutableStateOf<com.openminis.app.backup.remote.RcloneRemoteStore.Remote?>(null) }
     // Name of the destination saved by the last completed save, so the list
     // can confirm it. Cleared once acknowledged.
     var justSaved by remember { mutableStateOf<String?>(null) }
@@ -218,6 +220,13 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
             if (remotes.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 remotes.forEach { r ->
+                    // [T-android-backup-destination-edit] Rename / re-point an
+                    // existing destination without losing its enabled flag or
+                    // its stored credential.
+                    MinisOutlinedButton(
+                        onClick = { editing = r },
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    ) { Text(stringResource(R.string.backup_dest_edit_title)) }
                     MinisOutlinedButton(
                         onClick = { vm.remove(r.name) },
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -235,6 +244,77 @@ fun RcloneDestinationsScreen(onBack: () -> Unit) {
             }
         }
     }
+
+    // [T-android-backup-destination-edit] Rename / re-point a saved server.
+    val target = editing
+    if (target != null) {
+        EditDestinationDialog(
+            remote = target,
+            onDismiss = { editing = null },
+            onSave = { newName, newPath ->
+                editing = null
+                val renamed = newName.trim().takeIf { it.isNotEmpty() && it != target.name }
+                if (renamed != null) vm.rename(target.name, renamed)
+                val finalName = renamed ?: target.name
+                if (newPath != target.path) vm.updatePath(finalName, newPath)
+            },
+        )
+    }
+}
+
+/**
+ * [T-android-backup-destination-edit] Name + folder editor for a saved
+ * destination.
+ *
+ * Deliberately two fields rather than a full re-entry of the connection form:
+ * the common edits are a typo in the name and a backup folder that moved, and
+ * both can be applied without re-typing a password the Keystore already holds.
+ * Changing the connection itself (host, user, credentials) still goes through
+ * remove + Add Server, because only the add flow can verify a new connection
+ * before saving it.
+ */
+@Composable
+private fun EditDestinationDialog(
+    remote: com.openminis.app.backup.remote.RcloneRemoteStore.Remote,
+    onDismiss: () -> Unit,
+    onSave: (name: String, path: String) -> Unit,
+) {
+    var name by remember(remote.name) { mutableStateOf(remote.name) }
+    var path by remember(remote.path) { mutableStateOf(remote.path) }
+
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.backup_dest_edit_title)) },
+        text = {
+            Column {
+                androidx.compose.material3.OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.backup_dest_display_name)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.OutlinedTextField(
+                    value = path,
+                    onValueChange = { path = it },
+                    singleLine = true,
+                    label = { Text(stringResource(R.string.backup_dest_folder)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onSave(name, path.trim('/')) }) {
+                Text(stringResource(R.string.common_done))
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.common_cancel))
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

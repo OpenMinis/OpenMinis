@@ -169,6 +169,80 @@ class RcloneRemoteStore(private val context: Context) {
         AppLogger.info(TAG, "[Rclone] remote '$name' ${if (on) "enabled" else "disabled"}")
     }
 
+    /**
+     * [T-android-backup-destination-edit] Overwrite a saved remote's connection
+     * details and folder IN PLACE, keeping its name, enabled flag and creation
+     * time.
+     *
+     * Editing used to be impossible: [add] throws on a duplicate name, so the
+     * only way to fix a typo, a rotated password or a moved backup folder was
+     * remove-then-re-add, which also dropped the enabled flag and reordered the
+     * list. [secret] null/empty keeps the stored credential — that is what lets
+     * the edit dialog change only the folder without asking for the password
+     * again.
+     */
+    fun update(
+        name: String,
+        backend: String,
+        params: Map<String, String>,
+        secret: String?,
+        path: String,
+        allowInsecureTLS: Boolean = false,
+    ) {
+        val all = remotes
+        if (all.none { it.name == name }) throw StoreException("No destination named \"$name\".")
+        if (!secret.isNullOrEmpty()) storeSecret(name, secret)
+        remotes = all.map { existing ->
+            if (existing.name != name) {
+                existing
+            } else {
+                existing.copy(
+                    backend = backend,
+                    params = params,
+                    path = path,
+                    allowInsecureTLS = allowInsecureTLS,
+                )
+            }
+        }
+        AppLogger.info(TAG, "[Rclone] remote updated: $name ($backend)")
+    }
+
+    /**
+     * [T-android-backup-destination-edit] Rename a remote, carrying its
+     * encrypted credential across. Returns false when [oldName] is unknown;
+     * throws [StoreException] on an invalid or already-taken [newName].
+     */
+    fun rename(oldName: String, newName: String): Boolean {
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty() || !trimmed.all { it.isLetterOrDigit() || it == '-' || it == '_' }) {
+            throw StoreException("Choose a name using letters, numbers, - or _.")
+        }
+        if (remote(oldName) == null) return false
+        if (trimmed == oldName) return true
+        if (remote(trimmed) != null) {
+            throw StoreException("A destination named \"$trimmed\" already exists.")
+        }
+        val carried = loadSecret(oldName)
+        remotes = remotes.map { if (it.name == oldName) it.copy(name = trimmed) else it }
+        secrets.edit().remove(oldName).apply()
+        if (!carried.isNullOrEmpty()) storeSecret(trimmed, carried)
+        AppLogger.info(TAG, "[Rclone] remote renamed: $oldName -> $trimmed")
+        return true
+    }
+
+    /**
+     * [T-android-backup-destination-edit] Change only the destination folder.
+     * Returns false when the remote is unknown (e.g. removed from another
+     * screen while the editor was open).
+     */
+    fun updatePath(name: String, path: String): Boolean {
+        val all = remotes
+        if (all.none { it.name == name }) return false
+        remotes = all.map { if (it.name == name) it.copy(path = path) else it }
+        AppLogger.info(TAG, "[Rclone] remote '$name' path -> $path")
+        return true
+    }
+
     // MARK: - Secrets
 
     private fun storeSecret(name: String, secret: String) {

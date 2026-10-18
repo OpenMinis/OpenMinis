@@ -1896,4 +1896,9 @@
     <string name="usage_detail_window_share">Bu dönemdeki pay</string>
     <string name="usage_label_input_short">Girdi</string>
     <string name="usage_label_output_short">Çıktı</string>
+    <string name="picker_unavailable_toast">Bu cihazda bu seçiciyi açabilecek bir uygulama yok.</string>
+    <string name="settings_scheduled_badge_title">Zamanlanmış görev rozeti</string>
+    <string name="settings_scheduled_badge_footer">Ana ekrandaki saat simgesinde kaç zamanlanmış görevin etkin olduğunu gösterir.</string>
+    <string name="backup_dest_edit_title">Hedefi düzenle</string>
+    <string name="backup_dest_folder">Klasör</string>
 </resources>

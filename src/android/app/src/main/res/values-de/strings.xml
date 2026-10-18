@@ -1898,4 +1898,9 @@
     <string name="usage_detail_window_share">Anteil an diesem Zeitraum</string>
     <string name="usage_label_input_short">Eingabe</string>
     <string name="usage_label_output_short">Ausgabe</string>
+    <string name="picker_unavailable_toast">Keine App auf diesem Gerät kann diese Auswahl öffnen.</string>
+    <string name="settings_scheduled_badge_title">Badge für geplante Aufgaben</string>
+    <string name="settings_scheduled_badge_footer">Zeigt auf dem Uhr-Symbol der Startseite, wie viele geplante Aufgaben aktiv sind.</string>
+    <string name="backup_dest_edit_title">Ziel bearbeiten</string>
+    <string name="backup_dest_folder">Ordner</string>
 </resources>

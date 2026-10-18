@@ -1895,4 +1895,9 @@
     <string name="usage_detail_window_share">이 기간 비중</string>
     <string name="usage_label_input_short">입력</string>
     <string name="usage_label_output_short">출력</string>
+    <string name="picker_unavailable_toast">이 기기에서 해당 선택기를 열 수 있는 앱이 없습니다.</string>
+    <string name="settings_scheduled_badge_title">예약된 작업 배지</string>
+    <string name="settings_scheduled_badge_footer">홈 시계 아이콘에 활성 예약 작업 수를 표시합니다.</string>
+    <string name="backup_dest_edit_title">대상 편집</string>
+    <string name="backup_dest_folder">폴더</string>
 </resources>

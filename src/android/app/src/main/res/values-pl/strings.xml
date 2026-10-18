@@ -1904,4 +1904,9 @@
     <string name="usage_detail_window_share">Udział w tym okresie</string>
     <string name="usage_label_input_short">Wejście</string>
     <string name="usage_label_output_short">Wyjście</string>
+    <string name="picker_unavailable_toast">Żadna aplikacja na tym urządzeniu nie może otworzyć tego selektora.</string>
+    <string name="settings_scheduled_badge_title">Plakietka zaplanowanych zadań</string>
+    <string name="settings_scheduled_badge_footer">Pokazuje na ikonie zegara na ekranie głównym liczbę aktywnych zaplanowanych zadań.</string>
+    <string name="backup_dest_edit_title">Edytuj miejsce docelowe</string>
+    <string name="backup_dest_folder">Folder</string>
 </resources>

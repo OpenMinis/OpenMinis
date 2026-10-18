@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openminis.app.ui.settings.SettingsSwitch
 import com.openminis.app.R
+import com.openminis.app.scheduled.ScheduledBadgePrefs
 import com.openminis.app.scheduled.ScheduledRepeatMode
 import com.openminis.app.scheduled.ScheduledTask
 import com.openminis.app.util.IsoTime
@@ -108,25 +109,32 @@ fun ScheduledTasksScreen(
             }
         },
     ) { padding ->
-        if (tasks.isEmpty()) {
-            EmptyState(padding)
-            return@Scaffold
-        }
-        LazyColumn(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(vertical = 8.dp),
         ) {
-            items(tasks, key = { it.id }) { task ->
-                ScheduledTaskRow(
-                    task = task,
-                    onClick = { onEditTask(task.id) },
-                    onToggle = { vm.setEnabled(task.id, it) },
-                    onEdit = { onEditTask(task.id) },
-                    onViewRuns = { onViewRuns(task.id) },
-                    onDelete = { pendingDelete = task },
-                )
+            // [T-android-scheduled-badge-toggle] Opt out of the home clock badge
+            // without deleting the task that keeps the badge lit.
+            ScheduledBadgeToggleRow()
+            if (tasks.isEmpty()) {
+                EmptyState(PaddingValues(0.dp))
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 8.dp),
+                ) {
+                    items(tasks, key = { it.id }) { task ->
+                        ScheduledTaskRow(
+                            task = task,
+                            onClick = { onEditTask(task.id) },
+                            onToggle = { vm.setEnabled(task.id, it) },
+                            onEdit = { onEditTask(task.id) },
+                            onViewRuns = { onViewRuns(task.id) },
+                            onDelete = { pendingDelete = task },
+                        )
+                    }
+                }
             }
         }
     }
@@ -150,6 +158,45 @@ fun ScheduledTasksScreen(
                     Text(stringResource(R.string.cancel))
                 }
             },
+        )
+    }
+}
+
+/**
+ * [T-android-scheduled-badge-toggle] Switch for the toolbar clock-icon badge.
+ *
+ * Lives on this screen (upstream parity) rather than Settings → Appearance:
+ * the badge is about *this* list, so the explanation sits next to the tasks it
+ * counts. Reads/writes [ScheduledBadgePrefs], whose flow the list screen
+ * collects — toggling here updates the toolbar without a recreate.
+ */
+@Composable
+private fun ScheduledBadgeToggleRow() {
+    val context = LocalContext.current
+    val showBadge by remember { ScheduledBadgePrefs.flow(context) }.collectAsState()
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = stringResource(R.string.settings_scheduled_badge_title),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = stringResource(R.string.settings_scheduled_badge_footer),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        SettingsSwitch(
+            checked = showBadge,
+            onCheckedChange = { ScheduledBadgePrefs.set(context, it) },
         )
     }
 }

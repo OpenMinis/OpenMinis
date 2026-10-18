@@ -138,6 +138,9 @@ object OpenAIModelsApi {
             val json = JSONObject(body)
             val data = json.optJSONArray("data") ?: return@withContext fallback
             val parsed = mutableListOf<LLMModel>()
+            // [T-android-custom-endpoint-context] Caps the endpoint itself
+            // declared, kept aside so they survive models.dev enrichment below.
+            val declaredCaps = HashMap<String, Pair<Int?, Int?>>()
             for (i in 0 until data.length()) {
                 val obj = data.getJSONObject(i)
                 val id = obj.getString("id")
@@ -176,11 +179,39 @@ object OpenAIModelsApi {
                     idLower.startsWith("o4") ||
                     idLower.contains("codex")
 
+                // [T-android-custom-endpoint-context] A third-party endpoint
+                // usually publishes its real window right here (`vLLM`:
+                // max_model_len, OpenRouter-style: context_length, Ollama and
+                // LM Studio: context_length). Reading it beats guessing 128K,
+                // which silently overflowed small local models and under-used
+                // big ones. Absent → null → the existing heuristic still wins,
+                // so nothing regresses when a server omits the field.
+                val declaredContext = if (isCustomBase) {
+                    obj.firstPositiveInt(
+                        "context_length", "context_window", "max_context_length",
+                        "max_model_len", "max_input_tokens",
+                    )
+                } else {
+                    null
+                }
+                val declaredMaxOutput = if (isCustomBase) {
+                    obj.firstPositiveInt(
+                        "max_output_tokens", "max_completion_tokens", "max_tokens",
+                    )
+                } else {
+                    null
+                }
+                if (declaredContext != null || declaredMaxOutput != null) {
+                    declaredCaps[id] = declaredContext to declaredMaxOutput
+                }
+
                 parsed.add(
                     LLMModel(
                         id = id,
                         displayName = displayName,
                         provider = if (isCustomBase) "Custom" else "OpenAI",
+                        contextWindow = declaredContext,
+                        maxOutputTokens = declaredMaxOutput,
                         inputModalities = inputModalities,
                         outputModalities = outputModalities,
                         supportsReasoning = if (knownReasoning) true else null,
@@ -188,7 +219,27 @@ object OpenAIModelsApi {
                 )
             }
             if (parsed.isEmpty()) return@withContext fallback
-            ModelsDevApi.enrichModels(parsed)
+            val enriched = ModelsDevApi.enrichModels(parsed)
+            if (!isCustomBase) {
+                enriched
+            } else {
+                // The catalog does not know a private/local deployment, and when
+                // it knows a SAME-NAMED public model it would overwrite the
+                // endpoint's own (authoritative for this host) numbers. Re-apply
+                // what the endpoint declared, leaving the enriched value in
+                // place wherever the endpoint stayed silent.
+                enriched.map { model ->
+                    val (ctx, out) = declaredCaps[model.id] ?: (null to null)
+                    if (ctx == null && out == null) {
+                        model
+                    } else {
+                        model.copy(
+                            contextWindow = ctx ?: model.contextWindow,
+                            maxOutputTokens = out ?: model.maxOutputTokens,
+                        )
+                    }
+                }
+            }
         } catch (_: Exception) {
             return@withContext fallback
         }
@@ -204,6 +255,26 @@ object OpenAIModelsApi {
             if (s.isNotEmpty()) out.add(s)
         }
         return out
+    }
+
+    /**
+     * [T-android-custom-endpoint-context] First key in [keys] holding a positive
+     * integer, accepting both JSON numbers and numeric strings (`"131072"`) —
+     * relays are inconsistent about the latter, and `optInt` returns 0 for a
+     * string. Non-positive and unparsable values are skipped rather than
+     * treated as "0 tokens".
+     */
+    private fun JSONObject.firstPositiveInt(vararg keys: String): Int? {
+        for (key in keys) {
+            val raw = opt(key) ?: continue
+            val value = when (raw) {
+                is Number -> raw.toLong()
+                is String -> raw.trim().toLongOrNull()
+                else -> null
+            } ?: continue
+            if (value > 0) return value.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
+        return null
     }
 
     /** Check if a base URL points to official OpenAI endpoints. */
