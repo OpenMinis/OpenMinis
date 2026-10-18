@@ -222,6 +222,12 @@ beta.5 共 **32 项**（8 新功能 + 21 修复 + 3 视觉打磨），beta.4 遗
 baseline 已同步收紧（只降不升）。新增/改动单测 5 个类 48 例（`ToolIdCompatTest` 12、`StreamFollowDeadbandTest` 10、
 `ScheduledModelResolverTest` 10、`ModelRefreshPlannerTest` 6、`BackupHistoryLogCapTest` 10）。
 
+**全量上游对比审查（2026-10-19）**：本台账只覆盖逐条点名过的条目。把 origin 与 upstream（`b4c0661d`）做
+文件级 / 顶层符号级 / 字符串键级四层比对后，另有 **112 个上游源码文件、28 个部分实现文件（缺 55 个顶层符号）、
+339 个用户可见文案键**完全未落地，涉及终端模拟器、helper 子代理作业、Copilot/Codex 接入、备份运行侧、
+存储清理、容器 DNS 设置、计划任务详情与触发、语音 ASR 链路等——见
+[upstream-parity-audit.md](upstream-parity-audit.md)。
+
 ---
 
 ## 附：本次分析用到的只读证据
