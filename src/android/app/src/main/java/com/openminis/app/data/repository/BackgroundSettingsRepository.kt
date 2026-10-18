@@ -86,16 +86,11 @@ class BackgroundSettingsRepository(context: Context) {
      * dragged it again there and thereby destroyed the portrait placement. Two
      * slots keep both.
      *
-     * These no-argument accessors stay for callers that predate the split: they
-     * read and write the pre-split keys, which also act as the fallback so an
-     * upgrade keeps the position the user last chose.
+     * The no-argument READERS stay: they read the pre-split keys, which also act
+     * as the fallback so an upgrade keeps the position the user last chose.
      */
     fun getOverlayX(): Int = prefs.getInt(KEY_BG_OVERLAY_X, -1)
     fun getOverlayY(): Int = prefs.getInt(KEY_BG_OVERLAY_Y, -1)
-    fun setOverlayPosition(x: Int, y: Int) {
-        prefs.edit().putInt(KEY_BG_OVERLAY_X, x).putInt(KEY_BG_OVERLAY_Y, y).apply()
-    }
-
     /** Orientation-aware read: that orientation's slot, else the pre-split key. */
     fun getOverlayX(landscape: Boolean): Int = prefs.getInt(overlayKeyX(landscape), getOverlayX())
     fun getOverlayY(landscape: Boolean): Int = prefs.getInt(overlayKeyY(landscape), getOverlayY())

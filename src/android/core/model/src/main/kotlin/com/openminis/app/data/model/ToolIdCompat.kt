@@ -83,29 +83,6 @@ object ToolIdCompat {
         return base.take(keep) + "-" + digest(callHalf)
     }
 
-    /** True when [raw] can go on the wire unchanged. */
-    fun isWireSafe(raw: String): Boolean = normalize(raw) == raw
-
-    /**
-     * One-line explanation for a log/snackbar when an id had to be rewritten,
-     * or null when it did not. Kept here so every provider reports the same
-     * way instead of three ad-hoc messages.
-     */
-    fun describeRewrite(raw: String): String? {
-        val out = normalize(raw)
-        if (out == raw) return null
-        val reasons = buildList {
-            if (raw.contains('\u007c')) add("combined Responses id")
-            if (raw.any { it !in 'a'..'z' && it !in 'A'..'Z' && it !in '0'..'9' && it != '_' && it != '-' }) {
-                add("chars outside [A-Za-z0-9_-]")
-            }
-            if (raw.substringBefore('\u007c').length > MAX_WIRE_ID_LENGTH) add("longer than $MAX_WIRE_ID_LENGTH chars")
-            if (raw.isEmpty()) add("empty id")
-        }
-        val why = if (reasons.isEmpty()) "not idempotent" else reasons.joinToString(", ")
-        return "tool id rewritten for cross-API compatibility ($why): ${raw.take(40)}… -> ${out.take(40)}…"
-    }
-
     /** Stable 8-hex digest; SHA-256 so it does not vary across JVM runs. */
     private fun digest(text: String): String {
         val bytes = java.security.MessageDigest.getInstance("SHA-256")

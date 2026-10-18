@@ -21,7 +21,12 @@ import org.json.JSONObject
  * AIChatViewModel+ConcurrentTools read_image branch.
  */
 internal suspend fun ChatViewModel.executeReadImageTool(argsJson: String): ToolExecutionResult {
-    val base = ReadImageTool.execute(argsJson, activeSessionId, context)
+    // [T-android-tool-pool-cap] decodeFile + resize + JPEG re-encode block for
+    // hundreds of ms. Both dispatch sites (read_image and describe_image) come
+    // through here, so the bounded file-tool dispatcher is applied once.
+    val base = com.openminis.app.tools.ToolConcurrency.onFileOp {
+        ReadImageTool.execute(argsJson, activeSessionId, context)
+    }
     // [T-android-vision-group / GH#182] Optional caller instruction focusing
     // what to learn from the image.
     val customPrompt = try {

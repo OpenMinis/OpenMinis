@@ -2,7 +2,6 @@ package com.openminis.app.data.model
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,8 +23,6 @@ class ToolIdCompatTest {
         val safe = listOf("call_abc123", "toolu_01H8x9", "chatcmpl-tool-a1b2", "a")
         for (id in safe) {
             assertSame("$id is already wire-safe", id, ToolIdCompat.normalize(id))
-            assertTrue(ToolIdCompat.isWireSafe(id))
-            assertNull(ToolIdCompat.describeRewrite(id))
         }
     }
 
@@ -38,7 +35,6 @@ class ToolIdCompatTest {
         val out = ToolIdCompat.normalize("functions.Read:0")
         assertEquals("functions-Read-0", out)
         assertTrue("only [A-Za-z0-9_-] may survive", out.all { it.isLetterOrDigit() || it == '_' || it == '-' })
-        assertTrue(ToolIdCompat.describeRewrite("functions.Read:0")!!.contains("chars outside"))
     }
 
     @Test
@@ -65,7 +61,7 @@ class ToolIdCompatTest {
         val out = ToolIdCompat.normalize(raw)
         assertEquals(max, out.length)
         assertTrue(out.startsWith("call_"))
-        assertTrue("capped form is itself wire-safe", ToolIdCompat.isWireSafe(out))
+        assertTrue("capped form keeps the legal charset", out.all { it.isLetterOrDigit() || it == '_' || it == '-' })
     }
 
     @Test
@@ -117,7 +113,6 @@ class ToolIdCompatTest {
         // what keeps the pair intact — this is the pre-existing behaviour the
         // compat layer must not lose.
         assertEquals("call_abc", ToolIdCompat.normalize("call_abc|fc_def"))
-        assertTrue(ToolIdCompat.describeRewrite("call_abc|fc_def")!!.contains("combined Responses id"))
     }
 
     @Test

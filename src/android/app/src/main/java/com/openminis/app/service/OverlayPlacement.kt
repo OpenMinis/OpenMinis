@@ -42,9 +42,6 @@ internal data class OverlaySafeArea(
     fun clampY(y: Int): Int = if (minY >= maxY) minY else y.coerceIn(minY, maxY)
 
     fun clamp(x: Int, y: Int): Pair<Int, Int> = clampX(x) to clampY(y)
-
-    /** True when the position is fully visible without moving it. */
-    fun contains(x: Int, y: Int): Boolean = x in minX..maxX && y in minY..maxY
 }
 
 internal object OverlayPlacement {

@@ -78,7 +78,7 @@ class OverlayPlacementTest {
     fun firstRunPlacementIsInsideTheAreaAndOnScreen() {
         val area = OverlayPlacement.safeArea(w, h, capsuleW, capsuleH, status, navPortrait, pad)
         val (x, y) = OverlayPlacement.defaultBottomLeft(area)
-        assertTrue(area.contains(x, y))
+        assertTrue(x in area.minX..area.maxX && y in area.minY..area.maxY)
         // Bottom-left, i.e. above the nav bar, not under the status bar.
         assertTrue(y + capsuleH + navPortrait <= h)
         assertTrue(y >= status)
@@ -97,14 +97,14 @@ class OverlayPlacementTest {
     }
 
     @Test
-    fun containsRejectsAHalfVisibleCapsule() {
+    fun aHalfVisibleCapsuleIsPulledBackInside() {
         val area = OverlayPlacement.safeArea(w, h, capsuleW, capsuleH, status, navPortrait, pad)
-        // A capsule one pixel above the status-bar allowance is not "contained":
-        // this is exactly the "only half visible" state the clamp exists to stop.
-        assertFalse(area.contains(area.minX, area.minY - 1))
-        assertFalse(area.contains(area.maxX + 1, area.maxY))
-        assertTrue(area.contains(area.minX, area.minY))
-        assertTrue(area.contains(area.maxX, area.maxY))
+        // One pixel outside the box is exactly the "only half visible" state the
+        // clamp exists to stop: every such point lands ON the boundary.
+        assertEquals(area.minY, area.clampY(area.minY - 1))
+        assertEquals(area.maxY, area.clampY(area.maxY + 1))
+        assertEquals(area.minX, area.clampX(area.minX - 1))
+        assertEquals(area.maxX, area.clampX(area.maxX + 1))
     }
 
     @Test

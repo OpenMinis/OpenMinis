@@ -115,9 +115,7 @@ object ToolConcurrency {
         if (inFlight.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) offloadSlots.release()
     }
 
-    /** Slots currently running a handler (diagnostics + tests). */
+    /** Slots currently running a handler; reported in the `host_busy` reply. */
     fun offloadInFlight(): Int = inFlight.get()
 
-    /** Slots still free (diagnostics + tests). */
-    fun offloadSlotsAvailable(): Int = offloadSlots.availablePermits()
 }

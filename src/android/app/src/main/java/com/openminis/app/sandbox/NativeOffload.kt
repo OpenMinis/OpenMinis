@@ -515,7 +515,8 @@ object NativeOffloadServer {
     /** Structured reply for a request that could not get a handler slot. */
     private fun offloadBusyResult(name: String, request: NativeOffloadRequest): NativeOffloadResult {
         val max = ToolConcurrency.MAX_CONCURRENT_OFFLOAD_HANDLERS
-        Log.w(TAG, "handler '$name' refused: $max handlers already in flight (session=${request.sessionId})")
+        val inFlight = ToolConcurrency.offloadInFlight()
+        Log.w(TAG, "handler '$name' refused: $inFlight/$max handler slots busy (session=${request.sessionId})")
         return NativeOffloadResult(
             exitCode = 1,
             output = buildString {
@@ -523,6 +524,7 @@ object NativeOffloadServer {
                 append("  \"error\": \"host_busy\",\n")
                 append("  \"tool\": \"").append(name.replace("\\", "\\\\").replace("\"", "\\\"")).append("\",\n")
                 append("  \"max_concurrent\": ").append(max).append(",\n")
+                append("  \"in_flight\": ").append(inFlight).append(",\n")
                 append("  \"message\": \"The device is already running ").append(max)
                 append(" long host handlers; this call waited ")
                 append(ToolConcurrency.OFFLOAD_QUEUE_WAIT_MS / 1000)
