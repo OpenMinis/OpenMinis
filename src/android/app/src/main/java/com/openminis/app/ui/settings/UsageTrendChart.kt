@@ -2,6 +2,7 @@ package com.openminis.app.ui.settings
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
@@ -52,7 +54,7 @@ internal fun UsageTimeFilterRow(
             FilterChip(
                 selected = selected == range,
                 onClick = { onSelect(range) },
-                label = { Text(rangeLabel(range)) },
+                label = { Text(usageRangeLabel(range)) },
                 colors = FilterChipDefaults.filterChipColors(
                     containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                 ),
@@ -62,11 +64,51 @@ internal fun UsageTimeFilterRow(
 }
 
 @Composable
-private fun rangeLabel(range: UsageTimeRange): String = when (range) {
+internal fun usageRangeLabel(range: UsageTimeRange): String = when (range) {
     UsageTimeRange.TODAY -> stringResource(R.string.usage_range_today)
     UsageTimeRange.LAST_7 -> stringResource(R.string.usage_range_7d)
     UsageTimeRange.LAST_30 -> stringResource(R.string.usage_range_30d)
     UsageTimeRange.ALL -> stringResource(R.string.usage_range_all)
+}
+
+/**
+ * [T-usage-chart-card] The chart plus its legend and the selected day's numbers
+ * as one card. Previously the chart was drawn straight onto the section
+ * background with no legend: the two bars were distinguishable only by colour,
+ * and nothing on screen said which colour was input.
+ */
+@Composable
+internal fun UsageTrendCard(daily: List<DailyUsage>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            LegendSwatch(MaterialTheme.colorScheme.primary, stringResource(R.string.usage_label_input_short))
+            Spacer(Modifier.width(14.dp))
+            LegendSwatch(MaterialTheme.colorScheme.tertiary, stringResource(R.string.usage_label_output_short))
+        }
+        Spacer(Modifier.height(8.dp))
+        UsageTrendChart(daily = daily, showInlineLegend = false)
+    }
+}
+
+@Composable
+private fun LegendSwatch(color: Color, label: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .background(color, RoundedCornerShape(2.dp)),
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**
@@ -82,6 +124,8 @@ private fun rangeLabel(range: UsageTimeRange): String = when (range) {
 internal fun UsageTrendChart(
     daily: List<DailyUsage>,
     modifier: Modifier = Modifier,
+    /** False when the caller already drew a legend above the chart. */
+    showInlineLegend: Boolean = true,
 ) {
     if (daily.isEmpty()) return
     // Tap-select index; coerced on every read instead of being clamped
@@ -93,6 +137,9 @@ internal fun UsageTrendChart(
     val outputColor = MaterialTheme.colorScheme.tertiary
     val selectedColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
     val emptyColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+    // [T-usage-chart-card] Read BEFORE the Canvas lambda: DrawScope is not a
+    // composable scope, so MaterialTheme.colorScheme cannot be read inside it.
+    val ruleColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)
     val hasAnyData = daily.any { it.inputTokens > 0 || it.outputTokens > 0 }
 
     Column(modifier = modifier.fillMaxWidth()) {
@@ -100,7 +147,10 @@ internal fun UsageTrendChart(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(120.dp)
-                .padding(horizontal = 16.dp)
+                // [T-usage-chart-card] Horizontally inset only by 0 when a card
+                // already pads; the card wrapper supplies its own padding, so
+                // the canvas fills the width and the caller decides the inset.
+                .padding(horizontal = if (showInlineLegend) 16.dp else 0.dp)
                 .pointerInput(daily.size) {
                     detectTapGestures { offset ->
                         val slot = (offset.x / size.width * daily.size).toInt()
@@ -116,6 +166,20 @@ internal fun UsageTrendChart(
                 1L,
             ).toFloat()
             val chartHeight = size.height - 4.dp.toPx()
+            // [T-usage-chart-card] Faint horizontal rules at 1/3 and 2/3 so a
+            // bar's height can be read as a rough multiple of another's. Drawn
+            // before the bars so the selection backdrop and bars sit on top.
+            if (!showInlineLegend) {
+                listOf(1f / 3f, 2f / 3f).forEach { fraction ->
+                    val y = size.height * fraction
+                    drawLine(
+                        color = ruleColor,
+                        start = Offset(0f, y),
+                        end = Offset(size.width, y),
+                        strokeWidth = 1f,
+                    )
+                }
+            }
             daily.forEachIndexed { idx, day ->
                 val slotLeft = idx * slotWidth
                 val inputH = (day.inputTokens / maxVal) * chartHeight

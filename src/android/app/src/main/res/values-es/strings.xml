@@ -1892,4 +1892,10 @@
     <string name="ma_role_tools_label">Lista de herramientas permitidas (separadas por comas, vacío = sin límite)</string>
     <string name="ma_role_delete">Eliminar este rol</string>
     <string name="tool_limits_main_session">Máx. de turnos de la sesión principal</string>
+    <string name="usage_section_models">Uso por modelo</string>
+    <string name="usage_summary_window">Período: %1$s</string>
+    <string name="usage_summary_cache_hit">Aciertos de caché</string>
+    <string name="usage_detail_window_share">Cuota de este período</string>
+    <string name="usage_label_input_short">Entrada</string>
+    <string name="usage_label_output_short">Salida</string>
 </resources>

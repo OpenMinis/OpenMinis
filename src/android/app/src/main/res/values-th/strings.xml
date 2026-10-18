@@ -1890,4 +1890,10 @@
     <string name="ma_role_tools_label">รายการเครื่องมือที่อนุญาต (คั่นด้วยจุลภาค ว่าง = ไม่จำกัด)</string>
     <string name="ma_role_delete">ลบบทบาทนี้</string>
     <string name="tool_limits_main_session">จำนวนรอบสูงสุดของเซสชันหลัก</string>
+    <string name="usage_section_models">การใช้งานตามโมเดล</string>
+    <string name="usage_summary_window">ช่วงเวลา: %1$s</string>
+    <string name="usage_summary_cache_hit">แคชที่ตรง</string>
+    <string name="usage_detail_window_share">สัดส่วนในช่วงนี้</string>
+    <string name="usage_label_input_short">อินพุต</string>
+    <string name="usage_label_output_short">เอาต์พุต</string>
 </resources>

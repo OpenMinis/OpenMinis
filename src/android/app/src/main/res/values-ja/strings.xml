@@ -1889,4 +1889,10 @@
     <string name="ma_role_tools_label">ツール許可リスト（カンマ区切り、空=無制限）</string>
     <string name="ma_role_delete">このロールを削除</string>
     <string name="tool_limits_main_session">メインセッションの最大ターン数</string>
+    <string name="usage_section_models">モデル別使用量</string>
+    <string name="usage_summary_window">対象期間：%1$s</string>
+    <string name="usage_summary_cache_hit">キャッシュヒット</string>
+    <string name="usage_detail_window_share">この期間の割合</string>
+    <string name="usage_label_input_short">入力</string>
+    <string name="usage_label_output_short">出力</string>
 </resources>

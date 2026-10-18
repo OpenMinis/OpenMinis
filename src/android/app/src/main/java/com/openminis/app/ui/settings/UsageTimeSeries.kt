@@ -22,8 +22,57 @@ internal data class DailyUsage(
     val outputTokens: Long,
 )
 
-/** Bars shown in the trend chart. Fixed so slot count never jumps day to day. */
-internal const val CHART_DAYS = 14
+/**
+ * Bars shown in the trend chart for the ALL window. Full history is
+ * unreadable as daily bars on a phone, so the widest window still caps at
+ * the widest readable span; the section header states the window so the
+ * cap is never mistaken for the data's extent.
+ */
+internal const val ALL_CHART_DAYS = 30
+
+/**
+ * Parse every record ONCE into per-day buckets. This is the expensive half
+ * of the chart pipeline (a JSONObject parse per row); it runs on records
+ * load only — never per filter tap.
+ */
+internal fun buildDayBuckets(records: List<UsageRecord>): Map<String, LongArray> {
+    val byKey = HashMap<String, LongArray>()
+    for (record in records) {
+        val usage = try {
+            org.json.JSONObject(record.tokenUsage)
+        } catch (_: Exception) {
+            continue
+        }
+        val input = usage.optLong("inputTokens", 0) +
+            usage.optLong("cacheReadTokens", 0) +
+            usage.optLong("cacheCreationTokens", 0)
+        val output = usage.optLong("outputTokens", 0)
+        val key = localDateKey(record.createdAt)
+        val acc = byKey.getOrPut(key) { longArrayOf(0, 0) }
+        acc[0] += input
+        acc[1] += output
+    }
+    return byKey
+}
+
+/**
+ * Zero-filled daily series for the last [days] days, read from pre-parsed
+ * [buildDayBuckets] output. Pure arithmetic + map lookups — cheap enough to
+ * run on every filter tap, which is exactly what the window-following chart
+ * requires ([T-usage-window-drives-everything]).
+ */
+internal fun sliceDailySeries(
+    buckets: Map<String, LongArray>,
+    days: Int,
+    nowMillis: Long,
+): List<DailyUsage> {
+    require(days >= 1) { "days must be >= 1" }
+    return (days - 1 downTo 0).map { offset ->
+        val key = localDateKey(localMidnightBefore(nowMillis, offset))
+        val acc = buckets[key]
+        DailyUsage(key, acc?.get(0) ?: 0L, acc?.get(1) ?: 0L)
+    }
+}
 
 /**
  * Local-midnight boundary (ms) of the day `offsetDays` before today.
@@ -75,42 +124,12 @@ internal fun localDateKey(ms: Long): String {
 
 /**
  * Build a fixed-length daily series ending today (inclusive), zero-filled
- * for days without usage. The chart needs a stable slot count so bars don't
- * jump around as days pass; missing days render as empty slots.
- *
- * Rows outside the window are ignored, so the series can be built from the
- * full record list without a pre-filter.
+ * for days without usage. Composed of [buildDayBuckets] (the parse) and
+ * [sliceDailySeries] (the window); kept as one call for tests and for
+ * callers that only need the series once.
  */
 internal fun buildDailySeries(
     records: List<UsageRecord>,
     days: Int,
     nowMillis: Long,
-): List<DailyUsage> {
-    require(days >= 1) { "days must be >= 1" }
-    val start = localMidnightBefore(nowMillis, days - 1)
-    val keys = ArrayList<String>(days)
-    for (offset in days - 1 downTo 0) {
-        keys.add(localDateKey(localMidnightBefore(nowMillis, offset)))
-    }
-    val byKey = HashMap<String, LongArray>(days)
-    for (record in records) {
-        if (record.createdAt < start) continue
-        val usage = try {
-            org.json.JSONObject(record.tokenUsage)
-        } catch (_: Exception) {
-            continue
-        }
-        val input = usage.optLong("inputTokens", 0) +
-            usage.optLong("cacheReadTokens", 0) +
-            usage.optLong("cacheCreationTokens", 0)
-        val output = usage.optLong("outputTokens", 0)
-        val key = localDateKey(record.createdAt)
-        val acc = byKey.getOrPut(key) { longArrayOf(0, 0) }
-        acc[0] += input
-        acc[1] += output
-    }
-    return keys.map { key ->
-        val acc = byKey[key]
-        DailyUsage(key, acc?.get(0) ?: 0L, acc?.get(1) ?: 0L)
-    }
-}
+): List<DailyUsage> = sliceDailySeries(buildDayBuckets(records), days, nowMillis)

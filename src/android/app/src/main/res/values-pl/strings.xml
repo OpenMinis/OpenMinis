@@ -1898,4 +1898,10 @@
     <string name="ma_role_tools_label">Lista dozwolonych narzędzi (rozdzielona przecinkami, pusta = bez limitu)</string>
     <string name="ma_role_delete">Usuń tę rolę</string>
     <string name="tool_limits_main_session">Maks. turów sesji głównej</string>
+    <string name="usage_section_models">Użycie według modelu</string>
+    <string name="usage_summary_window">Zakres: %1$s</string>
+    <string name="usage_summary_cache_hit">Trafienia cache</string>
+    <string name="usage_detail_window_share">Udział w tym okresie</string>
+    <string name="usage_label_input_short">Wejście</string>
+    <string name="usage_label_output_short">Wyjście</string>
 </resources>

@@ -1,6 +1,16 @@
 package com.openminis.app.ui.settings
 
 import com.openminis.app.R
+import com.openminis.app.ui.chat.brandAccentFor
+import com.openminis.app.ui.chat.ModelBrandResolver
+import com.openminis.app.ui.chat.ModelBrandIcon
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import com.openminis.app.data.db.UsageRecord
 
 import androidx.compose.animation.AnimatedVisibility
@@ -72,7 +82,7 @@ internal enum class Attribution {
 
 internal data class ModelStats(
     val modelId: String,
-    var displayName: String,
+    val displayName: String,
     val provider: String,
     val attribution: Attribution,
     val instanceId: String? = null,
@@ -85,9 +95,41 @@ internal data class ModelStats(
     val distinctSessions: MutableSet<String> = mutableSetOf(),
 ) {
     val totalInput: Long get() = inputTokens + cacheReadTokens + cacheCreationTokens
+
+    /**
+     * [T-usage-provider-subtitle] The identity line under the model name.
+     *
+     * Prefers the provider INSTANCE label (the user's own name for the
+     * connection, e.g. "天翼云") over the provider TYPE ("OpenAI"):
+     * two relays both configured as OpenAI-compatible would otherwise show
+     * the same subtitle, which is exactly the collision the subtitle exists
+     * to resolve. Falls back to the type when the row predates the instance
+     * column.
+     */
+    val subtitle: String get() = instanceLabel?.takeIf { it.isNotBlank() } ?: provider
 }
 
 internal data class ProviderGroup(val name: String, val models: List<ModelStats>)
+
+/**
+ * [T-usage-flat-list] One row of the usage page.
+ *
+ * The page used to render provider sections with headers. The header repeated
+ * the provider that every row already shows as its subtitle, and it cost ~40dp
+ * per provider — on a 22-model relay catalogue that is most of a screen. Rows
+ * are now one flat, globally sorted list; the provider name in the subtitle is
+ * the only place identity is stated, which is also why it is never truncated
+ * away while the name has ellipsis.
+ *
+ * [shareOfWindow] is this row's input as a fraction of the CURRENTLY SELECTED
+ * window's total input — it changes when the time filter changes, because a
+ * 30-day window dilutes a model that dominated the last 7 days. Computed in
+ * the aggregation (not in the composable) so the arithmetic is testable.
+ */
+internal data class UsageRow(
+    val stats: ModelStats,
+    val shareOfWindow: Float,
+)
 
 internal data class GrandTotal(
     val totalInput: Long = 0,
@@ -126,6 +168,12 @@ internal fun providerDisplayName(rawValue: String): String =
 internal data class UsageAggregation(
     val groups: List<ProviderGroup>,
     val grandTotal: GrandTotal,
+    /**
+     * [T-usage-flat-list] Every row in one list, sorted by input descending.
+     * [groups] is kept for the existing aggregation tests and for any caller
+     * that still wants provider bucketing; the page renders THIS list.
+     */
+    val rows: List<UsageRow> = emptyList(),
 )
 
 /**
@@ -200,17 +248,13 @@ internal fun aggregateUsageRecords(
         stats.distinctSessions.add(record.sessionId)
     }
 
-    // The same display name in more than one bucket means the name alone
-    // cannot tell the rows apart; suffix the instance label (or the provider
-    // when the instance is gone) so the page never shows two identical rows
-    // holding different numbers.
-    val nameCounts = statsMap.values.groupingBy { it.displayName }.eachCount()
-    for (stats in statsMap.values) {
-        if ((nameCounts[stats.displayName] ?: 0) > 1) {
-            val suffix = stats.instanceLabel ?: stats.provider
-            stats.displayName = "${stats.displayName} · $suffix"
-        }
-    }
+    // [T-usage-provider-subtitle] The display name stays CLEAN. A previous
+    // revision suffixed colliding names with the instance label
+    // ("GLM-5.3 · 智谱 AI") so two rows could be told apart. The row now carries
+    // that identity as its own subtitle, so suffixing would print it twice —
+    // and the subtitle is the better carrier: it is the user's own provider
+    // instance name, which is unique by construction, whereas the name is
+    // whatever the vendor called the model.
 
     val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
     val grouped = statsMap.values.groupBy { it.provider }
@@ -222,14 +266,34 @@ internal fun aggregateUsageRecords(
     }
 
     val allStats = statsMap.values
+    val totalInput = allStats.sumOf { it.totalInput }
+    // [T-usage-flat-list] Rows sorted by input, with the share computed against
+    // the SAME total the caller is displaying. The previous page recomputed the
+    // fraction inline as `model.totalInput / grandTotal.totalInput`, which was
+    // correct only because both came from one window — moving the division here
+    // keeps that coupling explicit and lets a test pin it.
+    val flatRows = allStats
+        .sortedWith(compareByDescending<ModelStats> { it.totalInput }.thenBy { it.displayName })
+        .map { stats ->
+            UsageRow(
+                stats = stats,
+                shareOfWindow = if (totalInput > 0) {
+                    (stats.totalInput.toFloat() / totalInput).coerceIn(0f, 1f)
+                } else {
+                    0f
+                },
+            )
+        }
+
     return UsageAggregation(
         groups = sortedGroups,
         grandTotal = GrandTotal(
-            totalInput = allStats.sumOf { it.totalInput },
+            totalInput = totalInput,
             outputTokens = allStats.sumOf { it.outputTokens },
             cacheReadTokens = allStats.sumOf { it.cacheReadTokens },
             cacheCreationTokens = allStats.sumOf { it.cacheCreationTokens },
         ),
+        rows = flatRows,
     )
 }
 
@@ -264,27 +328,34 @@ fun UsageStatsScreen(
     onBack: () -> Unit,
 ) {
     var grandTotal by remember { mutableStateOf(GrandTotal()) }
-    var providerGroups by remember { mutableStateOf<List<ProviderGroup>>(emptyList()) }
+    var rows by remember { mutableStateOf<List<UsageRow>>(emptyList()) }
     var isLoaded by remember { mutableStateOf(false) }
     // [T-usage-time-range] Records + selected window. Aggregation runs on
     // Dispatchers.Default: thousands of rows x per-row JSONObject parsing is
     // a CPU burst, and the project discipline since PR62 keeps CPU bursts
-    // off the main thread. The chart series is window-independent (fixed
-    // 14-day lookback) so it is derived once per records load, not per
-    // filter tap.
+    // off the main thread.
+    //
+    // [T-usage-window-drives-everything] The time filter drives EVERYTHING
+    // below it — totals, the per-model list, the row order, the share bars
+    // AND the trend chart. The chart follows the window by slicing
+    // pre-parsed day buckets (buildDayBuckets, parsed once on load);
+    // sliceDailySeries is pure arithmetic, so a filter tap re-derives the
+    // chart without re-parsing a single row.
     var records by remember { mutableStateOf<List<UsageRecord>>(emptyList()) }
+    var dayBuckets by remember { mutableStateOf<Map<String, LongArray>>(emptyMap()) }
     var timeRange by remember { mutableStateOf(UsageTimeRange.LAST_7) }
     var daily by remember { mutableStateOf<List<DailyUsage>>(emptyList()) }
 
     LaunchedEffect(Unit) {
         val loaded = chatDao.allUsageRecords()
-        val now = System.currentTimeMillis()
-        val series = withContext(Dispatchers.Default) { buildDailySeries(loaded, CHART_DAYS, now) }
+        // Parse each row's tokenUsage exactly once, off the main thread.
+        val buckets = withContext(Dispatchers.Default) { buildDayBuckets(loaded) }
+        dayBuckets = buckets
         records = loaded
-        daily = series
         isLoaded = true
-        // Initial aggregation happens in the (timeRange, records) effect below
-        // — assigning `records` restarts it with isLoaded already true.
+        // Initial aggregation + chart slice happen in the (timeRange, records)
+        // effect below — assigning `records` restarts it with isLoaded already
+        // true and the buckets already in place.
     }
 
     // Re-derive on filter taps without re-querying the DB. The lookup maps
@@ -311,7 +382,10 @@ fun UsageStatsScreen(
             aggregateUsageRecords(filterUsageByRange(records, timeRange, now), modelLookup, instanceLabels)
         }
         grandTotal = summary.grandTotal
-        providerGroups = summary.groups
+        rows = summary.rows
+        // [T-usage-window-drives-everything] The chart follows the selected
+        // window. Slicing pre-parsed buckets: O(days) map lookups, no JSON.
+        daily = sliceDailySeries(dayBuckets, timeRange.days ?: ALL_CHART_DAYS, now)
     }
 
     SettingsScaffold(title = stringResource(R.string.usage_title), onBack = null) {
@@ -319,36 +393,33 @@ fun UsageStatsScreen(
 
         UsageTimeFilterRow(selected = timeRange, onSelect = { timeRange = it })
 
-        SettingsSection(header = stringResource(R.string.usage_chart_title)) {
-            UsageTrendChart(daily = daily)
-        }
-
+        // ── Totals ───────────────────────────────────────────────────────────
         SettingsSection(header = stringResource(R.string.usage_section_total)) {
-            val stats = listOfNotNull(
-                stringResource(R.string.usage_label_total_input) to formatCount(grandTotal.totalInput),
-                stringResource(R.string.usage_label_output) to formatCount(grandTotal.outputTokens),
-                if (grandTotal.cacheReadTokens > 0) stringResource(R.string.usage_label_cache_read) to formatCount(grandTotal.cacheReadTokens) else null,
-                if (grandTotal.cacheCreationTokens > 0) stringResource(R.string.usage_label_cache_creation) to formatCount(grandTotal.cacheCreationTokens) else null,
-                grandTotal.cacheHitRate?.let { rate -> stringResource(R.string.usage_label_cache_hit_rate) to String.format("%.1f%%", rate) },
-            )
-            stats.forEachIndexed { idx, (label, value) ->
-                SettingsValueRow(
-                    title = label,
-                    value = value,
-                    valueColor = MaterialTheme.colorScheme.onSurface,
-                    showDivider = idx < stats.size - 1,
-                )
-            }
+            UsageSummaryCard(grandTotal = grandTotal, timeRange = timeRange)
         }
 
-        for (group in providerGroups) {
-            SettingsSection(header = group.name) {
-                group.models.forEachIndexed { idx, model ->
+        // ── Trend chart (follows the selected window) ───────────────────────
+        SettingsSection(
+            header = stringResource(R.string.usage_chart_title) + " · " + usageRangeLabel(timeRange),
+        ) {
+            UsageTrendCard(daily = daily)
+        }
+
+        // ── Per-model usage ──────────────────────────────────────────────────
+        // [T-usage-flat-list] One flat, globally sorted card. The provider name
+        // lives in each row's subtitle instead of a section header: it is
+        // unique per instance, so it already disambiguates two rows showing the
+        // same model name from different providers, and dropping the headers
+        // returns ~40dp per provider to the list.
+        SettingsSection(header = stringResource(R.string.usage_section_models)) {
+            if (rows.isEmpty()) {
+                UsageEmptyRow()
+            } else {
+                rows.forEachIndexed { idx, row ->
                     ExpandableModelRow(
-                        model = model,
-                        shareOfTotal = if (grandTotal.totalInput > 0)
-                            model.totalInput.toFloat() / grandTotal.totalInput else 0f,
-                        showDivider = idx < group.models.size - 1,
+                        model = row.stats,
+                        shareOfTotal = row.shareOfWindow,
+                        showDivider = idx < rows.size - 1,
                     )
                 }
             }
@@ -358,20 +429,164 @@ fun UsageStatsScreen(
     }
 }
 
+/**
+ * [T-usage-summary-card] Totals as one glanceable block: two large numbers side
+ * by side, then the cache figures as pills. Replaces a run of label/value rows
+ * where the only thing the eye could latch onto was the label column.
+ */
+@Composable
+private fun UsageSummaryCard(grandTotal: GrandTotal, timeRange: UsageTimeRange) {
+    Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 16.dp)) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.usage_label_total_input),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(5.dp))
+                SplitTokenValue(grandTotal.totalInput, MaterialTheme.colorScheme.onSurface)
+            }
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 18.dp)
+                    .width(1.dp)
+                    .height(32.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.usage_label_output),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(5.dp))
+                SplitTokenValue(grandTotal.outputTokens, MaterialTheme.colorScheme.onSurface)
+            }
+        }
+
+        val pills = listOfNotNull(
+            grandTotal.cacheHitRate?.let {
+                stringResource(R.string.usage_summary_cache_hit) to String.format("%.1f%%", it)
+            },
+            if (grandTotal.cacheReadTokens > 0) {
+                stringResource(R.string.usage_label_cache_read) to formatCount(grandTotal.cacheReadTokens)
+            } else null,
+            if (grandTotal.cacheCreationTokens > 0) {
+                stringResource(R.string.usage_label_cache_creation) to formatCount(grandTotal.cacheCreationTokens)
+            } else null,
+        )
+        if (pills.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                pills.forEach { (label, value) ->
+                    UsagePill(label = label, value = value)
+                }
+            }
+        }
+        // The window is already selected by the chip row above, but a summary
+        // that says "Total" with no window is ambiguous once a user scrolls the
+        // chips out of view.
+        Spacer(Modifier.height(12.dp))
+        Text(
+            stringResource(R.string.usage_summary_window, usageRangeLabel(timeRange)),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+        )
+    }
+}
+
+/**
+ * A token count rendered as `1.24M` / `286k`: the number carries the emphasis,
+ * the magnitude suffix rides smaller so the leading digits stay aligned.
+ */
+@Composable
+private fun SplitTokenValue(value: Long, color: Color) {
+    val text = formatCount(value)
+    val split = text.takeWhile { it.isDigit() || it == '.' }
+    val suffix = text.removePrefix(split)
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(
+            split,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = color,
+        )
+        if (suffix.isNotEmpty()) {
+            Text(
+                suffix,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = color.copy(alpha = 0.55f),
+                modifier = Modifier.padding(start = 2.dp, bottom = 2.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun UsagePill(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "$label ",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
+private fun UsageEmptyRow() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 20.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            stringResource(R.string.usage_chart_no_data),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 @Composable
 private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivider: Boolean) {
     var expanded by remember { mutableStateOf(false) }
     val summary = "${formatCount(model.totalInput)} / ${formatCount(model.outputTokens)}"
+    // [T-brand-accent-color] Brand logo + the brand's own accent for the share
+    // bar. Resolves through the single brand entry point, so the row shows the
+    // SAME logo the picker and top bar show — and a model with no recognisable
+    // brand gets a deterministic hash hue instead of wearing another vendor's
+    // colour.
+    val brandSlug = remember(model.modelId, model.displayName) {
+        ModelBrandResolver.resolveExact(model.modelId, model.displayName)
+    }
+    val accent = brandAccentFor(model.modelId, model.displayName)
 
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { expanded = !expanded }
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            BrandAvatar(slug = brandSlug, fallbackName = model.displayName, accent = accent)
+            Spacer(Modifier.width(11.dp))
             // [T-token-attribution-snapshot] Name plus, for the two states a
             // user can act on, one short line saying why.
             //
@@ -383,59 +598,72 @@ private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivid
             // their own bucket and never merge into a measured one, so the
             // numbers remain honest even though the label is gone.
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    model.displayName,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-                val caveat = when (model.attribution) {
-                    Attribution.MEASURED, Attribution.ESTIMATED -> null
-                    Attribution.UNKNOWN_SESSION -> stringResource(R.string.usage_attr_unknown_session)
-                    Attribution.MEASURED_REMOVED -> stringResource(R.string.usage_attr_removed)
-                }
-                if (caveat != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        caveat,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        model.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
                     )
+                    when (model.attribution) {
+                        Attribution.MEASURED, Attribution.ESTIMATED -> Unit
+                        Attribution.UNKNOWN_SESSION -> AttributionBadge(R.string.usage_attr_unknown_session)
+                        Attribution.MEASURED_REMOVED -> AttributionBadge(R.string.usage_attr_removed)
+                    }
                 }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
+                // [T-usage-provider-subtitle] The provider name is the ONLY
+                // identity line here and it is deliberately never optional:
+                // two rows can display the same model name (official vs relay),
+                // and the subtitle is what tells them apart once the section
+                // headers are gone. It therefore gets its own line rather than
+                // competing with the name for space.
                 Text(
-                    summary,
-                    style = MaterialTheme.typography.bodyMedium,
+                    model.subtitle,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Icon(
-                    if (expanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                summary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = FontFamily.Default,
+            )
+            Icon(
+                if (expanded) Icons.Default.ExpandMore else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            )
         }
 
-        // [T-usage-share-bar] This model's input as a share of the selected
-        // window's total input — the same number the row shows, made
-        // comparable at a glance. Hidden when the window has no input.
+        // [T-usage-share-bar] This model's input as a share of the SELECTED
+        // window's total input — so the bar re-scales when the user switches
+        // Today / 7d / 30d / All, and a model that dominated the week visibly
+        // shrinks in a 30-day view. Hidden when the window has no input.
         if (shareOfTotal > 0f) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 2.dp)
+                    .padding(start = 53.dp, end = 14.dp, bottom = 10.dp)
                     .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
                     .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth(shareOfTotal.coerceIn(0f, 1f))
+                        .fillMaxWidth(shareOfTotal)
                         .height(3.dp)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)),
+                        .background(accent),
                 )
             }
         }
 
         AnimatedVisibility(visible = expanded) {
-            Column(modifier = Modifier.padding(start = 32.dp, end = 16.dp, bottom = 8.dp)) {
+            Column(modifier = Modifier.padding(start = 53.dp, end = 14.dp, bottom = 10.dp)) {
                 DetailRow(stringResource(R.string.usage_detail_input), formatCount(model.inputTokens))
                 DetailRow(stringResource(R.string.usage_detail_output), formatCount(model.outputTokens))
                 if (model.cacheReadTokens > 0) DetailRow(stringResource(R.string.usage_label_cache_read), formatCount(model.cacheReadTokens))
@@ -444,6 +672,14 @@ private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivid
                 if (modelTotalInput > 0 && model.cacheReadTokens > 0) {
                     val rate = (model.cacheReadTokens.toDouble() / modelTotalInput) * 100
                     DetailRow(stringResource(R.string.usage_label_cache_hit_rate), String.format("%.1f%%", rate))
+                }
+                // The window share is shown as a percentage next to the bar so
+                // the bar is not the only encoding of the number.
+                if (shareOfTotal > 0f) {
+                    DetailRow(
+                        stringResource(R.string.usage_detail_window_share),
+                        String.format("%.1f%%", shareOfTotal * 100),
+                    )
                 }
                 val days = model.distinctDays.size
                 val sessions = model.distinctSessions.size
@@ -463,12 +699,56 @@ private fun ExpandableModelRow(model: ModelStats, shareOfTotal: Float, showDivid
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 14.dp)
+                    .padding(start = 53.dp, end = 14.dp)
                     .height(0.5.dp)
                     .background(divider),
             )
         }
     }
+}
+
+/**
+ * [T-brand-avatar-single-source] The row's brand mark: the real lobe-icons
+ * asset on a tinted chip, or the model's initial on a deterministic brand
+ * accent when no brand resolves. Uses the same resolver entry point as every
+ * other brand surface, so a vendor cannot look like one thing here and another
+ * in the picker.
+ */
+@Composable
+private fun BrandAvatar(slug: String?, fallbackName: String, accent: Color) {
+    val resId = remember(slug) { slug?.let { ModelBrandResolver.iconResId(it) } }
+    Box(
+        modifier = Modifier
+            .size(28.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surface),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (resId != null) {
+            ModelBrandIcon(slug = slug, sizeDp = 17.dp)
+        } else {
+            Text(
+                text = fallbackName.take(1),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = accent,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttributionBadge(textRes: Int) {
+    Text(
+        stringResource(textRes),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .padding(start = 6.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    )
 }
 
 @Composable

@@ -1892,4 +1892,10 @@
     <string name="ma_role_tools_label">Werkzeug-Freigabeliste (kommagetrennt, leer = unbegrenzt)</string>
     <string name="ma_role_delete">Diese Rolle löschen</string>
     <string name="tool_limits_main_session">Max. Runden der Hauptsitzung</string>
+    <string name="usage_section_models">Nutzung nach Modell</string>
+    <string name="usage_summary_window">Zeitraum: %1$s</string>
+    <string name="usage_summary_cache_hit">Cache-Treffer</string>
+    <string name="usage_detail_window_share">Anteil an diesem Zeitraum</string>
+    <string name="usage_label_input_short">Eingabe</string>
+    <string name="usage_label_output_short">Ausgabe</string>
 </resources>

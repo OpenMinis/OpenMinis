@@ -1890,4 +1890,10 @@
     <string name="ma_role_tools_label">Listahan ng pinapayagang tool (hiwalay ng kuwit, walang laman = walang limitasyon)</string>
     <string name="ma_role_delete">Burahin ang role na ito</string>
     <string name="tool_limits_main_session">Max na turnos ng pangunahing sesyon</string>
+    <string name="usage_section_models">Paggamit ayon sa Modelo</string>
+    <string name="usage_summary_window">Sakop: %1$s</string>
+    <string name="usage_summary_cache_hit">Cache hit</string>
+    <string name="usage_detail_window_share">Bahagi ng panahong ito</string>
+    <string name="usage_label_input_short">Input</string>
+    <string name="usage_label_output_short">Output</string>
 </resources>

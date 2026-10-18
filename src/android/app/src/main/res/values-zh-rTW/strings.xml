@@ -1981,4 +1981,10 @@
     <string name="ma_role_tools_label">工具白名單 (逗號分隔, 空=不限)</string>
     <string name="ma_role_delete">刪除此角色</string>
     <string name="tool_limits_main_session">主會話輪次上限</string>
+    <string name="usage_section_models">模型用量</string>
+    <string name="usage_summary_window">統計範圍：%1$s</string>
+    <string name="usage_summary_cache_hit">快取命中</string>
+    <string name="usage_detail_window_share">本期佔比</string>
+    <string name="usage_label_input_short">輸入</string>
+    <string name="usage_label_output_short">輸出</string>
 </resources>

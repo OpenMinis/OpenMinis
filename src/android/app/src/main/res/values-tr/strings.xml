@@ -1890,4 +1890,10 @@
     <string name="ma_role_tools_label">Araç izin listesi (virgülle ayrılmış, boş = sınırsız)</string>
     <string name="ma_role_delete">Bu rolü sil</string>
     <string name="tool_limits_main_session">Ana oturum azami tur sayısı</string>
+    <string name="usage_section_models">Modele Göre Kullanım</string>
+    <string name="usage_summary_window">Dönem: %1$s</string>
+    <string name="usage_summary_cache_hit">Önbellek isabeti</string>
+    <string name="usage_detail_window_share">Bu dönemdeki pay</string>
+    <string name="usage_label_input_short">Girdi</string>
+    <string name="usage_label_output_short">Çıktı</string>
 </resources>

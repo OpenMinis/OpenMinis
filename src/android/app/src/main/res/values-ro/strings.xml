@@ -1894,4 +1894,10 @@
     <string name="ma_role_tools_label">Lista de instrumente permise (separate prin virgulă, goală = fără limită)</string>
     <string name="ma_role_delete">Șterge acest rol</string>
     <string name="tool_limits_main_session">Max. de tururi ale sesiunii principale</string>
+    <string name="usage_section_models">Utilizare pe model</string>
+    <string name="usage_summary_window">Perioada: %1$s</string>
+    <string name="usage_summary_cache_hit">Cache atins</string>
+    <string name="usage_detail_window_share">Pondere în această perioadă</string>
+    <string name="usage_label_input_short">Intrare</string>
+    <string name="usage_label_output_short">Ieșire</string>
 </resources>

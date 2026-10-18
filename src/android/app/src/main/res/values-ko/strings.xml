@@ -1889,4 +1889,10 @@
     <string name="ma_role_tools_label">도구 허용 목록(쉼표 구분, 비어 있으면 무제한)</string>
     <string name="ma_role_delete">이 역할 삭제</string>
     <string name="tool_limits_main_session">기본 세션 최대 턴 수</string>
+    <string name="usage_section_models">모델별 사용량</string>
+    <string name="usage_summary_window">집계 기간: %1$s</string>
+    <string name="usage_summary_cache_hit">캐시 적중</string>
+    <string name="usage_detail_window_share">이 기간 비중</string>
+    <string name="usage_label_input_short">입력</string>
+    <string name="usage_label_output_short">출력</string>
 </resources>

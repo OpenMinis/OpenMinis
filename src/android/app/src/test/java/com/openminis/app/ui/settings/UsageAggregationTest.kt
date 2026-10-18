@@ -39,9 +39,17 @@ class UsageAggregationTest {
         )
         assertEquals(2, models(agg).size)
         assertEquals(setOf(100L, 200L), models(agg).map { it.inputTokens }.toSet())
+        // [T-usage-provider-subtitle] The display name stays clean; the two
+        // rows are told apart by the SUBTITLE, which carries the provider
+        // instance label (unique by construction) instead of appending it to
+        // the model name.
         assertEquals(
-            setOf("Claude Sonnet 4.5 · Relay A", "Claude Sonnet 4.5 · Relay B"),
+            setOf("Claude Sonnet 4.5"),
             models(agg).map { it.displayName }.toSet(),
+        )
+        assertEquals(
+            setOf("Relay A", "Relay B"),
+            models(agg).map { it.subtitle }.toSet(),
         )
         assertEquals(300L, agg.grandTotal.totalInput)
     }
@@ -75,5 +83,21 @@ class UsageAggregationTest {
             mapOf("inst-a" to "Relay A"),
         )
         assertEquals("Claude Sonnet 4.5", models(agg).single().displayName)
+        assertEquals("Relay A", models(agg).single().subtitle)
+    }
+
+    /**
+     * [T-usage-provider-subtitle] A row written before the instance column
+     * existed has no label — the subtitle must fall back to the provider type
+     * rather than rendering empty.
+     */
+    @Test
+    fun legacyRowSubtitleFallsBackToProviderType() {
+        val agg = aggregateUsageRecords(
+            listOf(row(null, provider = "anthropic")),
+            emptyMap(),
+            emptyMap(),
+        )
+        assertEquals("Anthropic", models(agg).single().subtitle)
     }
 }

@@ -1892,4 +1892,10 @@
     <string name="ma_role_tools_label">Liste d\'outils autorisés (séparés par des virgules, vide = sans limite)</string>
     <string name="ma_role_delete">Supprimer ce rôle</string>
     <string name="tool_limits_main_session">Tours max de la session principale</string>
+    <string name="usage_section_models">Utilisation par modèle</string>
+    <string name="usage_summary_window">Période : %1$s</string>
+    <string name="usage_summary_cache_hit">Cache touché</string>
+    <string name="usage_detail_window_share">Part de cette période</string>
+    <string name="usage_label_input_short">Entrée</string>
+    <string name="usage_label_output_short">Sortie</string>
 </resources>
