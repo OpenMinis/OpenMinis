@@ -88,6 +88,20 @@ class ModelBrandResolverTest {
     }
 
     @Test
+    fun stepSeriesAndFriendsHitTheirIcon() {
+        // [T-brand-short-name] Real enablement ids are shorter than the icon
+        // slug: StepFun ships step-3/step-5-preview (not stepfun-*), Xiaomi
+        // ships mimo-*, Aion ships aion-2.
+        assertEquals("stepfun", resolve(modelId = "step-5-preview"))
+        assertEquals("stepfun", resolve(modelId = "step-3"))
+        assertEquals("stepfun", resolve(modelId = "step2"))
+        assertEquals("stepfun", resolve(modelId = "step-1v-8k"))
+        assertEquals("xiaomimimo", resolve(modelId = "mimo-v2-flash"))
+        assertEquals("aionlabs", resolve(modelId = "aion-2.0"))
+        assertEquals("kling", resolve(modelId = "kling-v2"))
+    }
+
+    @Test
     fun genericWordsNeverScoreAsBrands() {
         // [T-brand-generic-word-guard] Bare generic English words (magic,
         // sync, nova, flux, spark...) were in the keyword table straight
