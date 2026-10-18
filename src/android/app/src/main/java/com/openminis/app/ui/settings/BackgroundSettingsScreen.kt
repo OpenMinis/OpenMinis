@@ -40,6 +40,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import com.openminis.app.ui.components.MinisCenterTopBar
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -141,8 +142,12 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
         )
     }
 
+    // [T-android-lifecycle-observer-leak] LaunchedEffect version added one
+    // observer per visit and never removed any, so after N visits a single
+    // ON_RESUME fired N times (N stacked checks). Fixed by switching to
+    // DisposableEffect — same pattern as CheckUpdateSection.kt.
     val lifecycleOwner = LocalLifecycleOwner.current
-    LaunchedEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 ignoringOptimizations =
@@ -166,6 +171,7 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val vendor = remember { PowerOptimizationManager.Vendor.current() }

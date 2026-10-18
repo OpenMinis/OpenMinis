@@ -320,3 +320,21 @@ private fun scaledTypography(factor: Float): Typography {
         labelSmall = base.labelSmall.scale(factor),
     )
 }
+
+/**
+ * [T-android-spacing-rhythm] App-wide spacing tokens — 4dp base unit, 8dp
+ * rhythm. Use these for structural padding/gaps instead of raw dp literals so
+ * the visual rhythm stays consistent and a future density pass has one place
+ * to tune. Existing hand-tuned micro-spacings (6dp chip insets, 10dp badge
+ * padding) are left as-is; new code should prefer these tokens.
+ *
+ * xs=4  sm=8  md=12  lg=16  xl=20  xxl=24
+ */
+object MinisSpacing {
+    val xs = 4.dp   // hairline gaps, icon-to-text
+    val sm = 8.dp   // primary rhythm unit — default row/column gap
+    val md = 12.dp  // card inner padding, list item horizontal
+    val lg = 16.dp  // section padding, screen horizontal
+    val xl = 20.dp  // card-to-card, section header gap
+    val xxl = 24.dp // screen edge, large separation
+}

@@ -20,6 +20,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Accessibility
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bolt
@@ -85,6 +88,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.openminis.app.evolution.EvolutionPrefs
 import com.openminis.app.ui.components.openExternalUrl
 import com.openminis.app.i18n.uppercaseForDisplay
+import com.openminis.app.ui.theme.monetIconTint
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -192,7 +196,11 @@ fun SettingsScreen(
             }
 
             // -- Agent Runtime --
-            SettingsSection(title = stringResource(R.string.settings_section_agent_runtime)) {
+            SettingsSection(
+                title = stringResource(R.string.settings_section_agent_runtime),
+                collapsible = true,
+                initiallyExpanded = false,
+            ) {
                 SettingsItem(
                     icon = Icons.Outlined.Groups,
                     iconColor = Color(0xFF5856D6),
@@ -568,29 +576,54 @@ private fun buildFeedbackMailto(): String {
 
 /**
  * A grouped settings section with header and optional footer, matching iOS grouped List sections.
+ *
+ * [T-android-settings-collapsible] Sections with many rows (Agent Runtime has
+ * 11) can be collapsed by tapping the header. The collapsed state is held in
+ * the caller's rememberSaveable so it survives rotation and process death.
+ * Sections with ≤2 rows stay always-expanded (collapsing them saves nothing).
  */
 @Composable
 private fun SettingsSection(
     title: String,
     footer: String? = null,
+    collapsible: Boolean = false,
+    initiallyExpanded: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    var expanded by rememberSaveable(title) { mutableStateOf(initiallyExpanded) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 20.dp),
     ) {
-        // Section header
-        Text(
-            text = title.uppercaseForDisplay(),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 0.5.sp,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-        )
+        // Section header — tappable when collapsible
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(if (collapsible) Modifier.clickable { expanded = !expanded } else Modifier)
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = title.uppercaseForDisplay(),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.weight(1f),
+            )
+            if (collapsible) {
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
 
-        // Section card
+        // Section card — animated collapse
+        if (expanded) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -611,12 +644,18 @@ private fun SettingsSection(
                 lineHeight = 16.sp,
             )
         }
+        }
     }
 }
 
 /**
  * A single settings row item with colored icon, title, optional subtitle, and chevron.
  * Styled to match iOS settings rows with SF Symbol-like colored circle icons.
+ *
+ * [T-android-monet-settings-icon] The colored circle background follows the
+ * wallpaper accent in dynamic-color mode — same contract as AppearanceScreen's
+ * tile icons. Without this wrap the settings home showed static iOS hues while
+ * every other themed surface shifted, producing two visual systems in one app.
  */
 @Composable
 private fun SettingsItem(
@@ -627,6 +666,7 @@ private fun SettingsItem(
     onClick: () -> Unit,
     showDivider: Boolean = true,
 ) {
+    val tileColor = monetIconTint(iconColor)
     Column {
         Row(
             modifier = Modifier
@@ -640,7 +680,7 @@ private fun SettingsItem(
                 modifier = Modifier
                     .size(30.dp)
                     .background(
-                        color = iconColor,
+                        color = tileColor,
                         shape = CircleShape,
                     ),
                 contentAlignment = Alignment.Center,

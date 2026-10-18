@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
@@ -310,11 +311,9 @@ internal val ToolMemoryAccent = Color(0xFFFF2D55)
 internal val SparkleColor1 = Color(0xFFB8B096) // rgb(0.72, 0.69, 0.59)
 internal val SparkleColor2 = Color(0xFF99998C) // rgb(0.6, 0.6, 0.55)
 
-// T129: cap photo/video and file pickers at 50 items per launch. Above this
-// count Android's PickMultipleVisualMedia silently truncates anyway, but our
-// document picker has no native cap — so we apply the same limit on both
-// sides and toast the user when their selection is trimmed. Mirrors iOS
-// PHPickerConfiguration.selectionLimit = 50.
+// T129: cap pickers at 50 items — Android's PickMultipleVisualMedia silently
+// truncates anyway; our document picker has no cap so we apply the same limit
+// on both sides. Mirrors iOS PHPickerConfiguration.selectionLimit = 50.
 private const val ATTACHMENT_PICK_LIMIT = 50
 
 /**
@@ -5594,7 +5593,8 @@ fun ChatScreen(
                                 radiusPx, radiusPx,
                                 shadowPaint,
                             )
-                        }
+                        } // [T-android-composer-ime-animation]
+                        .animateContentSize()
                         .padding(top = if (attachments.isNotEmpty()) 8.dp else 4.dp),
                 ) {
                     // T185: Move-to capsule lives INSIDE the composer card,
