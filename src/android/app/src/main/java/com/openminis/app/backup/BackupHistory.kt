@@ -100,6 +100,7 @@ class BackupHistory private constructor(private val context: Context) {
         val destinations: List<DestinationOutcome> = emptyList(),
         val log: List<LogEntry> = emptyList(),
         val errorMessage: String? = null,
+        val isScheduled: Boolean = false,
     ) {
         val durationMillis: Long? get() = finishedAt?.let { it - startedAt }
         val hasProblems: Boolean
@@ -151,6 +152,13 @@ class BackupHistory private constructor(private val context: Context) {
     @Synchronized
     fun remove(id: String) {
         persist(records().filterNot { it.id == id })
+    }
+
+    @Synchronized
+    fun removeAll(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val set = ids.toSet()
+        persist(records().filterNot { it.id in set })
     }
 
     @Synchronized
