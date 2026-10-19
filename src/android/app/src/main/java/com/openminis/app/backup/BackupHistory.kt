@@ -100,6 +100,7 @@ class BackupHistory private constructor(private val context: Context) {
         val destinations: List<DestinationOutcome> = emptyList(),
         val log: List<LogEntry> = emptyList(),
         val errorMessage: String? = null,
+        val isScheduled: Boolean = false,
     ) {
         val durationMillis: Long? get() = finishedAt?.let { it - startedAt }
         val hasProblems: Boolean

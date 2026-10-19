@@ -54,6 +54,7 @@ object BackupRunController {
         val maxFileBytes: Long?,
         /** Non-null only when the user chose to encrypt. */
         val passphrase: String?,
+        val isScheduled: Boolean = false,
     ) {
         val encrypted: Boolean get() = !passphrase.isNullOrEmpty()
     }
@@ -185,6 +186,7 @@ object BackupRunController {
             status = BackupHistory.Status.RUNNING,
             categories = cats.map { it.key }.sorted(),
             encrypted = request.encrypted,
+            isScheduled = request.isScheduled,
         )
         writeHistory(history, record)
 

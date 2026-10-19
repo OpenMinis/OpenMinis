@@ -918,6 +918,21 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             .filter { it in BackupCategory.backupable }.toSet()
         return restored.ifEmpty { BackupCategory.backupable.toSet() }
     }
+    // MARK: - Scheduled Backup (Issue #476)
+
+    private val _scheduledConfig = MutableStateFlow(
+        com.openminis.app.backup.scheduled.ScheduledBackupConfig.load(app)
+    )
+    val scheduledConfig: StateFlow<com.openminis.app.backup.scheduled.ScheduledBackupConfig> =
+        _scheduledConfig.asStateFlow()
+
+    fun updateScheduledConfig(newConfig: com.openminis.app.backup.scheduled.ScheduledBackupConfig) {
+        val application = getApplication<Application>()
+        com.openminis.app.backup.scheduled.ScheduledBackupConfig.save(application, newConfig)
+        com.openminis.app.backup.scheduled.ScheduledBackupScheduler.applyConfig(application, newConfig)
+        _scheduledConfig.value = newConfig
+    }
+
 
 
     companion object {
