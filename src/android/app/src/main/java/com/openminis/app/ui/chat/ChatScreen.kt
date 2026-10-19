@@ -2358,57 +2358,35 @@ fun ChatScreen(
                     } else if (onToggleSidebar != null) {
                         // [T-android-tablet-sidebar-collapse] The slot the back
                         // arrow vacates in two-pane becomes the sidebar toggle.
-                        //
                         // ONE glyph for both states — the list icon, meaning
-                        // "the session list", with the action stated in the
-                        // content description instead.
-                        //
-                        // A directional chevron was tried for the expanded
-                        // state and is wrong here: this is the slot that used
-                        // to hold the back arrow, so a leading chevron reads as
-                        // "go back" — precisely the meaning two-pane removed.
-                        // Swapping the glyph on toggle also makes the control
-                        // look like two different buttons rather than one
-                        // switch. A stable icon whose accessible label changes
-                        // is both clearer and honest about what it targets.
-                        //
-                        // `Menu` rather than `List`, which this first used.
-                        // List draws a bulleted list — dots plus rules — whose
-                        // ink sat high and left in the 24dp box (measured 41x23
-                        // px with its mass above centre), so it read as a small
-                        // mark floating above the ⋮ at the other end of this
-                        // same bar. Menu's three full-width bars fill the box
-                        // symmetrically and optically centre against it; both
-                        // glyphs now share a baseline to the pixel. Menu is
-                        // also the conventional sidebar-toggle icon.
-                        //
-                        // [T-android-split-toggle-align] Two corrections, both
+                        // "the session list", action stated in the content
+                        // description. A directional chevron is wrong here:
+                        // this slot held the back arrow, so a leading chevron
+                        // reads as "go back" — the meaning two-pane removed —
+                        // and swapping glyphs on toggle makes one switch look
+                        // like two buttons.
+                        // `Menu` rather than `List`: List's bulleted ink sits
+                        // high-left in the 24dp box and read as a small mark
+                        // floating above the ⋮ at the other end of this bar;
+                        // Menu's three full-width bars fill the box
+                        // symmetrically and are the conventional
+                        // sidebar-toggle icon.
+                        // [T-android-split-toggle-align] Two corrections,
                         // measured on a Mate Pad against the SESSION LIST's
-                        // toolbar rather than this bar's own ⋮ — the toggle sits
-                        // hard against the pane seam, so the icons it is read
-                        // beside are the list's Schedule/Terminal, not the
-                        // kebab at the far end of this bar. Aligned only to the
-                        // kebab, it measured 8px shorter and 3.5px lower than
-                        // its actual neighbours.
-                        //
-                        // 1. `offset(y = -2.dp)`: this bar is 68dp (see
-                        //    expandedHeight below — sized for the 3-row title
-                        //    and NOT reducible without re-triggering
-                        //    T-topbar-model-row-clip), while the list's bar is
-                        //    M3's default 64dp. A TopAppBar centres its
-                        //    navigation icon in its OWN height, so the 4dp
-                        //    difference put this glyph 2dp below the list's row.
-                        //    Offsetting by half the delta lands it on the list's
-                        //    baseline while leaving the taller bar intact.
-                        //
-                        // 2. `size(28.dp)`: Menu's three bars ink only ~12 of
-                        //    their 24dp viewport (bars at y=6/11/16), where the
-                        //    circular Schedule and boxy Terminal fill ~20 of
-                        //    theirs. At a matched box size Menu therefore reads
-                        //    markedly lighter and smaller. Scaling the box to
-                        //    28dp brings its ink to ~14dp, closing most of the
-                        //    optical gap. The IconButton's 48dp touch target is
-                        //    unchanged, so this is purely visual weight.
+                        // toolbar (the toggle sits hard against the pane seam,
+                        // so its neighbours are the list's Schedule/Terminal,
+                        // not this bar's kebab — aligned only to the kebab it
+                        // measured 8px shorter and 3.5px lower):
+                        // 1. `offset(y = -2.dp)`: this bar is 68dp (sized for
+                        //    the 3-row title, not reducible without
+                        //    re-triggering T-topbar-model-row-clip), the
+                        //    list's is M3's default 64dp; a TopAppBar centres
+                        //    its nav icon in its OWN height, so offset by half
+                        //    the 4dp delta to land on the list's baseline.
+                        // 2. `size(28.dp)`: Menu inks only ~12 of its 24dp
+                        //    viewport where Schedule/Terminal fill ~20; at
+                        //    28dp its ink reaches ~14dp, closing the optical
+                        //    gap. The 48dp touch target is unchanged.
                         IconButton(
                             onClick = onToggleSidebar,
                             modifier = Modifier.offset(y = (-2).dp),
@@ -2853,52 +2831,31 @@ fun ChatScreen(
             Box(modifier = Modifier.weight(1f)) {
                 var toolBarHeightPx by remember { mutableStateOf(0) }
                 // T166 / T170 / T173: bottomReserve must clear the visible
-                // top of the floating activity pill. Layout primitive comes
-                // from ToolActivityPill: capsule height 34dp, mounted with
-                // 6dp bottom padding above the composer, so its visual top
-                // sits 40dp above the input bar's upper edge (which is also
-                // the LazyColumn bottom edge under reverseLayout).
-                //
+                // top of the floating activity pill. Layout primitive from
+                // ToolActivityPill: 34dp capsule + 6dp bottom padding above
+                // the composer → visual top 40dp above the input bar's
+                // upper edge (= LazyColumn bottom edge under reverseLayout).
                 // A measured `onGloballyPositioned` value drifts with wrapper
-                // padding and shadow allowance, so the reserve pins to the
-                // visual constant instead — the same approach the old 65dp
-                // thumbnail reserve used (T166–T174).
-                //
-                // T174: an earlier version gated reserve on `toolBarHeightPx
-                // > 0`, but `onGloballyPositioned` fires asynchronously after
-                // the first floating-bar layout pass; for one frame after
-                // toolBlocks appeared the reserve evaluated the small
-                // default (28 dp) and the just-arrived user bubble landed
-                // beneath the bar. Logcat showed the inverse glitch too:
-                // `toolBarHeightPx=258 toolBarHeightDp=0 reserve=28` — the
-                // px state and the dp/reserve values come from different
-                // recomposition snapshots. Drive the reserve directly off
-                // the same predicate used for *whether* the floating bar is
-                // emitted (`hasFloatingTools` below) so reserve and bar
-                // visibility flip on the same frame.
+                // padding/shadow, so the reserve pins to the visual constant
+                // (same as the old 65dp thumbnail reserve, T166–T174).
+                // T174: an earlier gate on `toolBarHeightPx > 0` raced —
+                // onGloballyPositioned fires after the first layout pass,
+                // and px vs dp/reserve came from different recomposition
+                // snapshots (`toolBarHeightPx=258 reserve=28` in logcat).
+                // Drive the reserve off the same predicate that gates the
+                // bar's emission (`hasFloatingTools` below) so both flip on
+                // the same frame.
                 // [T-android-chat-cannot-scroll-bottom-many-tools]
-                // Bug 𝙓𝙄𝙉 TG36286: with 7+ tools the user couldn't scroll the
-                // last messages above the floating tool status bar.
-                //
-                // Asymmetry between the bar's render condition and its
-                // bottomReserve gate: [lastToolBlocks] (drives whether to
-                // mount the ToolActivityPill) merges `messages` with the
-                // streaming-side-channel `streamingById`, so during a live
-                // turn the in-flight tool's toolStatus shows up there →
-                // bar renders. [hasFloatingTools] (drives bottomReserve)
-                // only read `messages`, which the streaming architecture
-                // intentionally leaves stable during a turn — so the
-                // in-flight tool is invisible to this predicate → reserve
-                // collapsed to 20dp while a 65dp+6dp floating bar covered
-                // the bottom of the LazyColumn. The new arrivals (status
-                // pill, "Minis is thinking" indicator, inline retry banner) landed
-                // behind the bar with no way to scroll them into view.
-                //
-                // Fix: also subscribe to streamingById so the predicate
-                // matches the bar's actual mount condition. The bar's
-                // mount uses `lastToolBlocks.isNotEmpty()` over the merged
-                // view; we mirror that semantically by checking the same
-                // filter on both sources.
+                // Bug 𝙓𝙄𝙉 TG36286: with 7+ tools the last messages couldn't
+                // scroll above the floating tool bar. Asymmetry: the bar's
+                // render condition ([lastToolBlocks]) merges `messages` with
+                // the streaming side-channel `streamingById` (in-flight tool
+                // visible), but [hasFloatingTools] read `messages` only —
+                // stable during a turn by design — so reserve collapsed to
+                // 20dp while a 65dp+6dp bar covered the LazyColumn bottom;
+                // new arrivals landed behind it. Fix: subscribe to
+                // streamingById so the predicate matches the bar's actual
+                // mount condition.
                 val streamingById by viewModel.streamingById.collectAsState()
                 // [T-android-fold-expanded-duplicate] Hoisted above
                 // `hasFloatingTools` — same composable scope, so this is a pure
@@ -3029,6 +2986,14 @@ fun ChatScreen(
                     mutableStateOf<List<FlatChatItem>>(emptyList())
                 }
                 var flatItemsVersion by remember(sessionId) { mutableLongStateOf(0L) }
+                // [T-android-selection-offscreen-order] (GH#296) Row key →
+                // flattened index, published by the same pass that builds
+                // flatItems. The selection's document order reads it so a
+                // selection whose start scrolled off-screen still orders,
+                // highlights and copies in full.
+                val flatRowIndexByKey = remember(sessionId) {
+                    mutableStateOf<Map<String, Int>>(emptyMap())
+                }
 
                 // [P-process-card] Which process cards are mid-run, read off
                 // the rows the pipeline already published. This used to be
@@ -3591,6 +3556,14 @@ fun ChatScreen(
                                 }
                             }
                             flatItems = if (liveRows.isEmpty()) frozenRows else frozenRows + liveRows
+                            // [T-android-selection-offscreen-order] (GH#296)
+                            // Publish where each row sits in the flattened
+                            // list — O(rows) over a list we just built, on
+                            // the same pass, so the selection's document
+                            // order never re-walks the list per lookup.
+                            flatRowIndexByKey.value = buildMap {
+                                flatItems.forEachIndexed { idx, row -> put(row.key, idx) }
+                            }
                             flatItemsVersion++
                             com.openminis.app.diagnostics.StreamPerfMonitor.tick(
                                 flattenNanos = System.nanoTime() - tickStartNs,
@@ -3751,6 +3724,16 @@ fun ChatScreen(
                 // scrolling back in re-registers the shard and the highlight
                 // redraws automatically.
                 val selectionController = remember { SelectionController() }
+                // [T-android-selection-offscreen-order] (GH#296) Give the
+                // selection the chat's document order, so a selection whose
+                // start scrolled off-screen (the handle's edge auto-scroll)
+                // still orders, highlights and copies in full. Reuses the
+                // row-index map the flatten pass already publishes; read at
+                // call time, so it always reflects the current rows.
+                DisposableEffect(selectionController, flatRowIndexByKey) {
+                    selectionController.documentOrder = chatDocumentOrder { flatRowIndexByKey.value }
+                    onDispose { selectionController.documentOrder = null }
+                }
                 // [T-android-selection-readaloud] Player backing the selection
                 // toolbar's "Read Aloud". Screen-scoped and independent of the
                 // voice panel's own player (that one only exists while voice
