@@ -1,6 +1,7 @@
 package com.openminis.app.provider.anthropic
 
 import android.util.Base64
+import com.openminis.app.auth.ClaudeCliMimicryHeaders
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.sanitizeToolId
@@ -1080,20 +1081,15 @@ class AnthropicProvider(
             builder.header("anthropic-beta", betaFlags.joinToString(","))
         }
 
-        // Stainless / CLI fingerprint headers — only on OAuth; bump in lockstep
-        // with sub2api when the real CLI version moves.
+        // Stainless / CLI fingerprint headers — only on OAuth. [T-claude-cli-
+        // fingerprint] The values live in one place now (ClaudeCliMimicryHeaders)
+        // because the auth path sends the same registered client identity; two
+        // copies is how the UA fell six CLI releases behind while the token
+        // requests carried no fingerprint at all.
         if (isOAuth) {
-            builder.header("User-Agent", "claude-cli/2.1.195 (external, cli)")
-            builder.header("X-Stainless-Lang", "js")
-            builder.header("X-Stainless-Package-Version", "0.106.0")
-            builder.header("X-Stainless-OS", "Linux")
-            builder.header("X-Stainless-Arch", "arm64")
-            builder.header("X-Stainless-Runtime", "node")
-            builder.header("X-Stainless-Runtime-Version", "v24.18.0")
-            builder.header("X-Stainless-Retry-Count", "0")
-            builder.header("X-Stainless-Timeout", "600")
-            builder.header("X-App", "cli")
-            builder.header("Anthropic-Dangerous-Direct-Browser-Access", "true")
+            for ((name, value) in ClaudeCliMimicryHeaders.ALL) {
+                builder.header(name, value)
+            }
         }
 
         if (isOAuth) {
@@ -1113,11 +1109,10 @@ class AnthropicProvider(
         // [T-provider-custom-user-agent] Applied last so a non-blank override
         // wins over the OAuth claude-cli UA above. null/blank → fall back to
         // the branded Minis UA on the regular apiKey path, but on the OAuth
-        // path keep the claude-cli/2.1.195 fingerprint set at line ~779 (the
-        // Anthropic OAuth backend pairs UA + X-Stainless-* and rejects calls
-        // whose UA doesn't match the registered client identity). T-android-
-        // default-ua: pass defaultUserAgent=null on OAuth, branded default
-        // everywhere else.
+        // path keep the CLI fingerprint set above (the Anthropic OAuth backend
+        // pairs UA + X-Stainless-* and rejects calls whose UA doesn't match the
+        // registered client identity). T-android-default-ua: pass
+        // defaultUserAgent=null on OAuth, branded default everywhere else.
         builder.applyUserAgentOverride(
             customUserAgent,
             defaultUserAgent = if (isOAuth) null else com.openminis.app.provider.MinisUserAgent.DEFAULT,

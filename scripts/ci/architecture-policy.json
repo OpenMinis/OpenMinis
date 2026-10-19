@@ -30,7 +30,7 @@
     "src/android/app/src/main/java/com/openminis/app/debug/DebugMethodRegistry.kt": 881,
     "src/android/app/src/main/java/com/openminis/app/debug/DebugRPCHandler.kt": 1424,
     "src/android/app/src/main/java/com/openminis/app/provider/ModelsDevApi.kt": 826,
-    "src/android/app/src/main/java/com/openminis/app/provider/anthropic/AnthropicProvider.kt": 1251,
+    "src/android/app/src/main/java/com/openminis/app/provider/anthropic/AnthropicProvider.kt": 1246,
     "src/android/app/src/main/java/com/openminis/app/provider/openai/OpenAIProvider.kt": 1772,
     "src/android/app/src/main/java/com/openminis/app/provider/openai/OpenAIRawStream.kt": 1098,
     "src/android/app/src/main/java/com/openminis/app/provider/openai/OpenAIRequestBodies.kt": 1304,

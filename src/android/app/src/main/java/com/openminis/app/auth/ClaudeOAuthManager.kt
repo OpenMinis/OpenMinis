@@ -25,7 +25,7 @@ import kotlin.coroutines.resume
  * 3. Open claude.ai/oauth/authorize in Chrome Custom Tab (in-app browser)
  * 4. User authorizes → Anthropic redirects to localhost:54545/callback
  * 5. Callback server captures code + state
- * 6. Exchange code for tokens via POST JSON to console.anthropic.com/v1/oauth/token
+ * 6. Exchange code for tokens via POST JSON to claude.ai/v1/oauth/token
  * 7. Store access_token as API key via ProviderRepository
  *
  * Key differences from OpenRouter:
@@ -115,7 +115,14 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
     }
 
     override val authURL = "https://claude.ai/oauth/authorize"
-    override val tokenURL = "https://console.anthropic.com/v1/oauth/token"
+
+    /**
+     * [T-claude-cli-fingerprint] `console.anthropic.com` is the retired host —
+     * posting there returns a Cloudflare interstitial (HTTP 403, HTML body)
+     * instead of JSON, so login looked like a network failure. The CLI posts to
+     * `claude.ai/v1/oauth/token` now.
+     */
+    override val tokenURL = "https://claude.ai/v1/oauth/token"
     override val clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
     override val clientSecret: String? = null
     override val callbackPort = 54545
@@ -199,6 +206,11 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
         val request = okhttp3.Request.Builder()
             .url(tokenURL)
+            // [T-claude-cli-fingerprint] Without the CLI fingerprint the token
+            // endpoint scores this as a non-official client and answers with a
+            // Cloudflare challenge instead of JSON. Same headers the chat path
+            // sends — see ClaudeCliMimicryHeaders.
+            .applyClaudeCliMimicryHeaders()
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         val response = httpClient.newCall(request).execute()
@@ -289,6 +301,10 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
                 Log.d(TAG, "Refreshing OAuth token via JSON POST to $tokenURL")
                 val request = okhttp3.Request.Builder()
                     .url(tokenURL)
+                    // Refresh is the call a user hits repeatedly; a fingerprint
+                    // on only the login path would look fixed and fail days
+                    // later.
+                    .applyClaudeCliMimicryHeaders()
                     .post(body.toString().toRequestBody("application/json".toMediaType()))
                     .build()
                 val response = httpClient.newCall(request).execute()
