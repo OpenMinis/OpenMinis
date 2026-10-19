@@ -8,9 +8,11 @@ import java.io.File
  * [T-android-backup-retention-policy] Manages retention and rotation of automated backup snapshots.
  *
  * Implements acceptance criteria of Issue #476:
- * 1. Configurable retention limit: Retains the latest N automated snapshots.
+ * 1. Configurable retention limit: Retains the latest N successful automated snapshots.
  * 2. Automated pruning: Automatically prunes the oldest scheduled snapshots exceeding the retention quota.
- * 3. Strict preservation of manual backups: User-created manual snapshots are never pruned automatically.
+ * 3. Failure resilience: Failed runs (`FAILED`) do NOT consume the retention quota, preventing
+ *    intermittent errors from displacing older valid backups.
+ * 4. Strict preservation of manual backups: User-created manual snapshots are never pruned automatically.
  */
 object BackupRetentionPolicy {
 
@@ -29,8 +31,12 @@ object BackupRetentionPolicy {
 
     /**
      * Pure selection logic: identifies which records should be pruned.
-     * Keeps newest [maxScheduledToKeep] scheduled backups and marks older ones for removal.
-     * Manual backups (`isScheduled == false`) are strictly omitted from pruning candidates.
+     *
+     * Invariants:
+     * - Manual backups (`isScheduled == false`) are strictly omitted.
+     * - Successful automated backups (`SUCCEEDED` or `COMPLETED_WITH_ISSUES`) are evaluated
+     *   against [maxScheduledToKeep]. Older valid backups beyond the quota are pruned.
+     * - Failed automated backups do NOT consume valid backup quota; excess failed records are cleaned up.
      */
     fun selectRecordsToPrune(
         records: List<BackupHistory.Record>,
@@ -38,16 +44,28 @@ object BackupRetentionPolicy {
     ): List<BackupHistory.Record> {
         if (maxScheduledToKeep <= 0) return emptyList()
 
-        // Filter scheduled records only, ordered newest first
         val scheduled = records.filter { it.isScheduled }
-            .sortedByDescending { it.startedAt }
+        if (scheduled.isEmpty()) return emptyList()
 
-        if (scheduled.size <= maxScheduledToKeep) {
-            return emptyList()
+        // 1. Valid snapshots that produced packages (SUCCEEDED or COMPLETED_WITH_ISSUES)
+        val validScheduled = scheduled.filter {
+            it.status == BackupHistory.Status.SUCCEEDED || it.status == BackupHistory.Status.COMPLETED_WITH_ISSUES
+        }.sortedByDescending { it.startedAt }
+
+        val toPrune = mutableListOf<BackupHistory.Record>()
+
+        if (validScheduled.size > maxScheduledToKeep) {
+            toPrune.addAll(validScheduled.drop(maxScheduledToKeep))
         }
 
-        // Drop the kept newest ones; the remainder (oldest) are pruned
-        return scheduled.drop(maxScheduledToKeep)
+        // 2. Clean up excess failed records so they don't grow unbounded, without touching valid quota
+        val failedScheduled = scheduled.filter { it.status == BackupHistory.Status.FAILED }
+            .sortedByDescending { it.startedAt }
+        if (failedScheduled.size > maxScheduledToKeep) {
+            toPrune.addAll(failedScheduled.drop(maxScheduledToKeep))
+        }
+
+        return toPrune
     }
 
     /**
@@ -84,10 +102,13 @@ object BackupRetentionPolicy {
                 }
             }
 
-            // 2. Remove record from persistent history
-            history.remove(record.id)
             prunedIds.add(record.id)
-            AppLogger.info(TAG, "[Retention] Pruned old scheduled backup id=${record.id}, startedAt=${record.startedAt}")
+            AppLogger.info(TAG, "[Retention] Pruned old scheduled backup id=${record.id}, startedAt=${record.startedAt}, status=${record.status}")
+        }
+
+        // 2. Batch remove records from persistent history (single disk write)
+        if (prunedIds.isNotEmpty()) {
+            history.removeAll(prunedIds)
         }
 
         return PruneResult(

@@ -155,6 +155,13 @@ class BackupHistory private constructor(private val context: Context) {
     }
 
     @Synchronized
+    fun removeAll(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val set = ids.toSet()
+        persist(records().filterNot { it.id in set })
+    }
+
+    @Synchronized
     fun clear() {
         persist(emptyList())
     }

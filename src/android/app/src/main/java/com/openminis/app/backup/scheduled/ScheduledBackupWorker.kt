@@ -42,7 +42,7 @@ class ScheduledBackupWorker(
         AppLogger.info(TAG, "[ScheduledBackup] Starting scheduled background backup...")
 
         val request = BackupRunController.Request(
-            categories = BackupCategory.entries.toSet(),
+            categories = BackupCategory.backupable.toSet(),
             maxFileBytes = null,
             passphrase = config.passphrase,
             isScheduled = true,

@@ -107,4 +107,36 @@ class BackupRetentionPolicyTest {
         val toPruneNegative = BackupRetentionPolicy.selectRecordsToPrune(records, maxScheduledToKeep = -1)
         assertTrue(toPruneNegative.isEmpty())
     }
+    @Test
+    fun `failed scheduled runs do not displace successful backups from retention quota`() {
+        // Successful backup made at t=1000
+        val b1 = mockRecord(startedAt = 1000L, isScheduled = true, id = "succ-old")
+        // Subsequent failed runs
+        val f1 = BackupHistory.Record(
+            id = "fail-1",
+            backupId = "fail-1",
+            startedAt = 2000L,
+            status = BackupHistory.Status.FAILED,
+            isScheduled = true,
+        )
+        val f2 = BackupHistory.Record(
+            id = "fail-2",
+            backupId = "fail-2",
+            startedAt = 3000L,
+            status = BackupHistory.Status.FAILED,
+            isScheduled = true,
+        )
+        // New successful backup made at t=4000
+        val b2 = mockRecord(startedAt = 4000L, isScheduled = true, id = "succ-new")
+
+        val records = listOf(b2, f2, f1, b1)
+        // Retention limit is 2
+        val toPrune = BackupRetentionPolicy.selectRecordsToPrune(records, maxScheduledToKeep = 2)
+
+        val prunedIds = toPrune.map { it.id }.toSet()
+        // Crucial invariant: succ-old (1000L) must NOT be pruned because there are only 2 valid backups!
+        assertTrue(!prunedIds.contains("succ-old"))
+        assertTrue(!prunedIds.contains("succ-new"))
+    }
+
 }
