@@ -48,26 +48,18 @@ internal suspend fun ChatViewModel.runAgentLoop(
     /** [T-android-instant-thinking] send 路径已预插占位气泡，复用其 id。 */
     overrideAssistantId: String? = null,
 ) {
-    // Room is the transcript authority. Rebuild immediately before the first
-    // request so UI paging, cold-open tail limits, and the resident hot-cache
-    // cannot hide older user instructions from the model. The current user row
-    // is already persisted by sendMessage; this also restores raw BodyStore
-    // bodies instead of the display projection.
+    // Room is the transcript authority. Rebuild before the first request so
+    // UI paging / cold-open tail limits / hot-cache can't hide older user
+    // instructions from the model. sendMessage already persisted the current
+    // user row; this also restores raw BodyStore bodies.
     withContext(Dispatchers.IO) {
         rebuildAgentHistoryFromDatabase(activeSessionId)
     }
-    // [T-android-resume-banner-race] Snapshot the resume epoch at run start:
-    // every `_canResume = true` this loop's tail may emit is only allowed to
-    // land while this snapshot is still current. A newer send bumps the
-    // epoch, so a tail that outlives its replacement drops the raise instead
-    // of re-showing the resume banner over the fresh turn.
+    // [T-android-resume-banner-race] Snapshot epochs so mid-run side effects
+    // (resume banner, model fallback writeback) only land while this snapshot
+    // is current. A newer send / model switch bumps the epoch; stale tails drop.
     val loopResumeEpoch = snapshotResumeEpoch()
-    // [T-android-model-switch-next-request] Snapshot the model-selection
-    // epoch too: this run's fallback writeback (persisting the fallback
-    // model onto the VM) may only land while this snapshot is still
-    // current. A user switching models mid-run bumps the epoch, so the
-    // writeback drops and the user's choice takes effect on the NEXT
-    // request instead of being clobbered by the loop's tail.
+    // [T-android-model-switch-next-request] Same race: model-selection epoch.
     val loopModelEpoch = snapshotModelSelectionEpoch()
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
@@ -78,14 +70,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
         activeSessionId,
         provider.model.displayName,
     )
-    // [T-android-mem-probe-trust] Send-path context shape. The existing
-    // `messages-shape` probe only runs on session LOAD, so the 2026-08-15
-    // log described the session as it was opened, never as it was sent —
-    // and the send is where the memory goes. `historySize` alone says
-    // nothing about payload: 17 messages carrying a 100 KB tool_result each
-    // is a very different request from 1500 short ones. Logged once per
-    // agent loop (not per turn) to stay cheap; the walk is O(parts) over
-    // already-resident strings.
+    // [T-android-mem-probe-trust] Send-path context shape. `messages-shape`
+    // probe only runs on LOAD; the send is where memory goes. `historySize`
+    // says nothing about payload (17×100KB tool_results ≠ 1500 short ones).
+    // Logged once per loop; O(parts) over resident strings.
     runCatching {
         var chars = 0L
         var maxOne = 0
@@ -126,15 +114,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
         )
     }
     // [T-android-queued-message-interrupt-on-toolclose] `assistantId` is
-    // normally a single message id for the whole agent loop (iOS-parity:
-    // multiple tool/text turns folded into one bubble). It is reassigned
-    // ONLY when a queued mid-loop prompt is injected as a new turn: the
-    // just-finished bubble is sealed and a fresh assistantId starts so the
-    // queued user message renders BETWEEN them. `allToolBlocks` and
-    // `accumulatedText` are also reset at that point so the new bubble
-    // starts empty and `buildTurnParts(allToolBlocks, turnStartBlockIndex,
-    // toolInputMap)` continues to slice only the current turn's blocks
-    // (turnStartBlockIndex is captured at iteration start to 0 after reset).
+    // normally a single id for the whole loop (iOS-parity: tool/text turns
+    // folded into one bubble). Reassigned ONLY when a queued mid-loop prompt
+    // injects as a new turn: the finished bubble is sealed, a fresh
+    // assistantId starts, and allToolBlocks/accumulatedText reset so the
+    // queued user message renders between them.
     var assistantId = overrideAssistantId ?: "assistant_${System.currentTimeMillis()}"
     val allToolBlocks = mutableListOf<AssistantBlock>()
     // Per-tool ring of the most recent `accumulated` JSON snapshots emitted
@@ -1809,40 +1793,54 @@ internal suspend fun ChatViewModel.runAgentLoop(
             // A null stopReason reaching here means an EMPTY turn, which the
             // empty-turn path below is designed to recover; treat it as
             // "clean" for that purpose exactly as before.
-            val finishedCleanly = turnFinishReason == null ||
-                turnFinishReason == "stop" || turnFinishReason == "end_turn"
-            if (!hasVisibleContent && finishedCleanly) {
-                // [T-android-empty-after-toolresult-reminder] Special case: the
-                // server returned an empty turn right after a tool result. The
-                // model owes a follow-up (next tool call or a final answer) but
-                // stalled — the user sees a blank bubble with no explanation.
-                // Inject a one-shot <system-reminder> into that tool result and
-                // retry ONE round. The guard fires at most once per run, so it
-                // can never loop; the SECOND empty falls through to the error
-                // hint below. Mirrors iOS AIChatViewModel.swift empty-after-
-                // tool-result path.
-                //
-                // The empty assistant turn was just appended (above) — drop it
-                // so the tool result is the last message and the model gets a
-                // clean "continue from here" prompt on the retry.
-                val priorIsToolResult = agentHistory.size >= 2 &&
-                    agentHistory[agentHistory.size - 2].contentParts.isNotEmpty() &&
-                    agentHistory[agentHistory.size - 2].contentParts.all { it is AgentContentPart.ToolResult }
-                if (!didInjectEmptyToolReminder && priorIsToolResult) {
+            // [T-android-empty-turn-reminder-any-tail] Route the empty-turn
+            // classification through EmptyTurnRecovery so the stop-reason
+            // narrowing (tool_use with no calls is also empty) and the
+            // recovery plan (nudge any tail part, not just tool_result) are
+            // one testable decision instead of inline branches.
+            val isEmptyTurn = EmptyTurnRecovery.shouldClassifyAsEmptyTurn(
+                hasText = hasVisibleContent,
+                hasToolCall = toolCalls.isNotEmpty(),
+                stopReason = turnFinishReason,
+            )
+            if (isEmptyTurn) {
+                // [T-android-empty-turn-reminder-any-tail] The recovery plan
+                // decides where to inject the reminder: tool_result tails
+                // (original behaviour) AND text-part tails (callback / statement
+                // case the old code missed). The guard fires at most once.
+                val recoveryPlan = EmptyTurnRecovery.plan(agentHistory, didInjectEmptyToolReminder)
+                if (recoveryPlan !is EmptyTurnRecovery.Plan.GiveUp) {
                     didInjectEmptyToolReminder = true
-                    AppLogger.warning(ChatViewModel.TAG_STREAM, "empty turn after tool result — injecting <system-reminder> and retrying one round (turn=$turn)")
+                    AppLogger.warning(ChatViewModel.TAG_STREAM, "empty turn — injecting <system-reminder> via $recoveryPlan and retrying one round (turn=$turn)")
                     // Remove the empty assistant turn we just added.
                     agentHistory.removeAt(agentHistory.size - 1)
-                    // Inject the reminder into the last tool result's content.
-                    val trIdx = agentHistory.size - 1
-                    val trMsg = agentHistory[trIdx]
-                    val reminder = "\n\n<system-reminder>The previous response was empty. A tool result was just provided and you MUST continue: respond with the next tool call(s) if more work is needed, or a final text answer for the user. Do not return an empty response.</system-reminder>"
-                    val newParts = trMsg.contentParts.toMutableList()
-                    val lastTrPartIdx = newParts.indexOfLast { it is AgentContentPart.ToolResult }
-                    if (lastTrPartIdx >= 0) {
-                        val part = newParts[lastTrPartIdx] as AgentContentPart.ToolResult
-                        newParts[lastTrPartIdx] = part.copy(content = part.content + reminder)
-                        agentHistory[trIdx] = trMsg.copy(contentParts = newParts)
+                    when (recoveryPlan) {
+                        is EmptyTurnRecovery.Plan.NudgeExistingPart -> {
+                            val tailIdx = recoveryPlan.tailIndex
+                            val partIdx = recoveryPlan.partIndex
+                            val tailMsg = agentHistory[tailIdx]
+                            val newParts = tailMsg.contentParts.toMutableList()
+                            val reminder = EmptyTurnRecovery.REMINDER
+                            val part = newParts[partIdx]
+                            newParts[partIdx] = if (part is AgentContentPart.ToolResult) {
+                                part.copy(content = part.content + reminder)
+                            } else if (part is AgentContentPart.Text) {
+                                part.copy(text = part.text + reminder)
+                            } else {
+                                part
+                            }
+                            agentHistory[tailIdx] = tailMsg.copy(contentParts = newParts)
+                        }
+                        EmptyTurnRecovery.Plan.AppendStandalone -> {
+                            appendBoundedHistory(
+                                LLMMessage(
+                                    role = LLMMessage.Role.USER,
+                                    content = EmptyTurnRecovery.REMINDER,
+                                    contentParts = listOf(AgentContentPart.Text(EmptyTurnRecovery.REMINDER)),
+                                ),
+                            )
+                        }
+                        EmptyTurnRecovery.Plan.GiveUp -> {}
                     }
                     // Retry a fresh model round with the nudged history.
                     continue

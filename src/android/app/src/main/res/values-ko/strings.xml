@@ -12,6 +12,14 @@
     <string name="type_message">메시지를 입력하세요…</string>
     <string name="delete">삭제</string>
     <string name="cancel">취소</string>
+    <string name="helper_status_running">running</string>
+    <string name="helper_status_completed">Done</string>
+    <string name="helper_status_failed">Failed</string>
+    <string name="helper_status_cancelled">Cancelled</string>
+    <string name="helper_status_timeout">Timed out</string>
+    <string name="helper_status_rejected">Rejected</string>
+    <string name="agent_callback_result">Agent result</string>
+    <string name="agent_callback_progress">Agent progress</string>
     <string name="save">저장</string>
     <string name="api_key">API Key</string>
     <string name="label">라벨</string>

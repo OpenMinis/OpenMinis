@@ -4809,43 +4809,29 @@ class ChatViewModel(
      * itself failed, in which case it raises [_error] first so the user learns
      * the delete did not land ([resolveAnchorSortOrder]).
      */
+    /**
+     * [T-bubble-row-locator] Delegates to BubbleRowLocator for the anchor +
+     * sort-order resolution so the "visible user row" predicate and the
+     * drain/cutoff arithmetic are one testable object. Replaces the inline
+     * ordinal match that skewed on image-only bubbles and drain groups.
+     */
     internal suspend fun resolveDeleteCutoffSortOrder(
         sid: String,
         messages: List<ChatMessage>,
         index: Int,
         target: ChatMessage,
     ): Int {
-        // [T-delete-anchor-by-id] Resolve the anchor row id first: the target
-        // itself for a user message, the preceding visible user message for
-        // an assistant target (its whole turn goes).
-        val anchorMessage: ChatMessage? = if (target.role == "user") {
-            target
-        } else {
-            // A visible user turn, not merely one with text. An image-only
-            // prompt has empty content but is the turn the assistant belongs
-            // to; skipping it anchored the cut on the PREVIOUS turn and
-            // deleted that one too.
-            (index downTo 0).asSequence()
-                .map { messages[it] }
-                .firstOrNull { it.isRenderedUserBubble }
-        }
-        val anchor = anchorMessage ?: return -1
-        val anchorIds = listOf(anchor.id) + anchor.sourceDbIds
-        val resolved = resolveAnchorSortOrder(anchorIds)
-        if (resolved.isFailure) {
-            // [T-anchor-lookup-fail-closed] -1 here means the caller leaves the
-            // DB alone; say so on screen too, because the UI has already been
-            // truncated and the rows the user deleted are still on disk.
-            AppLogger.error(
+        val rows = chatRepository.dao.loadMessages(sid)
+        val located = BubbleRowLocator.locateUserRow(messages, index, rows)
+        val keepBubble = target.role != "user"
+        val cutoff = BubbleRowLocator.cutoffFor(located, keepBubble)
+        if (cutoff < 0 && located.via == BubbleRowLocator.Via.NONE) {
+            AppLogger.warning(
                 TAG,
-                "resolveDeleteCutoffSortOrder: anchor lookup FAILED for ${anchor.id.take(8)}: " +
-                    resolved.exceptionOrNull()?.message,
+                "resolveDeleteCutoffSortOrder: no row for ${target.id.take(8)} — leaving DB alone",
             )
-            _error.value = "Couldn't read the message history — the delete was not applied. Please try again."
-            return -1
         }
-        val anchorSortOrder = resolved.getOrNull() ?: return -1
-        return if (target.role == "user") anchorSortOrder else anchorSortOrder + 1
+        return cutoff
     }
 
 

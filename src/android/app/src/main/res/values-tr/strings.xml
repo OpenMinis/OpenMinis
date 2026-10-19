@@ -12,6 +12,14 @@
     <string name="type_message">Bir mesaj yazın…</string>
     <string name="delete">Sil</string>
     <string name="cancel">İptal</string>
+    <string name="helper_status_running">running</string>
+    <string name="helper_status_completed">Done</string>
+    <string name="helper_status_failed">Failed</string>
+    <string name="helper_status_cancelled">Cancelled</string>
+    <string name="helper_status_timeout">Timed out</string>
+    <string name="helper_status_rejected">Rejected</string>
+    <string name="agent_callback_result">Agent result</string>
+    <string name="agent_callback_progress">Agent progress</string>
     <string name="save">Kaydet</string>
     <string name="api_key">API Anahtarı</string>
     <string name="label">Etiket</string>

@@ -12,6 +12,14 @@
     <string name="type_message">メッセージを入力…</string>
     <string name="delete">削除</string>
     <string name="cancel">キャンセル</string>
+    <string name="helper_status_running">実行中</string>
+    <string name="helper_status_completed">完了</string>
+    <string name="helper_status_failed">失敗</string>
+    <string name="helper_status_cancelled">キャンセル済み</string>
+    <string name="helper_status_timeout">タイムアウト</string>
+    <string name="helper_status_rejected">拒否</string>
+    <string name="agent_callback_result">エージェントの結果</string>
+    <string name="agent_callback_progress">エージェントの進捗</string>
     <string name="save">保存</string>
     <string name="api_key">API Key</string>
     <string name="label">ラベル</string>

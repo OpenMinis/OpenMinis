@@ -12,6 +12,14 @@
     <string name="type_message">輸入訊息…</string>
     <string name="delete">刪除</string>
     <string name="cancel">取消</string>
+    <string name="helper_status_running">執行中</string>
+    <string name="helper_status_completed">完成</string>
+    <string name="helper_status_failed">失敗</string>
+    <string name="helper_status_cancelled">已取消</string>
+    <string name="helper_status_timeout">逾時</string>
+    <string name="helper_status_rejected">已拒絕</string>
+    <string name="agent_callback_result">代理任務結果</string>
+    <string name="agent_callback_progress">代理任務進度</string>
     <string name="save">儲存</string>
     <string name="api_key">API 金鑰</string>
     <string name="label">標籤</string>

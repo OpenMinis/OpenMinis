@@ -12,6 +12,14 @@
     <string name="type_message">พิมพ์ข้อความ…</string>
     <string name="delete">ลบ</string>
     <string name="cancel">ยกเลิก</string>
+    <string name="helper_status_running">running</string>
+    <string name="helper_status_completed">Done</string>
+    <string name="helper_status_failed">Failed</string>
+    <string name="helper_status_cancelled">Cancelled</string>
+    <string name="helper_status_timeout">Timed out</string>
+    <string name="helper_status_rejected">Rejected</string>
+    <string name="agent_callback_result">Agent result</string>
+    <string name="agent_callback_progress">Agent progress</string>
     <string name="save">บันทึก</string>
     <string name="api_key">API Key</string>
     <string name="label">ป้ายกำกับ</string>

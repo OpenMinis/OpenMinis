@@ -12,6 +12,14 @@
     <string name="type_message">Scrie un mesaj…</string>
     <string name="delete">Șterge</string>
     <string name="cancel">Anulează</string>
+    <string name="helper_status_running">running</string>
+    <string name="helper_status_completed">Done</string>
+    <string name="helper_status_failed">Failed</string>
+    <string name="helper_status_cancelled">Cancelled</string>
+    <string name="helper_status_timeout">Timed out</string>
+    <string name="helper_status_rejected">Rejected</string>
+    <string name="agent_callback_result">Agent result</string>
+    <string name="agent_callback_progress">Agent progress</string>
     <string name="save">Salvează</string>
     <string name="api_key">Cheie API</string>
     <string name="label">Etichetă</string>
