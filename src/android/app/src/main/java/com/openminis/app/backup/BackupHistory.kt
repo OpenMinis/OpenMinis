@@ -125,6 +125,7 @@ class BackupHistory internal constructor(
         val destinations: List<DestinationOutcome> = emptyList(),
         val log: List<LogEntry> = emptyList(),
         val errorMessage: String? = null,
+        val isScheduled: Boolean = false,
     ) {
         val durationMillis: Long? get() = finishedAt?.let { it - startedAt }
         val hasProblems: Boolean
@@ -316,6 +317,13 @@ class BackupHistory internal constructor(
                 else r.copy(destinations = r.destinations.map { if (it.name == from) it.copy(name = to) else it })
             },
         )
+    }
+
+    @Synchronized
+    fun removeAll(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val set = ids.toSet()
+        persist(records().filterNot { it.id in set })
     }
 
     @Synchronized

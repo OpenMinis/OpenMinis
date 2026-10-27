@@ -53,6 +53,8 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.UnfoldMore
+import androidx.compose.material.icons.outlined.Schedule
+import com.openminis.app.backup.scheduled.ScheduledBackupConfig
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
@@ -318,6 +320,7 @@ private fun BackupTab(
     val lastResult by vm.lastResult.collectAsState()
     val exportReady by vm.exportReady.collectAsState()
     val saveState by vm.saveState.collectAsState()
+    val scheduledConfig by vm.scheduledConfig.collectAsState()
 
     // [T-android-backup-local-export] Save to Device: SAF CreateDocument. The
     // MIME type drives the extension the picker appends (BackupFormat.MIME_TYPE
@@ -500,6 +503,13 @@ private fun BackupTab(
             }
         }
     }
+
+    // -- Automated Scheduled Backup (Issue #476) --
+    ScheduledBackupSection(
+        config = scheduledConfig,
+        enabled = !running,
+        onConfigChange = vm::updateScheduledConfig,
+    )
 
     // -- Destinations --
     // [T-android-backup-destination-gate] Inline list, mirroring iOS's
@@ -2121,3 +2131,111 @@ private fun reportNoticeColor(): Color =
     } else {
         Color(0xFFB45309)
     }
+
+/**
+ * [T-android-scheduled-backup-ui] Automated scheduled backup settings section (Issue #476).
+ */
+@Composable
+private fun ScheduledBackupSection(
+    config: ScheduledBackupConfig,
+    enabled: Boolean,
+    onConfigChange: (ScheduledBackupConfig) -> Unit,
+) {
+    val footerText = if (config.enabled) {
+        val lastRunText = config.lastRunMillis?.let {
+            val dateStr = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
+            val outcome = if (config.lastRunSuccess == true) "Succeeded" else "Failed (${config.lastRunMessage ?: "error"})"
+            "Last run: $dateStr ($outcome). "
+        } ?: "No scheduled backup has run yet. "
+        lastRunText + "Scheduled backups are retained up to ${config.retentionCount} snapshots. User manual backups are never pruned."
+    } else {
+        "Automatically back up your chats, configuration, and skills in background using WorkManager."
+    }
+
+    SettingsSection(
+        header = "Scheduled Backup",
+        footer = footerText,
+    ) {
+        CategorySwitchRow(
+            title = "Automated Scheduled Backup",
+            icon = Icons.Outlined.Schedule,
+            iconColor = Color(0xFF007AFF),
+            checked = config.enabled,
+            onCheckedChange = { onConfigChange(config.copy(enabled = it)) },
+            enabled = enabled,
+            showDivider = config.enabled,
+        )
+
+        if (config.enabled) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Text(
+                    text = "Backup Frequency",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    val options = listOf(
+                        12L to "12 Hours",
+                        24L to "Daily",
+                        168L to "Weekly",
+                    )
+                    options.forEachIndexed { index, (hours, label) ->
+                        SegmentedButton(
+                            selected = config.intervalHours == hours,
+                            onClick = { onConfigChange(config.copy(intervalHours = hours)) },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                            enabled = enabled,
+                        ) {
+                            Text(label)
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                Text(
+                    text = "Retention Limit (Keep Latest)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 6.dp),
+                )
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    val limits = listOf(3, 5, 10)
+                    limits.forEachIndexed { index, count ->
+                        SegmentedButton(
+                            selected = config.retentionCount == count,
+                            onClick = { onConfigChange(config.copy(retentionCount = count)) },
+                            shape = SegmentedButtonDefaults.itemShape(index = index, count = limits.size),
+                            enabled = enabled,
+                        ) {
+                            Text("$count snapshots")
+                        }
+                    }
+                }
+            }
+
+            CategorySwitchRow(
+                title = "Only when charging",
+                subtitle = "Executes when device is connected to power",
+                icon = Icons.Outlined.PhoneAndroid,
+                iconColor = Color(0xFF34C759),
+                checked = config.requireCharging,
+                onCheckedChange = { onConfigChange(config.copy(requireCharging = it)) },
+                enabled = enabled,
+                showDivider = true,
+            )
+
+            CategorySwitchRow(
+                title = "Only on Wi-Fi (Unmetered)",
+                subtitle = "Avoids consuming mobile cellular data",
+                icon = Icons.Outlined.Cloud,
+                iconColor = Color(0xFF5856D6),
+                checked = config.requireUnmeteredNetwork,
+                onCheckedChange = { onConfigChange(config.copy(requireUnmeteredNetwork = it)) },
+                enabled = enabled,
+                showDivider = false,
+            )
+        }
+    }
+}

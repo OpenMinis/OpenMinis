@@ -416,6 +416,9 @@ dependencies {
     // DataStore
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
+    // WorkManager (Automated scheduled backups - Issue #476)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
+
     // Security (EncryptedSharedPreferences)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
