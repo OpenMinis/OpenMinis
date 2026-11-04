@@ -139,6 +139,8 @@ object Routes {
     const val NETWORK_TAILSCALE = "network_tailscale"
     const val NETWORK_PROXIES = "network_proxies"
     const val CONTAINER_DNS = "container_dns"
+    /** [inbound-task-api] Settings › Network › bearer-authenticated task listener. */
+    const val INBOUND_TASK_API = "inbound_task_api"
     const val SKILLS = "skills"
     const val SKILL_DETAIL = "skill/{skillId}"
     const val SKILL_FILE = "skill_file/{skillId}/{relativePath}"
@@ -655,6 +657,7 @@ fun AppNavigation(
                 onTailscaleClick = { navController.safeNavigate(Routes.NETWORK_TAILSCALE) },
                 onProxiesClick = { navController.safeNavigate(Routes.NETWORK_PROXIES) },
                 onContainerDnsClick = { navController.safeNavigate(Routes.CONTAINER_DNS) },
+                onInboundApiClick = { navController.safeNavigate(Routes.INBOUND_TASK_API) },
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
@@ -1310,6 +1313,9 @@ fun AppNavigation(
         }
         composable(Routes.CONTAINER_DNS) {
             com.openminis.app.ui.sandbox.ContainerDnsScreen(onBack = { navController.safePopBackStack() })
+        }
+        composable(Routes.INBOUND_TASK_API) {
+            com.openminis.app.ui.settings.InboundTaskApiScreen(onBack = { navController.safePopBackStack() })
         }
 
         composable(Routes.ENV_VARS) {

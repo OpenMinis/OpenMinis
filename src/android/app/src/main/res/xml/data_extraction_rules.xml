@@ -22,6 +22,8 @@
         <exclude domain="sharedpref" path="backup_rclone_secrets_plain_fallback.xml" />
         <exclude domain="sharedpref" path="minis_network_secrets.xml" />
         <exclude domain="sharedpref" path="minis_network_secrets_plain_fallback.xml" />
+        <!-- [inbound-task-api] Plaintext bearer. Not an EncryptedPrefs store. -->
+        <exclude domain="sharedpref" path="inbound_task_api.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="provider_secrets.xml" />
@@ -38,5 +40,7 @@
         <exclude domain="sharedpref" path="backup_rclone_secrets_plain_fallback.xml" />
         <exclude domain="sharedpref" path="minis_network_secrets.xml" />
         <exclude domain="sharedpref" path="minis_network_secrets_plain_fallback.xml" />
+        <!-- [inbound-task-api] Plaintext bearer. Not an EncryptedPrefs store. -->
+        <exclude domain="sharedpref" path="inbound_task_api.xml" />
     </device-transfer>
 </data-extraction-rules>

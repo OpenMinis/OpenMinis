@@ -1069,6 +1069,11 @@ class MinisApp : Application(), ImageLoaderFactory {
             }
         }
 
+        // [inbound-task-api] Release-safe listener, off until Settings enables
+        // it. Separate socket and token from the debug server above.
+        runCatching { com.openminis.app.inbound.InboundTaskApi.applyEnabled(this) }
+            .onFailure { Log.w("MinisApp", "inbound task api not started (${it.javaClass.simpleName})") }
+
         // T268: one-shot migration of pre-T266 internal alarms into the
         // system Clock app. Pre-T266 builds wrote alarms into Minis's own
         // SharedPreferences + AlarmManager; T266 retired that path but old

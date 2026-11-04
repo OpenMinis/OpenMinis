@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Http
 import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Router
@@ -92,6 +93,8 @@ fun SettingsScreen(
     onTailscaleClick: () -> Unit = {},
     onProxiesClick: () -> Unit = {},
     onContainerDnsClick: () -> Unit = {},
+    /** [inbound-task-api] Settings › Network › Inbound Task API. */
+    onInboundApiClick: () -> Unit = {},
     onSkillsClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
@@ -322,6 +325,13 @@ fun SettingsScreen(
                     title = stringResource(R.string.network_container_dns),
                     subtitle = null,
                     onClick = onContainerDnsClick,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Http,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.inbound_api_title),
+                    subtitle = stringResource(R.string.inbound_api_settings_subtitle),
+                    onClick = onInboundApiClick,
                     showDivider = false,
                 )
             }

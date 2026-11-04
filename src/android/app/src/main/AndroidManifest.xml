@@ -25,6 +25,10 @@
          the agent service (moved to mediaPlayback over the 6h/24h cap), a
          backup is finite, and the service handles onTimeout by stopping. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- [inbound-task-api] The user-enabled task listener stays up longer than
+         dataSync's 6h/24h cap, so it is a specialUse service. The manifest
+         property on InboundTaskApiService states the use. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- T50: PARTIAL_WAKE_LOCK held by AgentForegroundService while sessions
          are streaming so Doze + OEM CPU throttling don't stall long shell
          tools after screen-off. -->
@@ -509,6 +513,19 @@
             android:name=".service.OAuthWaitService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- [inbound-task-api] User-enabled HTTP listener (port 9473) that
+             starts a task from a bearer-authenticated prompt. Off until the
+             user turns it on. specialUse so Android 15's dataSync time cap
+             does not kill the process out from under a long-lived listener. -->
+        <service
+            android:name=".inbound.InboundTaskApiService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled local HTTP listener that accepts a bearer-authenticated prompt and starts an on-device agent task." />
+        </service>
 
         <!-- Alarm broadcast receiver (also handles BOOT_COMPLETED and
              MY_PACKAGE_REPLACED for re-scheduling). [T-android-alarm-reschedule-on-restart]

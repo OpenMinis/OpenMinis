@@ -21,4 +21,7 @@
     <exclude domain="sharedpref" path="backup_rclone_secrets_plain_fallback.xml" />
     <exclude domain="sharedpref" path="minis_network_secrets.xml" />
     <exclude domain="sharedpref" path="minis_network_secrets_plain_fallback.xml" />
+    <!-- [inbound-task-api] Plaintext bearer for the inbound task listener.
+         Not an EncryptedPrefs store — there is no plain_fallback twin. -->
+    <exclude domain="sharedpref" path="inbound_task_api.xml" />
 </full-backup-content>

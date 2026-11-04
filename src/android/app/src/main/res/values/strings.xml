@@ -2721,4 +2721,26 @@
     <string name="mcp_dcr_registration_unreadable">The registration response could not be read.</string>
     <string name="mcp_dcr_http_status">%1$s returned HTTP %2$d.</string>
     <string name="mcp_dcr_unreadable">%1$s returned data that could not be read.</string>
+    <!-- [inbound-task-api] Settings → Network → Inbound Task API -->
+    <string name="inbound_api_title">Inbound Task API</string>
+    <string name="inbound_api_settings_subtitle">Start a task from a prompt sent by another device</string>
+    <string name="inbound_api_section">Listener</string>
+    <string name="inbound_api_enable">Allow inbound tasks</string>
+    <string name="inbound_api_off">Off</string>
+    <string name="inbound_api_listening">Listening on port %1$d</string>
+    <string name="inbound_api_enable_footer">Off until you turn this on. A prompt sent to this phone starts a task: a new chat, or a follow-up when the request names a session. These are the same tasks as Scheduled Tasks. A notification stays up so the listener keeps running after you leave Minis. Force-stopping the app stops it until you open Minis again.</string>
+    <string name="inbound_api_port_label">Port</string>
+    <string name="inbound_api_bind_footer">Listens on every network interface, not only this phone\'s loopback, so a computer on your Tailscale network or LAN can connect. Another device cannot reach 127.0.0.1 on this phone. Every request needs the token below, including connections from this phone. Do not forward this port to the public internet. Use Tailscale or a private relay.</string>
+    <string name="inbound_api_token">Access token</string>
+    <string name="inbound_api_token_footer">Send this as Authorization: Bearer. Regenerating replaces it immediately. The old token stops working. It is not written to the app log.</string>
+    <string name="inbound_api_copy">Copy token</string>
+    <string name="inbound_api_copied">Copied</string>
+    <string name="inbound_api_regenerate">Regenerate token</string>
+    <string name="inbound_api_regenerate_title">Regenerate the token?</string>
+    <string name="inbound_api_regenerate_message">The token shown now stops working immediately. Update every assistant that sends prompts to this phone.</string>
+    <string name="inbound_api_regenerate_confirm">Regenerate</string>
+    <string name="inbound_api_default_label">Inbound</string>
+    <string name="inbound_api_notif_channel">Inbound task API</string>
+    <string name="inbound_api_notif_title">Inbound task API is on</string>
+    <string name="inbound_api_notif_text">Listening on port %1$d. Turn this off in Settings.</string>
 </resources>

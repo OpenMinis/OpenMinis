@@ -40,6 +40,14 @@ class AlarmReceiver : BroadcastReceiver() {
             } catch (t: Throwable) {
                 AppLogger.warning(TAG, "scheduled-task rescheduleAll failed: ${t.message}")
             }
+            // [inbound-task-api] Bring the user-enabled listener back after a
+            // reboot or an update. No-op when the switch is off. The token is
+            // not logged.
+            try {
+                com.openminis.app.inbound.InboundTaskApi.applyEnabled(context)
+            } catch (t: Throwable) {
+                AppLogger.warning(TAG, "inbound task api restore failed (${t.javaClass.simpleName})")
+            }
             return
         }
 
