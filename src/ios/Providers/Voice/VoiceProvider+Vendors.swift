@@ -312,16 +312,24 @@ final class XunfeiVoiceProvider: VoiceProvider {
     /// Default Xunfei TTS voice (Chinese female). Overridable via request.voice.
     private static let defaultTTSVoice = "xiaoyan"
 
+    func ttsWebSocketURL(date: Date) throws -> URL {
+        let host = "tts-api.xfyun.cn"
+        let path = "/v2/tts"
+        // URLSession.webSocketTask requires a ws/wss URL. Swap only the leading
+        // scheme; the HMAC query (authorization, date, host) stays as signed.
+        let signedURL = buildSignedURL(host: host, path: path, date: date)
+            .replacingOccurrences(of: "https://", with: "wss://", options: .anchored)
+        guard let url = URL(string: signedURL) else {
+            throw VoiceProviderError.parseError("Failed to build Xunfei TTS URL")
+        }
+        return url
+    }
+
     /// Xunfei TTS is a WebSocket endpoint (tts-api.xfyun.cn/v2/tts) that streams
     /// base64 PCM frames, signed with the same HMAC scheme as ASR. We collect all
     /// frames and wrap the raw 16k PCM in a WAV header for AVAudioPlayer.
     override func synthesize(_ request: VoiceOutputRequest) async throws -> Data {
-        let host = "tts-api.xfyun.cn"
-        let path = "/v2/tts"
-        let signedURL = buildSignedURL(host: host, path: path, date: Date())
-        guard let url = URL(string: signedURL) else {
-            throw VoiceProviderError.parseError("Failed to build Xunfei TTS URL")
-        }
+        let url = try ttsWebSocketURL(date: Date())
         let session = URLSession(configuration: .default)
         let ws = session.webSocketTask(with: url)
         ws.resume()
@@ -441,7 +449,7 @@ final class XunfeiVoiceProvider: VoiceProvider {
 
     // MARK: - HMAC-SHA256 URL signature
 
-    private func buildSignedURL(host: String = "iat-api.xfyun.cn", path: String = "/v2/iat", date: Date) -> String {
+    func buildSignedURL(host: String = "iat-api.xfyun.cn", path: String = "/v2/iat", date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale     = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss z"
