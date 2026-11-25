@@ -106,23 +106,23 @@ class ClaudeSonnet55Test {
             model = model,
             basePath = server.url("/").toString().trimEnd('/'),
         )
-        runCatching {
-            runBlocking {
-                provider.sendMessageClamped(
-                    messages = listOf(LLMMessage(LLMMessage.Role.USER, "question")),
-                    systemPrompt = null,
-                    maxTokens = 4096,
-                    temperature = null,
-                    imageParts = emptyList(),
-                    tools = emptyList(),
-                    thinkingLevel = level,
-                )
-            }
+        runBlocking {
+            provider.sendMessageClamped(
+                messages = listOf(LLMMessage(LLMMessage.Role.USER, "question")),
+                systemPrompt = null,
+                maxTokens = 4096,
+                temperature = null,
+                imageParts = emptyList(),
+                tools = emptyList(),
+                thinkingLevel = level,
+            )
         }
-        return JSONObject(server.takeRequest().body.readUtf8())
+        val request = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
+            ?: throw AssertionError("MockWebServer received no Anthropic request")
+        return JSONObject(request.body.readUtf8())
     }
 
-    @Test
+    @Test(timeout = 30_000)
     fun `max reaches the wire as adaptive thinking with effort max`() {
         val body = anthropicBody(sonnet55, ThinkingLevel.MAX)
         assertEquals("claude-sonnet-5-5", body.optString("model"))
@@ -133,7 +133,7 @@ class ClaudeSonnet55Test {
         assertFalse("no temperature on Claude 5", body.has("temperature"))
     }
 
-    @Test
+    @Test(timeout = 30_000)
     fun `off sends between_tools - never the disabled literal, never an absent field`() {
         // [T-claude5-thinking-off] An absent field thinks at the default high
         // effort on Sonnet 5.5 (iOS: voice correction timed out on it), and
