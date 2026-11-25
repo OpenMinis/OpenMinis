@@ -628,6 +628,16 @@ class AnthropicProviderTest {
     }
 
     @Test
+    fun `OAuth requires a configured identifier in public builds`() {
+        org.junit.Assume.assumeTrue(com.openminis.app.BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.isEmpty())
+        val oauthProvider = AnthropicProvider(apiKey = "test-token", isOAuth = true)
+        val error = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            oauthProvider.resolveSystemPrompt(null)
+        }
+        assertTrue(error.message.orEmpty().contains("ANTHROPIC_OAUTH_IDENTIFIER_PROMPT is not configured"))
+    }
+
+    @Test
     fun `OAuth request omits redact-thinking beta so thinking text is not blanked`() = runBlocking {
         // Mirrors iOS 958ee16c (T-anthropic-redact-thinking). The Claude-Code
         // mimicry beta set must NOT carry `redact-thinking-2026-02-12`; with it,
@@ -638,6 +648,7 @@ class AnthropicProviderTest {
             model = LLMModel.claudeSonnet5,
             basePath = server.url("/").toString().trimEnd('/'),
             isOAuth = true,
+            oauthIdentifierPrompt = { "synthetic-mock-identifier" },
         )
         server.enqueue(MockResponse().setBody("""{"content":[],"usage":{"input_tokens":0,"output_tokens":0}}"""))
 
@@ -646,7 +657,11 @@ class AnthropicProviderTest {
             thinkingLevel = ThinkingLevel.MEDIUM,
         )
 
-        val beta = server.takeRequest().getHeader("anthropic-beta") ?: ""
+        val request = server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)
+            ?: throw AssertionError("MockWebServer received no OAuth request")
+        val system = JSONObject(request.body.readUtf8()).getJSONArray("system")
+        assertEquals("synthetic-mock-identifier", system.getJSONObject(0).getString("text"))
+        val beta = request.getHeader("anthropic-beta") ?: ""
         assertTrue(
             "anthropic-beta must not contain redact-thinking; was: $beta",
             !beta.contains("redact-thinking"),

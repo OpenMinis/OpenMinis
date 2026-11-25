@@ -225,6 +225,24 @@ cd src/android
 Release builds are configured with the debug signing config, so no keystore is
 required to produce one locally.
 
+### Performance builds
+
+The `perf` variant is non-debuggable and profileable, with minification disabled.
+It keeps developer tools enabled by default for the profiling harness. To build
+it with the debug RPC server, streaming probes and developer request log disabled:
+
+```sh
+./gradlew -Pminis.perfDevTools=false :app:assembleGithubPerf
+./gradlew -Pminis.perfDevTools=false :app:testGithubPerfUnitTest
+```
+
+The APK is `app/build/outputs/apk/github/perf/app-github-perf.apk`.
+`minis.perfDevTools` applies only to `perf` and defaults to `true`; package identity,
+version and signing still follow the build configuration. Existing crash and
+resource diagnostics remain active. Measure CPU use and battery consumption on
+the target device with the same workload before attributing savings to this
+configuration; these flags alone establish no percentage improvement.
+
 ### Tests
 
 ```sh

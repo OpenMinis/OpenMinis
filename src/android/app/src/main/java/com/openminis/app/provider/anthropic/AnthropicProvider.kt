@@ -34,19 +34,30 @@ import java.util.concurrent.TimeUnit
 import com.openminis.app.provider.failOnSilentEmptyCompletion
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 
-class AnthropicProvider(
+class AnthropicProvider internal constructor(
     private val apiKey: String,
-    override var model: LLMModel = LLMModel.claudeHaiku45,
-    private val basePath: String = "https://api.anthropic.com",
+    override var model: LLMModel,
+    private val basePath: String,
     /** Whether this provider uses OAuth credentials (Bearer + beta header). */
-    val isOAuth: Boolean = false,
+    val isOAuth: Boolean,
     /**
      * [T-provider-custom-user-agent] Per-provider User-Agent override.
      * null/blank → default UA; non-blank → replaces User-Agent on the chat
      * request. Only set for custom-base Anthropic-compat instances.
      */
     private val customUserAgent: String? = null,
+    private val oauthIdentifierPrompt: () -> String,
 ) : LLMProvider, com.openminis.app.network.NetworkTagged {
+    constructor(
+        apiKey: String,
+        model: LLMModel = LLMModel.claudeHaiku45,
+        basePath: String = "https://api.anthropic.com",
+        isOAuth: Boolean = false,
+        customUserAgent: String? = null,
+    ) : this(apiKey, model, basePath, isOAuth, customUserAgent, {
+        com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
+    })
+
     override val name = "Anthropic"
 
     /**
@@ -368,8 +379,8 @@ class AnthropicProvider(
      *   Returns null when the prompt is null/empty (iOS parity — no empty `system` field).
      */
     internal fun resolveSystemPrompt(userPrompt: String?): JSONArray? {
-        val claudeCodePrefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
         if (isOAuth) {
+            val claudeCodePrefix = oauthIdentifierPrompt()
             // Strip the prefix if the caller already prepended it; the tail is the real user prompt.
             val tail = when {
                 userPrompt == null -> ""

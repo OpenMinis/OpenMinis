@@ -43,7 +43,8 @@ android {
 
         // DEV_TOOLS gates the on-device developer tooling (127.0.0.1:5321
         // debug server, LLM request log, StreamJitterProbe markers). It is
-        // true for `debug` AND for the `perf` build type below, false for
+        // true for `debug` and, by default, the `perf` build type below;
+        // `perf` can opt out with -Pminis.perfDevTools=false. False for
         // `release`. Kept separate from BuildConfig.DEBUG so a non-debuggable
         // build can still carry the tooling.
         buildConfigField("boolean", "DEV_TOOLS", "false")
@@ -97,13 +98,17 @@ android {
         // on `debug` therefore do not represent what users run. `perf` keeps
         // the debug server and probes (DEV_TOOLS) so the measurement harness
         // works, but is profileable/AOT-compilable like a release build.
+        // -Pminis.perfDevTools=false removes developer instrumentation while
+        // retaining a profileable build for measuring ordinary app work.
         // Same debug signing key as release, so it installs in place.
         create("perf") {
             initWith(getByName("debug"))
             isDebuggable = false
             isProfileable = true
             matchingFallbacks += listOf("debug")
-            buildConfigField("boolean", "DEV_TOOLS", "true")
+            val perfDevTools = providers.gradleProperty("minis.perfDevTools")
+                .map { it.toBooleanStrict() }.getOrElse(true)
+            buildConfigField("boolean", "DEV_TOOLS", perfDevTools.toString())
             signingConfig = signingConfigs.getByName("debug")
         }
         release {

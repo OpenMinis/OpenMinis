@@ -1,5 +1,6 @@
 package com.openminis.app.agent.jobs
 
+import com.openminis.app.BuildConfig
 import com.openminis.app.ProductionSources
 import com.openminis.app.scheduled.ScheduledAgentRunner
 import com.openminis.app.scheduled.ScheduledRepeatMode
@@ -99,12 +100,26 @@ class NewLimitsTest {
 
     @Test
     fun `the debug override applies per parent`() {
-        assertEquals(1, AgentJobRegistry.debugSetMaxConcurrentChildJobs(1))
-        child(p)
-        assertFalse(AgentJobRegistry.canStartChildJob(p))
-        assertTrue(AgentJobRegistry.canStartChildJob(q))
-        assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(null))
-        assertTrue(AgentJobRegistry.canStartChildJob(p))
+        if (BuildConfig.DEV_TOOLS) {
+            assertEquals(1, AgentJobRegistry.debugSetMaxConcurrentChildJobs(1))
+            child(p)
+            assertFalse(AgentJobRegistry.canStartChildJob(p))
+            assertTrue(AgentJobRegistry.canStartChildJob(q))
+            assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(null))
+            assertTrue(AgentJobRegistry.canStartChildJob(p))
+        } else {
+            // Without developer tools the override is ignored, and admission
+            // must still enforce the shipped three-child cap independently.
+            assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(1))
+            repeat(3) {
+                assertTrue("P retains each of its three default slots", AgentJobRegistry.canStartChildJob(p))
+                child(p)
+            }
+            assertFalse("P is full at the shipped cap", AgentJobRegistry.canStartChildJob(p))
+            assertTrue("Q still has its own slots", AgentJobRegistry.canStartChildJob(q))
+            assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(null))
+            assertFalse("reset cannot open a fourth slot", AgentJobRegistry.canStartChildJob(p))
+        }
     }
 
     // ── Queue: per-parent bound and no head-of-line blocking ───────────────

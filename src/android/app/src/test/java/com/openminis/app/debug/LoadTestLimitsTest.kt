@@ -1,5 +1,6 @@
 package com.openminis.app.debug
 
+import com.openminis.app.BuildConfig
 import com.openminis.app.ProductionSources
 import com.openminis.app.agent.jobs.AgentJobRegistry
 import com.openminis.app.sandbox.GlobalShellThrottle
@@ -34,15 +35,28 @@ class LoadTestLimitsTest {
 
     @Test
     fun `set, clamp and reset`() {
-        assertEquals(16, SessionConcurrencyManager.debugSetMaxConcurrent(16))
-        assertEquals(32, SessionConcurrencyManager.debugSetMaxConcurrent(99))
-        assertEquals(1, SessionConcurrencyManager.debugSetMaxConcurrent(0))
-        assertEquals(6, SessionConcurrencyManager.debugSetMaxConcurrent(null))
-        assertEquals(10, AgentJobRegistry.debugSetMaxConcurrentChildJobs(10))
-        assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(null))
-        assertEquals(32, GlobalShellThrottle.debugSetProcessBudget(32))
-        assertEquals(GlobalShellThrottle.PROCESSES_PER_COMMAND, GlobalShellThrottle.debugSetProcessBudget(1))
-        assertEquals(16, GlobalShellThrottle.debugSetProcessBudget(null))
+        if (BuildConfig.DEV_TOOLS) {
+            assertEquals(16, SessionConcurrencyManager.debugSetMaxConcurrent(16))
+            assertEquals(32, SessionConcurrencyManager.debugSetMaxConcurrent(99))
+            assertEquals(1, SessionConcurrencyManager.debugSetMaxConcurrent(0))
+            assertEquals(6, SessionConcurrencyManager.debugSetMaxConcurrent(null))
+            assertEquals(10, AgentJobRegistry.debugSetMaxConcurrentChildJobs(10))
+            assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(null))
+            assertEquals(32, GlobalShellThrottle.debugSetProcessBudget(32))
+            assertEquals(GlobalShellThrottle.PROCESSES_PER_COMMAND, GlobalShellThrottle.debugSetProcessBudget(1))
+            assertEquals(16, GlobalShellThrottle.debugSetProcessBudget(null))
+        } else {
+            // A build without developer tools must ignore every override,
+            // including valid values, clamping inputs and a reset request.
+            for (value in listOf<Int?>(0, 1, 10, 16, 32, 99, null)) {
+                assertEquals(6, SessionConcurrencyManager.debugSetMaxConcurrent(value))
+                assertEquals(6, SessionConcurrencyManager.maxConcurrent)
+                assertEquals(3, AgentJobRegistry.debugSetMaxConcurrentChildJobs(value))
+                assertEquals(3, AgentJobRegistry.maxConcurrentChildJobsPerParent)
+                assertEquals(16, GlobalShellThrottle.debugSetProcessBudget(value))
+                assertEquals(16, GlobalShellThrottle.processBudget)
+            }
+        }
     }
 
     @Test
