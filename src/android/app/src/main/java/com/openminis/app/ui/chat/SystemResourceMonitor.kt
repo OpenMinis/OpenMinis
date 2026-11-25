@@ -2,6 +2,8 @@ package com.openminis.app.ui.chat
 
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Debug
@@ -14,8 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.io.File
 
 /**
@@ -251,41 +252,44 @@ class SystemResourceMonitor {
 }
 
 /**
- * Compose-friendly entrypoint. Polls every 2 s while [active] is true,
- * triggering a recompose on every sample so the consumer can read the
- * monitor's fresh values straight from the returned instance.
- *
- * Stops sampling when [active] flips false (LaunchedEffect cancels its
- * coroutine). Cheap on backgrounded shells: no thread, no broadcast,
- * no allocations beyond the file reads.
+ * One sampler for this app process. Only applicationContext is retained;
+ * subscriber lifecycles belong to the UI and are never stored here.
+ */
+private object ProcessResourceSampling {
+    val monitor = SystemResourceMonitor()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var sampling: SharedResourceSampling? = null
+
+    @Synchronized
+    fun get(application: Context): SharedResourceSampling {
+        val context = application.applicationContext
+        return sampling ?: SharedResourceSampling(
+            scope = scope,
+            reset = monitor::reset,
+            sample = {
+                // All thumbnails and the expanded sheet share this IO read.
+                withContext(Dispatchers.IO) { monitor.sampleOnce(context) }
+            },
+        ).also { sampling = it }
+    }
+}
+
+/**
+ * Updates every 2 s while an active tool HUD is composed on a STARTED screen.
+ * Multiple HUDs share one process sample. When the last visible subscriber
+ * stops, polling stops; the next subscriber starts with a fresh CPU baseline.
  */
 @Composable
 fun rememberSystemResourceMonitor(active: Boolean): SystemResourceMonitor {
-    val context = LocalContext.current
-    val monitor = remember { SystemResourceMonitor() }
-    var tick by remember { mutableStateOf(0) }
-    LaunchedEffect(active) {
-        if (!active) {
-            monitor.reset()
-            return@LaunchedEffect
-        }
-        // Prime the baseline; first read returns 0% by design (no prior
-        // tick snapshot to subtract). Two seconds later we have a real
-        // delta, matching iOS's first-tick behavior.
-        // [T-android-resource-hud-offmain] Sample on IO; only the tick that
-        // publishes the result runs on the main thread. This used to sample
-        // right here, on Main, every 2 s.
-        withContext(Dispatchers.IO) { monitor.sampleOnce(context) }
-        tick++
-        while (isActive) {
-            delay(2000)
-            withContext(Dispatchers.IO) { monitor.sampleOnce(context) }
-            tick++
-        }
+    val context = LocalContext.current.applicationContext
+    val owner = LocalLifecycleOwner.current
+    val sampling = remember(context) { ProcessResourceSampling.get(context) }
+    var tick by remember { mutableStateOf(0L) }
+    LaunchedEffect(active, owner, sampling) {
+        sampling.collectWhileStarted(owner.lifecycle, active) { tick++ }
     }
-    // Read `tick` so Compose tracks this snapshot state and recomposes
-    // whenever it advances. Without the read the LaunchedEffect would
-    // tick happily but no consumer ever sees fresh values.
+    // The shared monitor is not Compose state; each delivered sample invalidates
+    // this reader, including a replay when a second HUD becomes visible.
     @Suppress("UNUSED_VARIABLE") val t = tick
-    return monitor
+    return ProcessResourceSampling.monitor
 }

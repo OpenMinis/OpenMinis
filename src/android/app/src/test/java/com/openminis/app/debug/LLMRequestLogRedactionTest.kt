@@ -4,7 +4,8 @@ import com.openminis.app.BuildConfig
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assume.assumeTrue
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -76,7 +77,7 @@ class LLMRequestLogRedactionTest {
     }
 
     @Test fun storedEntriesNeverContainTheKey() {
-        assumeTrue("LLMRequestLog only records when DEV_TOOLS is on", BuildConfig.DEV_TOOLS)
+        LLMRequestLog.clear()
         LLMRequestLog.add(
             LLMRequestLog.Entry(
                 provider = "openai",
@@ -85,9 +86,15 @@ class LLMRequestLogRedactionTest {
                 requestBody = "{}",
             ),
         )
-        val stored = LLMRequestLog.getAll().single()
-        assertFalse(stored.toString().contains(secret))
-        assertEquals("Bearer ***", stored.requestHeaders["Authorization"])
-        assertEquals("sid-1", stored.requestHeaders["x-opencode-session"])
+        if (BuildConfig.DEV_TOOLS) {
+            val stored = LLMRequestLog.getAll().single()
+            assertFalse(stored.toString().contains(secret))
+            assertEquals("Bearer ***", stored.requestHeaders["Authorization"])
+            assertEquals("sid-1", stored.requestHeaders["x-opencode-session"])
+        } else {
+            assertTrue("developer logging is disabled", LLMRequestLog.getAll().isEmpty())
+            assertTrue("no request remains in the tail", LLMRequestLog.getLast(1).isEmpty())
+            assertNull("the full request body is not retained", LLMRequestLog.lastFullJSON())
+        }
     }
 }

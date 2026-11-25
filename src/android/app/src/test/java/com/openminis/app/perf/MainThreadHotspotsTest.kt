@@ -50,7 +50,8 @@ class MainThreadHotspotsTest {
     @Test
     fun `sampling runs off the main thread and reads the rollup first`() {
         val src = ProductionSources.read("ui/chat/SystemResourceMonitor.kt")
-        assertEquals(2, Regex("""withContext\(Dispatchers\.IO\) \{ monitor\.sampleOnce\(context\) \}""").findAll(src).count())
+        // One shared IO read serves both the thumbnail and expanded sheet.
+        assertEquals(1, Regex("""withContext\(Dispatchers\.IO\) \{ monitor\.sampleOnce\(context\) \}""").findAll(src).count())
         assertFalse("no bare sample on the composition's dispatcher", Regex("""\n\s+monitor\.sampleOnce\(context\)\n""").containsMatchIn(src))
         val mem = src.substringAfter("private fun sampleMemory(").substringBefore("\n    companion object")
         assertTrue(mem.indexOf("smaps_rollup") in 0 until mem.indexOf("Debug.getMemoryInfo(mi)"))

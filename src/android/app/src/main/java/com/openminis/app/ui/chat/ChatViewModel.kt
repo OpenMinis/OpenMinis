@@ -1120,6 +1120,8 @@ class ChatViewModel(
         var pendingAwaiting: Boolean = false
     }
     private val streamFlushStates = HashMap<String, StreamFlushState>()
+    // The collector appends on IO; Stop drains on Main before the collector unwinds.
+    private val thinkingStreamBuffers = java.util.concurrent.ConcurrentHashMap<String, ThinkingStreamBuffer>()
 
     /**
      * [T-android-stream-flush-review] Cancel a message's pending trailing flush
@@ -1131,15 +1133,22 @@ class ChatViewModel(
      */
     private fun clearStreamFlushState(id: String) {
         streamFlushStates.remove(id)?.trailingJob?.cancel()
+        thinkingStreamBuffers.remove(id)?.closeAndSnapshot()
     }
     private fun clearAllStreamFlushStates() {
         streamFlushStates.values.forEach { it.trailingJob?.cancel() }
         streamFlushStates.clear()
+        thinkingStreamBuffers.keys.toList().forEach { id ->
+            thinkingStreamBuffers.remove(id)?.closeAndSnapshot()
+        }
     }
     /** Cancel + drop flush states for any message id NOT in [keptIds] (retry/truncate). */
     private fun retainStreamFlushStates(keptIds: Set<String>) {
         val drop = streamFlushStates.keys.filter { it !in keptIds }
         for (id in drop) streamFlushStates.remove(id)?.trailingJob?.cancel()
+        thinkingStreamBuffers.keys.filter { it !in keptIds }.forEach { id ->
+            thinkingStreamBuffers.remove(id)?.closeAndSnapshot()
+        }
     }
 
     // Dual-path flush thresholds — ported from iOS. Time tiers scale with total
@@ -11661,7 +11670,28 @@ class ChatViewModel(
                     allToolBlocks[idx] = allToolBlocks[idx].copy(content = sb.toString())
                 }
             }
-            val turnThinking = StringBuilder()
+            val turnThinking = ThinkingStreamBuffer("thinking_$turn")
+            val thinkingAssistantId = assistantId
+            var thinkingPublishJob: Job? = null
+            var thinkingSinceBoundary = false
+            fun materializeThinkingBlock(snapshot: ThinkingStreamBuffer.Snapshot) {
+                val updated = snapshot.applyTo(allToolBlocks)
+                if (updated !== allToolBlocks) {
+                    allToolBlocks.clear()
+                    allToolBlocks.addAll(updated)
+                }
+            }
+            suspend fun flushThinking() {
+                thinkingPublishJob?.cancel()
+                thinkingPublishJob = null
+                if (!thinkingSinceBoundary) return
+                thinkingSinceBoundary = false
+                val snapshot = turnThinking.snapshot(android.os.SystemClock.elapsedRealtime()) ?: return
+                materializeThinkingBlock(snapshot)
+                withContext(Dispatchers.Main) {
+                    updateAssistantMessage(thinkingAssistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                }
+            }
             // Opaque reasoning_content blob captured from the provider's
             // ReasoningContent stream chunk. When set (including empty string),
             // takes precedence over turnThinking concatenation so the exact
@@ -11835,6 +11865,9 @@ class ChatViewModel(
                             )
                         }
                     }
+                    // Keep a publisher failure local to this attempt so the outer
+                    // retry/error handler can still suspend and drain its complete tail.
+                    withThinkingStreamAttempt {
                     try {
                     // [T-scheduled-tool-prefill] A prefilled turn streams the
                     // calls that were decided ahead of time instead of asking the
@@ -11953,28 +11986,43 @@ class ChatViewModel(
                             "kind=${chunk.javaClass.simpleName}",
                     )
                 }
+                // Freeze the complete thinking prefix before any text/tool/status event.
+                // The same drain runs after collect and before error/retry handling.
+                if (chunk !is LLMStreamChunk.ThinkingDelta) flushThinking()
                 when (chunk) {
                     is LLMStreamChunk.ThinkingDelta -> {
+                        // Register atomically with Stop's removal. A late collector must
+                        // not recreate a buffer after liveTurn.cancel() closed the turn.
+                        if (thinkingPublishJob == null) {
+                            thinkingStreamBuffers.compute(thinkingAssistantId) { _, previous ->
+                                if (liveTurn.acceptsStreamingWrite(thinkingAssistantId)) turnThinking else previous
+                            }
+                        }
+                        if (thinkingStreamBuffers[thinkingAssistantId] !== turnThinking) return@collect
                         turnThinking.append(chunk.text)
+                        thinkingSinceBoundary = true
                         // [T-android-live-update-content] Surface the
                         // thinking phase to the FGS notification / overlay.
                         // Deduped inside the tracker, so per-token cost is
                         // one StateFlow read.
                         SessionActivityTracker.setThinking(true)
-                        // Update thinking block in UI
-                        val thinkIdx = allToolBlocks.indexOfFirst { it.kind == "thinking" && it.id == "thinking_$turn" }
-                        if (thinkIdx < 0) {
-                            allToolBlocks.add(AssistantBlock(
-                                id = "thinking_$turn",
-                                kind = "thinking",
-                                content = turnThinking.toString(),
-                                toolTitle = "Thinking",
-                            ))
-                        } else {
-                            allToolBlocks[thinkIdx] = allToolBlocks[thinkIdx].copy(content = turnThinking.toString())
+                        // Materialize and dispatch only at publication cadence, not per
+                        // token. One attempt-owned worker publishes the trailing tail even
+                        // when the provider pauses without sending another event.
+                        turnThinking.takeIfDue(android.os.SystemClock.elapsedRealtime())?.let { snapshot ->
+                            materializeThinkingBlock(snapshot)
+                            withContext(Dispatchers.Main) {
+                                updateAssistantMessage(thinkingAssistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                            }
                         }
-                        withContext(Dispatchers.Main) {
-                            updateAssistantMessage(assistantId, accumulatedText + turnTextSb.toString(), true, allToolBlocks)
+                        if (thinkingPublishJob == null) {
+                            thinkingPublishJob = launch {
+                                turnThinking.publishPending(android.os.SystemClock::elapsedRealtime) { snapshot ->
+                                    withContext(Dispatchers.Main) {
+                                        publishThinkingSnapshot(thinkingAssistantId, turnThinking, snapshot)
+                                    }
+                                }
+                            }
                         }
                     }
                     is LLMStreamChunk.Text -> {
@@ -12334,6 +12382,7 @@ class ChatViewModel(
                     }
                 }
                     }  // end collect
+                    flushThinking()
                     // T94 fix 2: flush any text that landed in the throttle
                     // window after the last UI tick. The retry-rollback /
                     // turn-finalize paths below assume _messages reflects all
@@ -12375,6 +12424,8 @@ class ChatViewModel(
                         _autoRetryCountdown.value = 0
                     }
                     } finally {
+                        thinkingPublishJob?.cancel()
+                        thinkingPublishJob = null
                         // [T-STALL-DIAG] Always stop the first-chunk watchdog —
                         // success, error, or cancellation — so it can never
                         // outlive its turn and spam the log.
@@ -12392,8 +12443,10 @@ class ChatViewModel(
                         // change or a doze cannot produce a negative interval.
                         turnStreamMs += android.os.SystemClock.elapsedRealtime() - streamStartMs
                     }
+                    } // withThinkingStreamAttempt: the worker is cancelled before scope exit.
                 } catch (e: Exception) {
-                    if (e is CancellationException && e.cause == null) throw e  // real job cancellation
+                    if (e is CancellationException && isRealStreamCancellation(e)) throw e
+                    if (kotlin.coroutines.coroutineContext.isActive) flushThinking()
                     val actual = unwrapFlowException(e)
                     val isRateLimit = actual is com.openminis.app.data.model.LLMError.RateLimited
                     // [T-android-503-fallback] A confirmed HTTP 5xx, taken from
@@ -12492,6 +12545,9 @@ class ChatViewModel(
                         // Roll back partial blocks from the failed stream attempt so the retried
                         // stream's deltas don't double-append on top of stale content. Previous
                         // turns (everything before turnStartBlockIndex) are preserved.
+                        // Reset before the Main suspension: Stop after rollback must not
+                        // recover reasoning that this retry has deliberately discarded.
+                        turnThinking.resetBeforeRetry {
                         if (allToolBlocks.size > turnStartBlockIndex) {
                             while (allToolBlocks.size > turnStartBlockIndex) {
                                 allToolBlocks.removeAt(allToolBlocks.size - 1)
@@ -12517,6 +12573,7 @@ class ChatViewModel(
                                 )
                             }
                         }
+                        }
                         // T307: SB-based per-turn accumulators reset.
                         turnTextSb.setLength(0)
                         currentTextBlockSb = null
@@ -12524,7 +12581,6 @@ class ChatViewModel(
                         // text block was just rolled back with the rest of
                         // this turn's partial blocks.
                         turnTextBlockIdx = -1
-                        turnThinking.clear()
                         toolCalls.clear()
                         toolCallSignatures.clear()  // [T-android-gemini3-thoughtsig / #179]
                         // T94 fix 2 + T256: throttle bookkeeping is per-stream
@@ -15979,9 +16035,20 @@ class ChatViewModel(
      * [updateAssistantMessage] call had isStreaming=true.
      */
     private fun flushStreamingDelta(id: String) {
-        val delta = _streamingById.value[id] ?: return
+        // Stale/orphan healing can run after a turn loses live ownership but
+        // before its error drain. Retain the same complete tail as the all-id
+        // drain, including a first chunk whose overlay was never published.
+        val thinking = thinkingStreamBuffers.remove(id)?.closeAndSnapshot()
         val current = _messages.value
         val idx = current.indexOfLast { it.id == id }
+        val canonical = current.getOrNull(idx)?.let {
+            StreamingDelta(content = it.content, toolBlocks = it.toolBlocks, isAwaitingModelResponse = it.isAwaitingModelResponse)
+        }
+        val delta = resolveThinkingStreamSnapshot(pendingStreamSnapshot(id), _streamingById.value[id], canonical, thinking)
+        if (delta == null) {
+            clearStreamFlushState(id)
+            return
+        }
         if (idx >= 0) {
             val updated = current.toMutableList()
             updated[idx] = current[idx].copy(
@@ -16003,12 +16070,46 @@ class ChatViewModel(
         _streamingById.value = _streamingById.value - id
     }
 
+    /** An empty pending body is valid; null alone means there is no trailing snapshot. */
+    private fun pendingStreamSnapshot(id: String): StreamingDelta? = streamFlushStates[id]?.let { state ->
+        state.pendingContent?.let { StreamingDelta(it, state.pendingBlocks, state.pendingAwaiting) }
+    }
+
+    /** Publish only the buffered thinking field; preserve concurrent tool progress. Main thread. */
+    private fun publishThinkingSnapshot(
+        id: String,
+        buffer: ThinkingStreamBuffer,
+        snapshot: ThinkingStreamBuffer.Snapshot,
+    ) {
+        if (thinkingStreamBuffers[id] !== buffer || !buffer.accepts(snapshot) || !liveTurn.acceptsStreamingWrite(id)) return
+        val canonical = _messages.value.lastOrNull { it.id == id }?.let {
+            StreamingDelta(it.content, it.toolBlocks, it.isAwaitingModelResponse)
+        }
+        val delta = resolveThinkingStreamSnapshot(pendingStreamSnapshot(id), _streamingById.value[id], canonical, snapshot) ?: return
+        updateAssistantMessage(id, delta.content, true, delta.toolBlocks, delta.isAwaitingModelResponse)
+    }
+
     /** Drain ALL outstanding streaming deltas (called on global resets). */
     private fun flushAllStreamingDeltas() {
-        clearAllStreamFlushStates()
-        val pending = _streamingById.value
-        if (pending.isEmpty()) return
+        // Stop marks liveTurn closed before coming here. Close each accumulator
+        // synchronously so the full received tail is retained without a late UI job.
+        val thinking = thinkingStreamBuffers.entries.mapNotNull { (id, buffer) ->
+            if (thinkingStreamBuffers.remove(id, buffer)) buffer.closeAndSnapshot()?.let { id to it } else null
+        }.toMap()
         val current = _messages.value.toMutableList()
+        val published = _streamingById.value
+        // Read trailing state BEFORE clearing it, including ids with no visible
+        // overlay yet. A 200 ms thinking tick must not discard a newer reply
+        // waiting behind the longer text-publication throttle.
+        val ids = published.keys + streamFlushStates.keys + thinking.keys
+        val pending = ids.mapNotNull { id ->
+            val canonical = current.lastOrNull { it.id == id }?.let {
+                StreamingDelta(it.content, it.toolBlocks, it.isAwaitingModelResponse)
+            }
+            resolveThinkingStreamSnapshot(pendingStreamSnapshot(id), published[id], canonical, thinking[id])?.let { id to it }
+        }.toMap()
+        clearAllStreamFlushStates()
+        if (pending.isEmpty()) return
         var changed = false
         for ((id, delta) in pending) {
             val idx = current.indexOfLast { it.id == id }
